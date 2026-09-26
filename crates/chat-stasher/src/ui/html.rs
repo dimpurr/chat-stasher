@@ -335,6 +335,45 @@ pub(super) fn destinations_block(data: &UiData) -> String {
     )
 }
 
+/// The two count lines a merged view prints instead of one (§4.8): the
+/// **distinct** sessions the view holds, and the **raw** copies the
+/// destinations hold between them.
+///
+/// Both are printed whenever more than one destination was read, and neither
+/// is derived at print time from the other. Choosing one would be the bug this
+/// pair exists to prevent: "3 sessions" is wrong about redundancy and "5
+/// sessions" is wrong about conversations, and a reader who sees only one of
+/// them cannot tell which mistake they are looking at.
+///
+/// With a single destination the two counts are equal by construction, so the
+/// lines are omitted rather than printed as two identical numbers.
+///
+/// It lives here, beside [`destinations_block`], because it is a statement
+/// about the **view** and not about any one answer: it belongs on every page
+/// that can show a merged view — the overview's headline number is the
+/// distinct reading and needs the pair under it, and the list page needs it
+/// under *each* answer it can give, including the zero-match one. A caller
+/// that renders it on one branch of an if/else has made the other branch the
+/// single place a reader can meet a merged view without the two counts.
+pub(super) fn merged_counts(data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let raw_in_view: usize = data.destinations.iter().map(|d| d.in_view).sum();
+    let doubled = raw_in_view.saturating_sub(data.sessions.len());
+    format!(
+        "<p class=sub><b>distinct:</b> {} session(s) in view — each session counted once, \
+         however many destinations hold it.</p>\n\
+         <p class=sub><b>raw:</b> {} session row(s) across the {} destinations — a session held \
+         by more than one counts once per copy, so {doubled} row(s) here {verb} a second (or \
+         later) copy of a session already counted.</p>\n",
+        data.sessions.len(),
+        raw_in_view,
+        data.destinations.len(),
+        verb = if doubled == 1 { "is" } else { "are" },
+    )
+}
+
 /// R9 (29-UI-DESIGN §3.1/§4.1): machines that hold sessions but no activity
 /// index — the same list the `/api/overview` field
 /// `machines_without_activity_index` carries, which before W172 surfaced only

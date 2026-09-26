@@ -16,7 +16,7 @@ use crate::selector::{Resolved, UnplacedBy};
 use super::facets;
 use super::html::{
     completeness_banner, describe_selector, destinations_block, esc, fmt_bytes, fmt_unix, footer,
-    head, read_from_note,
+    head, merged_counts, read_from_note,
 };
 use super::{
     index_param, page_from_query, page_href, page_window, paging_nav, percent_encode, select,
@@ -120,11 +120,18 @@ fn page_sessions(
     // correct the query would trap the typo (§4.1's OQ-2 rationale).
     out.push_str(&facets::facet_bar(resolved, params, token, data));
 
+    // §4.8: the distinct/raw pair describes the **view**, so it goes under
+    // every answer this page can give — the zero-match one included. It used
+    // to hang off the matched branch alone, which made "nothing matched" the
+    // one page a reader could reach a merged view from without ever being
+    // told that two of its rows are copies of one conversation.
+    let counts = merged_counts(data);
     if sel.matched.is_empty() {
         // The three "nothing matched" sentences are triggered by the matched
         // **total** alone (§5.2 invariant 1). Which window was asked for plays
         // no part in them, so paging can neither create nor hide one.
         out.push_str(&no_hit_html(sel, data));
+        out.push_str(&counts);
     } else {
         out.push_str(&format!(
             "<p><b>{}</b> session(s) matched{}.</p>\n",
@@ -135,7 +142,7 @@ fn page_sessions(
                 String::new()
             }
         ));
-        out.push_str(&merged_counts(data));
+        out.push_str(&counts);
         // The order is fixed once, here, and the window cut from it, so the
         // rows on a page and the range sentence below describe the same
         // sequence a concatenated walk of all pages reproduces.
@@ -280,37 +287,6 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
         "<p><b>Not in this destination</b> — 0 of the {} session(s) in view matched, and the \
          destination was read in full. This is a real absence, not a failure to look.</p>\n",
         data.sessions.len()
-    )
-}
-
-/// The two count lines a merged view prints instead of one (§4.8): the
-/// **distinct** sessions the view holds, and the **raw** copies the
-/// destinations hold between them.
-///
-/// Both are printed whenever more than one destination was read, and neither
-/// is derived at print time from the other. Choosing one would be the bug this
-/// pair exists to prevent: "3 sessions" is wrong about redundancy and "5
-/// sessions" is wrong about conversations, and a reader who sees only one of
-/// them cannot tell which mistake they are looking at.
-///
-/// With a single destination the two counts are equal by construction, so the
-/// lines are omitted rather than printed as two identical numbers.
-fn merged_counts(data: &UiData) -> String {
-    if data.destinations.len() <= 1 {
-        return String::new();
-    }
-    let raw_in_view: usize = data.destinations.iter().map(|d| d.in_view).sum();
-    let doubled = raw_in_view.saturating_sub(data.sessions.len());
-    format!(
-        "<p class=sub><b>distinct:</b> {} session(s) in view — each session counted once, \
-         however many destinations hold it.</p>\n\
-         <p class=sub><b>raw:</b> {} session row(s) across the {} destinations — a session held \
-         by more than one counts once per copy, so {doubled} row(s) here {verb} a second (or \
-         later) copy of a session already counted.</p>\n",
-        data.sessions.len(),
-        raw_in_view,
-        data.destinations.len(),
-        verb = if doubled == 1 { "is" } else { "are" },
     )
 }
 

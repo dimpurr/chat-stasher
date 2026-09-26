@@ -4553,6 +4553,62 @@ mod tests {
         assert!(single.contains("Read in full — every snapshot scanned was readable."));
     }
 
+    /// Every page a merged view can reach carries **both** counts — including
+    /// the two the pair used to be missing from.
+    ///
+    /// §4.8's pair describes the *view*, not any one answer: the overview's
+    /// headline stat is the distinct reading with no way to recover the raw one
+    /// from it, and the list page's zero-match screen is still a page of a
+    /// merged dashboard. A reader who meets only the distinct number on either
+    /// cannot tell "two conversations" from "one conversation held twice".
+    /// The single-destination halves pin the other direction: where the two
+    /// readings are equal by construction, neither page prints the pair.
+    #[test]
+    fn every_merged_page_carries_both_counts() {
+        let d = fixture::merged_data();
+
+        // The overview: the pair sits directly under the stat it qualifies.
+        let overview = req("/", &d, &NoContent).body;
+        assert!(
+            overview.contains("<b>distinct:</b> 5 session(s)"),
+            "the overview must print the distinct count it is headlining: {overview}"
+        );
+        assert!(
+            overview.contains("<b>raw:</b> 6 session row(s)"),
+            "and the raw one beside it — the headline is one of two readings: {overview}"
+        );
+
+        // A filter that rejects every row is still a merged view: the answer
+        // becomes the zero-match sentence, and the pair has to survive it.
+        let none = req("/sessions?machine=no-such-machine", &d, &NoContent).body;
+        assert!(
+            none.contains("session(s) in view matched"),
+            "this request must actually reach the zero-match page: {none}"
+        );
+        assert!(
+            none.contains("<b>distinct:</b> 5 session(s)"),
+            "a zero-match page is still a merged view: {none}"
+        );
+        assert!(
+            none.contains("<b>raw:</b> 6 session row(s)"),
+            "and it must not be the one page that hides the redundancy: {none}"
+        );
+
+        // One destination: one reading, so no pair on either page.
+        let single = fixture::data();
+        for target in ["/", "/sessions?machine=no-such-machine"] {
+            let html = req(target, &single, &NoContent).body;
+            assert!(
+                !html.contains("<b>distinct:</b>"),
+                "a single destination has nothing to disambiguate, `{target}`: {html}"
+            );
+            assert!(
+                !html.contains("<b>raw:</b>"),
+                "so no second count that would only repeat the first, `{target}`: {html}"
+            );
+        }
+    }
+
     /// One unreadable copy makes the whole page a floor, names that copy **only**,
     /// and leaves the readable copy's rows exactly where they were.
     ///

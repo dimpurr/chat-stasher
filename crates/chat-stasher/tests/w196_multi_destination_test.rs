@@ -452,6 +452,64 @@ fn the_merged_list_pages_like_sessions_does() {
     );
 }
 
+/// Both counts reach every merged page a reader can get to — the overview, and
+/// the list page in the state where its answer is "nothing matched".
+///
+/// §4.8's pair is a property of the **view**, not of an answer. The overview
+/// headlines the distinct reading and the raw one cannot be recovered from it;
+/// the zero-match sentence replaces the list's matched line, and the counts
+/// used to hang off that line, so the one page that most needs "two copies of
+/// one conversation, not two conversations" was the page that never said it.
+/// One destination is pinned the other way: one reading, no pair, because
+/// there the two numbers are equal by construction.
+#[test]
+fn every_merged_page_carries_both_counts() {
+    let sb = sandbox();
+    two_destinations(sb.path());
+    let (ui, _) = Ui::start(sb.path(), &["--destination", "alpha,beta"]);
+
+    let (status, overview) = ui.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        overview.contains("<b>distinct:</b> 3 session(s)"),
+        "the overview headlines the distinct reading and must say so:\n{overview}"
+    );
+    assert!(
+        overview.contains("<b>raw:</b> 4 session row(s)"),
+        "and carry the raw one beside it, not instead of it:\n{overview}"
+    );
+
+    // A facet value no session carries: the answer becomes the zero-match
+    // sentence, and the pair has to survive the branch that prints it.
+    let (status, none) = ui.get("/sessions?machine=no-such-machine");
+    assert_eq!(status, 200, "{none}");
+    assert!(
+        none.contains("session(s) in view matched"),
+        "this request must actually reach the zero-match page:\n{none}"
+    );
+    assert!(
+        none.contains("<b>distinct:</b> 3 session(s)"),
+        "a zero-match page is still a page of a merged dashboard:\n{none}"
+    );
+    assert!(
+        none.contains("<b>raw:</b> 4 session row(s)"),
+        "and must not be the one page that hides the redundancy:\n{none}"
+    );
+
+    // One destination: one reading, so neither page prints the pair.
+    let one = sandbox();
+    two_destinations(one.path());
+    let (single, _) = Ui::start(one.path(), &["--destination", "alpha"]);
+    for target in ["/", "/sessions?machine=no-such-machine"] {
+        let (status, html) = single.get(target);
+        assert_eq!(status, 200, "{target}: {html}");
+        assert!(
+            !html.contains("<b>distinct:</b>") && !html.contains("<b>raw:</b>"),
+            "`{target}` has one reading and must not print a pair:\n{html}"
+        );
+    }
+}
+
 /// `--destination all` is the same read as naming every destination, because
 /// the order it expands to is the config's own (sorted) order.
 #[test]
