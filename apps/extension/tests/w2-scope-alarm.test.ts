@@ -16,11 +16,18 @@ import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import type { DeliverResult, NackKind } from '../lib/native-host';
 
-const ITEM_SCOPE: NackKind[] = ['bad-request', 'too-large', 'integrity', 'invalid-bundle'];
+const ITEM_SCOPE: NackKind[] = ['bad-request', 'too-large', 'integrity', 'invalid-bundle', 'install-conflict'];
 const HOST_SCOPE: NackKind[] = ['protocol-version', 'config', 'stage-unavailable', 'io'];
 
 function nack(kind: NackKind, retryable: boolean): DeliverResult {
   return { delivered: false, reason: 'nack', kind, retryable, detail: kind, requestId: 'r', sha256: 's' };
+}
+
+/** W205c · the D4 copied-install refusal: item-scope, non-retryable, and the
+ * detail is the instruction a human has to read to fix it. */
+const INSTALL_CONFLICT_DETAIL = 'this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile';
+function installConflict(): DeliverResult {
+  return { delivered: false, reason: 'nack', kind: 'install-conflict', retryable: false, detail: INSTALL_CONFLICT_DETAIL, requestId: 'r', sha256: 's' };
 }
 
 beforeEach(() => {
@@ -135,6 +142,33 @@ describe('scope · drainOutbox', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ name: NAME_A, state: 'rejected', rejectKind: 'invalid-bundle' });
   });
+
+  // W205c · the D4 copied-install refusal used to be kind `config`: host-scope,
+  // so the item stayed pending forever with the nack's detail dropped. It now
+  // has its own item-scope kind, and its detail — the only place the fix is
+  // written down — must survive into the rejected entry.
+  it('🔴 an install-conflict nack rejects the item, keeps the host instruction, and the drain is not stopped by it', async () => {
+    const ob = await import('../lib/outbox');
+    await ob.enqueue(NAME_A, PAYLOAD_A);
+    await ob.enqueue(NAME_B, PAYLOAD_B);
+    const deliver = vi.fn(async (name: string): Promise<DeliverResult> => (name === NAME_A
+      ? installConflict()
+      : { delivered: true, status: 'stored', shard: 's2', requestId: 'r', sha256: 's' }));
+
+    const report = await ob.drainOutbox({ deliver });
+
+    expect(report).toMatchObject({ attempted: 2, rejected: 1, delivered: 1, stoppedBy: 'drained' });
+    expect(deliver).toHaveBeenCalledTimes(2);
+    const entries = (await ob.listEntries())!;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: NAME_A,
+      state: 'rejected',
+      rejectKind: 'install-conflict',
+      rejectDetail: INSTALL_CONFLICT_DETAIL,
+      lastError: 'nack:install-conflict',
+    });
+  });
 });
 
 // ===========================================================================
@@ -204,7 +238,7 @@ describe('outbox alarm · background wiring (backfill switch OFF)', () => {
   const store: Record<string, unknown> = {};
   const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
   let alarmListeners: Array<(a: { name?: string }) => void> = [];
-  let hostMode: 'up' | 'down' | 'nack-config' = 'up';
+  let hostMode: 'up' | 'down' | 'nack-config' | 'nack-install-conflict' = 'up';
   let deliveries: string[] = [];
   const SID = 'aaaaaaaa-1111-2222-3333-444444444444';
   let alarms = fakeAlarms();
@@ -221,6 +255,13 @@ describe('outbox alarm · background wiring (backfill switch OFF)', () => {
             return {
               protocol: 1, type: 'nack', request_id: message.request_id ?? null, kind: 'config', retryable: false,
               detail: 'run: chat-stasher install-native-host --stage <path>',
+            };
+          }
+          if (hostMode === 'nack-install-conflict' && message.type === 'deliver') {
+            return {
+              protocol: 1, type: 'nack', request_id: message.request_id ?? null,
+              kind: 'install-conflict', retryable: false,
+              detail: INSTALL_CONFLICT_DETAIL,
             };
           }
           if (message.type === 'hello') {
@@ -321,6 +362,48 @@ describe('outbox alarm · background wiring (backfill switch OFF)', () => {
     expect(entries[0]).toMatchObject({ state: 'pending', lastError: 'nack:config' });
     expect(entries[0]!.rejectKind).toBeUndefined();
     expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(true);
+  });
+
+  // W205c · end to end through the real nack validation: an unknown kind is
+  // answered for by `validateNack` before any scope decision, so this test
+  // stays red until the kind exists in `NACK_KINDS` — a bypassed seam (the
+  // `deliver` option) alone would not prove the wire accepts it.
+  it('🔴 live leg: an install-conflict nack lands the capture in rejected, with the instruction, and the alarm disarms', async () => {
+    const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
+    const { listEntries } = await import('../lib/outbox');
+    const { summarizeOutbox } = await import('../lib/popup-view');
+    const { outboxLine } = await import('../lib/ui-strings');
+    hostMode = 'nack-install-conflict';
+    const mod = await boot();
+    const result = await dispatch(mod);
+
+    // The capture answer says the honest state: rejected, with the nack kind.
+    expect(result).toMatchObject({ saved: false, status: 'rejected', kind: 'install-conflict' });
+    const entries = (await listEntries())!;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      state: 'rejected',
+      rejectKind: 'install-conflict',
+      rejectDetail: INSTALL_CONFLICT_DETAIL,
+    });
+    expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(false);
+
+    // The popup's own line says what happened and how to fix it.
+    const summary = summarizeOutbox(entries);
+    expect(summary.rejected).toBe(1);
+    expect(summary.rejectedKinds).toEqual([{ kind: 'install-conflict', count: 1 }]);
+    expect(summary.rejectedSamples[0]).toEqual({ kind: 'install-conflict', detail: INSTALL_CONFLICT_DETAIL });
+    const line = outboxLine({
+      pending: summary.pending,
+      rejected: summary.rejected,
+      bytes: summary.bytes,
+      capacityBytes: summary.capacityBytes,
+      full: summary.full,
+      rejectedKinds: summary.rejectedKinds,
+      rejectedSamples: summary.rejectedSamples,
+    });
+    expect(line).toContain('install-conflict');
+    expect(line).toContain('regenerate the install identity');
   });
 
   it('a context with no IndexedDB API at all creates no outbox alarm (nothing can ever be queued there)', async () => {

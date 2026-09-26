@@ -336,6 +336,11 @@ fn the_nack_kind_vocabulary_matches_the_contract_table() {
         (NackKind::TooLarge, "too-large", false),
         (NackKind::Integrity, "integrity", true),
         (NackKind::InvalidBundle, "invalid-bundle", false),
+        // W205c · item-scope, non-retryable: the D4 copied-install refusal. The
+        // extension's scope table turns exactly this combination into a
+        // visible rejected entry, so the flag here decides whether a copied
+        // install stays in the drain's retry path forever.
+        (NackKind::InstallConflict, "install-conflict", false),
         (NackKind::Config, "config", false),
         (NackKind::StageUnavailable, "stage-unavailable", true),
         (NackKind::Io, "io", true),

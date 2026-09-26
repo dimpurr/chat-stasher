@@ -165,6 +165,7 @@ bytes were already sealed; `shard` names the existing one).
 | `too-large` | item | false | Length prefix above 64 MiB. |
 | `integrity` | item | true | `sha256` does not match `payload`. |
 | `invalid-bundle` | item | false | `payload` is not a valid inbox bundle. |
+| `install-conflict` | item | false | The bundle's install identity (`install_id` + browser + user-named `profile_label`) conflicts with the provenance this machine's stage has already sealed under the same `install_id`. This is the D4 copied-install refusal: the fix — regenerating the installing profile's identity — lives in the *browser*, so nothing on the host can ever make these bytes deliverable. `detail` names the fix for the person reading it. |
 | `config` | host | false | No `[native_host] stage`, config unreadable, or machine id unresolvable. `detail` names the fix command. |
 | `stage-unavailable` | host | true | Stage missing, not a directory, not writable, or lock wait timed out. |
 | `io` | host | true | Sealing failed. Nothing was acknowledged; the retry is safe. |

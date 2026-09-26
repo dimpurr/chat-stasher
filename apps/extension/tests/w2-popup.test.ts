@@ -189,6 +189,37 @@ describe('W2-POPUP · the outbox', () => {
     expect(out.full).toBe(false);
   });
 
+  // W205c · a rejected entry now carries the host's own `rejectDetail`; the
+  // sample must show that instruction, not the `reason:kind` code. An entry
+  // without one (older records) still falls back to `lastError`, and absence
+  // of both is the existing "no detail recorded" state, never a blank.
+  it('🔴 the rejected sample prefers the nack detail over the reason code, falling back for older records', () => {
+    const withoutDetail = entry({
+      state: 'rejected', rejectKind: 'invalid-bundle', lastError: 'nack:invalid-bundle',
+    });
+    const withoutEither = entry({
+      state: 'rejected', rejectKind: 'invalid-bundle', lastError: null,
+    });
+    const out = summarizeOutbox([
+      entry({
+        state: 'rejected',
+        rejectKind: 'install-conflict',
+        rejectDetail: 'regenerate the install identity in the later browser profile',
+        lastError: 'nack:install-conflict',
+      }),
+      withoutDetail,
+      withoutEither,
+    ]);
+    expect(out.rejectedSamples).toEqual([
+      {
+        kind: 'install-conflict',
+        detail: 'regenerate the install identity in the later browser profile',
+      },
+      { kind: 'invalid-bundle', detail: 'nack:invalid-bundle' },
+      { kind: 'invalid-bundle', detail: 'no detail recorded' },
+    ]);
+  });
+
   it('🔴 the summary carries no payload / URL / conversation body', () => {
     const out = summarizeOutbox([
       entry({

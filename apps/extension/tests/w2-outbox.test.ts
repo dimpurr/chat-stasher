@@ -275,6 +275,40 @@ describe('W2-OUTBOX · a non-retryable nack ⇒ rejected', () => {
     expect(left!.map((e) => e.name)).toEqual([NAME_A]);
     expect(left![0]!.state).toBe('rejected');
   });
+
+  // W205c · the nack detail is the only place the fix is written down; the
+  // review found it dropped here, so the popup could only ever say
+  // `nack:<kind>` for a refusal that needs a human to read its instruction.
+  it('🔴 a rejected entry keeps the nack detail (rejectDetail) beside its kind', async () => {
+    const ob = await outbox();
+    const { sha256 } = await ob.enqueue(NAME_A, PAYLOAD_A);
+    const conflict: DeliverResult = {
+      delivered: false, reason: 'nack', kind: 'install-conflict', retryable: false,
+      detail: 'regenerate the install identity in the later browser profile',
+      requestId: 'r', sha256: 's',
+    };
+    const report = await ob.drainOutbox({ deliver: async () => conflict, now: () => 9_000 });
+    expect(report).toMatchObject({ attempted: 1, rejected: 1, stoppedBy: 'drained' });
+    const lookup = await ob.getEntry(sha256!);
+    expect(lookup).toMatchObject({
+      ok: true,
+      entry: {
+        state: 'rejected',
+        rejectKind: 'install-conflict',
+        rejectDetail: 'regenerate the install identity in the later browser profile',
+        lastError: 'nack:install-conflict',
+      },
+    });
+    // A retryable failure records no rejectDetail: nothing was rejected.
+    vi.resetModules();
+    freshIdb();
+    const ob2 = await outbox();
+    await ob2.enqueue(NAME_B, PAYLOAD_B);
+    await ob2.drainOutbox({ deliver: async () => RETRYABLE, now: () => 9_000 });
+    const entries = await ob2.listEntries();
+    expect(entries![0]!.state).toBe('pending');
+    expect(entries![0]!.rejectDetail).toBeUndefined();
+  });
 });
 
 // ===========================================================================

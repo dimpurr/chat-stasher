@@ -734,10 +734,13 @@ pub enum SealOutcome {
 
 /// Why [`seal_payload`] could not answer.
 ///
-/// The two variants exist because the caller has to answer differently: the
-/// host must tell the extension `stage-unavailable` for the first and `io` for
-/// the second (`nativehost-protocol.md` §6.3). Both are `retryable: true` and
-/// in both cases nothing was acknowledged.
+/// The variants exist because the callers have to answer differently: `ingest`
+/// records the error, while the host must tell the extension a §6.3 word for
+/// the first (`stage-unavailable`), the third (`io`) and — for a bundle whose
+/// install identity collides with what this stage already sealed — the
+/// item-scope, non-retryable `install-conflict`, whose `detail` is the only
+/// place the fix (regenerating the later install's identity) is written down
+/// (`nativehost-protocol.md` §6.3). Nothing was acknowledged in any of them.
 #[derive(Debug)]
 pub enum SealError {
     /// The stage write lock could not be taken inside

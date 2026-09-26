@@ -594,6 +594,73 @@ fn a_payload_that_is_not_a_bundle_is_an_invalid_bundle_nack() {
     );
 }
 
+/// An `inbox@2` bundle carrying the W205 install identity, shaped like the one
+/// `buildBundle` serialises (`apps/extension/entrypoints/background.ts`).
+fn identity_bundle(
+    session: &str,
+    text: &str,
+    install_id: &str,
+    browser: &str,
+    label: &str,
+) -> String {
+    format!(
+        r#"{{"schema":"chat-stasher/inbox@2","install_id":"{install_id}","browser":"{browser}","profile_label":"{label}","platform":"deepseek","sessionId":"{session}","capturedAt":"2026-09-26T00:00:00.000Z","parsed":{{"hasJson":true,"keys":["id"]}},"raw":{{"text":{raw},"bytes":{n}}}}}"#,
+        raw = serde_json::to_string(text).expect("text as JSON"),
+        n = text.len(),
+    )
+}
+
+/// W205c · D4, wire-level: a copied install (same `install_id`, different
+/// user-named profile label) must be refused in a way an extension can act on —
+/// `install-conflict` is item-scope and non-retryable, so the entry lands
+/// visible and rejected instead of piling up pending behind a host-scope
+/// `config`. This test was red while the refusal was kind `config`: the scope
+/// table on the extension side kept the item pending forever.
+#[test]
+fn a_copied_install_is_refused_with_install_conflict_not_config() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // The original install seals normally.
+    let original = identity_bundle("sess-a", "hello a", "install-fixture", "Chrome", "Personal");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-orig",
+        "deepseek-sess-a.json",
+        &original,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "ack");
+    assert!(fixture.session_dir(&machine, "deepseek.sess-a").exists());
+
+    // The copy — same install_id, a label the user actually named — is refused.
+    let copy = identity_bundle("sess-b", "hello b", "install-fixture", "Chrome", "Work");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-copy",
+        "deepseek-sess-b.json",
+        &copy,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack");
+    assert_eq!(response["kind"], "install-conflict");
+    assert_eq!(response["retryable"], false);
+    assert!(
+        response["detail"]
+            .as_str()
+            .expect("detail is a string")
+            .contains("regenerate the install identity"),
+        "the refusal must tell the later install what to do: {response}"
+    );
+    assert!(
+        !fixture.session_dir(&machine, "deepseek.sess-b").exists(),
+        "a refused delivery must seal nothing"
+    );
+}
+
 // ------------------------------------------------------------------ §6.6 has
 
 /// A content fingerprint. The host compares it as an opaque string, so any 64

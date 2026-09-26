@@ -78,6 +78,14 @@ export interface OutboxEntry {
   state: EntryState;
   /** The `nack` kind that rejected this entry. Only on `state: 'rejected'`. */
   rejectKind?: string;
+  /**
+   * The rejecting `nack`'s own `detail` sentence. Only on `state: 'rejected'`.
+   * 🔴 It is the only place some refusals say what to do — the install-conflict
+   * refusal's whole instruction lives here — so it is kept beside the kind and
+   * shown in the popup's rejected samples. `lastError` stays the short
+   * `reason:kind` code for one-line debugging.
+   */
+  rejectDetail?: string;
 }
 
 export interface OutboxSummary {
@@ -400,13 +408,19 @@ export interface FailureInput {
   /** From the host's `nack` when there was one. */
   retryable: boolean;
   kind?: string;
+  /** The `nack`'s `detail`, when there was one. Kept only on rejection —
+   * while an item stays pending the retry is the answer, and the last nack's
+   * sentence is not a fact about the queue. */
+  detail?: string;
 }
 
 /**
  * Record a failed delivery attempt.
  *
  * Retryable ⇒ stay pending, attempts + 1, exponential backoff.
- * Non-retryable ⇒ move to `rejected` (kept, listed, exported, never retried).
+ * Non-retryable ⇒ move to `rejected` (kept, listed, exported, never retried),
+ * keeping the nack's kind and its `detail` — the refusal's own wording is the
+ * only place some fixes (an install-identity conflict) are described.
  * Either way the entry itself stays: this function never deletes.
  */
 export async function recordFailure(sha256: string, input: FailureInput): Promise<OutboxEntry | null> {
@@ -426,7 +440,10 @@ export async function recordFailure(sha256: string, input: FailureInput): Promis
     lastAttemptAt: input.at,
     state: input.retryable ? 'pending' : 'rejected',
   };
-  if (!input.retryable) next.rejectKind = input.kind ?? input.reason;
+  if (!input.retryable) {
+    next.rejectKind = input.kind ?? input.reason;
+    if (typeof input.detail === 'string' && input.detail.length > 0) next.rejectDetail = input.detail;
+  }
   store.put(next);
   await txDone(tx);
   return next;
@@ -631,6 +648,7 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
     await recordFailure(entry.sha256, {
       reason: result.reason,
       kind: result.kind,
+      detail: result.detail,
       at: now(),
       retryable: !itemRejected,
     });

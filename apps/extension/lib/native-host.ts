@@ -53,6 +53,11 @@ export const NACK_KINDS = [
   'too-large',
   'integrity',
   'invalid-bundle',
+  // W205c · the D4 copied-install refusal: item-scope, non-retryable. A kind an
+  // older extension does not know reads as `malformed-response` (retryable),
+  // so a newer host alone degrades to today's pending behaviour — the pair
+  // settles once the extension updates.
+  'install-conflict',
   'config',
   'stage-unavailable',
   'io',
@@ -967,6 +972,14 @@ export async function deliver(
  * wrong protocol, stage missing, sealing failed) and says nothing about the
  * item, so the item must stay pending even when `retryable` is false: once a
  * person fixes the host, every waiting item has to go through.
+ *
+ * `install-conflict` is deliberately absent: it is a statement about the
+ * *item's* identity — the bytes carry an install_id this stage already sealed
+ * under a different browser/profile — and the only fix, regenerating that
+ * install's identity in the browser, can never deliver these same bytes.
+ * Treating it as host-scope kept the W205 D4 refusal pending forever with its
+ * instruction dropped; as item-scope, non-retryable, it lands in `rejected`
+ * with the nack's detail attached.
  */
 export const HOST_SCOPE_KINDS: readonly NackKind[] = ['protocol-version', 'config', 'stage-unavailable', 'io'];
 

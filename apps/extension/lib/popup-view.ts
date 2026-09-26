@@ -377,9 +377,10 @@ export interface PopupOutbox {
 export const MAX_REJECTED_SAMPLES = 5;
 
 /**
- * 🔴 Pure: outbox entries → the few numbers the popup displays.
- * The render layer never walks the entries, and the payload never comes along:
- * the wording needs counts and kinds only.
+ * 🔴 Pure: outbox entries → the few numbers and refusal words the popup
+ * displays. The render layer never walks the entries, and the payload never
+ * comes along: the wording needs counts, kinds and the rejecting nack's own
+ * detail sentence — never conversation bytes.
  */
 export function summarizeOutbox(
   entries: readonly OutboxEntry[],
@@ -403,8 +404,11 @@ export function summarizeOutbox(
       .sort((a, b) => (b.count - a.count) || a.kind.localeCompare(b.kind)),
     rejectedSamples: rejected.slice(0, MAX_REJECTED_SAMPLES).map((entry) => ({
       kind: entry.rejectKind ?? ui.OUTBOX_KIND_UNKNOWN,
-      // Summary: keep the reason code itself. 🔴 Never the payload / URL / conversation body.
-      detail: (entry.lastError ?? ui.OUTBOX_DETAIL_MISSING).slice(0, 200),
+      // W205c · the rejecting nack's own sentence first — for an
+      // install-conflict it is the only place the fix is written down — with
+      // the pre-W205c `reason:kind` code as the fallback for entries rejected
+      // before the detail was kept. 🔴 Never the payload / URL / conversation body.
+      detail: (entry.rejectDetail ?? entry.lastError ?? ui.OUTBOX_DETAIL_MISSING).slice(0, 200),
     })),
   };
 }
