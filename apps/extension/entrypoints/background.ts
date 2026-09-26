@@ -766,6 +766,22 @@ async function pauseForCoordinationFailure(reason: string): Promise<void> {
   });
 }
 
+/** Share Claude organization-discovery refusals with every install on this machine. */
+async function reportClaudeOrganizationRateLimit(status: 403 | 429): Promise<boolean> {
+  const install = await getInstallIdentity();
+  const report = await coordinate({
+    mode: 'rate_limit',
+    platform: 'claude',
+    installId: install.install_id,
+    status,
+    retryAfterMs: 0,
+  });
+  if (report.ok) return true;
+  await pauseForCoordinationFailure(report.reason ?? 'Claude rate-limit report failed');
+  console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared', report.reason ?? 'unknown');
+  return false;
+}
+
 /**
  * 🔴 W113 · **The speed preset this tick runs with** (ADR-032 §3, ADR-033).
  *
@@ -821,7 +837,7 @@ async function coordinatedTick(
   if (!claim.granted) return { ran: false, reason: 'already-running', report: null };
   const coordinatedHttp: HttpPort = async (url, init) => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const segment = coordinationSegmentForRequest(url);
+      const segment = coordinationSegmentForRequest(platform, url);
       const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment });
       if (!token.ok) {
         await pauseForCoordinationFailure(token.reason ?? 'unknown');
@@ -836,7 +852,10 @@ async function coordinatedTick(
       const retryAfterMs = parseRetryAfterMs(response.retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0;
       const report = await coordinate({ mode: 'rate_limit', platform, installId: install.install_id,
         status: response.status, retryAfterMs });
-      if (!report.ok) console.warn('[chat-stasher] rate-limit cooldown could not be shared', report.reason ?? 'unknown');
+      if (!report.ok) {
+        await pauseForCoordinationFailure(report.reason ?? 'rate-limit report failed');
+        throw new Error(`machine-wide rate-limit coordination unavailable: ${report.reason ?? 'unknown'}`);
+      }
     }
     return response;
   };
@@ -1704,6 +1723,9 @@ export async function registerBackfillTargetHere(): Promise<
   const resolver = scopeResolverFor(platform);
   if (resolver) {
     const resolved = (await resolver(live.tabId, origin)).resolved;
+    if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
+      await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus);
+    }
     if (resolved.ok) {
       scope = resolved.org;
     } else {
@@ -2069,9 +2091,15 @@ async function resolveScopeForTick(
   }
   const resolved = answer.resolved;
   if (!resolved.ok) {
+    const rateLimitShared = resolved.rateLimitStatus === undefined
+      ? true
+      : await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus);
     await recordBackfillHalt(store, {
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
+    if (!rateLimitShared) {
+      return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(answer), coordinationBlocked: true };
+    }
     // The engine now finds the halt record and stops by name, issuing nothing.
     return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(answer) };
   }

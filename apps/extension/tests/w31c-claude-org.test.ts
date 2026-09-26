@@ -108,10 +108,11 @@ const pageFetch = async (url: string) => {
 };
 
 /** The organizations endpoint, answering with `uuids` (or a status). */
-function organizationsEndpoint(uuids: string[] | 'http-500'): Route {
-  return uuids === 'http-500'
-    ? () => ({ status: 500, text: 'synthetic server error' })
-    : jsonRoute(() => JSON.stringify(uuids.map((uuid) => ({ uuid, name: 'synthetic' }))));
+function organizationsEndpoint(uuids: string[] | 'http-500' | 'http-403' | 'http-429'): Route {
+  if (Array.isArray(uuids)) {
+    return jsonRoute(() => JSON.stringify(uuids.map((uuid) => ({ uuid, name: 'synthetic' }))));
+  }
+  return () => ({ status: Number(uuids.slice(5)), text: 'synthetic endpoint refusal' });
 }
 
 /**
@@ -139,11 +140,20 @@ let currentTab: FakeTab | null = null;
 const store: Record<string, unknown> = {};
 const backgroundListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmBook = new Map<string, unknown>();
+let coordinationMessages: Array<Record<string, unknown>> = [];
+let failRateLimitCoordination = false;
 
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
-    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
+    sendNativeMessage: (_host: string, message: unknown) => {
+      const msg = message as Record<string, unknown>;
+      if (msg.type === 'coordination') coordinationMessages.push(msg);
+      if (failRateLimitCoordination && msg.type === 'coordination' && msg.mode === 'rate_limit') {
+        return Promise.reject(new Error('synthetic host unavailable'));
+      }
+      return Promise.resolve(syntheticCoordinationResponse(message));
+    },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { backgroundListeners.push(fn); } },
     async sendMessage() { return undefined; },
@@ -305,6 +315,8 @@ beforeEach(async () => {
   alarmBook.clear();
   routes = {};
   currentTab = null;
+  coordinationMessages = [];
+  failRateLimitCoordination = false;
   runtimeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
@@ -318,6 +330,36 @@ beforeEach(async () => {
 // 1 · The popup's start button, on a page that has made no request yet
 // ---------------------------------------------------------------------------
 describe('W31c-1 · starting a Claude backfill resolves the organization through the page', () => {
+  it.each([403, 429] as const)('shares an organization-discovery HTTP %i refusal with the native host', async (status) => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint(`http-${status}` as 'http-403' | 'http-429');
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(reply?.ok).toBe(false);
+    expect(coordinationMessages.filter((message) => message.mode === 'rate_limit'))
+      .toMatchObject([{ type: 'coordination', mode: 'rate_limit', platform: 'claude', status }]);
+  });
+
+  it('pauses local backfill when the host cannot accept Claude organization-discovery cooldown', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { loadHostPause } = await import('../lib/host-status');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    failRateLimitCoordination = true;
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(reply?.ok).toBe(false);
+    expect(await loadHostPause(browserLocalStore())).not.toBeNull();
+  });
+
   it('🔴 no captured URL, one organization ⇒ the page is asked, and the target is registered with it', async () => {
     const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
     await enableBackfill();
@@ -562,6 +604,38 @@ describe('W31c-3 · the allowlist compares the path segment against the page\'s 
 // 4 · The alarm retries a transient failure, and does not poll a permanent one
 // ---------------------------------------------------------------------------
 describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
+  it('reports an organizations-endpoint 429 to the host while the alarm owns the Claude lease', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.filter((message) => message.mode === 'rate_limit'))
+      .toMatchObject([{ type: 'coordination', mode: 'rate_limit', platform: 'claude', status: 429 }]);
+  });
+
+  it('pauses the alarm backfill locally if the host rejects an organizations-endpoint cooldown report', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    failRateLimitCoordination = true;
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { loadHostPause } = await import('../lib/host-status');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+
+    await mod.runAlarmTick();
+
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    expect(await loadHostPause(browserLocalStore())).not.toBeNull();
+  });
+
   it('reproduces W99: a stored resolved scope reaches a fresh /new page and the page establishes its own allowlist', async () => {
     const mod = await bootBackground();
     await enableBackfill();
