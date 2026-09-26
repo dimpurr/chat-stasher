@@ -64,7 +64,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:938-947`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:988-997`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:388-403`). There is no "probably delivered".
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:863-865`). That page does not have to
+`apps/extension/entrypoints/background.ts:924-927`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -180,7 +180,7 @@ backfill has been observed in a real browser, so read the row as *implemented,
 not verified*.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:946-959`).
+(`apps/extension/lib/popup-view.ts:950-963`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -300,11 +300,11 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:1283-1358`).
+  install (`crates/chat-stasher/src/nativehost.rs:1479-1554`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:2016-2026`, `:1753`).
+  (`crates/chat-stasher/src/nativehost.rs:2214-2224`, `:1951`).
 
 **It is not yet on any app store** (see section 6 for details). Stable releases
 include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
@@ -346,7 +346,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:1346-1357`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:1542-1553`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -371,7 +371,7 @@ sentence the surrounding documents have to get right:
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
   (`crates/chat-stasher/src/main.rs:1978-1993`;
-  `crates/chat-stasher/src/nativehost.rs:1283-1358`). So several installs deliver
+  `crates/chat-stasher/src/nativehost.rs:1479-1554`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
@@ -403,7 +403,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:649-656`).
+`apps/extension/entrypoints/background.ts:650-657`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
@@ -446,7 +446,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1346-1357`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1542-1553`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -458,10 +458,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1107-1135`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1291-1358`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1487-1554`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1553-1555`, `:1561`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:1751-1753`, `:1759`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -471,7 +471,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:1363-1392`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:1559-1588`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -1017,7 +1017,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:1887-1968`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:1957-2038`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4630-4661`) is covered.
