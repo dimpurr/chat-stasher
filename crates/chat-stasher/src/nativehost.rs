@@ -1545,6 +1545,11 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         Err(inbox::SealError::Lock(e)) => {
             nack(request_id, NackKind::StageUnavailable, format!("{e:#}"))
         }
+        Err(inbox::SealError::IdentityCollision) => nack(
+            request_id,
+            NackKind::Config,
+            "this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile",
+        ),
         Err(inbox::SealError::Other(e)) => nack(request_id, NackKind::Io, format!("{e:#}")),
     }
 }

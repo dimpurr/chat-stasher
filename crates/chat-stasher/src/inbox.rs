@@ -112,6 +112,12 @@ pub struct Consumed {
     /// was unknown": an unknown account is `kind: "unknown"`, which reports as
     /// `Some("unknown")`.
     pub account_kind: Option<String>,
+    /// W205 install provenance, omitted for older bundles.
+    pub install_id: Option<String>,
+    pub browser: Option<String>,
+    pub profile_label: Option<String>,
+    /// Host-assigned machine partition that accepted this bundle.
+    pub machine: Option<String>,
 }
 
 /// A file whose bytes were already archived by an earlier run.
@@ -441,6 +447,9 @@ struct Bundle {
     /// account fingerprint is computed from state outside the captured response,
     /// so `raw.text` cannot re-derive it — an unparsed drop here is permanent.
     account: Option<serde_json::Value>,
+    install_id: Option<String>,
+    browser: Option<String>,
+    profile_label: Option<String>,
     provenance: Option<serde_json::Value>,
     #[serde(rename = "provenanceSupplement")]
     provenance_supplement: Option<serde_json::Value>,
@@ -490,6 +499,13 @@ struct ShardRecord {
     /// id or the dedup key — those remain `platform.sessionId` / `file_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    browser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_label: Option<String>,
+    machine: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance: Option<serde_json::Value>,
     #[serde(rename = "provenanceSupplement")]
@@ -727,6 +743,8 @@ pub enum SealError {
     /// The stage write lock could not be taken inside
     /// [`STAGE_LOCK_TIMEOUT`], or the lock file itself could not be opened.
     Lock(anyhow::Error),
+    /// The same stable install id was previously stored with a different browser/profile label.
+    IdentityCollision,
     /// Parsing or sealing failed.
     Other(anyhow::Error),
 }
@@ -735,6 +753,7 @@ impl std::fmt::Display for SealError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SealError::Lock(e) => write!(f, "{e:#}"),
+            SealError::IdentityCollision => write!(f, "this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile"),
             SealError::Other(e) => write!(f, "{e:#}"),
         }
     }
@@ -783,6 +802,17 @@ pub fn seal_payload(
     let parsed = parse_bundle(source_file, bytes).map_err(SealError::Other)?;
 
     let _lock = lock_stage(stage).map_err(SealError::Lock)?;
+    if let (Some(install_id), Some(browser), Some(profile_label)) = (
+        parsed.install_id.as_deref(),
+        parsed.browser.as_deref(),
+        parsed.profile_label.as_deref(),
+    ) {
+        if install_identity_conflicts(stage, install_id, browser, profile_label)
+            .map_err(SealError::Other)?
+        {
+            return Err(SealError::IdentityCollision);
+        }
+    }
     let session_dir = store::session_shard_dir(stage, machine, &parsed.id);
 
     // Content-addressed idempotency: identical raw bytes already archived?
@@ -812,6 +842,10 @@ pub fn seal_payload(
             .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
         account: parsed.account,
+        install_id: parsed.install_id,
+        browser: parsed.browser,
+        profile_label: parsed.profile_label,
+        machine: machine.to_string(),
         provenance: parsed.provenance,
         provenance_supplement: parsed.provenance_supplement,
         fingerprint: fingerprint.map(str::to_string),
@@ -837,7 +871,75 @@ pub fn seal_payload(
             .and_then(|a| a.get("kind"))
             .and_then(|k| k.as_str())
             .map(String::from),
+        install_id: record.install_id.clone(),
+        browser: record.browser.clone(),
+        profile_label: record.profile_label.clone(),
+        machine: Some(record.machine.clone()),
     }))
+}
+
+/// The label the extension writes while the user has not named the browser
+/// profile yet (schema: `contracts/inbox.schema.json`, `profile_label`). It is
+/// a placeholder, not a claim about which browser profile produced the
+/// bundle, so it can neither establish nor violate an identity binding.
+const UNNAMED_PROFILE_LABEL: &str = "Unnamed profile";
+
+/// Does `label` identify a browser profile the user actually named?
+fn names_a_profile(label: &str) -> bool {
+    label != UNNAMED_PROFILE_LABEL
+}
+
+/// Compare a stable install id against readable provenance already sealed in this local stage.
+/// Old shards without these fields cannot establish a conflict and remain compatible.
+/// A profile goes [unnamed → named] as its normal first-run flow, so a
+/// placeholder label on either side of the comparison is treated as the
+/// absence of a claim rather than as a different profile.
+fn install_identity_conflicts(
+    stage: &Path,
+    install_id: &str,
+    browser: &str,
+    profile_label: &str,
+) -> anyhow::Result<bool> {
+    let sessions = stage.join(store::SESSIONS_DIR);
+    let machines = match fs::read_dir(&sessions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("read {}", sessions.display())),
+    };
+    for machine in machines {
+        let machine = machine?;
+        if !machine.file_type()?.is_dir() {
+            continue;
+        }
+        for session in fs::read_dir(machine.path())? {
+            let session = session?;
+            if !session.file_type()?.is_dir() {
+                continue;
+            }
+            for (_, shard) in store::sealed_shard_entries(&session.path())? {
+                let raw = fs::read(&shard)
+                    .with_context(|| format!("read install provenance from {}", shard.display()))?;
+                for line in raw.split(|byte| *byte == b'\n') {
+                    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let saved_browser = record.get("browser").and_then(|value| value.as_str());
+                    let saved_label = record.get("profile_label").and_then(|value| value.as_str());
+                    let label_conflict = saved_label.is_some_and(|saved| {
+                        names_a_profile(saved)
+                            && names_a_profile(profile_label)
+                            && saved != profile_label
+                    });
+                    if record.get("install_id").and_then(|value| value.as_str()) == Some(install_id)
+                        && (saved_browser != Some(browser) || label_conflict)
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Is `bytes` a bundle that would be archived as a `kind: "bundle"` record —
@@ -1185,6 +1287,9 @@ struct ParseOutcome {
     /// W128 step 1 · the `account` envelope as written, or `None` when the bundle
     /// carried no object with a string `kind`.
     account: Option<serde_json::Value>,
+    install_id: Option<String>,
+    browser: Option<String>,
+    profile_label: Option<String>,
     provenance: Option<serde_json::Value>,
     provenance_supplement: Option<serde_json::Value>,
 }
@@ -1211,6 +1316,9 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         raw: None,
         identity: None,
         account: None,
+        install_id: None,
+        browser: None,
+        profile_label: None,
         provenance: None,
         provenance_supplement: None,
     };
@@ -1250,6 +1358,9 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     out.session_id = sanitize_component(session_raw);
     out.id = id;
     out.captured_at = bundle.capturedAt.filter(|s| !s.is_empty());
+    out.install_id = bundle.install_id.filter(|s| !s.trim().is_empty());
+    out.browser = bundle.browser.filter(|s| !s.trim().is_empty());
+    out.profile_label = bundle.profile_label.filter(|s| !s.trim().is_empty());
 
     // `parsed` is explicitly best-effort in the contract. Preserve absence
     // as absence so a missing analysis envelope is not serialized as false/[];
@@ -1500,6 +1611,166 @@ mod tests {
             raw = serde_json::to_string(raw_text).unwrap(),
             n = raw_text.len(),
         )
+    }
+
+    #[test]
+    fn v2_install_identity_is_archived_and_old_bundles_remain_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let mut bundle: serde_json::Value = serde_json::from_str(&synthetic_bundle_v2(
+            "sess-install",
+            "opaque-fixture",
+            "platform_uid",
+            "uid-fixture",
+        ))
+        .unwrap();
+        bundle["install_id"] = serde_json::json!("install-fixture");
+        bundle["browser"] = serde_json::json!("Chrome");
+        bundle["profile_label"] = serde_json::json!("Work profile");
+        fs::write(
+            inbox.join("deepseek-sess-install.json"),
+            serde_json::to_vec(&bundle).unwrap(),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(
+            report.consumed[0].install_id.as_deref(),
+            Some("install-fixture")
+        );
+        assert_eq!(report.consumed[0].browser.as_deref(), Some("Chrome"));
+        assert_eq!(
+            report.consumed[0].profile_label.as_deref(),
+            Some("Work profile")
+        );
+        assert_eq!(report.consumed[0].machine.as_deref(), Some("mbp-test"));
+        let rec = only_shard_record(&stage, "mbp-test", "deepseek.sess-install");
+        assert_eq!(rec["install_id"], "install-fixture");
+        assert_eq!(rec["browser"], "Chrome");
+        assert_eq!(rec["profile_label"], "Work profile");
+        assert_eq!(rec["machine"], "mbp-test");
+
+        fs::write(
+            inbox.join("deepseek-old-install.json"),
+            synthetic_bundle_v2("old-install", "opaque-old", "platform_uid", "uid-fixture"),
+        )
+        .unwrap();
+        let old_report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(old_report.consumed[0].install_id, None);
+        let old = only_shard_record(&stage, "mbp-test", "deepseek.old-install");
+        assert!(old.get("install_id").is_none());
+    }
+
+    #[test]
+    fn repeated_install_id_with_different_profile_label_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let mut first: serde_json::Value = serde_json::from_str(&synthetic_bundle_v2(
+            "sess-collision-a",
+            "opaque-a",
+            "platform_uid",
+            "uid-fixture",
+        ))
+        .unwrap();
+        first["install_id"] = serde_json::json!("install-fixture");
+        first["browser"] = serde_json::json!("Chrome");
+        first["profile_label"] = serde_json::json!("Personal");
+        fs::write(
+            inbox.join("deepseek-sess-collision-a.json"),
+            serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ingest(&inbox, &stage, "mbp-test").unwrap().consumed.len(),
+            1
+        );
+
+        let mut later: serde_json::Value = serde_json::from_str(&synthetic_bundle_v2(
+            "sess-collision-b",
+            "opaque-b",
+            "platform_uid",
+            "uid-fixture",
+        ))
+        .unwrap();
+        later["install_id"] = serde_json::json!("install-fixture");
+        later["browser"] = serde_json::json!("Chrome");
+        later["profile_label"] = serde_json::json!("Work");
+        fs::write(
+            inbox.join("deepseek-sess-collision-b.json"),
+            serde_json::to_vec(&later).unwrap(),
+        )
+        .unwrap();
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert!(report.consumed.is_empty());
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0]
+            .message
+            .contains("regenerate the install identity"));
+    }
+
+    /// W205/D4: the extension captures before the user names the profile, and the
+    /// popup asks for the name afterwards. Those unnamed bundles carry the
+    /// `Unnamed profile` placeholder, which claims nothing about which browser
+    /// profile produced them — so it must neither establish nor violate a binding.
+    /// Only a profile the user actually named identifies an install.
+    #[test]
+    fn naming_a_profile_after_unnamed_captures_is_not_a_conflict() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+
+        let write_bundle = |name: &str, session: &str, label: &str| {
+            let mut bundle: serde_json::Value = serde_json::from_str(&synthetic_bundle_v2(
+                session,
+                &format!("opaque-{name}"),
+                "platform_uid",
+                "uid-fixture",
+            ))
+            .unwrap();
+            bundle["install_id"] = serde_json::json!("install-fixture");
+            bundle["browser"] = serde_json::json!("Chrome");
+            bundle["profile_label"] = serde_json::json!(label);
+            fs::write(
+                inbox.join(format!("deepseek-{name}.json")),
+                serde_json::to_vec(&bundle).unwrap(),
+            )
+            .unwrap();
+        };
+
+        write_bundle(
+            "sess-before-naming",
+            "sess-before-naming",
+            "Unnamed profile",
+        );
+        let before = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(before.consumed.len(), 1);
+
+        write_bundle("sess-after-naming", "sess-after-naming", "Work profile");
+        let after = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(
+            after.consumed.len(),
+            1,
+            "naming a profile must not be a conflict"
+        );
+        assert!(after.errors.is_empty());
+
+        write_bundle(
+            "sess-unnamed-again",
+            "sess-unnamed-again",
+            "Unnamed profile",
+        );
+        let unnamed = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(
+            unnamed.consumed.len(),
+            1,
+            "a placeholder label cannot violate a named binding either"
+        );
+        assert!(unnamed.errors.is_empty());
     }
 
     /// W128 step 1: the account fingerprint must survive ingest. It is computed from

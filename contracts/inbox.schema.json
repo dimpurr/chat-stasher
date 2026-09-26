@@ -152,6 +152,21 @@
         }
       ]
     },
+    "install_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Since W205. Stable UUID for this extension install, generated once per browser profile and kept in storage.local. Older inbox@2 bundles may omit it."
+    },
+    "browser": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Since W205. Best-effort browser name for the profile that produced the bundle."
+    },
+    "profile_label": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Since W205. User-provided browser profile label; older bundles may omit it. Until the user names the profile in the popup, bundles carry the literal placeholder \"Unnamed profile\". The placeholder is not an identity claim: hosts must not treat it as establishing or violating an install-id binding (see EXT-2 / D4)."
+    },
     "provenance": {
       "type": "object",
       "description": "Immutable ChatGPT source facts recorded at capture. project='unknown' means membership had not been resolved; it is not no-project.",
