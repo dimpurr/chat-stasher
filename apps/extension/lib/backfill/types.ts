@@ -2011,10 +2011,10 @@ export function readAccountSuspension(value: unknown): AccountSuspension | undef
  *  · `'holds'` — a suspension this build can read is on the record;
  *  · `'absent'` — nothing is there, so nothing bars the scope;
  *  · `'unreadable'` — something is there and this build cannot read it. The caller
- *    must say so rather than assume either way; `scopeRetryDue` fails **closed**
- *    (no request is issued), because the one thing we do know is that a record exists,
- *    and running a request under an account we cannot vouch for is the failure this
- *    whole mechanism exists to prevent.
+ *    must say so rather than assume either way; the alarm's `tickHoldReason` fails
+ *    **closed** (no request is issued), because the one thing we do know is that a
+ *    record exists, and running a request under an account we cannot vouch for is
+ *    the failure this whole mechanism exists to prevent.
  *
  * It reads the **raw stored value**, not a typed view: a typed view of a header has
  * already dropped what could not be parsed, which is precisely the evidence needed

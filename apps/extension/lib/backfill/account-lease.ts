@@ -22,7 +22,8 @@
  *     keeps waking it. This is the *registry* half: an observation of B suspends
  *     every other scope of that platform whose lease says something else
  *     (`suspensionFor`), and the suspension is what stops the next alarm wake —
- *     `scopeRetryDue` consults it, and it does not expire on a clock.
+ *     the alarm's `tickHoldReason` consults it through `accountSuspensionHolds`,
+ *     and it does not expire on a clock.
  *  3. **A suspension that nothing can lift** would trade "wrong data" for "no data",
  *     which is not a trade this project makes. So a suspension is lifted by an
  *     observation that **agrees** with the suspended scope's lease — in practice the

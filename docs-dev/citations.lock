@@ -67,7 +67,7 @@ apps/extension/lib/account-fingerprint.ts:195-219  0438c93fd9eb  lines=25
   <- docs-dev/threat-model.md:339  :: export async function fingerprintAccountId(
 apps/extension/lib/account-fingerprint.ts:298-317  6d85675d2fcd  lines=20
   <- docs-dev/privacy.md:265  :: export async function accountFingerprintFor(
-apps/extension/lib/backfill/account-lease.ts:140-196  ce0b93a0b3f9  lines=57
+apps/extension/lib/backfill/account-lease.ts:141-197  ce0b93a0b3f9  lines=57
   <- docs-dev/threat-model.md:357  :: export async function accountLeaseForScope(
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs-dev/privacy.md:639  :: * In Chrome's permission-warning list, `alarms` — like `sto…
@@ -103,7 +103,7 @@ apps/extension/lib/backfill/debt-store.ts:109-128  c2b9b363b155  lines=20
   <- docs-dev/privacy.md:323  :: export const BACKFILL_DB_VERSION = 2;
 apps/extension/lib/backfill/engine.ts:147-150  5cfeee9f2531  lines=4
   <- docs-dev/privacy.md:480, docs-dev/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
-apps/extension/lib/backfill/engine.ts:1418-1505  f87519af5fb8  lines=88
+apps/extension/lib/backfill/engine.ts:1418-1505  e4f39205a489  lines=88
   <- docs-dev/threat-model.md:358  :: /**
 apps/extension/lib/backfill/engine.ts:1564-1585  acd18b5f4ef3  lines=22
   <- docs-dev/threat-model.md:358  :: runLease.kind === 'run' ? runLease.lease : undefined,

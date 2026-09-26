@@ -611,7 +611,7 @@ popup:
         signed in, so this leg stopped before storing anything else: nothing has
         been written off, and everything still owed is still owed. It resumes by
         itself once this account is signed in and used again. Technical detail:
-        {detail}"
+        {detail}
     # 🔴 W44 · **A stop that stopped applying, because the extension changed.**
     #
     # A stored stop whose reason is a judgement about the extension itself is tied

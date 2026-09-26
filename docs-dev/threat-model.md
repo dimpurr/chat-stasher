@@ -354,7 +354,7 @@ the account its scope names before it fetches anything, and every list or body
 response is checked against it — a response that names a *different* account on
 the same install stops the run with `account-changed` and **suspends** that
 scope, so the next wake cannot issue the same request under the same wrong
-account (`apps/extension/lib/backfill/account-lease.ts:140-196`,
+account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 `apps/extension/lib/backfill/engine.ts:1418-1505`, `:1564-1585`). A capture is
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new

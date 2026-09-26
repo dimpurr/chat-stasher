@@ -1440,10 +1440,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    first request**, so a run that dies mid-fetch cannot leave a scope that ran
    *    without a lease.
    *
-   * 🔴 It is placed here — after the ledger is open, before the re-enumeration migration
-   *    and before any gate that can fetch — because both halves matter: it must be able
-   *    to write (so the ledger must be open) and it must precede the first request (so
-   *    nothing can be attributed under an account this run never claimed).
+   * 🔴 It is placed here — after the ledger is open, after the re-enumeration migration
+   *    (which fetches nothing), and before any gate that can fetch — because both halves
+   *    matter: it must be able to write (so the ledger must be open) and it must precede
+   *    the first request (so nothing can be attributed under an account this run never claimed).
    *
    * 🔴 What it deliberately does **not** do: it does not contact a page, does not read
    *    a platform body, and does not turn an unreadable salt into an accusation. A run

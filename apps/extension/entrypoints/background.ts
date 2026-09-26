@@ -975,7 +975,7 @@ async function rememberScopedTarget(
  * already running. The live leg sees the account the *user* is actually using, which is
  * the only signal that arrives while nothing is running — and it is also the only thing
  * that can lift a suspension, because a suspended scope never runs (that is what
- * suspended means, `scopeRetryDue`).
+ * suspended means, `tickHoldReason`).
  *
  * ## Three outcomes per scope, and the third is not the second
  *
