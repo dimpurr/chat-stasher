@@ -531,10 +531,14 @@ struct ShardRecord {
     ///    not. A recreated or restored stage holds no shards and therefore holds
     ///    no fingerprints — which is exactly the review finding this closes.
     ///
-    /// `None` for every path that has no capture body to fingerprint (`ingest`
-    /// of a bundle file, an export line) and for every shard sealed before this
-    /// field existed. Omitted entirely when absent, so those shard lines keep
-    /// their existing bytes.
+    /// `None` for every path that has no fingerprint to record — the user's own
+    /// `*.json` drop box (`ingest` of a hand-dropped file, which `consume_one`
+    /// seals without one, because a hand-dropped file naming a fingerprint
+    /// proves nothing) and every shard sealed before this field existed. An §8
+    /// export line is not in that set: when its bundle carries a `fingerprint`
+    /// it is sealed with it via `ingest_export_file` (see [`seal_payload`]);
+    /// there `None` means only a pre-W213 bundle that carried none. Omitted
+    /// entirely when absent, so those shard lines keep their existing bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
 }

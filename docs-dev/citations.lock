@@ -513,15 +513,15 @@ crates/chat-stasher/src/inbox.rs:447-452  bcce48fa0bc4  lines=6
   <- docs-dev/privacy.md:282  :: /// account fingerprint is computed from state outside the …
 crates/chat-stasher/src/inbox.rs:508-516  cd1cfe6ef524  lines=9
   <- docs-dev/privacy.md:283  :: account: Option<serde_json::Value>,
-crates/chat-stasher/src/inbox.rs:521-539  beb0e19c7f66  lines=19
+crates/chat-stasher/src/inbox.rs:521-543  46292023761e  lines=23
   <- docs-dev/privacy.md:306  :: /// W50c · The **content fingerprint** the delivery was mad…
-crates/chat-stasher/src/inbox.rs:819-829  87d5599f8f90  lines=11
+crates/chat-stasher/src/inbox.rs:823-833  87d5599f8f90  lines=11
   <- docs-dev/privacy.md:289  :: if let (Some(install_id), Some(browser), Some(profile_label…
-crates/chat-stasher/src/inbox.rs:859-862  488fcbe9c4c7  lines=4
+crates/chat-stasher/src/inbox.rs:863-866  488fcbe9c4c7  lines=4
   <- docs-dev/privacy.md:283  :: install_id: parsed.install_id,
-crates/chat-stasher/src/inbox.rs:899-957  a0367ad05e22  lines=59
+crates/chat-stasher/src/inbox.rs:903-961  a0367ad05e22  lines=59
   <- docs-dev/privacy.md:289  :: const UNNAMED_PROFILE_LABEL: &str = "Unnamed profile";
-crates/chat-stasher/src/inbox.rs:1156-1184  81d263fdddc2  lines=29
+crates/chat-stasher/src/inbox.rs:1160-1188  81d263fdddc2  lines=29
   <- docs-dev/install.md:466, docs-dev/threat-model.md:437  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…

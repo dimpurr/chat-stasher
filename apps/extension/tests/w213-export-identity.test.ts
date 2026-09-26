@@ -69,7 +69,7 @@ describe('W213 · the export file name', () => {
     expect(c).not.toBe(b);
   });
 
-  it('omits the install segment when the identity could be read — it never invents one', async () => {
+  it('omits the install segment when the identity could not be read — it never invents one', async () => {
     const ob = await outbox();
     // The escape hatch survives broken identity storage: no fabricated id, and
     // the nonce still keeps the name unique against every other export.
