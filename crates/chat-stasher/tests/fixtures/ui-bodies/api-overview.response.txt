@@ -6,6 +6,21 @@ content-type: application/json; charset=utf-8
   "complete": true,
   "data_blobs_read": 0,
   "destination": "dest-under-test",
+  "destinations": [
+    {
+      "complete": true,
+      "held": 4,
+      "in_view": 4,
+      "label": "dest-under-test",
+      "machines_with_legacy_index": [],
+      "machines_without_activity_index": [
+        "m-3"
+      ],
+      "snapshots_in_repo": 2,
+      "snapshots_scanned": 2,
+      "unreadable_parts": []
+    }
+  ],
   "filter": null,
   "generated_unix": 1770000000,
   "index_files_read": 3,
@@ -46,6 +61,8 @@ content-type: application/json; charset=utf-8
   ],
   "payload_loaded": false,
   "schema_version": 1,
+  "sessions_distinct": 4,
+  "sessions_raw": 4,
   "sessions_seen": 4,
   "snapshots_in_repo": 2,
   "snapshots_scanned": 2,

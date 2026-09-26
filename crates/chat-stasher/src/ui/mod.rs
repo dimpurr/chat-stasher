@@ -49,6 +49,8 @@
 //! * [`json`] — `/api/overview`, `/api/sessions` and `/api/search`.
 //! * [`facets`] — the platform/agent grouping table (29-UI-DESIGN §2), the
 //!   `/sessions` facet bar, and the group any harness id falls into.
+//! * [`merge`] — the row-level merge that makes **one** dashboard out of
+//!   several destinations (`ui --destination a,b`, 29-UI-DESIGN §4.8/R10).
 //!
 //! Everything below is the shared model, the selector bridge, the paging
 //! window and the router.
@@ -67,12 +69,14 @@ use crate::view::Response;
 pub(crate) mod facets;
 pub(crate) mod html;
 pub(crate) mod json;
+pub(crate) mod merge;
 pub(crate) mod overview;
 pub(crate) mod reader;
 pub(crate) mod search;
 pub(crate) mod sessions;
 
 pub use html::describe_selector;
+pub use merge::{DestinationRead, MergedTextIndex};
 
 /// How long without a push before a machine stops reading as healthy.
 ///
@@ -116,6 +120,15 @@ pub struct UiSession {
     /// The snapshot's own time — the backup run, not the conversation's.
     pub archive_time_unix: i64,
     pub data_blobs: usize,
+    /// Which destinations hold this session, as positions in
+    /// [`UiData::destinations`], in the order the destinations were named.
+    ///
+    /// Never empty: every row came from at least one destination. `len() > 1`
+    /// is the ×2-backup badge — the same session, backed up to more than one
+    /// place. The **first** entry is the copy the row's own facts (label,
+    /// times, byte count) were read from, and the copy `/content` and
+    /// `/reader` open; the row's destination cell says so.
+    pub destinations: Vec<usize>,
 }
 
 /// The label a session with no harness prefix gets in the matrix. Not a harness
@@ -127,6 +140,13 @@ pub const NO_HARNESS: &str = "(no harness prefix)";
 /// the two modules on purpose — a shared *string* without a shared constant
 /// is how a page ends up comparing against a word nobody owns.
 pub const EXPLICIT_REPO_LABEL: &str = "(explicit --repo)";
+
+/// What separates two destination names where several are named at once.
+///
+/// One spelling, shared with the command line: `ui --destination a,b` reads the
+/// same string the page prints, so the footer's equivalent command is a command
+/// that runs rather than a description of one.
+pub const DESTINATION_JOIN: &str = ",";
 
 /// The two honest words a known label's provenance renders as — one sentence
 /// each so the reader never has to guess whether the harness wrote the label
@@ -183,19 +203,65 @@ impl UiSession {
     }
 }
 
+/// One destination's own reading, kept apart from the merge.
+///
+/// The merge is a *view*: it never edits what a destination reported, so a
+/// page can always say which copy a claim came from and which copy is missing.
+/// `unreadable` here is that destination's own list — the union across
+/// destinations lives on [`UiData::unreadable`], and the two exist together so
+/// "the page is a floor" and "this destination is the hole" are both sayable.
+#[derive(Debug, Clone, Default)]
+pub struct DestinationState {
+    /// The name the user typed in `--destination`, never a repository path.
+    pub label: String,
+    pub snapshots_scanned: usize,
+    pub snapshots_in_repo: usize,
+    /// Sessions this destination held, before any filter and before the merge.
+    pub sessions: usize,
+    /// Sessions from this destination still in view after the launch filter.
+    pub in_view: usize,
+    /// Non-empty == this destination could not be read in full.
+    pub unreadable: Vec<String>,
+    pub machines_without_index: Vec<String>,
+    pub machines_with_legacy_index: Vec<String>,
+}
+
+impl DestinationState {
+    pub fn complete(&self) -> bool {
+        self.unreadable.is_empty()
+    }
+}
+
 /// Everything the dashboard renders, computed once before the socket is bound.
 #[derive(Debug, Clone)]
 pub struct UiData {
     /// The destination *name* the user typed — deliberately not `repo_root`,
     /// which would put a real hostname on a page served over a socket.
+    ///
+    /// With several destinations this is every name, in the order they were
+    /// named (`a, b`) — the same spelling `--destination` takes, so a footer
+    /// command built from it is a command that runs.
     pub destination_label: String,
+    /// Every destination this dashboard read, in the order named. Never empty,
+    /// and one entry for an ordinary single-destination run.
+    pub destinations: Vec<DestinationState>,
     pub snapshots_scanned: usize,
     pub snapshots_in_repo: usize,
     pub sessions_seen: usize,
     /// How many sessions the tree held, before any filter. Kept beside
     /// [`Self::sessions`] so a "0 of N" sentence quotes the archive rather than
     /// the filtered set it is comparing against.
+    ///
+    /// With several destinations this is the **distinct** count — the sessions
+    /// the merged view holds, each once. [`Self::raw_sessions`] is the other
+    /// reading, and the two differ exactly when a session is backed up twice.
     pub archive_sessions: usize,
+    /// The **raw** count: every destination's own session total, added up. A
+    /// session held by two destinations counts twice here and once in
+    /// [`Self::archive_sessions`]. Both are printed beside each other rather
+    /// than one being chosen — the pair is what says "two copies of one
+    /// conversation, not two conversations".
+    pub raw_sessions: usize,
     /// Sessions the launch filter did not reject, keyed by their position in
     /// the **whole** inventory. Every drill-down filters this set again, with
     /// the shared selector, so the two filters compose as a conjunction.
@@ -245,29 +311,27 @@ impl UiData {
         launch: Selector,
         now_unix: i64,
     ) -> Self {
-        let all: Vec<UiSession> = report
-            .hits
-            .iter()
-            .enumerate()
-            .map(|(index, h)| UiSession {
-                index,
-                machine: h.machine.clone(),
-                harness: h.harness.clone(),
-                session_id: h.session_id.clone(),
-                short_id: h.short_id(),
-                shard_count: h.shard_count,
-                bytes: h.bytes,
-                first_unix: h.first_unix,
-                last_unix: h.last_unix,
-                time_why: h.time_why.clone(),
-                time_source: h.time_source.clone(),
-                title: h.title.clone(),
-                provenance: h.provenance.clone(),
-                line_count: h.line_count,
-                archive_time_unix: h.archive_time_unix,
-                data_blobs: h.data_blobs,
-            })
-            .collect();
+        Self::from_reports(
+            &[DestinationRead {
+                label: label.into(),
+                outcome: Ok(report),
+            }],
+            launch,
+            now_unix,
+        )
+    }
+
+    /// Build from **one read per destination**, merged row by row.
+    ///
+    /// Same contract as [`Self::from_report`] for the rows — `hits` is the
+    /// whole inventory of each destination and `launch` is applied here, to the
+    /// merge — with the merge itself in [`merge`]. A single-element `reads`
+    /// produces exactly what `from_report` always produced, which is what keeps
+    /// the ordinary dashboard byte-identical and its tests a proof of that.
+    pub fn from_reports(reads: &[DestinationRead<'_>], launch: Selector, now_unix: i64) -> Self {
+        let merged = merge::merge(reads);
+        let all: Vec<UiSession> = merged.sessions;
+        let distinct_sessions = all.len();
         // `index` is a position in `all`, and stays one: a drill-down URL is a
         // handle into the whole inventory, not into whatever the launch filter
         // left behind, so the same link keeps working under any launch filter.
@@ -280,28 +344,65 @@ impl UiData {
             .into_iter()
             .filter(|s| keep.contains(&s.index))
             .collect();
-        let mut hosts = report.hosts.clone();
-        hosts.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        let mut destinations = merged.destinations;
+        for (position, state) in destinations.iter_mut().enumerate() {
+            state.in_view = sessions
+                .iter()
+                .filter(|s| s.destinations.contains(&position))
+                .count();
+        }
+        let destination_label = destinations
+            .iter()
+            .map(|d| d.label.as_str())
+            .collect::<Vec<_>>()
+            .join(DESTINATION_JOIN);
         Self {
-            destination_label: label.into(),
-            snapshots_scanned: report.snapshots_scanned,
-            snapshots_in_repo: report.snapshots_in_repo,
-            sessions_seen: report.sessions_seen,
-            archive_sessions: report.hits.len(),
+            destination_label,
+            destinations,
+            snapshots_scanned: merged.snapshots_scanned,
+            snapshots_in_repo: merged.snapshots_in_repo,
+            sessions_seen: merged.sessions_seen,
+            archive_sessions: distinct_sessions,
+            raw_sessions: merged.raw_sessions,
             sessions,
             launch,
-            hosts,
-            machines_without_index: report.machines_without_index.clone(),
-            machines_with_legacy_index: report.machines_with_legacy_index.clone(),
-            unreadable: report.unreadable.clone(),
-            data_blobs_read: report.data_blobs_read,
-            index_files_read: report.index_files_read,
+            hosts: merged.hosts,
+            machines_without_index: merged.machines_without_index,
+            machines_with_legacy_index: merged.machines_with_legacy_index,
+            unreadable: merged.unreadable,
+            data_blobs_read: merged.data_blobs_read,
+            index_files_read: merged.index_files_read,
             now_unix,
         }
     }
 
     pub fn complete(&self) -> bool {
         self.unreadable.is_empty()
+    }
+
+    /// The destinations that could not be read in full, by name. This is the
+    /// list every INCOMPLETE sentence names — never all of them, so a page
+    /// cannot make a healthy copy look broken by association.
+    pub fn incomplete_destinations(&self) -> Vec<&str> {
+        self.destinations
+            .iter()
+            .filter(|d| !d.complete())
+            .map(|d| d.label.as_str())
+            .collect()
+    }
+
+    /// The destination the merged rows are read from where several hold the
+    /// same session — the first one named, by the rule [`merge`] documents.
+    pub fn first_destination_label(&self) -> &str {
+        self.destinations
+            .first()
+            .map(|d| d.label.as_str())
+            .unwrap_or(EXPLICIT_REPO_LABEL)
+    }
+
+    /// One destination's state by its position in [`Self::destinations`].
+    pub fn destination(&self, position: usize) -> Option<&DestinationState> {
+        self.destinations.get(position)
     }
 
     /// The row a URL's `i` names. Linear, because `index` is a position in the
@@ -511,6 +612,19 @@ pub trait TextIndex {
 
     /// Where `query` first sits inside each of `ids`, in the order given.
     fn placements(&self, query: &str, ids: &[String]) -> Result<Vec<fts::MatchPlace>, String>;
+
+    /// Which destinations this index answers for, each with its own state —
+    /// `None` for the ordinary server that reads exactly one index, where
+    /// [`Self::state`] is already that one answer.
+    ///
+    /// The states are read on every request rather than remembered at startup,
+    /// because an index is built by hand: the reader who finds "no index" here
+    /// runs `index build` in another terminal and reloads, and a state frozen
+    /// when the server started would keep answering "no index" to a command
+    /// that had just finished.
+    fn parts(&self) -> Option<Vec<(String, IndexState)>> {
+        None
+    }
 }
 
 /// Refuses every query. The default for anything that must not reach the
@@ -1204,6 +1318,128 @@ pub(crate) mod fixture {
 
     pub fn data() -> UiData {
         UiData::from_report(&report(), "dest-under-test", Selector::default(), NOW)
+    }
+
+    /// A second destination's read: it holds **one** session `report()` also
+    /// holds, and one session only it holds.
+    ///
+    /// That is the shape the merge exists for, and the shape whose two counts
+    /// differ: distinct 5, raw 6.
+    pub fn report_partner() -> SearchReport {
+        let mut r = report();
+        r.destination = "partner-destination".into();
+        r.snapshots_in_repo = 1;
+        r.snapshots_scanned = 1;
+        r.sessions_seen = 2;
+        // The session `report()` also has, read from a *newer* snapshot with a
+        // different byte count — so which copy supplies the row is observable
+        // rather than a coincidence.
+        let mut shared = hit(
+            "m-1",
+            "claude-code.m-1.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            999,
+            9,
+            Some((NOW - 7200, NOW - 7000)),
+        );
+        shared.archive_time_unix = NOW - 60;
+        r.hits = vec![
+            shared,
+            hit(
+                "m-9",
+                "claude-code.m-9.019bf00d-97b6-7eb2-9bf8-eacbacc09799",
+                7,
+                1,
+                Some((NOW - 50, NOW - 40)),
+            ),
+        ];
+        r.machines_without_index = Vec::new();
+        r.hosts = vec![
+            HostSnapshot {
+                hostname: "m-1".into(),
+                snapshot_id: "cccccccccccccccc".into(),
+                archive_time_unix: NOW - 60,
+                has_activity_index: true,
+                index_read_ok: true,
+                index_trusted: true,
+            },
+            HostSnapshot {
+                hostname: "m-9".into(),
+                snapshot_id: "dddddddddddddddd".into(),
+                archive_time_unix: NOW - 60,
+                has_activity_index: true,
+                index_read_ok: true,
+                index_trusted: true,
+            },
+        ];
+        r
+    }
+
+    /// Two destinations, both read in full: `dest-under-test` first.
+    pub fn merged_data() -> UiData {
+        let first = report();
+        let second = report_partner();
+        UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "alpha".into(),
+                    outcome: Ok(&first),
+                },
+                DestinationRead {
+                    label: "beta".into(),
+                    outcome: Ok(&second),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        )
+    }
+
+    /// Two destinations, the second one **partially** unreadable: it still
+    /// holds rows, and the page is a floor because of it.
+    pub fn merged_data_with_one_corrupt() -> UiData {
+        let first = report();
+        let mut second = report_partner();
+        second
+            .unreadable
+            .push("host `m-9`: snapshot dddddddd tree walk failed".into());
+        UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "alpha".into(),
+                    outcome: Ok(&first),
+                },
+                DestinationRead {
+                    label: "beta".into(),
+                    outcome: Ok(&second),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        )
+    }
+
+    /// Two destinations, the second one **not read at all** — the key would not
+    /// load, or the repository would not open.
+    pub fn merged_data_with_one_unread() -> UiData {
+        let first = report();
+        UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "alpha".into(),
+                    outcome: Ok(&first),
+                },
+                DestinationRead {
+                    label: "beta".into(),
+                    outcome: Err(
+                        "destination `beta` could not be read at all — its repository or its key \
+                         would not open"
+                            .into(),
+                    ),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        )
     }
 
     /// The same archive, read only in part — the case where every count on the
@@ -4256,6 +4492,276 @@ mod tests {
             !past_end.contains("time-state legend:"),
             "an empty window has no marks to decode: {past_end}"
         );
+    }
+
+    //
+    // R10 (29-UI-DESIGN §4.8): `ui --destination a,b` merges the destinations row
+    // by row. The merge itself is tested in `merge`; these are the page-level
+    // claims — what the reader can see, and what must not become false when more
+    // than one copy is in play.
+
+    /// The list page carries the badge, the destination column and **both** counts,
+    /// and the single-destination page carries none of them.
+    ///
+    /// The absence half is the one that matters most: the ordinary dashboard is
+    /// most dashboards, and a column that is constant, a badge that is always `×1`
+    /// and a second count that always equals the first would be noise on every page
+    /// — and noise is what teaches a reader to skip the marks that do matter.
+    #[test]
+    fn a_merged_list_carries_the_badge_the_column_and_both_counts() {
+        let merged = req("/sessions", &fixture::merged_data(), &NoContent).body;
+        assert!(
+            merged.contains("×2 backup"),
+            "the shared session must carry the badge: {merged}"
+        );
+        assert!(
+            merged.contains("<th>destination</th>"),
+            "the merged list must have a destination column: {merged}"
+        );
+        assert_eq!(
+            merged.matches("<th>destination</th>").count(),
+            2,
+            "one column in the list's own header, one in the destinations block"
+        );
+        assert!(
+            merged.contains("<b>distinct:</b> 5 session(s)"),
+            "the distinct count must be on the page: {merged}"
+        );
+        assert!(
+            merged.contains("<b>raw:</b> 6 session row(s)"),
+            "and the raw count beside it, not instead of it: {merged}"
+        );
+        // The badge says how many copies; the cell lists which ones.
+        assert!(
+            merged.contains("×2 backup</span> <span class=mono>alpha,beta</span>"),
+            "the badge's cell names both copies: {merged}"
+        );
+
+        let single = req("/sessions", &fixture::data(), &NoContent).body;
+        assert!(
+            !single.contains("class=badge") && !single.contains("×2 backup"),
+            "a single-destination page must not carry the badge: {single}"
+        );
+        assert!(
+            !single.contains("<th>destination</th>"),
+            "nor a destination column: {single}"
+        );
+        assert!(
+            !single.contains("<b>raw:</b>"),
+            "nor a second count that would only repeat the first: {single}"
+        );
+        assert!(single.contains("Read in full — every snapshot scanned was readable."));
+    }
+
+    /// One unreadable copy makes the whole page a floor, names that copy **only**,
+    /// and leaves the readable copy's rows exactly where they were.
+    ///
+    /// This is the contagion rule (§4.8) in the direction that is easy to get
+    /// wrong: the page must not report the readable destination as damaged, and it
+    /// must not quietly drop the unreadable one's rows to make the counts agree.
+    #[test]
+    fn one_corrupt_destination_contaminates_the_page_and_names_only_itself() {
+        let html = req(
+            "/sessions",
+            &fixture::merged_data_with_one_corrupt(),
+            &NoContent,
+        )
+        .body;
+        assert!(
+            html.contains("INCOMPLETE READ."),
+            "the page must say it is a floor: {html}"
+        );
+        assert!(
+            html.contains("1 of the 2 destinations could not be read in full"),
+            "the contagion must be counted: {html}"
+        );
+        let banner_start = html.find("INCOMPLETE READ.").unwrap();
+        let banner = &html[banner_start..banner_start + 900];
+        assert!(
+            banner.contains("<b>beta</b>") && !banner.contains("<b>alpha</b>"),
+            "the failing destination is named and the healthy one is not: {banner}"
+        );
+        // Alpha's rows are all still listed: an unreadable copy is not an empty one.
+        // The list renders short ids, so that is what is looked for — the full id
+        // never reaches a page (module privacy line).
+        let d = fixture::merged_data_with_one_corrupt();
+        let short = |suffix: &str| {
+            d.sessions
+                .iter()
+                .find(|s| s.session_id.ends_with(suffix))
+                .unwrap_or_else(|| panic!("the fixture holds a row ending {suffix}"))
+                .short_id
+                .clone()
+        };
+        let shared = short("eacbacc09765");
+        assert_eq!(
+            html.matches(&format!(">{shared}</a>")).count(),
+            1,
+            "alpha's shared row is listed exactly once, though the other copy of it failed"
+        );
+        assert!(
+            html.contains(&format!(">{}</a>", short("eacbacc09766"))),
+            "and so is a row only alpha holds: {html}"
+        );
+        // The failing destination's own state is in the block, per copy.
+        assert!(
+            html.contains("<tr><td><b>beta</b> <span class=bad"),
+            "the per-destination block marks the failing copy: {html}"
+        );
+        assert!(
+            html.contains("<tr><td><b>alpha</b></td><td class=n>4</td>"),
+            "and reports the healthy copy's own rows without a mark: {html}"
+        );
+    }
+
+    /// A destination that could not be read **at all** is still a named hole: the
+    /// page serves, the rows of the readable copy are intact, and the sentence
+    /// names the copy that never opened rather than saying nothing.
+    #[test]
+    fn a_destination_that_never_opened_is_still_named_on_the_page() {
+        let d = fixture::merged_data_with_one_unread();
+        assert!(!d.complete());
+        assert_eq!(d.incomplete_destinations(), vec!["beta"]);
+        let html = req("/sessions", &d, &NoContent).body;
+        assert!(html.contains("INCOMPLETE READ."), "{html}");
+        assert!(
+            html.contains("could not be read at all"),
+            "the hole must say what it is, not only that a count is a floor: {html}"
+        );
+        let alpha_only = d
+            .sessions
+            .iter()
+            .find(|s| s.session_id.ends_with("eacbacc09766"))
+            .expect("alpha still holds its own session")
+            .short_id
+            .clone();
+        assert!(
+            html.contains(&format!(">{alpha_only}</a>")),
+            "alpha's rows are untouched by beta's failure: {html}"
+        );
+        // The badge is about copies, not about completeness: the shared session
+        // really does exist in both destinations, and the failure is a different
+        // part of one of them. Suppressing the badge here would be the count
+        // agreeing with the failure instead of with the archive.
+        assert!(
+            html.contains("×2 backup"),
+            "the session both copies hold keeps its badge: {html}"
+        );
+    }
+
+    /// A merged row's payload pages say which copy they opened.
+    ///
+    /// The list's cell says it too, but these are different pages: a link, a
+    /// bookmark or a reload lands on `/content` or `/reader` without the list, and
+    /// "which copy" is what decides whether the bytes on screen are the newest of
+    /// them. A single-destination page says nothing extra — there is one answer and
+    /// it is already in its header.
+    #[test]
+    fn the_payload_pages_name_the_copy_they_opened() {
+        let d = fixture::merged_data();
+        for target in ["/session?i=0", "/content?i=0", "/reader?i=0"] {
+            let html = req(target, &d, &CountingContent::default()).body;
+            assert!(
+                html.contains("read from destination <b>alpha</b>"),
+                "`{target}` must name the copy it read: {html}"
+            );
+        }
+        let single = req(
+            "/content?i=0",
+            &fixture::data(),
+            &CountingContent::default(),
+        )
+        .body;
+        assert!(
+            !single.contains("read from destination"),
+            "a single-destination page has nothing extra to name: {single}"
+        );
+    }
+
+    /// Merging is a view, not a rewrite: a one-element read produces the same page
+    /// the single-destination dashboard has always produced, byte for byte.
+    ///
+    /// This is the property that keeps every recorded capture and every black-box
+    /// assertion about the ordinary dashboard true of the merged code path too.
+    #[test]
+    fn one_destination_renders_exactly_what_it_always_did() {
+        let report = fixture::report();
+        let from_one = UiData::from_report(
+            &report,
+            "dest-under-test",
+            Selector::default(),
+            fixture::NOW,
+        );
+        let from_merge = UiData::from_reports(
+            &[DestinationRead {
+                label: "dest-under-test".into(),
+                outcome: Ok(&report),
+            }],
+            Selector::default(),
+            fixture::NOW,
+        );
+        assert_eq!(from_one.destination_label, from_merge.destination_label);
+        assert_eq!(from_one.raw_sessions, from_merge.raw_sessions);
+        assert_eq!(from_one.archive_sessions, from_merge.archive_sessions);
+        assert_eq!(from_one.unreadable, from_merge.unreadable);
+        assert_eq!(
+            from_one.machines_without_index,
+            from_merge.machines_without_index
+        );
+        assert_eq!(from_one.session_at(0).unwrap().destinations, vec![0]);
+        for target in [
+            "/",
+            "/sessions",
+            "/sessions?limit=2&offset=1",
+            "/api/overview",
+            "/api/sessions",
+        ] {
+            assert_eq!(
+                req(target, &from_one, &NoContent).body,
+                req(target, &from_merge, &NoContent).body,
+                "`{target}` must not change when one destination is read through the merge"
+            );
+        }
+    }
+
+    /// The JSON routes carry both counts and the per-copy states, so a consumer can
+    /// attribute a floor without parsing a sentence.
+    #[test]
+    fn the_json_routes_carry_both_counts_and_the_copies() {
+        let d = fixture::merged_data_with_one_corrupt();
+        let v: serde_json::Value =
+            serde_json::from_str(&req("/api/overview", &d, &NoContent).body).unwrap();
+        assert_eq!(v["sessions_distinct"], 5);
+        assert_eq!(v["sessions_raw"], 6);
+        assert_eq!(v["destinations"][0]["label"], "alpha");
+        assert_eq!(v["destinations"][0]["complete"], true);
+        assert_eq!(v["destinations"][1]["label"], "beta");
+        assert_eq!(v["destinations"][1]["complete"], false);
+        assert_eq!(
+            v["destinations"][1]["unreadable_parts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            v["complete"], false,
+            "the merged read is incomplete because one copy is"
+        );
+
+        let v: serde_json::Value =
+            serde_json::from_str(&req("/api/sessions", &d, &NoContent).body).unwrap();
+        assert_eq!(v["sessions_distinct"], 5);
+        assert_eq!(v["sessions_raw"], 6);
+        let rows: Vec<&serde_json::Value> = v["sessions"].as_array().unwrap().iter().collect();
+        let two_copies = rows
+            .iter()
+            .filter(|row| row["destinations"].as_array().unwrap().len() == 2)
+            .count();
+        assert_eq!(two_copies, 1, "exactly one row is held by both copies");
+        assert!(rows
+            .iter()
+            .all(|row| !row["destinations"].as_array().unwrap().is_empty()));
     }
 }
 

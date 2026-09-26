@@ -12,8 +12,8 @@ use crate::overview::{Granularity, HeatmapAxis, OverviewRow};
 
 use super::facets::{self, PlatformGroup};
 use super::html::{
-    completeness_banner, describe_selector, esc, fmt_age, fmt_bytes, fmt_unix, footer, head,
-    launch_banner, machines_without_index_banner,
+    completeness_banner, describe_selector, destinations_block, esc, fmt_age, fmt_bytes, fmt_unix,
+    footer, head, launch_banner, machines_without_index_banner,
 };
 use super::{
     health_of, percent_encode, select, Health, UiData, UiSession, NO_HARNESS, STALE_AFTER_DAYS,
@@ -35,6 +35,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     ));
     out.push_str(&launch_banner(data));
     out.push_str(&completeness_banner(data));
+    out.push_str(&destinations_block(data));
     out.push_str(&machines_without_index_banner(data));
 
     let total_bytes: u64 = in_view.iter().map(|s| s.bytes).sum();

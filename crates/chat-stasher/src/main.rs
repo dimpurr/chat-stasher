@@ -95,15 +95,23 @@ struct Cli {
 /// `day=X` cannot mean different things.
 #[derive(Debug, Clone, clap::Args)]
 struct UiArgs {
-    /// Destination to open. Optional when the config makes the choice
-    /// unambiguous: with exactly one `[destinations.<name>]` declared it
-    /// opens that one, and with several it opens the one
-    /// `[native_host] destination` names — or lists them and exits 2 when
-    /// no default is recorded. An explicit `--repo` or `--destination`
-    /// always wins. There is still no cross-destination merge: one dashboard
-    /// serves exactly one archive.
-    #[arg(long)]
-    destination: Option<String>,
+    /// Destination to open: one name, several names separated by commas
+    /// (`--destination a,b`), or `all` for every destination the config
+    /// declares. Optional when the config makes the choice unambiguous: with
+    /// exactly one `[destinations.<name>]` declared it opens that one, and with
+    /// several it opens the one `[native_host] destination` names — or lists
+    /// them and exits 2 when no default is recorded. An explicit `--repo` or
+    /// `--destination` always wins.
+    ///
+    /// Naming more than one destination serves **one** dashboard with the
+    /// reports merged row by row: a session held by several destinations is
+    /// listed once, with a badge saying how many copies there are, and the
+    /// counts are printed both ways (distinct sessions and raw copies). The
+    /// destinations are read in the order named, and where two copies of a
+    /// session disagree the first one named supplies the row — so the order is
+    /// a choice, not an accident, and the narration prints it back.
+    #[arg(long, value_delimiter = ',')]
+    destination: Vec<String>,
     /// Filters applied when the dashboard opens. Omit them to see the whole
     /// archive; every filter is also reachable as a link on the page.
     #[command(flatten)]
@@ -116,16 +124,21 @@ struct UiArgs {
     /// still exits on Ctrl+C).
     #[arg(long, default_value_t = chat_stasher::view::DEFAULT_IDLE_SECS)]
     idle_timeout: u64,
-    /// Repository path override.
+    /// Repository path override. Not valid with more than one destination:
+    /// each destination resolves its own repository from its own
+    /// `[destinations.<name>]` section, and one `--repo` cannot say which.
     #[arg(long)]
     repo: Option<String>,
-    /// Masterkey file override.
+    /// Masterkey file override. Not valid with more than one destination, for
+    /// the same reason as `--repo`: each destination has its own key.
     #[arg(long)]
     key_file: Option<String>,
-    /// Concurrency cap override.
+    /// Concurrency cap override. A cap rather than a locator, so it applies to
+    /// every destination read.
     #[arg(long)]
     connections: Option<usize>,
-    /// Backend option `key=value`, repeatable.
+    /// Backend option `key=value`, repeatable. Not valid with more than one
+    /// destination: each destination carries its own backend options.
     #[arg(long = "option")]
     options: Vec<String>,
     /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
@@ -4007,6 +4020,71 @@ fn cmd_export(
 /// keeps one meaning; a default naming an undeclared destination is a config
 /// bug and is refused rather than fallen back. None declared leaves nothing to
 /// open, and the fix (declaring one) is in the message.
+/// The destinations a `ui` run was asked to read, in the order named.
+///
+/// `all` expands to every declared destination, **sorted** — the order is a
+/// consequence of the merge rule (the first name holding a session supplies its
+/// row), so the spelling that does not name an order has to have one that is
+/// stable, and sorting is the only order the config itself has. `all` is
+/// refused alongside explicit names: `--destination all,prod` would read
+/// everything while the person who typed `prod` asked for one, and the name was
+/// already the answer to "which".
+///
+/// Every name is checked against the config here rather than inside the read
+/// loop, so an undeclared name — a typo, or a destination removed since the
+/// shell history was written — is a usage error (2) *before* any destination is
+/// read, rather than one entry of a merged page.
+fn resolve_ui_destinations(named: &[String], config: &Config) -> Result<Vec<String>, String> {
+    let mut declared: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
+    declared.sort_unstable();
+    let all = named.iter().any(|name| name == "all");
+    if all && named.len() > 1 {
+        return Err(format!(
+            "`all` cannot be combined with other names (got `{}`): `all` means every declared \
+             destination, and naming one beside it would read something other than what was asked \
+             for",
+            named.join(",")
+        ));
+    }
+    let names: Vec<String> = if all {
+        if declared.is_empty() {
+            return Err(
+                "`--destination all` was given, but the config declares no destination — declare \
+                 one with a `[destinations.<name>]` section"
+                    .to_string(),
+            );
+        }
+        declared.iter().map(|name| name.to_string()).collect()
+    } else {
+        named.to_vec()
+    };
+    for name in &names {
+        if !config.destinations.contains_key(name) {
+            return Err(format!(
+                "`{name}` is not declared in the config. Declared: {}",
+                if declared.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    declared.join(", ")
+                }
+            ));
+        }
+    }
+    // A repeated name would read the same repository twice and badge every row
+    // it holds as a copy of itself. Refused rather than deduplicated silently:
+    // `--destination a,a` was not a request this command can honour.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for name in &names {
+        if !seen.insert(name.as_str()) {
+            return Err(format!(
+                "`{name}` was named twice — a destination read twice would badge every session in \
+                 it as a backup of itself"
+            ));
+        }
+    }
+    Ok(names)
+}
+
 fn default_destination_or_exit(config: &Config) -> Option<(String, String)> {
     let mut names: Vec<&str> = config.destinations.keys().map(String::as_str).collect();
     names.sort_unstable();
@@ -4097,24 +4175,65 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     // has for "which destination the dashboard opens" — names it. The two
     // callers a config can leave unresolvable both exit 2 here, with the
     // state on stderr; nothing is ever guessed and served.
-    // A `--repo` override is kept beside `destination` because `resolve_store_config`
-    // below takes `repo` by value, and the text index is located from the same
-    // two facts the `index` command uses — the destination (or that override)
-    // and the resolved repo root — through the same `index_identity`. Without
-    // this the page could read a different index than `index build` wrote.
+    // A `--repo` override is kept beside the destination because
+    // `resolve_store_config` below takes `repo` by value, and each
+    // destination's text index is located from the same two facts the `index`
+    // command uses — the destination (or that override) and the resolved repo
+    // root — through the same `index_identity`. Without this the page could
+    // read a different index than `index build` wrote.
     let repo_override = repo.clone();
     let mut default_from: Option<String> = None;
-    let destination = match (destination, repo.as_deref()) {
-        (Some(name), _) => Some(name),
-        (None, Some(_)) => None,
-        (None, None) => match default_destination_or_exit(&config) {
+    // The destinations to read, in the order named. Empty means "the one
+    // repository `--repo` names", which has no destination name to print — the
+    // `(explicit --repo)` label stands in, exactly as before.
+    let destinations: Vec<String> = match (destination.is_empty(), repo.as_deref()) {
+        (false, Some(_)) if destination.len() == 1 => destination,
+        (false, Some(_)) => {
+            eprintln!(
+                "ui: `--repo` names one repository, but {} destinations were named (`{}`) — the \
+                 flag cannot say which destination it is meant to override",
+                destination.len(),
+                destination.join(",")
+            );
+            return ExitCode::from(2);
+        }
+        (false, None) => match resolve_ui_destinations(&destination, &config) {
+            Ok(names) => names,
+            Err(message) => {
+                eprintln!("ui: {message}");
+                return ExitCode::from(2);
+            }
+        },
+        (true, Some(_)) => Vec::new(),
+        (true, None) => match default_destination_or_exit(&config) {
             Some((name, how)) => {
                 default_from = Some(how);
-                Some(name)
+                vec![name]
             }
             None => return ExitCode::from(2),
         },
     };
+    if destinations.len() > 1 {
+        // Each of these names one repository, one key file or one backend
+        // option set. A merged read would have to apply the value to every
+        // destination, and "which copy did you mean" is not a question a flag
+        // can answer — so it is refused as a usage error rather than guessed.
+        for (flag, given) in [
+            ("--key-file", key_file.is_some()),
+            ("--option", !options.is_empty()),
+        ] {
+            if given {
+                eprintln!(
+                    "ui: `{flag}` names a setting for one destination, and {} were named (`{}`) — \
+                     with several destinations each one uses its own `[destinations.<name>]` \
+                     section; drop the flag to open them merged",
+                    destinations.len(),
+                    destinations.join(",")
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
     let resolved = match filters.resolve() {
         Ok(r) => r,
         Err(e) => {
@@ -4129,78 +4248,129 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         // same story, so it is passed through rather than reworded.
         eprintln!("{warning}");
     }
-    let label = destination
-        .clone()
-        .unwrap_or_else(|| chat_stasher::ui::EXPLICIT_REPO_LABEL.to_string());
-    let cfg = resolve_store_config(
-        &config,
-        destination.as_deref(),
-        repo,
-        key_file,
-        connections,
-        &options,
-    );
-    // The FTS index root, by the same derivation `index build`/`check`/`clear`
-    // use, so one destination has exactly one index. `None` when the platform
-    // reports no cache directory at all: the page then says so instead of
-    // serving a search that could only ever be empty.
-    let text_index = scanner::user_cache_dirs()
-        .into_iter()
-        .next()
-        .map(|cache_root| {
-            chat_stasher::fts::Index::for_destination(
-                &cache_root,
-                &index_identity(
-                    destination.as_deref(),
-                    repo_override.as_deref(),
-                    &cfg.repo_root,
-                ),
-            )
-        });
-    // ADR-034: the dashboard is the other single-session body reader. Every
-    // route except `load` is metadata-tier, and only `load` reaches this cache.
-    let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
-        chat_stasher::body_cache::for_operation(
+    // One read per destination, in the order named. `--repo` alone is the one
+    // read with no destination name; every other shape is one entry per name.
+    let named: Vec<Option<String>> = if destinations.is_empty() {
+        vec![None]
+    } else {
+        destinations.iter().cloned().map(Some).collect()
+    };
+    let single_read = named.len() == 1;
+    let mut parts: Vec<UiDestination> = Vec::with_capacity(named.len());
+    for name in &named {
+        let label = name
+            .clone()
+            .unwrap_or_else(|| chat_stasher::ui::EXPLICIT_REPO_LABEL.to_string());
+        let cfg = resolve_store_config(
             &config,
-            chat_stasher::body_cache::Policy::ReadThrough,
-        )
-        .handle(),
-    );
-    let mk = match store::load_key_file(&cfg) {
-        Ok(mk) => mk,
-        Err(e) => {
-            eprintln!("ui: {e}");
-            eprintln!("ui: without the key nothing was read — this is not an empty result");
-            reap_remote(&cfg, keep_ssh_masters);
-            // 3, not 1: the archive was never consulted. Same reasoning as
-            // `search` — a lost key must not be indistinguishable from an
-            // archive that genuinely holds nothing.
-            return ExitCode::from(3);
-        }
-    };
-
-    let report = match chat_stasher::search::search_sessions(
-        &store,
-        &mk,
-        &chat_stasher::selector::Selector::default(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("ui: cannot read `{}`: {e}", cfg.repo_root);
-            eprintln!("ui: this is not an empty destination — the archive was not read");
-            reap_remote(&cfg, keep_ssh_masters);
-            return ExitCode::from(3);
-        }
-    };
+            name.as_deref(),
+            // `--repo`, `--key-file` and `--option` describe one repository, one
+            // key file and one backend option set, and the multi-destination
+            // shapes were already refused above — so they are handed only to
+            // the one read that can be described by them.
+            if single_read { repo.clone() } else { None },
+            if single_read { key_file.clone() } else { None },
+            connections,
+            if single_read { &options } else { &[] },
+        );
+        // The FTS index root, by the same derivation `index build`/`check`/
+        // `clear` use, so one destination has exactly one index. `None` when
+        // the platform reports no cache directory at all: the page then says so
+        // instead of serving a search that could only ever be empty.
+        let text_index = scanner::user_cache_dirs()
+            .into_iter()
+            .next()
+            .map(|cache_root| {
+                chat_stasher::fts::Index::for_destination(
+                    &cache_root,
+                    &index_identity(name.as_deref(), repo_override.as_deref(), &cfg.repo_root),
+                )
+            });
+        // ADR-034: the dashboard is the other single-session body reader. Every
+        // route except `load` is metadata-tier, and only `load` reaches this cache.
+        let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
+            chat_stasher::body_cache::for_operation(
+                &config,
+                chat_stasher::body_cache::Policy::ReadThrough,
+            )
+            .handle(),
+        );
+        let mk = match store::load_key_file(&cfg) {
+            Ok(mk) => mk,
+            Err(e) => {
+                // One destination named and nothing else to fall back on: the
+                // run stops, exactly as it always has — 3, not 1, because the
+                // archive was never consulted, and a lost key must not be
+                // indistinguishable from an archive that genuinely holds
+                // nothing. With several, this destination becomes the hole the
+                // page reports and the others are still read (R10/§4.8).
+                if single_read {
+                    eprintln!("ui: {e}");
+                    eprintln!("ui: without the key nothing was read — this is not an empty result");
+                    reap_remote(&cfg, keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+                eprintln!("ui: destination `{label}`: {e}");
+                parts.push(UiDestination::unread(cfg, label, text_index));
+                continue;
+            }
+        };
+        let report = match chat_stasher::search::search_sessions(
+            &store,
+            &mk,
+            &chat_stasher::selector::Selector::default(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                if single_read {
+                    eprintln!("ui: cannot read `{}`: {e}", cfg.repo_root);
+                    eprintln!("ui: this is not an empty destination — the archive was not read");
+                    reap_remote(&cfg, keep_ssh_masters);
+                    return ExitCode::from(3);
+                }
+                eprintln!("ui: destination `{label}` could not be read at all: {e}");
+                parts.push(UiDestination::unread(cfg, label, text_index));
+                continue;
+            }
+        };
+        parts.push(UiDestination {
+            label,
+            cfg,
+            text_index,
+            store: Some(store),
+            mk: Some(mk),
+            report: Some(report),
+            unread_at_all: false,
+        });
+    }
     // ssh masters are reaped before the server starts, not after: the serve loop
     // can sit idle for minutes, and there is nothing left to read by then. The
     // one exception is `/content`, which reopens the repository on demand — it
     // does so with whatever the backend needs, and opens no master of its own
     // beyond what `BackupStore` already configures.
-    reap_remote(&cfg, keep_ssh_masters);
+    for part in &parts {
+        reap_remote(&part.cfg, keep_ssh_masters);
+    }
 
-    for path in &report.unreadable {
-        say!("  !! unreadable: {path}");
+    let multi = parts.len() > 1;
+    for part in &parts {
+        // With several destinations the reader has to know which copy each
+        // unreadable part belongs to, or the line names a host with no way to
+        // tell which repository it came from. With one, the prefix would be
+        // noise on every line — and the archive is the only thing in play.
+        let prefix = if multi {
+            format!("{}: ", part.label)
+        } else {
+            String::new()
+        };
+        if let Some(report) = &part.report {
+            for path in &report.unreadable {
+                say!("  !! unreadable: {prefix}{path}");
+            }
+        }
+        if part.unread_at_all {
+            say!("  !! unreadable: {prefix}this destination could not be read at all");
+        }
     }
     // OQ-2 (29-UI-DESIGN §5.4/§12, landed by W172): a metadata read that
     // finished serves even when it matched nothing — the empty page is one of
@@ -4210,12 +4380,63 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     // the same pass-through the filter warnings use below), and the exit code
     // is decided by the read's completeness after serving (bottom of this
     // function), never by emptiness.
-    if report.hits.is_empty() {
-        say!("{}", report.no_hit_line());
+    // The sentence is said only when every destination read **and** every one
+    // of them matched nothing. A destination that could not be read at all
+    // keeps it off the output entirely: with a hole in the view, "not in these
+    // destinations" is not something this run is in a position to say. So this
+    // is not a default over an unknown — it is a sentence that is or is not
+    // sayable, and a hole in the read makes it unsayable.
+    let mut sayable = !parts.is_empty();
+    for part in &parts {
+        match &part.report {
+            Some(report) if report.hits.is_empty() => {}
+            _ => sayable = false,
+        }
+    }
+    if sayable {
+        match parts.first().and_then(|p| p.report.as_ref()) {
+            Some(report) if single_read => say!("{}", report.no_hit_line()),
+            Some(_) => {
+                let seen: usize = parts
+                    .iter()
+                    .filter_map(|p| p.report.as_ref())
+                    .map(|r| r.sessions_seen)
+                    .sum();
+                say!(
+                    "search: not in these destinations — 0 of {} session(s) matched across \
+                     `{}`; the per-destination lines above are each destination's own read",
+                    seen,
+                    destinations.join(chat_stasher::ui::DESTINATION_JOIN)
+                );
+            }
+            None => {}
+        }
     }
 
     let now_unix = now_unix();
-    let data = chat_stasher::ui::UiData::from_report(&report, label, resolved.selector, now_unix);
+    // The merge, row by row (`ui/merge.rs`). One destination gives exactly the
+    // data every earlier version built; several give one inventory whose rows
+    // carry the copies they were found in.
+    let reads: Vec<chat_stasher::ui::DestinationRead<'_>> = parts
+        .iter()
+        .map(|part| chat_stasher::ui::DestinationRead {
+            label: part.label.clone(),
+            outcome: match (&part.report, part.unread_at_all) {
+                (Some(report), _) => Ok(report),
+                // The page gets a sentence, not the raw error: an error from
+                // opening a repository or a key file names a path, and the page
+                // is served over a socket. The terminal's `!!` line above
+                // carries the exact message, which is where the reader who can
+                // act on it is looking.
+                (None, _) => Err(format!(
+                    "destination `{}` could not be read at all — its repository or its key would \
+                     not open; this run's terminal output names the exact error",
+                    part.label
+                )),
+            },
+        })
+        .collect();
+    let data = chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
     let in_view = chat_stasher::ui::select(&data.sessions, &data.launch);
     let listed = in_view.matched.len() + in_view.unplaced.len();
     let token = match chat_stasher::view::new_token() {
@@ -4253,6 +4474,36 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     if let Some(how) = &default_from {
         say!("[ui] default      : {how}");
     }
+    if multi {
+        // The order is a choice with a consequence: where two copies of one
+        // session disagree, the first name here supplies the row. Printing it
+        // is what makes that rule answerable rather than mysterious.
+        say!(
+            "[ui] merge order  : {} — the first destination holding a session supplies its row, \
+             and its copy is the one the reader opens",
+            data.destination_label
+        );
+        for state in &data.destinations {
+            say!(
+                "[ui]   · {:<12} {} in view / {} held · {} snapshot(s) · {}",
+                state.label,
+                state.in_view,
+                state.sessions,
+                state.snapshots_scanned,
+                if state.complete() {
+                    "read in full".to_string()
+                } else {
+                    format!("{} part(s) unreadable", state.unreadable.len())
+                }
+            );
+        }
+        say!(
+            "[ui] merged       : {} distinct session(s) / {} raw copy(ies) in view — both counts \
+             are printed because they answer different questions",
+            data.sessions.len(),
+            data.destinations.iter().map(|d| d.in_view).sum::<usize>()
+        );
+    }
     say!(
         "[ui] snapshots    : {} scanned / {} in repo",
         data.snapshots_scanned,
@@ -4262,6 +4513,14 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         "[ui] sessions     : {listed} in view / {} in the archive",
         data.archive_sessions
     );
+    if multi {
+        say!(
+            "[ui] raw copies   : {} in the archive across {} destinations (a session held by \
+             more than one counts once per copy)",
+            data.raw_sessions,
+            data.destinations.len()
+        );
+    }
     if let Some(text) = chat_stasher::ui::describe_selector(&data.launch) {
         say!("[ui] filter       : {text}");
     }
@@ -4299,11 +4558,13 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         say!("[ui] browser      : opened");
     }
 
-    let content = RepoContent {
-        store: &store,
-        mk: &mk,
-    };
-    let text_index = RepoTextIndex { index: text_index };
+    let content = MergedContent::new(&parts, &data);
+    let text_index = chat_stasher::ui::MergedTextIndex::new(
+        parts
+            .iter()
+            .map(|part| (part.label.clone(), part.text_index.clone()))
+            .collect(),
+    );
     let stats =
         match chat_stasher::view::serve(&listener, &token, &data, idle, &content, &text_index) {
             Ok(s) => s,
@@ -4319,91 +4580,135 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         stats.rejected
     );
 
-    if !report.complete() {
-        say!(
-            "ui: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
-            data.destination_label,
-            report.unreadable.len()
-        );
+    if !data.complete() {
+        // The failing destinations are named, and only they: with several
+        // destinations, naming the whole view under "could not be read in full"
+        // would be a false statement about the copies that read fine.
+        let failed = data.incomplete_destinations();
+        if data.destinations.len() == 1 {
+            say!(
+                "ui: PARTIAL — the sessions listed are real, but `{}` could not be read in full ({} unreadable), so there may be more",
+                data.destination_label,
+                data.unreadable.len()
+            );
+        } else {
+            say!(
+                "ui: PARTIAL — the sessions listed are real, but {} of the {} destinations could not be read in full (`{}`), so there may be more",
+                failed.len(),
+                data.destinations.len(),
+                failed.join(chat_stasher::ui::DESTINATION_JOIN)
+            );
+        }
         return ExitCode::from(3);
     }
     ExitCode::SUCCESS
 }
 
-/// The one implementation of the payload tier: the `/content` route asks this
-/// for one session's shards, and nothing else does.
-struct RepoContent<'a> {
-    store: &'a BackupStore,
-    mk: &'a MasterKey,
+/// One destination as the rest of the run needs it: what was read from it, and
+/// the handles the served dashboard still needs — the store and key the payload
+/// tier reads through, and the local text index `/search` answers from.
+struct UiDestination {
+    label: String,
+    cfg: StoreConfig,
+    text_index: Option<chat_stasher::fts::Index>,
+    store: Option<BackupStore>,
+    mk: Option<MasterKey>,
+    report: Option<chat_stasher::search::SearchReport>,
+    /// The read never happened: the key would not load, or the repository would
+    /// not open. Distinct from a report whose `unreadable` is non-empty — there
+    /// the read happened and part of it failed.
+    unread_at_all: bool,
 }
 
-impl chat_stasher::ui::ContentSource for RepoContent<'_> {
+impl UiDestination {
+    fn unread(
+        cfg: StoreConfig,
+        label: String,
+        text_index: Option<chat_stasher::fts::Index>,
+    ) -> Self {
+        Self {
+            label,
+            cfg,
+            text_index,
+            store: None,
+            mk: None,
+            report: None,
+            unread_at_all: true,
+        }
+    }
+}
+
+/// The one implementation of the payload tier: the `/content` route asks this
+/// for one session's shards, and nothing else does.
+///
+/// With several destinations a merged row exists in more than one copy, and
+/// this reads it from the copy the row itself describes — the first destination
+/// named that holds it. It does **not** fall through to another copy when that
+/// one cannot be read: the copies are different snapshots, so serving the
+/// second while the page shows the first's metadata would be a read the page
+/// never claimed to make. A failure to read stays a failure, which is the one
+/// thing `/content` has always done — and the destination column says the other
+/// copy exists, so the reader can name it and read it deliberately.
+struct MergedContent<'a> {
+    parts: &'a [UiDestination],
+    /// Which copy each row is read from, keyed the way the archive keys a
+    /// session. Built from the dashboard's own rows, so the payload tier and
+    /// the metadata tier cannot disagree about which copy a row is.
+    owner: std::collections::BTreeMap<(String, String), usize>,
+}
+
+impl<'a> MergedContent<'a> {
+    fn new(parts: &'a [UiDestination], data: &chat_stasher::ui::UiData) -> Self {
+        let owner = data
+            .sessions
+            .iter()
+            .filter_map(|s| s.destinations.first().map(|first| (s, *first)))
+            .map(|(s, first)| ((s.machine.clone(), s.session_id.clone()), first))
+            .collect();
+        Self { parts, owner }
+    }
+}
+
+impl chat_stasher::ui::ContentSource for MergedContent<'_> {
     fn fetch(&self, machine: &str, session_id: &str) -> Result<chat_stasher::ui::Content, String> {
-        let (bytes, shards) = self
-            .store
-            .read_session_concat(machine, session_id, self.mk)
-            .map_err(|e| format!("{e:#}"))?;
+        let key = (machine.to_string(), session_id.to_string());
+        let position = self.owner.get(&key).ok_or_else(|| {
+            format!(
+                "`{machine}` holds no row for that session in this dashboard's list, so there is \
+                 no destination to read it from — this is not an empty session"
+            )
+        })?;
+        let part = self.parts.get(*position).ok_or_else(|| {
+            format!(
+                "destination `{}` was not read by this run, so its copy cannot be opened",
+                self.parts
+                    .get(*position)
+                    .map(|p| p.label.as_str())
+                    .unwrap_or("(unknown)")
+            )
+        })?;
+        // A destination that could not be read at all has no store; it also
+        // contributed no rows, so reaching here would mean the two tiers
+        // disagree, and saying so beats panicking.
+        let (store, mk) = match (&part.store, &part.mk) {
+            (Some(store), Some(mk)) => (store, mk),
+            _ => {
+                return Err(format!(
+                    "`{}` could not be read at all in this run, so the copy it holds cannot be \
+                     opened — this is not an empty session",
+                    part.label
+                ))
+            }
+        };
+        let (bytes, shards) = store
+            .read_session_concat(machine, session_id, mk)
+            .map_err(|e| format!("destination `{}`: {e:#}", part.label))?;
         Ok(chat_stasher::ui::Content {
             concat_sha256: sha256_hex(&bytes),
             bytes: bytes.len(),
             body: String::from_utf8_lossy(&bytes).into_owned(),
             shards,
         })
-    }
-}
-
-/// The one implementation of the index tier: `/search` and `/api/search` ask
-/// this, and no other route does.
-///
-/// "Missing" is decided by looking at the index file rather than by matching
-/// the wording of an error message: the two are the same fact, and only one of
-/// them stays true if the message is ever reworded.
-struct RepoTextIndex {
-    index: Option<chat_stasher::fts::Index>,
-}
-
-impl RepoTextIndex {
-    fn index(&self) -> Result<&chat_stasher::fts::Index, String> {
-        self.index.as_ref().ok_or_else(|| {
-            "this system reports no cache directory, so no local index can exist".to_string()
-        })
-    }
-}
-
-impl chat_stasher::ui::TextIndex for RepoTextIndex {
-    fn state(&self) -> chat_stasher::ui::IndexState {
-        use chat_stasher::ui::IndexState;
-        let index = match self.index() {
-            Ok(index) => index,
-            Err(reason) => return IndexState::Unreadable(reason),
-        };
-        if !index.db_path().exists() {
-            return IndexState::Missing;
-        }
-        match index.summary() {
-            Ok(summary) => IndexState::Ready(summary),
-            Err(error) => IndexState::Unreadable(format!("{error:#}")),
-        }
-    }
-
-    fn query(&self, query: &str) -> Result<chat_stasher::ui::QueryResult, String> {
-        use chat_stasher::ui::QueryResult;
-        let index = self.index()?;
-        match index.matches(query) {
-            Ok(Ok(set)) => Ok(QueryResult::Matches(set)),
-            Ok(Err(too_short)) => Ok(QueryResult::TooShort(too_short)),
-            Err(error) => Err(format!("{error:#}")),
-        }
-    }
-
-    fn placements(
-        &self,
-        query: &str,
-        ids: &[String],
-    ) -> Result<Vec<chat_stasher::fts::MatchPlace>, String> {
-        self.index()?
-            .placements(query, ids)
-            .map_err(|error| format!("{error:#}"))
     }
 }
 

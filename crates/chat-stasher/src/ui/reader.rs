@@ -94,6 +94,7 @@ fn page_reader(
         t = percent_encode(token),
         d = esc(&data.destination_label),
     ));
+    out.push_str(&super::html::read_from_note(s, data));
     out.push_str(&reader_provenance(s, token, conversation));
     // A harness this build has no extractor for is served whole by the raw
     // route and interpreted here not at all. The page stops at the statement:

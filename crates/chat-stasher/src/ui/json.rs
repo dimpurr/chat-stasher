@@ -78,9 +78,53 @@ pub(super) fn json_overview(data: &UiData) -> String {
         },
         "machines": machines,
         "machines_without_activity_index": data.machines_without_index,
+        // R10: which copies this one dashboard was merged from, and the two
+        // readings of "how many sessions" that a merged view has to keep
+        // apart (see `json_sessions`, which spells the same pair).
+        "destinations": destinations_json(data),
+        "sessions_distinct": in_view.len(),
+        "sessions_raw": data.destinations.iter().map(|d| d.in_view).sum::<usize>(),
         "generated_unix": data.now_unix,
     });
     json_string(&v)
+}
+
+/// The destination names one row is held by, in the order the destinations were
+/// named. Never empty for a row that exists.
+fn destinations_of(s: &UiSession, data: &UiData) -> Vec<String> {
+    s.destinations
+        .iter()
+        .filter_map(|position| data.destination(*position))
+        .map(|d| d.label.clone())
+        .collect()
+}
+
+/// What each destination this dashboard read holds, and whether it read in
+/// full (R10/§4.8).
+///
+/// The per-destination list is what lets a consumer attribute a floor: the
+/// top-level `unreadable_parts` is the union of these, and a union says
+/// *something* could not be read while this says *which copy*. `raw_sessions`
+/// is the sum of `held`; the distinct total is `sessions_in_view`.
+fn destinations_json(data: &UiData) -> serde_json::Value {
+    serde_json::Value::Array(
+        data.destinations
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "label": d.label,
+                    "held": d.sessions,
+                    "in_view": d.in_view,
+                    "snapshots_scanned": d.snapshots_scanned,
+                    "snapshots_in_repo": d.snapshots_in_repo,
+                    "complete": d.complete(),
+                    "unreadable_parts": d.unreadable,
+                    "machines_without_activity_index": d.machines_without_index,
+                    "machines_with_legacy_index": d.machines_with_legacy_index,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The wire shape of one row's label (29-UI-DESIGN §5.3): an object, never a
@@ -143,6 +187,13 @@ pub(super) fn json_sessions(
             "line_count": s.line_count,
             "archive_time_unix": s.archive_time_unix,
             "title": title_json(s),
+            // Which copies of this session the view found, by destination name,
+            // in the order the destinations were named (R10/§4.8). One entry is
+            // the ordinary case; more than one is the ×N-backup badge, and the
+            // **first** is the copy this row's own facts were read from — an
+            // array rather than a count, because "which copy" is the question a
+            // consumer has to answer before it can read one.
+            "destinations": destinations_of(s, data),
             "href": format!("/session?i={}&token={}", s.index, percent_encode(token)),
         });
         if let Some(provenance) = &s.provenance {
@@ -169,6 +220,14 @@ pub(super) fn json_sessions(
         "not_matched": sel.not_matched,
         "could_not_be_placed": sel.unplaced.len(),
         "machines_with_legacy_index": data.machines_with_legacy_index,
+        // R10: the copies this view was merged from. `sessions_distinct` is the
+        // same number `sessions_in_view` reports (one row per conversation,
+        // however many copies exist), and it is spelled here beside
+        // `sessions_raw` so a consumer cannot read one of the two readings as
+        // the only one — the pair is the fact.
+        "destinations": destinations_json(data),
+        "sessions_distinct": data.sessions.len(),
+        "sessions_raw": data.destinations.iter().map(|d| d.in_view).sum::<usize>(),
         // The window this page is: `total` is the matched count the pages
         // divide, `sort` the order to read `sessions` in. A consumer that
         // walks the offsets and concatenates gets exactly the sorted list.
@@ -351,6 +410,28 @@ fn search_json(
             "documents": documents,
             "written_unix": written_unix,
             "written_note": "the index file's mtime; the index records no build time of its own",
+            // R10: the one merged state above, split back into the copies it was
+            // merged from. `null` on a single-destination server, where the
+            // object above is already that destination's own answer. Without
+            // this, a caller told "unreadable" cannot tell which file to repair.
+            "per_destination": match &answer.index_parts {
+                None => serde_json::Value::Null,
+                Some(parts) => serde_json::Value::Array(
+                    parts
+                        .iter()
+                        .map(|(label, state)| {
+                            let (state_word, reason) = match state {
+                                IndexState::Ready(_) => ("ready", serde_json::Value::Null),
+                                IndexState::Missing => ("missing", serde_json::Value::Null),
+                                IndexState::Unreadable(reason) => {
+                                    ("unreadable", serde_json::json!(reason))
+                                }
+                            };
+                            serde_json::json!({ "label": label, "state": state_word, "reason": reason })
+                        })
+                        .collect(),
+                ),
+            },
         },
         "coverage": coverage,
         // The destination read, which is not the same thing as the index's

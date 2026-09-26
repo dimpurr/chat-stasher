@@ -14,12 +14,15 @@ use crate::search::SessionLabel;
 use crate::selector::{Resolved, UnplacedBy};
 
 use super::facets;
-use super::html::{completeness_banner, describe_selector, esc, fmt_bytes, fmt_unix, footer, head};
+use super::html::{
+    completeness_banner, describe_selector, destinations_block, esc, fmt_bytes, fmt_unix, footer,
+    head, read_from_note,
+};
 use super::{
     index_param, page_from_query, page_href, page_window, paging_nav, percent_encode, select,
     selector_from_query, sort_rows, Content, ContentSource, ListSort, Page, Query, Response,
-    Selection, UiData, UiSession, EXPLICIT_REPO_LABEL, LIST_CARRY, PROVENANCE_FIRST_USER_LINE,
-    PROVENANCE_HARNESS_TITLE,
+    Selection, UiData, UiSession, DESTINATION_JOIN, EXPLICIT_REPO_LABEL, LIST_CARRY,
+    PROVENANCE_FIRST_USER_LINE, PROVENANCE_HARNESS_TITLE,
 };
 
 pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response {
@@ -109,6 +112,7 @@ fn page_sessions(
         out.push_str(&format!("<div class=warn>{}</div>\n", esc(w)));
     }
     out.push_str(&completeness_banner(data));
+    out.push_str(&destinations_block(data));
     out.push_str(&label_coverage_note(sel, data));
     // The facet bar (29-UI-DESIGN §2.3) renders for every state the page can
     // be in — a zero-match page most of all, because a facet typed wrong is
@@ -131,6 +135,7 @@ fn page_sessions(
                 String::new()
             }
         ));
+        out.push_str(&merged_counts(data));
         // The order is fixed once, here, and the window cut from it, so the
         // rows on a page and the range sentence below describe the same
         // sequence a concatenated walk of all pages reproduces.
@@ -154,7 +159,17 @@ fn page_sessions(
         } else {
             out.push_str(
                 "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
-                 <th>session (short)</th><th>label</th>\
+                 <th>session (short)</th>",
+            );
+            // The destination column exists only where it carries information:
+            // with one destination every cell would repeat the page header, and
+            // a column that never varies is a column readers learn to skip —
+            // including the one place it would have mattered (§4.8/R10).
+            if data.destinations.len() > 1 {
+                out.push_str("<th>destination</th>");
+            }
+            out.push_str(
+                "<th>label</th>\
                  <th class=n title=\"count of non-blank lines in the archived session record, \
                  measured by the activity index\">msgs</th><th class=n>shards</th>\
                  <th class=n>bytes</th>\
@@ -162,7 +177,7 @@ fn page_sessions(
                  </tr></thead>\n<tbody>\n",
             );
             for s in window {
-                out.push_str(&list_row(s, token));
+                out.push_str(&list_row(s, token, data));
             }
             out.push_str("</tbody></table></div>\n");
             // The legend goes with the table it explains: it names the marks
@@ -217,11 +232,26 @@ fn page_sessions(
 /// its vocabulary — rather than one "no results" line — is the point.
 fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
     if !data.complete() {
+        let failed = data.incomplete_destinations();
+        if data.destinations.len() == 1 {
+            return format!(
+                "<div class=warn><b>UNKNOWN — not \"not there\".</b> The destination could not be \
+                 read in full ({} part(s) unreadable), so 0 matched in the part that could be read \
+                 proves nothing.</div>\n",
+                data.unreadable.len()
+            );
+        }
+        // The failing destinations are named and the healthy ones are not: the
+        // reader has to act on the broken copy, and listing the others under a
+        // "could not be read" sentence would be a false statement about them.
         return format!(
-            "<div class=warn><b>UNKNOWN — not \"not there\".</b> The destination could not be \
-             read in full ({} part(s) unreadable), so 0 matched in the part that could be read \
-             proves nothing.</div>\n",
-            data.unreadable.len()
+            "<div class=warn><b>UNKNOWN — not \"not there\".</b> {} of the {} destinations could \
+             not be read in full ({}), so 0 matched in what could be read proves nothing. The \
+             other destination(s) read in full — their 0 is real, and this answer is still not \
+             a proven absence of the whole view.</div>\n",
+            failed.len(),
+            data.destinations.len(),
+            esc(&failed.join(DESTINATION_JOIN)),
         );
     }
     let unplaced_blocking = sel
@@ -237,10 +267,50 @@ fn no_hit_html(sel: &Selection<'_>, data: &UiData) -> String {
             unplaced_blocking
         );
     }
+    if data.destinations.len() > 1 {
+        return format!(
+            "<p><b>Not in these destinations</b> — 0 of the {} session(s) in view matched, and \
+             all {} destinations were read in full. This is a real absence, not a failure to \
+             look.</p>\n",
+            data.sessions.len(),
+            data.destinations.len(),
+        );
+    }
     format!(
         "<p><b>Not in this destination</b> — 0 of the {} session(s) in view matched, and the \
          destination was read in full. This is a real absence, not a failure to look.</p>\n",
         data.sessions.len()
+    )
+}
+
+/// The two count lines a merged view prints instead of one (§4.8): the
+/// **distinct** sessions the view holds, and the **raw** copies the
+/// destinations hold between them.
+///
+/// Both are printed whenever more than one destination was read, and neither
+/// is derived at print time from the other. Choosing one would be the bug this
+/// pair exists to prevent: "3 sessions" is wrong about redundancy and "5
+/// sessions" is wrong about conversations, and a reader who sees only one of
+/// them cannot tell which mistake they are looking at.
+///
+/// With a single destination the two counts are equal by construction, so the
+/// lines are omitted rather than printed as two identical numbers.
+fn merged_counts(data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let raw_in_view: usize = data.destinations.iter().map(|d| d.in_view).sum();
+    let doubled = raw_in_view.saturating_sub(data.sessions.len());
+    format!(
+        "<p class=sub><b>distinct:</b> {} session(s) in view — each session counted once, \
+         however many destinations hold it.</p>\n\
+         <p class=sub><b>raw:</b> {} session row(s) across the {} destinations — a session held \
+         by more than one counts once per copy, so {doubled} row(s) here {verb} a second (or \
+         later) copy of a session already counted.</p>\n",
+        data.sessions.len(),
+        raw_in_view,
+        data.destinations.len(),
+        verb = if doubled == 1 { "is" } else { "are" },
     )
 }
 
@@ -344,6 +414,9 @@ fn label_cell_html(s: &UiSession) -> String {
 /// spelled out, and it follows the machine filter so a fresh machine never
 /// reads as partial.
 fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
+    if data.destinations.len() > 1 {
+        return merged_label_coverage_note(sel, data);
+    }
     let on_page: BTreeSet<&str> = sel.matched.iter().map(|s| s.machine.as_str()).collect();
     let legacy: Vec<&str> = data
         .machines_with_legacy_index
@@ -381,19 +454,89 @@ fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
         .collect()
 }
 
-fn list_row(s: &UiSession, token: &str) -> String {
+/// The same note for a merged view, where the machine's rows can come from
+/// several copies and only some of those indexes are old.
+///
+/// The repair is per destination — `activity-index --rebuild` writes one
+/// destination's snapshot — so the note names the destinations that actually
+/// reported the machine as legacy rather than the whole merged view. Attaching
+/// the repair to a destination that has a good index for that machine would
+/// send the reader to rebuild something that is not broken, and naming no
+/// destination would leave the command unrunnable.
+fn merged_label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
+    let on_page: BTreeSet<&str> = sel.matched.iter().map(|s| s.machine.as_str()).collect();
+    // (machine, the destinations whose index is old for it), in destination
+    // order — the same order the rows and the badges use.
+    let mut by_machine: Vec<(&str, Vec<&str>)> = Vec::new();
+    for d in &data.destinations {
+        for machine in &d.machines_with_legacy_index {
+            let machine = machine.as_str();
+            if !on_page.contains(machine) {
+                continue;
+            }
+            match by_machine.iter_mut().find(|(m, _)| *m == machine) {
+                Some((_, dests)) => {
+                    if !dests.contains(&d.label.as_str()) {
+                        dests.push(d.label.as_str());
+                    }
+                }
+                None => by_machine.push((machine, vec![d.label.as_str()])),
+            }
+        }
+    }
+    by_machine
+        .iter()
+        .map(|(machine, dests)| {
+            let commands: String = dests
+                .iter()
+                .map(|d| {
+                    format!(
+                        "<span class=mono>chat-stasher activity-index --rebuild --destination {} \
+                         --machine {m} --stage <an existing empty work directory></span>",
+                        esc(d),
+                        m = esc(machine),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("<br>");
+            let where_ = if dests.len() == 1 {
+                format!("in <span class=mono>{}</span>", esc(dests[0]))
+            } else {
+                format!(
+                    "in {} of the destinations read ({})",
+                    dests.len(),
+                    esc(&dests.join(DESTINATION_JOIN))
+                )
+            };
+            format!(
+                "<div class=note><b>Label coverage is partial.</b> Machine \
+                 <span class=mono>{m}</span>'s activity index {where_} predates labels, so the \
+                 rows that came from there show <i>label unknown</i> — that is the index's age, \
+                 not a session with no label. The same machine's rows from another destination \
+                 can carry a label; the destination column says which copy a row came from. \
+                 Backfill each one with:<br>{commands}</div>\n",
+                m = esc(machine),
+                where_ = where_,
+                commands = commands,
+            )
+        })
+        .collect()
+}
+
+fn list_row(s: &UiSession, token: &str, data: &UiData) -> String {
     let msgs = msgs_cell_html(s);
     let f = time_cell_html(s, s.first_unix);
     let l = time_cell_html(s, s.last_unix);
     format!(
         "<tr><td class=mono>{m}</td><td>{h}</td>\
-         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{label}{msgs}\
+         <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{dest}{label}{msgs}\
          <td class=n>{sh}</td><td class=n>{b}</td>{f}{l}<td>{snap}</td></tr>\n",
         m = esc(&s.machine),
         h = esc(&s.source_label()),
         i = s.index,
         t = percent_encode(token),
         sid = esc(&s.short_id),
+        dest = destination_cell_html(s, data),
         label = label_cell_html(s),
         msgs = msgs,
         sh = s.shard_count,
@@ -402,6 +545,55 @@ fn list_row(s: &UiSession, token: &str) -> String {
         l = l,
         snap = esc(&fmt_unix(s.archive_time_unix)),
     )
+}
+
+/// The destination cell — rendered only where the destination column exists, so
+/// it must stay in step with the header's own `if`.
+///
+/// One destination: the name, no badge. More than one: every name the session
+/// is held by, and the `×N backup` badge. The badge is the row's own copy of
+/// the fact, because the row is where a reader asks it — the block above the
+/// table explains the convention once, but a reader who scrolls straight to a
+/// row must still be able to see that this conversation exists twice.
+///
+/// The cell's tooltip names the copy the row's own facts came from. That is the
+/// half of the badge a reader cannot otherwise see: the two copies were pushed
+/// at different times, so their times and byte counts can disagree, and this
+/// row shows one of them.
+fn destination_cell_html(s: &UiSession, data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let names: Vec<&str> = s
+        .destinations
+        .iter()
+        .filter_map(|position| data.destination(*position))
+        .map(|d| d.label.as_str())
+        .collect();
+    let listed = if names.is_empty() {
+        // A row with no destination cannot happen — every row came from one —
+        // so this is a rendering hole, and the cell says so rather than
+        // defaulting to a name it does not have.
+        "no destination recorded".to_string()
+    } else {
+        esc(&names.join(DESTINATION_JOIN))
+    };
+    let mut out = String::from("<td>");
+    if names.len() > 1 {
+        out.push_str(&format!(
+            "<span class=badge title=\"held by {} destinations: {}. This row's label, times and \
+             byte count are read from `{}`, the first destination named on the command line — the \
+             copies were pushed at different times, so another copy's numbers can differ, and \
+             `{}` is the copy the reader and the raw view open.\">×{n} backup</span> ",
+            names.len(),
+            esc(&names.join(", ")),
+            esc(names[0]),
+            esc(names[0]),
+            n = names.len(),
+        ));
+    }
+    out.push_str(&format!("<span class=mono>{listed}</span></td>"));
+    out
 }
 
 // -------------------------------------------------------------- time states
@@ -538,6 +730,7 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
         t = percent_encode(token),
         d = esc(&data.destination_label),
     ));
+    out.push_str(&read_from_note(s, data));
     // The label rows (29-UI-DESIGN §4.3): the label itself, and its source —
     // the provenance row only exists for a known label, because there is
     // nothing to attribute for the honest non-labels.
@@ -707,7 +900,7 @@ fn page_content(s: &UiSession, c: &Content, data: &UiData) -> String {
     }
     format!(
         "{head}\n<h1>Session <span class=mono>{sid}</span> · content</h1>\n\
-         <p class=sub>machine <span class=mono>{m}</span> · source {h}</p>\n\
+         <p class=sub>machine <span class=mono>{m}</span> · source {h}</p>\n{note}\
          <p>Loaded <b>{b}</b> of shard data across {n} shard(s). Concatenation sha256 \
          <span class=mono>{sha}</span>.</p>\n\
          <ul>{shards}</ul>\n\
@@ -719,6 +912,7 @@ fn page_content(s: &UiSession, c: &Content, data: &UiData) -> String {
         sid = esc(&s.short_id),
         m = esc(&s.machine),
         h = esc(&s.source_label()),
+        note = read_from_note(s, data),
         b = esc(&fmt_bytes(c.bytes as u64)),
         n = c.shards.len(),
         sha = esc(&c.concat_sha256),

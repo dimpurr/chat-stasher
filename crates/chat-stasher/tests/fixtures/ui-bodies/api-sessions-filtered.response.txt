@@ -7,6 +7,21 @@ content-type: application/json; charset=utf-8
   "could_not_be_placed": 0,
   "data_blobs_read": 0,
   "destination": "dest-under-test",
+  "destinations": [
+    {
+      "complete": true,
+      "held": 4,
+      "in_view": 4,
+      "label": "dest-under-test",
+      "machines_with_legacy_index": [],
+      "machines_without_activity_index": [
+        "m-3"
+      ],
+      "snapshots_in_repo": 2,
+      "snapshots_scanned": 2,
+      "unreadable_parts": []
+    }
+  ],
   "filter": "machine `m-1` · harness in {claude-code}",
   "machines_with_legacy_index": [],
   "matched": 1,
@@ -23,6 +38,9 @@ content-type: application/json; charset=utf-8
     {
       "archive_time_unix": 1769996400,
       "bytes": 100,
+      "destinations": [
+        "dest-under-test"
+      ],
       "first_unix": {
         "kind": "known",
         "unix": 1769992800
@@ -45,7 +63,9 @@ content-type: application/json; charset=utf-8
       }
     }
   ],
+  "sessions_distinct": 4,
   "sessions_not_placed": [],
+  "sessions_raw": 4,
   "tier": "metadata",
   "unreadable_parts": []
 }
