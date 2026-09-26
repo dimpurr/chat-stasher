@@ -552,7 +552,7 @@ enum Command {
     /// machine's small activity index, and never fetches or decrypts a
     /// session's conversation shard, which is why it is cheap. On a local
     /// three-session fixture the metadata walk read 11,761 bytes against
-    /// 1,206,285 bytes of data packs — two orders of magnitude apart. Use
+    /// 1,206,285 bytes of data packs — two orders of magnitude apart.
     /// In a separate metadata-only run, use `--cost` to estimate the payload
     /// size before choosing a full-text mode. `--scan` reads those payloads;
     /// `--text` uses the local index and checks that it covers the selected

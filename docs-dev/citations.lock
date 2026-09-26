@@ -13,7 +13,7 @@
 # 默认模式只校验、不写这个文件。要接受一次真实变化, 显式跑:
 #   python3 scripts/check-citation-drift.py --update
 
-./.gitignore:12  a182dd2acb58  lines=1
+.gitignore:12  a182dd2acb58  lines=1
   <- docs-dev/install.md:306  :: apps/extension/.output/
 apps/extension/.gitignore:11  6ef40595ec0a  lines=1
   <- docs-dev/install.md:307  :: .output
@@ -469,7 +469,7 @@ crates/chat-stasher/src/inbox.rs:1002-1030  81d263fdddc2  lines=29
   <- docs-dev/install.md:399, docs-dev/threat-model.md:414  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:148-1157  a09612e4fde8  lines=1010
+crates/chat-stasher/src/main.rs:148-1157  09d326855d40  lines=1010
   <- docs-dev/install.md:849, docs-dev/privacy.md:690, docs-dev/threat-model.md:576  :: enum Command {
 crates/chat-stasher/src/main.rs:149-150  6f7da3119197  lines=2
   <- docs-dev/install.md:259  :: /// Write a commented default config if none exists (non-de…

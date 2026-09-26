@@ -564,7 +564,7 @@ help_doc     crates/chat-stasher/src/main.rs:551  Metadata tier only: this walks
 help_doc     crates/chat-stasher/src/main.rs:552  machine's small activity index, and never fetches or decrypts a
 help_doc     crates/chat-stasher/src/main.rs:553  session's conversation shard, which is why it is cheap. On a local
 help_doc     crates/chat-stasher/src/main.rs:554  three-session fixture the metadata walk read 11,761 bytes against
-help_doc     crates/chat-stasher/src/main.rs:555  1,206,285 bytes of data packs — two orders of magnitude apart. Use
+help_doc     crates/chat-stasher/src/main.rs:555  1,206,285 bytes of data packs — two orders of magnitude apart.
 help_doc     crates/chat-stasher/src/main.rs:556  In a separate metadata-only run, use `--cost` to estimate the payload
 help_doc     crates/chat-stasher/src/main.rs:557  size before choosing a full-text mode. `--scan` reads those payloads;
 help_doc     crates/chat-stasher/src/main.rs:558  `--text` uses the local index and checks that it covers the selected
