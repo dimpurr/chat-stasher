@@ -617,8 +617,8 @@ crates/chat-stasher/src/store.rs:1400-1404  e915d9a10309  lines=5
   <- docs-dev/threat-model.md:565  :: }
 crates/chat-stasher/src/store.rs:1549-1554  4a031ff70c84  lines=6
   <- docs-dev/install.md:443, docs-dev/install.md:533  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
-crates/chat-stasher/src/ui/sessions.rs:55  c1f3dff68b88  lines=1
-  <- docs-dev/threat-model.md:207  :: pub(super) fn content_page(params: &Query, data: &UiData, c…
+crates/chat-stasher/src/ui/sessions.rs:55  ef0f4004ef5d  lines=1
+  <- docs-dev/threat-model.md:207  :: pub(super) fn content_page(
 crates/chat-stasher/src/view.rs:204-216  605bc65511cd  lines=13
   <- docs-dev/threat-model.md:179  :: if status == 0 {
 crates/chat-stasher/src/view.rs:224-238  042d252f1ccf  lines=15

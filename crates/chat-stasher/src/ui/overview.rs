@@ -24,7 +24,7 @@ use super::{
 pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     let sel = select(&data.sessions, &data.launch);
     let in_view = sel.in_view();
-    let mut out = head(&format!("chat-stasher · {}", data.destination_label));
+    let mut out = head(&format!("chat-stasher · {}", data.destination_label), token);
     out.push_str(&format!(
         "<h1>chat-stasher</h1>\n<p class=sub>destination <b>{}</b> · {} snapshot(s) scanned of {} \
          in repository · this page rendered {} of the archive metadata only</p>\n",

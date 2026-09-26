@@ -1115,7 +1115,7 @@ pub fn paging_nav(
     let mut parts: Vec<String> = Vec::new();
     if page.offset >= limit {
         parts.push(format!(
-            "<a href=\"{}\">‹ previous</a>",
+            "<a href=\"{}\" accesskey=\"[\">‹ previous</a>",
             page_href(path, carry, params, token, page.offset - limit)
         ));
     }
@@ -1138,7 +1138,7 @@ pub fn paging_nav(
     }
     if page.offset.saturating_add(limit) < total {
         parts.push(format!(
-            "<a href=\"{}\">next ›</a>",
+            "<a href=\"{}\" accesskey=\"]\">next ›</a>",
             page_href(path, carry, params, token, page.offset + limit)
         ));
     }
@@ -1177,7 +1177,7 @@ pub fn handle(
         )),
         "/sessions" => Some(sessions::list_page(params, token, data)),
         "/session" => Some(sessions::one_session_page(params, token, data)),
-        "/content" => Some(sessions::content_page(params, data, content)),
+        "/content" => Some(sessions::content_page(params, token, data, content)),
         "/export" => Some(export::export_page(params, data, content)),
         "/reader" => Some(reader::reader_page(params, token, data, content)),
         // The one route that reads the text index. It is the only branch that

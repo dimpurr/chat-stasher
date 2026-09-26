@@ -84,11 +84,11 @@ fn page_reader(
 ) -> String {
     let total = conversation.messages.len();
     let end = start.saturating_add(width).min(total);
-    let mut out = head(&format!("chat-stasher · reader · {}", s.short_id));
+    let mut out = head(&format!("chat-stasher · reader · {}", s.short_id), token);
     out.push_str(&format!(
         "<h1>Conversation <span class=mono>{sid}</span></h1>\n\
          <p class=sub><a href=\"/session?i={i}&token={t}\">← session metadata</a> · \
-         <a href=\"/content?i={i}&token={t}\">show raw shards</a> · destination <b>{d}</b></p>\n",
+         <a href=\"/content?i={i}&token={t}\" accesskey=r>show raw shards</a> · destination <b>{d}</b></p>\n",
         sid = esc(&s.short_id),
         i = s.index,
         t = percent_encode(token),
@@ -208,13 +208,22 @@ fn reader_provenance(
 /// Window links, in the order the design's wireframe draws them: previous,
 /// next, first, last. Every one is a plain `<a>` with the window in its query,
 /// so paging works with no script and each page is a URL worth bookkeeping.
+///
+/// The previous/next pair carries the `[`/`]` access keys (§8.2) — the two a
+/// keyboard reader presses to walk a long conversation without a mouse. First
+/// and last stay unkeyed: they are jumps, not steps, and the help line keeps
+/// one key meaning one thing.
 fn reader_nav(s: &UiSession, token: &str, start: usize, width: usize, total: usize) -> String {
     let width = width.max(1);
     let last_start = total.saturating_sub(1) / width * width;
     let mut links = Vec::new();
-    let push = |label: &str, m: usize, links: &mut Vec<String>| {
+    let push = |label: &str, m: usize, key: Option<&str>, links: &mut Vec<String>| {
+        let accesskey = match key {
+            Some(k) => format!(" accesskey={k}"),
+            None => String::new(),
+        };
         links.push(format!(
-            "<a href=\"/reader?i={}&m={}&n={}&token={}\">{}</a>",
+            "<a href=\"/reader?i={}&m={}&n={}&token={}\"{accesskey}>{}</a>",
             s.index,
             m,
             width,
@@ -226,17 +235,23 @@ fn reader_nav(s: &UiSession, token: &str, start: usize, width: usize, total: usi
         push(
             "← previous messages",
             start.saturating_sub(width),
+            Some("["),
             &mut links,
         );
     }
     if start.saturating_add(width) < total {
-        push("next messages →", start.saturating_add(width), &mut links);
+        push(
+            "next messages →",
+            start.saturating_add(width),
+            Some("]"),
+            &mut links,
+        );
     }
     if start > 0 {
-        push("first messages", 0, &mut links);
+        push("first messages", 0, None, &mut links);
     }
     if last_start > start {
-        push("last messages", last_start, &mut links);
+        push("last messages", last_start, None, &mut links);
     }
     if links.is_empty() {
         String::new()
