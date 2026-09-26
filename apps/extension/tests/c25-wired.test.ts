@@ -9,6 +9,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 
 const runBackfillSpy = vi.fn(async (_opts: any) => ({
   stopped: 'queue-empty',
@@ -46,6 +47,7 @@ const storageChangeListeners: Array<(changes: Record<string, { newValue?: unknow
 const fakeBrowser: any = {
   runtime: {
     id: 'c25-test-extension',
+    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
     onStartup: { addListener(fn: any) { startupListeners.push(fn); } },
   },

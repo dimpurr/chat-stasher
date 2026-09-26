@@ -96,7 +96,34 @@ export async function launchExtension(): Promise<Extension> {
       + ' default headless build silently loads no extensions.',
     );
   }
-  return { context, extensionId: new URL(worker.url()).host, worker, userDataDir };
+  const extension = { context, extensionId: new URL(worker.url()).host, worker, userDataDir };
+  await installSyntheticCoordinator(extension);
+  return extension;
+}
+
+/**
+ * Backfill E2E specs exercise platform pacing, not a registered native host.
+ * Model a responsive single-install arbiter for coordination messages only;
+ * all delivery and other native-host messages still take Chromium's real path.
+ */
+async function installSyntheticCoordinator(extension: Extension): Promise<void> {
+  await extension.worker.evaluate(() => {
+    const globals = globalThis as unknown as { browser?: any; chrome?: any };
+    const runtime = globals.browser?.runtime?.id ? globals.browser.runtime : globals.chrome?.runtime;
+    if (!runtime || runtime.__chatStasherCoordinationStub) return;
+    const original = runtime.sendNativeMessage?.bind(runtime);
+    runtime.sendNativeMessage = (host: string, message: Record<string, unknown>, callback?: (reply: unknown) => void) => {
+      if (message?.type !== 'coordination') return original?.(host, message, callback);
+      const reply = {
+        protocol: 1, type: 'coordination', ok: true,
+        request_id: String(message.request_id), granted: true,
+        active_installs: 1, gentle: false, cooldown_until: 0, wait_ms: 0,
+      };
+      if (callback) { callback(reply); return undefined; }
+      return Promise.resolve(reply);
+    };
+    runtime.__chatStasherCoordinationStub = true;
+  });
 }
 
 /**

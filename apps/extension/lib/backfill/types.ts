@@ -1075,15 +1075,17 @@ export function transientRetryDelayMs(
  *
  * Both are the same numbers the reference implementations converge on: pionxzh
  * defaults to 30 s when the header is missing (src/api.ts:705-706), and Echoes
- * clamps its aistudio `Retry-After` to a band (28-RATE-LIMITS §5 B4).
+ * clamps its aistudio `Retry-After` to a band (28-RATE-LIMITS §5 B4). The
+ * machine-wide arbiter call supplies the host's 30-day ceiling so a longer
+ * platform wait reaches every install on this machine without being shortened.
  */
 export const RETRY_AFTER_MIN_MS = 30_000;
 export const RETRY_AFTER_MAX_MS = TRANSIENT_RETRY_BASE_MS['rate-limited'];
 
 /** Clamp a decided wait into the band above. `NaN` is not a wait; it degrades to the floor. */
-function clampRetryAfterMs(ms: number): number {
+function clampRetryAfterMs(ms: number, maximum = RETRY_AFTER_MAX_MS): number {
   const finite = Number.isFinite(ms) ? ms : RETRY_AFTER_MIN_MS;
-  return Math.min(RETRY_AFTER_MAX_MS, Math.max(RETRY_AFTER_MIN_MS, finite));
+  return Math.min(maximum, Math.max(RETRY_AFTER_MIN_MS, finite));
 }
 
 /**
@@ -1139,13 +1141,17 @@ function isHttpDate(value: string): boolean {
  * in tests; the delta-seconds form does not read it. The engine passes the same
  * clock instant the halt record is stamped with.
  */
-export function parseRetryAfterMs(raw: string | null | undefined, now: number = Date.now()): number | null {
+export function parseRetryAfterMs(
+  raw: string | null | undefined,
+  now: number = Date.now(),
+  maximum = RETRY_AFTER_MAX_MS,
+): number | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (trimmed === '') return null;
   // delta-seconds: digits only (a sign, a decimal or a unit word is not this form).
   if (/^\d+$/.test(trimmed)) {
-    return clampRetryAfterMs(Number(trimmed) * 1000);
+    return clampRetryAfterMs(Number(trimmed) * 1000, maximum);
   }
   // HTTP-date, but only after the form is exact: `Date.parse` reads `abc 2026-01-01`
   // and `2026-01-01T00:00:00Z` as real dates, which would turn "the header said
@@ -1153,7 +1159,7 @@ export function parseRetryAfterMs(raw: string | null | undefined, now: number = 
   if (!isHttpDate(trimmed)) return null;
   const at = Date.parse(trimmed);
   if (Number.isNaN(at)) return null;
-  return clampRetryAfterMs(at - now);
+  return clampRetryAfterMs(at - now, maximum);
 }
 
 export interface HaltRecord {

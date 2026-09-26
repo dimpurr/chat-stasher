@@ -41,6 +41,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 
 import {
   BACKFILL_ALARM_NAME,
@@ -90,6 +91,7 @@ function releaseHttpGate(): void {
 const fakeBrowser: any = {
   runtime: {
     id: 'w90-rearm-test-extension',
+    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
     onMessage: { addListener() {} },
     onStartup: { addListener() {} },
   },

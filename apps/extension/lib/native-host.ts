@@ -839,6 +839,7 @@ export interface CoordinationResult {
   cooldownUntil: number;
   waitMs: number;
   reason?: string;
+  olderHost?: boolean;
 }
 
 /** Host mutations may wait behind another short SQLite transaction. */
@@ -874,7 +875,10 @@ export async function coordinate(input: {
     const unavailable = classified.reason === 'nack'
       ? `${classified.kind ?? 'nack'}: ${classified.detail ?? ''}`
       : classified.reason;
-    return { ok: false, granted: false, activeInstalls: 0, gentle: false, cooldownUntil: 0, waitMs: 0, reason: unavailable };
+    return { ok: false, granted: false, activeInstalls: 0, gentle: false, cooldownUntil: 0, waitMs: 0,
+      reason: unavailable,
+      olderHost: classified.reason === 'nack' && looksLikeOlderHost(classified)
+        && /unknown message type\s+["']?coordination/i.test(classified.detail ?? '') };
   }
   const value = classified.value as Record<string, unknown>;
   return { ok: true, granted: value.granted as boolean, activeInstalls: value.active_installs as number,

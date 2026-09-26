@@ -29,6 +29,10 @@ describe('EXT-3 native-host coordination', () => {
     expect(coordinationSegmentForRequest('https://chatgpt.com/backend-api/conversation/opaque-id')).toBe('detail');
     expect(coordinationSegmentForRequest('https://claude.ai/api/organizations/org/chat_conversations/opaque-id')).toBe('detail');
     expect(coordinationSegmentForRequest('https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=opaque-id')).toBe('detail');
+    expect(coordinationSegmentForRequest('https://www.perplexity.ai/rest/thread/opaque-id')).toBe('detail');
+    expect(coordinationSegmentForRequest('https://grok.com/rest/app-chat/conversations/opaque-id/response-node')).toBe('detail');
+    expect(coordinationSegmentForRequest('https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages')).toBe('detail');
+    expect(coordinationSegmentForRequest('https://gemini.google.com/_/BardChatUi/data/batchexecute?rpcids=hNvQHb')).toBe('detail');
     expect(coordinationSegmentForRequest('https://claude.ai/api/organizations/org/chat_conversations?limit=100&offset=0')).toBe('enumerate');
   });
 
@@ -46,5 +50,13 @@ describe('EXT-3 native-host coordination', () => {
     const result = await coordinate({ mode: 'claim', platform: 'deepseek', installId: 'synthetic-install' });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain('bad-request');
+    expect(result.olderHost).toBe(true);
+  });
+
+  it('does not label an arbitrary bad-request nack as an older host', async () => {
+    response = { protocol: PROTOCOL, type: 'nack', request_id: null, kind: 'bad-request', retryable: false,
+      detail: 'malformed coordination request' };
+    const result = await coordinate({ mode: 'claim', platform: 'deepseek', installId: 'synthetic-install' });
+    expect(result).toMatchObject({ ok: false, olderHost: false });
   });
 });

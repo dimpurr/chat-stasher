@@ -27,6 +27,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 
 import {
   armBackfillTick,
@@ -434,6 +435,7 @@ const listCalls: string[] = [];
 const fakeBrowser: any = {
   runtime: {
     id: 'w16-test-extension',
+    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
     onStartup: { addListener() {} },
   },

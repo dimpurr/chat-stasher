@@ -103,6 +103,7 @@ describe('W127-A · parseRetryAfterMs is one place, and its three answers are di
     expect(parseRetryAfterMs('999999')).toBe(RETRY_AFTER_MAX_MS);
     expect(RETRY_AFTER_MAX_MS).toBe(TRANSIENT_RETRY_BASE_MS['rate-limited']);
     expect(RETRY_AFTER_MAX_MS).toBe(15 * 60_000);
+    expect(parseRetryAfterMs('3600', 0, 30 * 24 * 60 * 60 * 1000)).toBe(3_600_000);
   });
 
   it('🔴 absent, empty and garbage are all null — not zero, which would mean "now"', () => {
