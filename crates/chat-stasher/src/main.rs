@@ -553,8 +553,8 @@ enum Command {
     /// session's conversation shard, which is why it is cheap. On a local
     /// three-session fixture the metadata walk read 11,761 bytes against
     /// 1,206,285 bytes of data packs — two orders of magnitude apart. Use
-    /// `--cost` to see what a full-text pass over the current hits *would*
-    /// cost before asking for one; full-text matching is not implemented.
+    /// `--cost` to see the payload size for the current hits before using
+    /// `--text` or `--scan`.
     ///
     /// One destination per run, always named: there is no automatic merge
     /// across destinations, and no default destination to search "everything".
@@ -572,6 +572,12 @@ enum Command {
     /// "0 matched" answer cannot be trusted while any remain, so the exit code
     /// is `3` rather than `1`.
     ///
+    /// `--text` searches the local FTS5 trigram index (substring matching for
+    /// runs of at least three characters). One- and two-character queries
+    /// return no FTS matches and suggest a longer query. `--scan` instead
+    /// reads selected conversations and performs a case-insensitive substring
+    /// match; it can answer short queries but reads archived content.
+    ///
     /// Exit codes distinguish the three answers, because two of them look the
     /// same and mean opposite things: `0` matched something, `1` read the whole
     /// destination and answered for every session and nothing matched, `3`
@@ -584,6 +590,12 @@ enum Command {
         /// The shared filters (session / machine / harness / time window).
         #[command(flatten)]
         filters: chat_stasher::selector::SelectorArgs,
+        /// Search indexed titles and user/assistant text with SQLite's trigram tokenizer.
+        #[arg(long)]
+        text: Option<String>,
+        /// Read selected sessions and perform a case-insensitive substring scan.
+        #[arg(long, requires = "text")]
+        scan: bool,
         /// Emit one JSON object on stdout instead of the human report. The
         /// three groups (matched / not matched / could not be placed) stay
         /// separate fields, so a consumer cannot read an unknown as an absence.
@@ -1632,6 +1644,8 @@ fn run() -> ExitCode {
         Command::Search {
             destination,
             filters,
+            text,
+            scan,
             json,
             cost,
             repo,
@@ -1642,6 +1656,8 @@ fn run() -> ExitCode {
         } => cmd_search(
             destination,
             &filters,
+            text,
+            scan,
             json,
             cost,
             repo,
@@ -3380,6 +3396,8 @@ fn query_machine(config: &Config, explicit: Option<&str>) -> Option<String> {
 fn cmd_search(
     destination: Option<String>,
     filters: &chat_stasher::selector::SelectorArgs,
+    text: Option<String>,
+    scan: bool,
     json: bool,
     cost: bool,
     repo: Option<String>,
@@ -3388,6 +3406,13 @@ fn cmd_search(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
+    if let Some(query) = text.as_deref() {
+        eprintln!("search: mode={}", if scan { "scan" } else { "fts" });
+        if query.trim().is_empty() {
+            eprintln!("search: --text must contain at least one non-whitespace character");
+            return ExitCode::from(2);
+        }
+    }
     // Resolve the filter before touching the network: a date that is not a
     // date, or a window that cannot be satisfied, is a usage error and must
     // cost nothing and read nothing.
@@ -3419,7 +3444,7 @@ fn cmd_search(
     let cfg = resolve_store_config(
         &config,
         destination.as_deref(),
-        repo,
+        repo.clone(),
         key_file,
         connections,
         options,
@@ -3454,6 +3479,23 @@ fn cmd_search(
         }
     };
 
+    if let Some(query) = text.as_deref() {
+        let code = cmd_search_text(
+            query,
+            scan,
+            json,
+            cost,
+            destination.as_deref(),
+            repo.as_deref(),
+            &cfg,
+            &store,
+            &mk,
+            &report,
+        );
+        reap_remote(&cfg, keep_ssh_masters);
+        return code;
+    }
+
     let code = if json {
         for warning in report.machine_recall_warnings() {
             eprintln!("{warning}");
@@ -3477,6 +3519,151 @@ fn cmd_search(
 
     reap_remote(&cfg, keep_ssh_masters);
     code
+}
+
+fn cmd_search_text(
+    query: &str,
+    scan: bool,
+    json: bool,
+    cost: bool,
+    destination: Option<&str>,
+    repo_override: Option<&str>,
+    cfg: &StoreConfig,
+    store: &BackupStore,
+    mk: &MasterKey,
+    report: &chat_stasher::search::SearchReport,
+) -> ExitCode {
+    let mode = if scan { "scan" } else { "fts" };
+    let selected: BTreeSet<String> = report
+        .hits
+        .iter()
+        .map(|hit| format!("{}/{}", hit.machine, hit.session_id))
+        .collect();
+    let titles: BTreeMap<String, String> = report
+        .hits
+        .iter()
+        .filter_map(|hit| match &hit.title {
+            chat_stasher::search::SessionLabel::Known { text, .. } => {
+                Some((format!("{}/{}", hit.machine, hit.session_id), text.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let query_lower = query.to_lowercase();
+    let mut matches = BTreeSet::new();
+    let mut read_failures = 0usize;
+    let mut suggestion = false;
+
+    if scan {
+        let mut by_machine = BTreeMap::<String, BTreeSet<String>>::new();
+        for id in &selected {
+            if let Some((machine, session)) = id.split_once('/') {
+                by_machine
+                    .entry(machine.to_owned())
+                    .or_default()
+                    .insert(session.to_owned());
+            }
+        }
+        for (machine, sessions) in by_machine {
+            match store.dump_machine_sessions(mk, &machine, &sessions) {
+                Ok(dumped) => {
+                    let found = dumped.len();
+                    for (session, shards) in dumped {
+                        let raw: Vec<u8> = shards.into_iter().flatten().collect();
+                        match chat_stasher::fts::extract_index_text(&raw) {
+                            Ok((fallback_title, body)) => {
+                                let title = titles
+                                    .get(&format!("{machine}/{session}"))
+                                    .map(String::as_str)
+                                    .unwrap_or(&fallback_title);
+                                let searchable = format!("{title}\n{body}").to_lowercase();
+                                if searchable.contains(&query_lower) {
+                                    matches.insert(format!("{machine}/{session}"));
+                                }
+                            }
+                            Err(_) => read_failures += 1,
+                        }
+                    }
+                    read_failures += sessions.len().saturating_sub(found);
+                }
+                Err(_) => read_failures += sessions.len(),
+            }
+        }
+    } else {
+        let Some(cache_root) = scanner::user_cache_dirs().into_iter().next() else {
+            eprintln!("search: mode=fts; no operating-system cache directory is available");
+            return ExitCode::from(3);
+        };
+        let identity = index_identity(destination, repo_override, &cfg.repo_root);
+        let index = chat_stasher::fts::Index::for_destination(&cache_root, &identity);
+        if let Err(error) = index.check() {
+            eprintln!("search: mode=fts; {error:#}");
+            return ExitCode::from(3);
+        }
+        if query.chars().count() < 3 {
+            suggestion = true;
+        } else if let Err(error) = index
+            .search(
+                &format!("\"{}\"", query.replace('"', "\"\"")),
+                i64::MAX as usize,
+            )
+            .map(|hits| {
+                matches.extend(
+                    hits.into_iter()
+                        .map(|hit| hit.id)
+                        .filter(|id| selected.contains(id)),
+                );
+            })
+        {
+            eprintln!("search: mode=fts; {error:#}");
+            return ExitCode::from(3);
+        }
+    }
+
+    if json {
+        let fulltext_cost = report.fulltext_cost();
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": mode,
+                "query_length": query.chars().count(),
+                "selected": selected.len(),
+                "matched": matches.len(),
+                "suggestion": suggestion.then_some("use a query of at least 3 characters"),
+                "read_failures": read_failures,
+                "cost": cost.then(|| serde_json::json!({
+                    "sessions": fulltext_cost.sessions,
+                    "shards": fulltext_cost.shards,
+                    "data_blobs": fulltext_cost.data_blobs,
+                    "plaintext_bytes": fulltext_cost.plaintext_bytes,
+                })),
+            })
+        );
+    } else {
+        println!("[search] mode={mode}");
+        println!("[search] selected={}", selected.len());
+        println!("[search] matched={}", matches.len());
+        if suggestion {
+            println!("[search] suggestion: use a query of at least 3 characters");
+        }
+        if read_failures > 0 {
+            println!("[search] unreadable_sessions={read_failures}");
+        }
+        if cost {
+            let c = report.fulltext_cost();
+            println!(
+                "[search] cost sessions={} shards={} data_blobs={} plaintext_bytes={}",
+                c.sessions, c.shards, c.data_blobs, c.plaintext_bytes
+            );
+        }
+    }
+    if read_failures > 0 || !report.answer_complete() {
+        ExitCode::from(3)
+    } else if matches.is_empty() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// The human report.
@@ -7621,6 +7808,36 @@ mod decision_surface_tests {
     use super::*;
     use clap::CommandFactory;
     use std::fs;
+
+    #[test]
+    fn search_text_modes_parse_and_scan_requires_text() {
+        let cli = Cli::try_parse_from([
+            "chat-stasher",
+            "search",
+            "--repo",
+            "/synthetic/archive",
+            "--text",
+            "synthetic",
+            "--scan",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Search {
+                text: Some(_),
+                scan: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "chat-stasher",
+            "search",
+            "--repo",
+            "/synthetic/archive",
+            "--scan",
+        ])
+        .is_err());
+    }
 
     #[test]
     fn explicit_repo_override_gets_its_own_index_identity() {
