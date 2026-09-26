@@ -167,6 +167,11 @@
       "minLength": 1,
       "description": "Since W205. User-provided browser profile label; older bundles may omit it. Until the user names the profile in the popup, bundles carry the literal placeholder \"Unnamed profile\". The placeholder is not an identity claim: hosts must not treat it as establishing or violating an install-id binding (see EXT-2 / D4). The popup saves a label once and has no rename step today; directly editing the stored record afterwards, once a first user-named label was already sealed under this install_id, makes later bundles carry a second user-named label under the same install_id, which hosts refuse until that install regenerates its identity."
     },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Since W213. The content fingerprint of the capture this bundle was built from: sha256 of `platform` + newline + the raw body as JSON with only that platform's known volatile top-level fields removed (apps/extension/lib/recapture.ts `contentFingerprint`). It is the same value the deliver message's optional `fingerprint` carries (§6.2), placed inside the bundle because the §8 export file holds the payload and nothing else — that way `chat-stasher ingest` of an export line seals the fingerprint onto the shard and `has` (§6.6) answers for content that entered through the manual channel. The host treats it as opaque and never recomputes it. Optional: a platform with no volatile-field table has no derivation, a non-JSON body has none, and every bundle from a build before this field omits the key — absence stays absence. The field is derived from the body the bundle already carries and takes no part in the id or the dedup key, which remain platform.sessionId and file_sha256."
+    },
     "provenance": {
       "type": "object",
       "description": "Immutable ChatGPT source facts recorded at capture. project='unknown' means membership had not been resolved; it is not no-project.",

@@ -59,6 +59,9 @@ export:
   noHistory: "导出：还没有写出过任何导出文件。"
   nothingQueued: 没有可导出的。
   unreadable: 发件箱：读不出来 —— 这个浏览器上下文里没有 IndexedDB。没有生成任何导出文件。
+  noUniqueName: >-
+    导出：没有写出任何文件 —— 这个浏览器上下文生成不了唯一文件名所需要的随机
+    字节。没有任何东西被删除。
 
 backfill:
   paused:

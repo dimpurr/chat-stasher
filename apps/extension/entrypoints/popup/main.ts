@@ -63,16 +63,18 @@ import { openDashboard, summary as fetchSummary } from '../../lib/native-host';
 import { clearFailures } from '../../lib/backfill/failures';
 import {
   buildExportFile,
+  exportNonce,
   listEntries,
   loadLastExport,
   recordExport,
   undeliveredEntries,
 } from '../../lib/outbox';
+import { getInstallIdentity } from '../../lib/install-identity';
 import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { hookStatusOf, loadHookDecline } from '../../lib/hook-status';
 import { liveCaptureOf } from '../../lib/live-capture';
 import { currentReleaseChannel, isPlatformActiveInChannel } from '../../lib/contract';
-import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
+import { exportNoHistory, exportNoUniqueName, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 import { attachInstallIdentityToConsole } from '../../lib/install-identity';
 
@@ -288,8 +290,12 @@ async function onStartBackfill(): Promise<void> {
 /**
  * 🔴 W2 · "Export undelivered captures".
  *
- * Spec §8: the file name is `chat-stasher-export-<UTC yyyymmddThhmmssZ>.jsonl`,
- * one payload per line (verbatim) followed by a `\n`.
+ * Spec §8: the file name is
+ * `chat-stasher-export-<UTC yyyymmddThhmmssZ>-<install_id short form>-<nonce>.jsonl`
+ * (W213: the short install id names the producing browser profile, the nonce
+ * makes the name unique per export — two profiles exporting in one second into
+ * one download directory must not collide), one payload per line (verbatim)
+ * followed by a `\n`.
  *
  * 🔴 The user's click is the user gesture, so `<a download>` is permitted — and
  *    **no** `downloads` permission is used here (it has been removed from the
@@ -298,6 +304,12 @@ async function onStartBackfill(): Promise<void> {
  * 🔴 Exporting **does not delete** any entry: they are still queued in the
  *    outbox, and once the host is reachable again they are confirmed as
  *    duplicates and cleared (§7 — content addressing makes re-sending safe).
+ *
+ * 🔴 W213 · The install segment is omitted when the identity cannot be read —
+ *    the escape hatch must not fail on broken identity storage, and the nonce
+ *    alone keeps the name unique. A nonce that cannot be drawn is a refusal
+ *    with its own note: the same standard the delivery path holds for `crypto`,
+ *    applied to the only file this popup ever writes.
  */
 async function onExportUndelivered(): Promise<void> {
   let entries;
@@ -320,7 +332,24 @@ async function onExportUndelivered(): Promise<void> {
   }
 
   const at = Date.now();
-  const file = buildExportFile(entries, at);
+  const nonce = await exportNonce();
+  if (nonce === null) {
+    console.warn('[chat-stasher] export refused: the random source did not answer');
+    setExportNote(exportNoUniqueName());
+    return;
+  }
+  let installId: string | null = null;
+  try {
+    installId = (await getInstallIdentity()).install_id;
+  } catch (err) {
+    // The name goes out without the install segment rather than staying
+    // unwritten: an export the user cannot produce while the host is missing
+    // is the one loss this path exists to prevent.
+    console.warn('[chat-stasher] install identity unreadable at export time', (err as Error).message);
+    installId = null;
+  }
+
+  const file = buildExportFile(entries, at, installId, nonce);
   const blob = new Blob([file.content], { type: 'application/x-ndjson' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');

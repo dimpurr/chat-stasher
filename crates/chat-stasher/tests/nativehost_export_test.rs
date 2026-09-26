@@ -105,6 +105,32 @@ impl Fixture {
             "sha256": sha256_hex(payload.as_bytes()),
         }))
         .expect("serialise");
+        self.frame_exchange(body)
+    }
+
+    /// Ask the real host §6.6's `has`, through the same Native Messaging frame
+    /// the extension uses, so an assertion about what an install would be told
+    /// is about the shipped binary and not a library call.
+    fn has_via_host(
+        &self,
+        request_id: &str,
+        platform: &str,
+        session_id: &str,
+        fingerprint: &str,
+    ) -> Value {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "type": "has",
+            "request_id": request_id,
+            "platform": platform,
+            "session_id": session_id,
+            "fingerprint": fingerprint,
+        }))
+        .expect("serialise");
+        self.frame_exchange(body)
+    }
+
+    fn frame_exchange(&self, body: Vec<u8>) -> Value {
         let mut frame = (body.len() as u32).to_ne_bytes().to_vec();
         frame.extend_from_slice(&body);
 
@@ -411,4 +437,94 @@ fn a_plain_json_file_keeps_the_raw_fallback_and_the_export_does_not() {
         .inbox
         .join("chat-stasher-export-20260912T040404Z.jsonl")
         .exists());
+}
+
+/// W213 / EXT-4 · A fingerprint that entered the stage by export → `ingest`
+/// must answer `has` exactly as a live delivery's does.
+///
+/// The scenario this test exists for (the W203 audit's "Export import dedupe",
+/// P1): the host is down for a long time, a profile exports its outbox, the
+/// user ingests the file by hand, and only much later the host comes back and
+/// the same profile captures the same conversation again — possibly
+/// byte-different (a volatile field moved), which is exactly what the
+/// fingerprint exists to bridge. The redelivery pre-gate asks `has`; before
+/// W213 the imported copy held no fingerprint, the answer was `held: false`,
+/// and the archive grew a second copy. After W213 the bundle carries the
+/// fingerprint inside itself, `ingest` seals it, and the answer is honest.
+#[test]
+fn a_fingerprint_imported_from_an_export_answers_has() {
+    let fixture = Fixture::new();
+    let fingerprint = "c294ed8b34c417f0fc80e81723e2a072dcc52f52b1d86960479075e4af2a5c5c";
+    let line = format!(
+        r#"{{"schema":"chat-stasher/inbox@2","platform":"chatgpt","sessionId":"sess-has","install_id":"7d3e9f21-1111-4222-8333-444444444444","browser":"Chrome","profile_label":"Unnamed profile","fingerprint":"{fingerprint}","capturedAt":"2026-09-12T00:00:00.000Z","parsed":{{"hasJson":true,"keys":["mapping","current_node"]}},"raw":{{"text":"{{\"mapping\":{{}}}}","bytes":14}}}}"#
+    );
+    fixture.write_export(
+        "chat-stasher-export-20260912T070707Z-7d3e9f21-4f2a61.jsonl",
+        &[&line],
+    );
+
+    let output = fixture.ingest();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "import stdout: {}",
+        Fixture::stdout(&output)
+    );
+
+    let answer = fixture.has_via_host("req-has-1", "chatgpt", "sess-has", fingerprint);
+    assert_eq!(answer["ok"], true, "has nacked: {answer}");
+    assert_eq!(
+        answer["held"], true,
+        "an imported bundle must answer `held: true` for its own fingerprint: {answer}"
+    );
+    assert_eq!(
+        answer["shard"], "000001.jsonl",
+        "the answer must name the shard it came from: {answer}"
+    );
+}
+
+/// The negative half, so the positive one cannot pass vacuously: a line from a
+/// pre-W213 export (or a fingerprint-less platform) seals with no fingerprint,
+/// and `has` answers the measured `held: false` — import never invents a value
+/// a delivery never carried (invariant 1: absence stays absence).
+#[test]
+fn a_pre_w213_export_line_stores_no_fingerprint_and_has_says_so() {
+    let fixture = Fixture::new();
+    let line = bundle(
+        "sess-fpold",
+        r#"{"mapping":{"node-0":{"id":"node-0"}},"current_node":"node-0"}"#,
+    );
+    fixture.write_export(
+        "chat-stasher-export-20260912T080808Z-7d3e9f21-5b3c77.jsonl",
+        &[&line],
+    );
+
+    let output = fixture.ingest();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}",
+        Fixture::stdout(&output)
+    );
+
+    let records = fixture.shard_records("deepseek.sess-fpold");
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0].get("fingerprint").is_none(),
+        "an un-fingerprinted export line must not gain one at import: {}",
+        records[0]
+    );
+
+    // Nothing holds this fingerprint. That is a *measurement* — the stage was
+    // really read — and its consequence is a redelivery, which the byte-level
+    // duplicate scan will recognise for identical bytes (§7).
+    let answer = fixture.has_via_host(
+        "req-has-2",
+        "deepseek",
+        "sess-fpold",
+        "c294ed8b34c417f0fc80e81723e2a072dcc52f52b1d86960479075e4af2a5c5c",
+    );
+    assert_eq!(answer["ok"], true, "has nacked: {answer}");
+    assert_eq!(answer["held"], false, "no fingerprint, so nothing to hold");
+    assert_eq!(answer["shard"], serde_json::Value::Null);
 }
