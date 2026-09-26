@@ -14,6 +14,27 @@ pub(super) fn esc(s: &str) -> String {
     crate::view::esc(s)
 }
 
+/// An index excerpt as HTML: every character of it escaped, and the runs the
+/// index marked as the match wrapped in `<mark>`.
+///
+/// The escaping happens **per run**, on the conversation text, and the only
+/// markup added is the two tags this function writes — so conversation text
+/// cannot become markup by containing a tag, and the marker characters cannot
+/// reach the page (the split drops them; see [`crate::fts::marked_segments`]).
+pub(super) fn marked_html(excerpt: &str) -> String {
+    let mut out = String::new();
+    for segment in crate::fts::marked_segments(excerpt) {
+        if segment.matched {
+            out.push_str("<mark>");
+            out.push_str(&esc(&segment.text));
+            out.push_str("</mark>");
+        } else {
+            out.push_str(&esc(&segment.text));
+        }
+    }
+    out
+}
+
 /// `1 234 567 B (1.2 MiB)` — a measurement with its unit, never a bare ratio.
 pub fn fmt_bytes(n: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
@@ -119,6 +140,13 @@ pub(super) fn head(title: &str) -> String {
 /// Every page carries the same three statements. They are the reason the page
 /// can be trusted at a glance, so they are emitted by one function rather than
 /// re-typed per route.
+///
+/// The first statement is the one a route may have to replace: it says the page
+/// holds no conversation text beyond a one-line label, and `/search` shows a
+/// bounded excerpt of indexed conversation around each match. That page uses
+/// [`search_footer`] instead of quietly carrying a sentence that would be false
+/// on it — a footer that is true of most pages and wrong on one is worse than
+/// no footer, because it is read as a property of the page in front of you.
 pub(super) fn footer(data: &UiData) -> String {
     format!(
         "<footer>\n\
@@ -128,16 +156,38 @@ pub(super) fn footer(data: &UiData) -> String {
          characters, recorded in the activity index, which rode that same metadata read. \
          {} session shard blob(s) were fetched by that read — a session's full conversation \
          is fetched only when you click it and then click <i>load</i>, and the cost is shown \
-         before you do.</p>\n\
-         <p>Machines are named by their archive partition id, which is the key the repository \
-         actually partitions on. Times are UTC. No JavaScript, no external asset, no \
-         off-host link is loaded by this page.</p>\n\
-         <p><b>This server is on 127.0.0.1, which is not a security boundary</b> — any other \
-         program on this machine can connect to it. Access is gated only by the random token \
-         in this page's URL. Do not share the URL. The server exits by itself when idle.</p>\n\
-         </footer>\n",
-        data.data_blobs_read
+         before you do.</p>\n{tail}",
+        data.data_blobs_read,
+        tail = footer_tail()
     )
+}
+
+/// The `/search` page's first statement, which says what that page actually
+/// holds: the index is a plaintext cache of conversation text, and the excerpts
+/// on the page come from it rather than from the payload tier.
+pub(super) fn search_footer(data: &UiData) -> String {
+    format!(
+        "<footer>\n\
+         <p><b>Index tier.</b> This page was rendered from one archive-metadata read taken \
+         before the server started plus the local full-text index. Each hit shows at most about \
+         240 characters of conversation text around the match, taken from that index — not from \
+         the archive: the index is a plaintext cache built by <code>chat-stasher index build</code>, \
+         and an excerpt's absence proves nothing about the archive, only about the index. \
+         This page fetched {} session shard blob(s).</p>\n{tail}",
+        data.data_blobs_read,
+        tail = footer_tail()
+    )
+}
+
+/// The two statements every page shares, whatever tier it reads.
+fn footer_tail() -> &'static str {
+    "<p>Machines are named by their archive partition id, which is the key the repository \
+     actually partitions on. Times are UTC. No JavaScript, no external asset, no \
+     off-host link is loaded by this page.</p>\n\
+     <p><b>This server is on 127.0.0.1, which is not a security boundary</b> — any other \
+     program on this machine can connect to it. Access is gated only by the random token \
+     in this page's URL. Do not share the URL. The server exits by itself when idle.</p>\n\
+     </footer>\n"
 }
 
 pub(super) fn completeness_banner(data: &UiData) -> String {

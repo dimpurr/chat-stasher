@@ -16,9 +16,10 @@ use crate::selector::{Resolved, UnplacedBy};
 use super::facets;
 use super::html::{completeness_banner, describe_selector, esc, fmt_bytes, fmt_unix, footer, head};
 use super::{
-    index_param, page_from_query, page_window, percent_encode, select, selector_from_query,
-    sort_rows, Content, ContentSource, ListSort, Page, Query, Response, Selection, UiData,
-    UiSession, EXPLICIT_REPO_LABEL, PROVENANCE_FIRST_USER_LINE, PROVENANCE_HARNESS_TITLE,
+    index_param, page_from_query, page_href, page_window, paging_nav, percent_encode, select,
+    selector_from_query, sort_rows, Content, ContentSource, ListSort, Page, Query, Response,
+    Selection, UiData, UiSession, EXPLICIT_REPO_LABEL, LIST_CARRY, PROVENANCE_FIRST_USER_LINE,
+    PROVENANCE_HARNESS_TITLE,
 };
 
 pub(super) fn list_page(params: &Query, token: &str, data: &UiData) -> Response {
@@ -148,7 +149,7 @@ fn page_sessions(
                  <b>{total}</b> session(s), but this window starts past the last of them. \
                  That is a paging position, not a match count: it is not the same as matching \
                  nothing. <a href=\"{back}\">Back to page 1</a></div>\n",
-                back = page_href(params, token, 0),
+                back = page_href("/sessions", &LIST_CARRY, params, token, 0),
             ));
         } else {
             out.push_str(
@@ -287,92 +288,17 @@ fn range_sentence(page: &Page, ordered: &[&UiSession], shown: usize) -> String {
     out
 }
 
-/// The URL one paging link points at: the query this page was reached by,
-/// moved to a new window. Only the vocabulary the two list routes read is
-/// carried — the selector keys plus `sort` and `limit` — each key's **first**
-/// value, the same one `selector_from_query` reads, so a link cannot smuggle
-/// in a second meaning for a key. `offset` is set to the one thing the link
-/// changes and the token is appended last, the way every link on the page
-/// carries it.
-fn page_href(params: &Query, token: &str, offset: usize) -> String {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut parts: Vec<String> = Vec::new();
-    for (key, value) in params {
-        if !matches!(
-            key.as_str(),
-            "session" | "machine" | "harness" | "day" | "since" | "until" | "sort" | "limit"
-        ) || !seen.insert(key.as_str())
-        {
-            continue;
-        }
-        parts.push(format!("{}={}", percent_encode(key), percent_encode(value)));
-    }
-    parts.push(format!("offset={offset}"));
-    parts.push(format!("token={}", percent_encode(token)));
-    format!("/sessions?{}", parts.join("&"))
-}
-
-/// The paging links, in the wireframe's order: previous, the page numbers,
-/// next. The numbers are the first page, the last page and the two pages
-/// around the current one (§5.2: never more than seven), with `…` where the
-/// sequence jumps; the current page is where the reader already is, so it is
-/// printed, not linked. A list that fits one window has no nav at all — the
-/// range sentence above already says so — mirroring the reader's window
-/// links, which appear only when there is something to page to.
+/// The paging links for this route: the shared builder (29-UI-DESIGN §5.2),
+/// pointed at `/sessions` with the keys this route reads.
 fn list_nav(params: &Query, token: &str, page: Page, total: usize) -> String {
-    let limit = page.limit.max(1);
-    let pages = total.div_ceil(limit);
-    if pages <= 1 {
-        return String::new();
-    }
-    // The window is pinned to the last page when it starts past the end: the
-    // fourth sentence's empty window is a position, and the position nearest
-    // it that is a page at all is the last one. The clamp is also what keeps
-    // `offset` out of this arithmetic — it is deliberately unclamped (see
-    // `Page`), so `usize::MAX / 1 + 1` is a real input here, and it overflows.
-    // Every other sum below is derived from `total`, the way the reader's
-    // window links are, so this is the only one that needs it.
-    let current = page.offset.min(total.saturating_sub(1)) / limit + 1;
-    let mut numbers: BTreeSet<usize> = BTreeSet::from([1, pages]);
-    for delta in [-2isize, -1, 0, 1, 2] {
-        let candidate = current as isize + delta;
-        if (1..=pages as isize).contains(&candidate) {
-            numbers.insert(candidate as usize);
-        }
-    }
-    let mut parts: Vec<String> = Vec::new();
-    if page.offset >= limit {
-        parts.push(format!(
-            "<a href=\"{}\">‹ previous</a>",
-            page_href(params, token, page.offset - limit)
-        ));
-    }
-    let mut last_number: Option<usize> = None;
-    for n in &numbers {
-        if let Some(previous) = last_number {
-            if *n > previous + 1 {
-                parts.push("…".to_string());
-            }
-        }
-        if *n == current {
-            parts.push(format!("<b aria-current=\"page\">{n}</b>"));
-        } else {
-            parts.push(format!(
-                "<a href=\"{}\">{n}</a>",
-                page_href(params, token, (n - 1) * limit)
-            ));
-        }
-        last_number = Some(*n);
-    }
-    if page.offset.saturating_add(limit) < total {
-        parts.push(format!(
-            "<a href=\"{}\">next ›</a>",
-            page_href(params, token, page.offset + limit)
-        ));
-    }
-    format!(
-        "<nav class=sub aria-label=\"session pages\">{}</nav>\n",
-        parts.join(" · ")
+    paging_nav(
+        "/sessions",
+        &LIST_CARRY,
+        "session pages",
+        params,
+        token,
+        page,
+        total,
     )
 }
 

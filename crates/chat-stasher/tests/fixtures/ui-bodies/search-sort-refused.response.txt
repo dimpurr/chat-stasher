@@ -1,0 +1,4 @@
+status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+ui: `sort` is a `/sessions` parameter and `/search` does not sort — its rows are in the index's relevance order. Got `sort=size-desc`

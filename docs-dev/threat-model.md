@@ -157,7 +157,7 @@ your user, it is the dominant risk in this document.
 | | |
 |---|---|
 | **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:173`). Loopback is not a security boundary. |
-| **Cannot see** | Anything, without the random token printed in the URL at launch. Every route checks it with a constant-time comparison before doing anything else, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:256`, `:180`). |
+| **Cannot see** | Anything, without the random token printed in the URL at launch. Every route checks it with a constant-time comparison before doing anything else, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:265`, `:180`). |
 
 **Who can start it.** There are two ways, and both end in the same
 loopback-only, token-gated server:
@@ -204,7 +204,7 @@ What that new path does and does not change:
 
 Two things worth stating plainly:
 
-- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui/sessions.rs:55`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
+- **Opening a conversation is a GET request that fetches and decrypts it** (`crates/chat-stasher/src/ui/sessions.rs:56`). That is acceptable only because the per-launch token is the one gate: there is no separate CSRF token and no Origin check. Treat the printed URL as a secret for as long as the process runs. A dashboard started from the popup prints nothing: its URL exists in the extension, in the tab, and nowhere else.
 - **Whether the macOS application firewall prompts for a server bound only to `127.0.0.1` is documented, not verified.** Apple's firewall documentation describes protection against connections from other computers and does not mention loopback either way; third-party documentation states that the application firewall does not filter loopback. We have not observed the behaviour on a machine with the firewall turned on.
 
 ### Someone with physical access to your machine, or your stolen disk
@@ -518,9 +518,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6048-6144`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6128-6224`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6020-6027`).
+  (`crates/chat-stasher/src/main.rs:6100-6107`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -531,7 +531,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4373-4429`).
+  as many words (`crates/chat-stasher/src/main.rs:4453-4509`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -578,7 +578,7 @@ a real limitation of the current code.
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:402-404,6380-6519`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:402-404,6460-6599`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:611-691`) — see exposure 5
@@ -593,7 +593,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,227-327,330-344,471-476`; `crates/chat-stasher/src/main.rs:6681-6912`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:6761-6993`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

@@ -453,11 +453,11 @@ crates/chat-stasher/src/doctor.rs:1836-1885  59f113258db9  lines=50
   <- docs-dev/install.md:800  :: pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndex…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:596  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:227-327  de4f66b2d3bc  lines=101
+crates/chat-stasher/src/fts.rs:557-670  1efaa35d3bb3  lines=114
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:596  :: /// Build/update documents. `load` is called only for new o…
-crates/chat-stasher/src/fts.rs:330-344  b713b3d4d58b  lines=15
+crates/chat-stasher/src/fts.rs:673-687  b713b3d4d58b  lines=15
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:596  :: /// Clear only an FTS cache directory carrying this module'…
-crates/chat-stasher/src/fts.rs:471-476  861efcd76cac  lines=6
+crates/chat-stasher/src/fts.rs:823-828  861efcd76cac  lines=6
   <- docs-dev/threat-model.md:596  :: #[cfg(unix)]
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
   <- docs-dev/privacy.md:304, docs-dev/privacy.md:684  :: /// Subdirectory of the inbox where consumed files are reti…
@@ -513,37 +513,37 @@ crates/chat-stasher/src/main.rs:860-882  f05337c1507c  lines=23
   <- docs-dev/install.md:330  :: /// Register this executable as the browsers' Native Messag…
 crates/chat-stasher/src/main.rs:883-925  00c9d6ccdc4b  lines=43
   <- docs-dev/install.md:62  :: InstallNativeHost {
-crates/chat-stasher/src/main.rs:4170-4183  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:4250-4263  6e297c93e74c  lines=14
   <- docs-dev/install.md:455  :: Err(e) => {
-crates/chat-stasher/src/main.rs:4173-4181  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:4253-4261  7606cd68232e  lines=9
   <- docs-dev/install.md:494  :: }
-crates/chat-stasher/src/main.rs:4185-4194  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:4265-4274  a14261353a59  lines=10
   <- docs-dev/install.md:491  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:4206-4230  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:4286-4310  6d97af905715  lines=25
   <- docs-dev/install.md:459  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:4373-4429  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:4453-4509  d1e3f53d40dc  lines=57
   <- docs-dev/threat-model.md:534  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:6020-6027  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:6100-6107  f369ca3fd940  lines=8
   <- docs-dev/threat-model.md:523  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:6048-6144  9bab85dd14b4  lines=97
+crates/chat-stasher/src/main.rs:6128-6224  9bab85dd14b4  lines=97
   <- docs-dev/threat-model.md:521  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:6131-6143  fcc341adabd7  lines=13
+crates/chat-stasher/src/main.rs:6211-6223  fcc341adabd7  lines=13
   <- SECURITY.md:70  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:6380-6519  30a9e386a35b  lines=140
+crates/chat-stasher/src/main.rs:6460-6599  30a9e386a35b  lines=140
   <- docs-dev/threat-model.md:581  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:6681-6912  485a77b99e13  lines=232
+crates/chat-stasher/src/main.rs:6761-6993  0cd0ab027103  lines=233
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:596  :: fn cmd_index(action: IndexAction) -> ExitCode {
-crates/chat-stasher/src/main.rs:9115-9125  2a1dbefed1f6  lines=11
+crates/chat-stasher/src/main.rs:9196-9206  2a1dbefed1f6  lines=11
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12063-12083  1156efd1ea2d  lines=21
+crates/chat-stasher/src/main.rs:12144-12164  1156efd1ea2d  lines=21
   <- docs-dev/install.md:777  :: // `status` is not a second exception to "an unusable confi…
-crates/chat-stasher/src/main.rs:12086-12088  a9f17cb346dc  lines=3
+crates/chat-stasher/src/main.rs:12167-12169  a9f17cb346dc  lines=3
   <- docs-dev/install.md:738  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:12119-12160  7f5acb93bd19  lines=42
+crates/chat-stasher/src/main.rs:12200-12241  7f5acb93bd19  lines=42
   <- docs-dev/install.md:767  :: // B84 — and the third case, the one that reads wrong in a …
-crates/chat-stasher/src/main.rs:12388-12401  3f28f15c93b2  lines=14
+crates/chat-stasher/src/main.rs:12469-12482  3f28f15c93b2  lines=14
   <- docs-dev/install.md:733  :: /// The scan half of `status`.
-crates/chat-stasher/src/main.rs:12396-12686  aac75b5f81dc  lines=291
+crates/chat-stasher/src/main.rs:12477-12767  aac75b5f81dc  lines=291
   <- docs-dev/install.md:754  :: /// `sessions = true` restores the full per-session table —…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs-dev/privacy.md:631, docs-dev/threat-model.md:400  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
@@ -617,7 +617,7 @@ crates/chat-stasher/src/store.rs:1400-1404  e915d9a10309  lines=5
   <- docs-dev/threat-model.md:565  :: }
 crates/chat-stasher/src/store.rs:1549-1554  4a031ff70c84  lines=6
   <- docs-dev/install.md:443, docs-dev/install.md:533  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
-crates/chat-stasher/src/ui/sessions.rs:55  c1f3dff68b88  lines=1
+crates/chat-stasher/src/ui/sessions.rs:56  c1f3dff68b88  lines=1
   <- docs-dev/threat-model.md:207  :: pub(super) fn content_page(params: &Query, data: &UiData, c…
 crates/chat-stasher/src/view.rs:138-150  605bc65511cd  lines=13
   <- docs-dev/threat-model.md:179  :: if status == 0 {
@@ -627,5 +627,5 @@ crates/chat-stasher/src/view.rs:173  b5e212be96e8  lines=1
   <- docs-dev/threat-model.md:159  :: pub fn bind_ephemeral() -> std::io::Result<TcpListener> {
 crates/chat-stasher/src/view.rs:180  5ac58701d728  lines=1
   <- docs-dev/threat-model.md:160  :: fn ct_eq(a: &str, b: &str) -> bool {
-crates/chat-stasher/src/view.rs:256  7b4316e08fad  lines=1
+crates/chat-stasher/src/view.rs:265  7b4316e08fad  lines=1
   <- docs-dev/threat-model.md:160  :: pub fn route(

@@ -44,7 +44,7 @@ use std::process::{Command, Output};
 use chat_stasher::activity::TimeSource;
 use chat_stasher::normalize::{normalize, Block, Conversation};
 use chat_stasher::search::SessionLabel;
-use chat_stasher::ui::{handle, split_target, Content, ContentSource, UiData, UiSession};
+use chat_stasher::ui::{handle, split_target, Content, ContentSource, NoIndex, UiData, UiSession};
 
 // --------------------------------------------------------------- fixtures
 
@@ -344,6 +344,9 @@ fn the_reader_page_names_the_branch_it_followed() {
         "t",
         &data_for("claude"),
         &Body(CLAUDE_DETAIL, "claude"),
+        // `/reader` is not a search route: the text index is not reachable
+        // from here, and `NoIndex` is the implementation that says so.
+        &NoIndex,
     )
     .expect("`/reader` is a route");
     assert_eq!(response.status, 200, "{}", response.body);
@@ -380,6 +383,7 @@ fn the_reader_page_does_not_claim_a_branch_it_could_not_walk() {
         "t",
         &data_for("claude"),
         &Body(leaked, "claude"),
+        &NoIndex,
     )
     .expect("`/reader` is a route");
 

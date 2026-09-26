@@ -24,12 +24,18 @@
 #    below checks that its edit landed *before* it judges the checker — a stale
 #    coordinate must fail loudly here, never pass quietly.
 #
-#    Probe 1 goes one step further since W33: its line number is not written
-#    down at all. A two-line edit elsewhere in docs-dev/threat-model.md moved the
-#    dashboard row from :148 to :150 and the hardcoded 148 silently stopped
-#    pointing at it. The probe now finds the line by its content and refuses to
-#    run unless exactly one line matches, so the next such move is a loud void
-#    here instead of a probe that edits an uncited line and passes.
+#    Probe 1 goes two steps further, and both steps were paid for by a rot.
+#    Since W33 no line number is written down: a two-line edit elsewhere in
+#    docs-dev/threat-model.md moved the dashboard row from :148 to :150 and the
+#    hardcoded 148 silently stopped pointing at it. Since W193 not even the
+#    citation text is written down: the literal `view.rs:256`, `:180` stopped
+#    matching once nine lines were added above `pub fn route(` and the citation,
+#    correctly, became `view.rs:265`, `:180` — so the probe applied no edit at
+#    all, called itself void, and judged nothing while the document it was
+#    judging was right. What is written down now is the *shape*: the probe asks
+#    the checker's own parser for a continuation citation and moves the first one
+#    it can onto a legal line. That cannot rot with the code, and finding nothing
+#    is a loud void, never a quiet pass.
 
 set -u
 
@@ -60,34 +66,92 @@ expect() { # expect <期望退出码> <实际退出码> <说明>
 echo "=============================================================="
 echo "Probe 1: move a citation to a line that exists, is not empty, and"
 echo "  has nothing to do with the claim it is attached to."
-# The coordinate is a content match, never a line number: a hardcoded number
-# rotted once already (W33) and the probe then edited an unrelated line. The
-# anchor is the citation itself — view.rs:256 immediately followed by the
-# continuation `:180` on the dashboard row — and the guard below refuses to run
-# unless it is on exactly one line.
-PROBE1_ANCHOR='view.rs:256`, `:180`'
-PROBE1_HITS="$(grep -c -F "$PROBE1_ANCHOR" "$REPO/docs-dev/threat-model.md")"
-PROBE1_LINE="$(grep -n -F "$PROBE1_ANCHOR" "$REPO/docs-dev/threat-model.md" | head -1 | cut -d: -f1)"
-echo "  Target: docs-dev/threat-model.md:${PROBE1_LINE:-none}, \`:180\` -> \`:1\`"
-echo "  (Chosen because it is a *continuation* citation: the file name is"
-echo "   omitted and inferred from the citation before it on the same line, so"
-echo "   this exercises the other parsing branch. view.rs:1 is that module's own"
-echo "   doc comment — it exists, it is not empty, and it has nothing to do with"
-echo "   the constant-time token check the sentence cites. That is exactly what"
-echo "   the previous checker let through: bounds and non-emptiness were the"
-echo "   whole test.)"
+# The target is found by shape, never by a written-down coordinate — and both
+# kinds of coordinate have now rotted: the line number (W33, see the header) and
+# then the citation text itself (W193: `view.rs:256`, `:180` became `view.rs:265`,
+# `:180` when nine lines went in above `pub fn route(`, so the probe applied no
+# edit and judged nothing).
+#
+# So the probe asks the checker's own parser which citations in the document are
+# continuations — a bare `:N` that inherits the file named before it in the same
+# sentence — and moves the first one it can. Spelling that shape out a second
+# time as a regex here would be a second answer to "what is a citation", which is
+# what check-citation-drift.py's parse_text() exists to prevent; probe 5 imports
+# the same module for the same reason.
+#
+# The destination is always line 1 of the file the continuation inherits, and a
+# candidate is skipped unless line 1 exists and is non-empty: the red has to come
+# from the citation pointing somewhere else, never from the line being out of
+# bounds or blank, which is the hole the first checker had.
+PROBE1_PICK="$(python3 - "$REPO" <<'PY'
+import importlib.util, os, sys
+
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location(
+    "citation_drift", os.path.join(root, "scripts", "check-citation-drift.py")
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+doc = "docs-dev/threat-model.md"
+with open(os.path.join(root, doc), encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+
+citations, _ = module.parse_text(doc, lines, module.build_basename_index())
+
+for cit in citations:
+    if not cit.raw.startswith(":"):  # the file name is written down: not this branch
+        continue
+    if cit.start != cit.end or cit.start == 1:  # a range, or already on line 1
+        continue
+    if f"`{cit.raw}`" not in lines[cit.doc_line - 1]:
+        continue  # the citation is not literally on that line; an edit would miss
+    try:
+        with open(os.path.join(root, cit.target), encoding="utf-8", errors="replace") as fh:
+            body = fh.read().splitlines()
+    except OSError:
+        continue
+    first = body[0].strip() if body else ""
+    if not first:
+        continue  # line 1 is absent or blank: a red there would prove nothing
+    print(f"{cit.doc_line}\t{cit.raw}\t{cit.target}\t{first[:60]}")
+    sys.exit(0)
+
+print(f"no moveable continuation citation is left in {doc}", file=sys.stderr)
+sys.exit(1)
+PY
+)"
+PROBE1_LINE="$(printf '%s\n' "$PROBE1_PICK" | cut -f1)"
+PROBE1_OLD="$(printf '%s\n' "$PROBE1_PICK" | cut -f2)"
+PROBE1_TARGET="$(printf '%s\n' "$PROBE1_PICK" | cut -f3)"
+PROBE1_FIRST="$(printf '%s\n' "$PROBE1_PICK" | cut -f4)"
+if [ -n "$PROBE1_LINE" ]; then
+  echo "  Target: docs-dev/threat-model.md:${PROBE1_LINE}, \`${PROBE1_OLD}\` -> \`:1\`"
+  echo "  (Chosen because it is a *continuation* citation: the file name is"
+  echo "   omitted and inferred from the citation before it on the same line, so"
+  echo "   this exercises the other parsing branch. It inherits ${PROBE1_TARGET},"
+  echo "   whose line 1 is: ${PROBE1_FIRST}"
+  echo "   — that line exists, it is not empty, and it has nothing to do with the"
+  echo "   claim the sentence makes. That is exactly what the previous checker let"
+  echo "   through: bounds and non-emptiness were the whole test.)"
+else
+  echo "  Target: none — see the void report below"
+fi
 echo "=============================================================="
-if [ "$PROBE1_HITS" != "1" ] || [ -z "$PROBE1_LINE" ]; then
-  echo "  ✘ probe 1's anchor is on ${PROBE1_HITS} line(s) of docs-dev/threat-model.md, not 1;"
-  echo "    the selftest itself is void (the citation moved, or the wording changed)"
+if [ -z "$PROBE1_LINE" ] || [ -z "$PROBE1_OLD" ] || [ -z "$PROBE1_TARGET" ]; then
+  echo "  ✘ probe 1 found no continuation citation it can move onto a legal line;"
+  echo "    the selftest itself is void (the shape left the document, or the line"
+  echo "    it would move to is gone)"
   FAILED=1
-  PROBE1_LINE=""
 fi
 cp "$REPO/docs-dev/threat-model.md" "$TMP/threat-model.md"
 if [ -n "$PROBE1_LINE" ]; then
-  sed -i '' "${PROBE1_LINE}s/\`:180\`/\`:1\`/" "$REPO/docs-dev/threat-model.md"
-  if ! sed -n "${PROBE1_LINE}p" "$REPO/docs-dev/threat-model.md" | grep -q -F '`:1`'; then
-    echo "  ✘ probe 1 could not modify the document; the selftest itself is void"
+  sed -i '' "${PROBE1_LINE}s/\`${PROBE1_OLD}\`/\`:1\`/" "$REPO/docs-dev/threat-model.md"
+  PROBE1_AFTER="$(sed -n "${PROBE1_LINE}p" "$REPO/docs-dev/threat-model.md")"
+  if printf '%s\n' "$PROBE1_AFTER" | grep -q -F "\`${PROBE1_OLD}\`" \
+    || ! printf '%s\n' "$PROBE1_AFTER" | grep -q -F '`:1`'; then
+    echo "  ✘ probe 1's edit did not land on docs-dev/threat-model.md:${PROBE1_LINE};"
+    echo "    the selftest itself is void"
     FAILED=1
   fi
 fi

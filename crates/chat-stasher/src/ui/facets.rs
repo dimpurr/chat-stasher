@@ -393,9 +393,16 @@ mod tests {
 
     fn req(target: &str, data: &crate::ui::UiData) -> String {
         let (path, params) = crate::ui::split_target(target);
-        crate::ui::handle(path, &params, "t", data, &crate::ui::NoContent)
-            .unwrap_or_else(|| panic!("`{target}` must be a known route"))
-            .body
+        crate::ui::handle(
+            path,
+            &params,
+            "t",
+            data,
+            &crate::ui::NoContent,
+            &crate::ui::NoIndex,
+        )
+        .unwrap_or_else(|| panic!("`{target}` must be a known route"))
+        .body
     }
 
     /// The bar block of a rendered list page: everything inside the nav that

@@ -212,6 +212,7 @@ The dashboard shows every machine side by side, and `status --destination <name>
 ## Getting your conversations back
 
 - **Browse.** `chat-stasher ui` opens a dashboard on `127.0.0.1`, and needs no flag when the config leaves the choice unambiguous (one declared destination, or a default recorded). It shows totals, a machine × source matrix and a weekly heatmap, and you can drill into any cell. The list is sorted and paged on the server, and a conversation opens in a reader that fetches and decrypts that one session, printing the byte cost first.
+- **Search inside conversations.** The dashboard's `/search` runs a query against a **local full-text index**, which `chat-stasher index build` creates from the archive into the operating-system cache directory. It matches literal substrings (including scripts without spaces) from three characters up, and every answer states how much of the destination that index covers — a session the index has not read cannot be searched, and the page says so rather than reporting no match. `chat-stasher index clear` deletes the index.
 - **Find.** `chat-stasher search` finds sessions by machine, tool and **conversation date**: `--day 2026-01-15`, or `--since` / `--until`.
 - **Take out.** `chat-stasher export --out <dir>` writes exactly the sessions `search` found as files in their native format, plus a checksummed `manifest.json`. `--dry-run` shows the cost and writes nothing. `chat-stasher read` prints a single session.
 
@@ -260,13 +261,15 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 - **No `restore` command.** Sessions come out with `read` and `export`, but nothing writes them back into a tool.
 - **The extension is not in a store**, and backfill is not yet verified end to end on any platform.
 - **No prebuilt Linux or Windows binary in a stable release yet**; they arrive with 0.5.0.
-- **The dashboard has no full-text search yet.** The conversation reader is there; searching inside conversations is not.
+- **Search covers only what the local index holds, and only the dashboard can use it.** The index is a separate cache built by an explicit command; anything it has not read is unsearchable until you rebuild it, and the search page says which sessions that is. There is no command-line twin yet (`search --text`), and no linear scan mode for the one- and two-character queries the index cannot answer.
 
 ## Roadmap
 
 - Cloudflare R2 as the documented default remote.
 - A small macOS menubar app showing how fresh each backup is.
-- Full-text search and platform filters in the dashboard.
+- Platform and date facets on the search page, and a command-line `search --text`.
+
+Sessions are in the dashboard's search results because the index holds the text SQLite can match on; the archive itself is never the search target, so a stale index shows stale matches until it is rebuilt.
 - A per-platform coverage page in the extension (next extension release), and store listings.
 
 ## Documentation

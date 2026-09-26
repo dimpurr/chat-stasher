@@ -18,10 +18,13 @@ This is the short version: what chat-stasher does with your conversations, who c
 |---|---|---|
 | The extension's outbox, in your browser profile, until the host confirms delivery | **No** | Anything running as your user |
 | The stage folder on your disk | **No** | Anything running as your user |
+| The optional local full-text index, if you built one | **No** | Anything running as your user |
 | Your destination: local folder, SFTP or R2 | **Yes** | Only someone with the key file |
 | The master key file, on your disk | Written readable only by you (`0600`, on macOS and Linux) | Anything running as your user |
 
 Your storage provider holds encrypted objects only. It can still see how much you store, and when you back up.
+
+The **full-text index** is the one place conversation text is written outside the archive. `chat-stasher index build` reads changed sessions, extracts user and assistant text, and stores it in a plaintext SQLite database under the operating-system cache directory (mode `0600`, in a `0700` directory, on macOS and Linux). It exists only so the dashboard's search can work; it is never uploaded, and `chat-stasher index clear` deletes it.
 
 ## The browser extension
 
@@ -37,7 +40,7 @@ Your storage provider holds encrypted objects only. It can still see how much yo
 ## Keeping and deleting
 
 - **The archive keeps everything, by design.** It exists so that history a tool deleted still survives. Each run adds a snapshot. Nothing in chat-stasher deletes from an archive, and there is no command to delete one conversation from it.
-- **The only thing chat-stasher deletes is its own staged copy**, and only after every destination proves it holds those exact bytes.
+- **The only things chat-stasher deletes are its own copies, never yours**: the staged copy, and only after every destination proves it holds those exact bytes, and — when you ask with `chat-stasher index clear` — the local full-text index. Neither is an archive.
 - **To delete everything,** delete the destination (the local folder, or the bucket or folder at your provider) and its key file. [install.md → Uninstalling](install.md#uninstalling) lists every local path.
 - **Uninstalling the extension** also deletes captures it had not yet delivered.
 

@@ -45,16 +45,18 @@
 //!   weekly heatmap and the time-unknown lists.
 //! * [`sessions`] — `/sessions`, `/session` and the raw `/content` view.
 //! * [`reader`] — `/reader` and the message-block rendering.
-//! * [`json`] — `/api/overview` and `/api/sessions`.
+//! * [`search`] — `/search`, the local full-text index's one screen.
+//! * [`json`] — `/api/overview`, `/api/sessions` and `/api/search`.
 //! * [`facets`] — the platform/agent grouping table (29-UI-DESIGN §2), the
 //!   `/sessions` facet bar, and the group any harness id falls into.
 //!
 //! Everything below is the shared model, the selector bridge, the paging
 //! window and the router.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::activity::TimeSource;
+use crate::fts;
 use crate::overview::OverviewRow;
 use crate::search::{HostSnapshot, SearchReport, SessionLabel};
 use crate::selector::{
@@ -67,6 +69,7 @@ pub(crate) mod html;
 pub(crate) mod json;
 pub(crate) mod overview;
 pub(crate) mod reader;
+pub(crate) mod search;
 pub(crate) mod sessions;
 
 pub use html::describe_selector;
@@ -468,13 +471,114 @@ impl ContentSource for NoContent {
     }
 }
 
+/// The local full-text index's state, as a screen needs to describe it.
+///
+/// Three states, and the distinction is the whole point: a *missing* index has
+/// a build command and no results at all, an *unreadable* one has a repair and
+/// no results at all, and only a ready index can answer a query. Collapsing
+/// them would print "no matches" for a question nothing ever looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexState {
+    /// No index has been built for this destination. Nothing was searched.
+    Missing,
+    /// An index exists and cannot be used. The text is the reason, which names
+    /// the repair.
+    Unreadable(String),
+    /// An index that can answer queries, with what it holds.
+    Ready(fts::IndexSummary),
+}
+
+/// One query's outcome: matches, or the index saying it cannot answer this
+/// query at all. A one-character query is not a zero-hit search.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryResult {
+    Matches(fts::MatchSet),
+    TooShort(fts::QueryTooShort),
+}
+
+/// Everything `/search` needs from the local index, and nothing else.
+///
+/// A trait for the same reason [`ContentSource`] is one: the router stays a
+/// pure function of its arguments and a test can inject a stub, so "only the
+/// search route reads the index" and "each empty answer says which empty
+/// answer it is" are tests rather than claims.
+pub trait TextIndex {
+    /// The index's state and, when ready, what it holds.
+    fn state(&self) -> IndexState;
+
+    /// Every document matching `query`, best rank first.
+    fn query(&self, query: &str) -> Result<QueryResult, String>;
+
+    /// Where `query` first sits inside each of `ids`, in the order given.
+    fn placements(&self, query: &str, ids: &[String]) -> Result<Vec<fts::MatchPlace>, String>;
+}
+
+/// Refuses every query. The default for anything that must not reach the
+/// index.
+pub struct NoIndex;
+
+impl TextIndex for NoIndex {
+    fn state(&self) -> IndexState {
+        IndexState::Unreadable("the text index is disabled for this server".to_string())
+    }
+
+    fn query(&self, _query: &str) -> Result<QueryResult, String> {
+        Err("the text index is disabled for this server".to_string())
+    }
+
+    fn placements(&self, _query: &str, _ids: &[String]) -> Result<Vec<fts::MatchPlace>, String> {
+        Err("the text index is disabled for this server".to_string())
+    }
+}
+
+/// The set of sessions this destination's metadata read holds, keyed the way
+/// the index keys a document: `<machine>/<session_id>`.
+///
+/// Built once per request rather than per hit, because the answer to "is this
+/// hit in this destination" is a lookup, and the two id spellings — the
+/// index's and the archive's — must be joined in exactly one place.
+pub fn archive_document_ids(data: &UiData) -> BTreeSet<String> {
+    data.sessions
+        .iter()
+        .map(|s| format!("{}/{}", s.machine, s.session_id))
+        .collect()
+}
+
+/// Indexed document counts per machine, or per the whole id when it carries no
+/// separator. The index's id is `<machine>/<session_id>`; a machine partition
+/// id never contains `/`, so the split is the machine.
+pub fn machine_of_document_id(id: &str) -> &str {
+    id.split_once('/').map(|(machine, _)| machine).unwrap_or(id)
+}
+
+/// Count documents per machine, for a coverage line that can name a stale
+/// machine rather than only a total.
+pub fn count_by_machine_id<'a>(ids: impl IntoIterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    for id in ids {
+        *out.entry(machine_of_document_id(id).to_string())
+            .or_insert(0) += 1;
+    }
+    out
+}
+
 /// A decoded query string: ordered `(key, value)` pairs.
 pub type Query = Vec<(String, String)>;
 
-/// Percent-decode a query/form component. `+` is *not* a space here: the
-/// links this server emits encode a space as `%20`, and treating `+` as a space
-/// would corrupt a machine partition legitimately containing one.
-fn percent_decode(s: &str) -> String {
+/// Decode one `application/x-www-form-urlencoded` component — what the query
+/// string of a request is.
+///
+/// `+` decodes to a space, because that is what a `+` means there: the search
+/// box is a plain GET form with no JavaScript, and the space a reader types in
+/// it arrives as `+`. Keeping it literal would search for a different string
+/// than the one that was typed.
+///
+/// A machine partition that legitimately contains a `+` is not lost by this:
+/// [`percent_encode`] escapes it as `%2B`, which decodes back to `+` here, so
+/// every link this server emits round-trips. Only a hand-written `+` reads as
+/// a space, which is the reading every browser and query-string parser gives
+/// it.
+fn form_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -494,7 +598,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -515,7 +619,8 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Split `/path?query` and decode the query.
+/// Split `/path?query` and decode the query, which is form-encoded — see
+/// [`form_decode`] for what that means for a `+`.
 pub fn split_target(target: &str) -> (&str, Query) {
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p, q),
@@ -526,7 +631,7 @@ pub fn split_target(target: &str) -> (&str, Query) {
         .filter(|kv| !kv.is_empty())
         .filter_map(|kv| {
             let (k, v) = kv.split_once('=')?;
-            Some((percent_decode(k), percent_decode(v)))
+            Some((form_decode(k), form_decode(v)))
         })
         .collect();
     (path, params)
@@ -771,9 +876,136 @@ pub fn sort_rows<'a>(rows: &[&'a UiSession], sort: ListSort) -> Vec<&'a UiSessio
 /// the two different states §4.2 keeps apart, and the caller renders each in
 /// its own words.
 pub fn page_window<'a>(rows: &'a [&'a UiSession], page: Page) -> &'a [&'a UiSession] {
+    window_of(rows, page)
+}
+
+/// The same window over any sequence. `/search` pages hits that are not
+/// `UiSession`s, and §5.2 is one contract: splitting the arithmetic in two
+/// would be two chances for the two pages to differ.
+pub fn window_of<T>(rows: &[T], page: Page) -> &[T] {
     let start = page.offset.min(rows.len());
     let end = page.offset.saturating_add(page.limit).min(rows.len());
     &rows[start..end]
+}
+
+/// The query keys `/sessions` reads and therefore carries through a paging
+/// link: the selector keys plus `sort` and `limit`. The order is the order the
+/// links spell them in.
+pub const LIST_CARRY: [&str; 8] = [
+    "session", "machine", "harness", "day", "since", "until", "sort", "limit",
+];
+
+/// The query keys `/search` reads: the selector keys, `limit`, and `q` — and
+/// deliberately not `sort`, because a search page's order is the index's
+/// relevance rank rather than one of the list's sortable keys.
+pub const SEARCH_CARRY: [&str; 8] = [
+    "session", "machine", "harness", "day", "since", "until", "limit", "q",
+];
+
+/// The URL one paging link points at: the query this page was reached by,
+/// moved to a new window. `carry` names the vocabulary the route reads — never
+/// a wildcard, so a link cannot carry a key the route would silently ignore —
+/// and only each key's **first** value, the same one `selector_from_query`
+/// reads, so a link cannot smuggle in a second meaning for a key. `offset` is
+/// set to the one thing the link changes and the token is appended last, the
+/// way every link on the page carries it.
+pub fn page_href(path: &str, carry: &[&str], params: &Query, token: &str, offset: usize) -> String {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut parts: Vec<String> = Vec::new();
+    for (key, value) in params {
+        if !carry.contains(&key.as_str()) || !seen.insert(key.as_str()) {
+            continue;
+        }
+        parts.push(format!("{}={}", percent_encode(key), percent_encode(value)));
+    }
+    parts.push(format!("offset={offset}"));
+    parts.push(format!("token={}", percent_encode(token)));
+    format!("{path}?{}", parts.join("&"))
+}
+
+/// The paging links, in the wireframe's order: previous, the page numbers,
+/// next. The numbers are the first page, the last page and the two pages
+/// around the current one (§5.2: never more than seven), with `…` where the
+/// sequence jumps; the current page is where the reader already is, so it is
+/// printed, not linked. A result set that fits one window has no nav at all —
+/// the range sentence above already says so — mirroring the reader's window
+/// links, which appear only when there is something to page to.
+///
+/// Shared by `/sessions` and `/search` because §5.2 is one contract: the two
+/// pages must page the same way, and two copies of this arithmetic would be
+/// two chances to differ. `label` names the nav for assistive technology, and
+/// is the one thing that does differ between the pages.
+pub fn paging_nav(
+    path: &str,
+    carry: &[&str],
+    label: &str,
+    params: &Query,
+    token: &str,
+    page: Page,
+    total: usize,
+) -> String {
+    let limit = page.limit.max(1);
+    let pages = total.div_ceil(limit);
+    if pages <= 1 {
+        return String::new();
+    }
+    // The window is pinned to the last page when it starts past the end: the
+    // fourth sentence's empty window is a position, and the position nearest
+    // it that is a page at all is the last one. The clamp is also what keeps
+    // `offset` out of this arithmetic — it is deliberately unclamped (see
+    // `Page`), so `usize::MAX / 1 + 1` is a real input here, and it overflows.
+    // Every other sum below is derived from `total`, the way the reader's
+    // window links are, so this is the only one that needs it.
+    let current = page.offset.min(total.saturating_sub(1)) / limit + 1;
+    let mut numbers: BTreeSet<usize> = BTreeSet::from([1, pages]);
+    for delta in [-2isize, -1, 0, 1, 2] {
+        let candidate = current as isize + delta;
+        if (1..=pages as isize).contains(&candidate) {
+            numbers.insert(candidate as usize);
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if page.offset >= limit {
+        parts.push(format!(
+            "<a href=\"{}\">‹ previous</a>",
+            page_href(path, carry, params, token, page.offset - limit)
+        ));
+    }
+    let mut last_number: Option<usize> = None;
+    for n in &numbers {
+        if let Some(previous) = last_number {
+            if *n > previous + 1 {
+                parts.push("…".to_string());
+            }
+        }
+        if *n == current {
+            parts.push(format!("<b aria-current=\"page\">{n}</b>"));
+        } else {
+            parts.push(format!(
+                "<a href=\"{}\">{n}</a>",
+                page_href(path, carry, params, token, (n - 1) * limit)
+            ));
+        }
+        last_number = Some(*n);
+    }
+    if page.offset.saturating_add(limit) < total {
+        parts.push(format!(
+            "<a href=\"{}\">next ›</a>",
+            page_href(path, carry, params, token, page.offset + limit)
+        ));
+    }
+    format!(
+        "<nav class=sub aria-label=\"{}\">{}</nav>\n",
+        esc_attr(label),
+        parts.join(" · ")
+    )
+}
+
+/// Escape a string this module controls for use inside a double-quoted HTML
+/// attribute. Not a general-purpose escaper: it exists so a nav label cannot
+/// close the attribute, and takes only literals.
+fn esc_attr(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;")
 }
 
 /// Route one request. `None` == no such route (the caller answers 404).
@@ -787,6 +1019,7 @@ pub fn handle(
     token: &str,
     data: &UiData,
     content: &dyn ContentSource,
+    index: &dyn TextIndex,
 ) -> Option<Response> {
     match path {
         "/" => Some(Response::html(
@@ -798,7 +1031,12 @@ pub fn handle(
         "/session" => Some(sessions::one_session_page(params, token, data)),
         "/content" => Some(sessions::content_page(params, data, content)),
         "/reader" => Some(reader::reader_page(params, token, data, content)),
+        // The one route that reads the text index. It is the only branch that
+        // touches `index`, which is what lets the router test prove the other
+        // routes cannot reach it.
+        "/search" => Some(search::search_page(params, token, data, index)),
         "/api/overview" => Some(Response::json(200, "OK", json::json_overview(data))),
+        "/api/search" => Some(json::api_search(params, token, data, index)),
         "/api/sessions" => Some(
             match (selector_from_query(params), page_from_query(params)) {
                 (Ok(r), Ok(page)) => Response::json(
@@ -834,14 +1072,16 @@ pub(super) fn index_param<'a>(params: &Query, data: &'a UiData) -> Option<&'a Ui
 ///
 /// The one place the route table lives: `view::route` builds its 404 wording
 /// from this, and the router test proves [`handle`] answers each of them.
-pub const ROUTES: [&str; 7] = [
+pub const ROUTES: [&str; 9] = [
     "/",
     "/sessions",
     "/session",
     "/reader",
     "/content",
+    "/search",
     "/api/overview",
     "/api/sessions",
+    "/api/search",
 ];
 
 /// The 404 body `view::route` sends when [`handle`] has no route for a path.
@@ -1230,11 +1470,178 @@ pub(crate) mod fixture {
             })
         }
     }
+
+    /// One document the stub index answers with.
+    ///
+    /// `id` is spelled exactly as the index spells it — `<machine>/<session_id>`
+    /// — so whether a hit is in the dashboard's view is decided by the fixture
+    /// data rather than by the test's own bookkeeping.
+    #[derive(Debug, Clone)]
+    pub struct StubHit {
+        pub id: String,
+        /// The excerpt with `\u{1}`/`\u{2}` around the matched span, or `None`
+        /// for a document whose match was not in its body.
+        pub excerpt: Option<String>,
+        /// `Some(n)` places the match in message `n`; `None` is the
+        /// not-relocated answer.
+        pub ordinal: Option<usize>,
+    }
+
+    impl StubHit {
+        pub fn placed(id: &str, excerpt: &str, ordinal: usize) -> Self {
+            Self {
+                id: id.to_string(),
+                excerpt: Some(excerpt.to_string()),
+                ordinal: Some(ordinal),
+            }
+        }
+
+        /// A document whose match sits in its label: no excerpt, no ordinal.
+        pub fn in_label(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                excerpt: None,
+                ordinal: None,
+            }
+        }
+    }
+
+    /// A `TextIndex` a test drives directly: a fixed state and a fixed set of
+    /// documents, with every call recorded. The record is how a test proves
+    /// *which* routes reached the index, the same way [`CountingContent`] does
+    /// for the payload tier.
+    pub struct StubIndex {
+        pub state: IndexState,
+        pub hits: Vec<StubHit>,
+        /// When set, `placements` fails, so a test can drive the difference
+        /// between "the index could not place the match" and "the index could
+        /// not be read".
+        pub fail_placements: bool,
+        pub calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl StubIndex {
+        /// An index that cannot be built: the coverage the page reports is
+        /// derived from the ids the index holds against the dashboard's own
+        /// rows.
+        pub fn missing() -> Self {
+            Self {
+                state: IndexState::Missing,
+                hits: Vec::new(),
+                fail_placements: false,
+                calls: Default::default(),
+            }
+        }
+
+        pub fn unreadable(reason: &str) -> Self {
+            Self {
+                state: IndexState::Unreadable(reason.to_string()),
+                hits: Vec::new(),
+                fail_placements: false,
+                calls: Default::default(),
+            }
+        }
+
+        /// A readable index holding exactly `ids`, one document each, spelled
+        /// the way the index spells them.
+        ///
+        /// The ids are named rather than counted because that is what the
+        /// index's own summary carries: a stub that only knew how many
+        /// documents it held could not express the case a replaced session
+        /// makes — the same count over a different set of sessions.
+        pub fn ready(ids: &[&str]) -> Self {
+            Self {
+                state: IndexState::Ready(crate::fts::IndexSummary {
+                    ids: ids.iter().map(|id| id.to_string()).collect(),
+                    written_unix: Some(NOW),
+                }),
+                hits: Vec::new(),
+                fail_placements: false,
+                calls: Default::default(),
+            }
+        }
+
+        /// A readable index holding every session of `data` that sits on
+        /// `machines` — the dashboard's own rows, which is what "a complete
+        /// index over this view" means. A machine left out stays named by the
+        /// coverage line as one the index is behind on.
+        pub fn covering(data: &UiData, machines: &[&str]) -> Self {
+            let ids: Vec<String> = archive_document_ids(data)
+                .into_iter()
+                .filter(|id| machines.contains(&machine_of_document_id(id)))
+                .collect();
+            Self::ready(&ids.iter().map(String::as_str).collect::<Vec<_>>())
+        }
+
+        /// The same, answering `hits` for any query long enough to run.
+        pub fn with_hits(mut self, hits: Vec<StubHit>) -> Self {
+            self.hits = hits;
+            self
+        }
+
+        fn called(&self, call: String) {
+            self.calls.borrow_mut().push(call);
+        }
+    }
+
+    impl TextIndex for StubIndex {
+        fn state(&self) -> IndexState {
+            self.called("state".to_string());
+            self.state.clone()
+        }
+
+        fn query(&self, query: &str) -> Result<QueryResult, String> {
+            self.called(format!("query:{query}"));
+            let chars = query.chars().count();
+            if chars < crate::fts::MIN_QUERY_CHARS {
+                return Ok(QueryResult::TooShort(crate::fts::QueryTooShort {
+                    chars,
+                    minimum: crate::fts::MIN_QUERY_CHARS,
+                }));
+            }
+            Ok(QueryResult::Matches(crate::fts::MatchSet {
+                matches: self
+                    .hits
+                    .iter()
+                    .enumerate()
+                    .map(|(position, hit)| crate::fts::RankedMatch {
+                        id: hit.id.clone(),
+                        title: format!("synthetic label {position}"),
+                        snippet: hit.excerpt.clone(),
+                        rank: position as f64,
+                    })
+                    .collect(),
+                truncated: false,
+            }))
+        }
+
+        fn placements(
+            &self,
+            query: &str,
+            ids: &[String],
+        ) -> Result<Vec<crate::fts::MatchPlace>, String> {
+            self.called(format!("placements:{query}:{}", ids.len()));
+            if self.fail_placements {
+                return Err("read of the index failed while placing matches".to_string());
+            }
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    self.hits
+                        .iter()
+                        .find(|hit| &hit.id == id)
+                        .and_then(|hit| hit.ordinal)
+                        .map(|ordinal| crate::fts::MatchPlace::Message { ordinal })
+                        .unwrap_or(crate::fts::MatchPlace::NotRelocated)
+                })
+                .collect())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::{self, CountingContent, NOW};
+    use super::fixture::{self, CountingContent, StubIndex, NOW};
     use super::html::{fmt_age, fmt_bytes};
     use super::reader::reader_window;
     use super::*;
@@ -1244,7 +1651,7 @@ mod tests {
 
     fn req(target: &str, data: &UiData, src: &dyn ContentSource) -> Response {
         let (path, params) = split_target(target);
-        handle(path, &params, "t", data, src)
+        handle(path, &params, "t", data, src, &NoIndex)
             .unwrap_or_else(|| panic!("`{target}` must be a known route"))
     }
 
@@ -1257,7 +1664,7 @@ mod tests {
         for route in ROUTES {
             let (path, params) = split_target(route);
             assert!(
-                handle(path, &params, "t", &d, &NoContent).is_some(),
+                handle(path, &params, "t", &d, &NoContent, &NoIndex).is_some(),
                 "`{route}` is in ROUTES but the router does not answer it"
             );
             assert!(
@@ -1267,7 +1674,7 @@ mod tests {
         }
         let (path, params) = split_target("/no-such-route");
         assert!(
-            handle(path, &params, "t", &d, &NoContent).is_none(),
+            handle(path, &params, "t", &d, &NoContent, &NoIndex).is_none(),
             "a path outside ROUTES must not be answered"
         );
         assert!(no_route_message().starts_with("ui: no such route ("));
@@ -1440,6 +1847,63 @@ mod tests {
         let total: u64 = d.sessions.iter().map(|s| s.bytes).sum();
         assert_eq!(total, 370);
         assert!(req("/", &d, &NoContent).body.contains("370 B"));
+    }
+
+    // ------------------------------------------------------------- text index
+
+    /// The same containment claim for the index: **only `/search` and
+    /// `/api/search` read it.** Every other route must leave it untouched,
+    /// which is what keeps "a page that did not search cannot imply it did"
+    /// a checked property rather than a convention.
+    #[test]
+    fn only_the_search_routes_reach_the_text_index() {
+        let d = fixture::data();
+        let idx = StubIndex::covering(&d, &["m-1", "m-2"]);
+        for target in [
+            "/",
+            "/sessions",
+            "/session?i=0",
+            "/session?i=1",
+            "/api/overview",
+            "/api/sessions",
+        ] {
+            let (path, params) = split_target(target);
+            let response = handle(path, &params, "t", &d, &NoContent, &idx)
+                .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                idx.calls.borrow().is_empty(),
+                "{target} reached the text index; only /search and /api/search may: {:?}",
+                idx.calls.borrow()
+            );
+        }
+        // …and the instrument can say yes: each search route reads the index,
+        // and the page reads it for a query rather than only for its state.
+        for target in ["/search?q=synthetic", "/api/search?q=synthetic"] {
+            let (path, params) = split_target(target);
+            let response = handle(path, &params, "t", &d, &NoContent, &idx)
+                .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+            assert_eq!(response.status, 200, "{target}");
+            assert!(
+                idx.calls
+                    .borrow()
+                    .iter()
+                    .any(|call| call.starts_with("query:")),
+                "{target} must ask the index the query: {:?}",
+                idx.calls.borrow()
+            );
+            idx.calls.borrow_mut().clear();
+        }
+        // The page for a URL with no `q` still reports the index's state, and
+        // asks it no query — nothing was asked, so nothing was searched.
+        let (path, params) = split_target("/search");
+        let response = handle(path, &params, "t", &d, &NoContent, &idx).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            idx.calls.borrow().as_slice(),
+            ["state"],
+            "a page with no query must read the index's state and nothing else"
+        );
     }
 
     // ---------------------------------------------------------- payload tier
@@ -2082,9 +2546,12 @@ mod tests {
         // …and it mirrors the JSON field set for set, not in its own wording
         // alone.
         let (path, params) = split_target("/api/overview");
-        let v: serde_json::Value =
-            serde_json::from_str(&handle(path, &params, "t", &d, &NoContent).unwrap().body)
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &handle(path, &params, "t", &d, &NoContent, &NoIndex)
+                .unwrap()
+                .body,
+        )
+        .unwrap();
         assert_eq!(
             v["machines_without_activity_index"],
             serde_json::json!(["m-3"]),
@@ -2544,9 +3011,12 @@ mod tests {
     fn json_carries_completeness_so_partial_is_not_read_as_empty() {
         let d = fixture::data();
         let (path, params) = split_target("/api/sessions");
-        let full: serde_json::Value =
-            serde_json::from_str(&handle(path, &params, "t", &d, &NoContent).unwrap().body)
-                .unwrap();
+        let full: serde_json::Value = serde_json::from_str(
+            &handle(path, &params, "t", &d, &NoContent, &NoIndex)
+                .unwrap()
+                .body,
+        )
+        .unwrap();
         assert_eq!(full["complete"], serde_json::json!(true));
         assert_eq!(full["payload_loaded"], serde_json::json!(false));
         assert_eq!(full["tier"], serde_json::json!("metadata"));
@@ -2554,9 +3024,12 @@ mod tests {
 
         let p = fixture::partial_data();
         let (path, params) = split_target("/api/sessions");
-        let partial: serde_json::Value =
-            serde_json::from_str(&handle(path, &params, "t", &p, &NoContent).unwrap().body)
-                .unwrap();
+        let partial: serde_json::Value = serde_json::from_str(
+            &handle(path, &params, "t", &p, &NoContent, &NoIndex)
+                .unwrap()
+                .body,
+        )
+        .unwrap();
         assert_eq!(partial["complete"], serde_json::json!(false));
         assert_eq!(
             partial["unreadable_parts"].as_array().map(Vec::len),
@@ -2570,9 +3043,12 @@ mod tests {
     fn overview_json_names_machines_and_their_health() {
         let d = fixture::data();
         let (path, params) = split_target("/api/overview");
-        let v: serde_json::Value =
-            serde_json::from_str(&handle(path, &params, "t", &d, &NoContent).unwrap().body)
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &handle(path, &params, "t", &d, &NoContent, &NoIndex)
+                .unwrap()
+                .body,
+        )
+        .unwrap();
         assert_eq!(v["command"], serde_json::json!("ui"));
         assert_eq!(v["summary"]["sessions_in_view"], serde_json::json!(4));
         assert_eq!(v["summary"]["machines"], serde_json::json!(3));
@@ -2676,11 +3152,17 @@ mod tests {
             "a b/c?d=e&f",
             "sessions/2026-01-15",
             "härte",
+            // A value containing `+` is the case the decoder's own reading of
+            // `+` as a space could break: the link must carry `%2B`, and the
+            // query string must not turn it into a space on the way back.
+            "m+1",
+            "a+b c",
         ] {
-            assert_eq!(percent_decode(&percent_encode(s)), s, "{s}");
+            assert_eq!(form_decode(&percent_encode(s)), s, "{s}");
         }
         assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(percent_encode("a+b"), "a%2Bb");
     }
 
     #[test]
@@ -2705,8 +3187,12 @@ mod tests {
             .1
             .iter()
             .all(|(k, _)| k != "token"));
-        // A `+` is not a space here: a partition may legitimately contain one.
-        assert_eq!(split_target("/?machine=a+b").1[0].1, "a+b");
+        // The query string is form-encoded, so `+` is the space a browser sends
+        // from the search box…
+        assert_eq!(split_target("/?q=hello+world").1[0].1, "hello world");
+        // …and a partition that really contains one still arrives as `+`,
+        // because every link this server prints escapes it as `%2B`.
+        assert_eq!(split_target("/?machine=a%2Bb").1[0].1, "a+b");
     }
 
     #[test]
@@ -3913,8 +4399,15 @@ mod golden {
             Source::Denied => &NoContent,
             Source::Conversation => &conversation,
         };
-        let response = handle(path, &params, "golden-token", &fixture::data(), content)
-            .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+        let response = handle(
+            path,
+            &params,
+            "golden-token",
+            &fixture::data(),
+            content,
+            &NoIndex,
+        )
+        .unwrap_or_else(|| panic!("`{target}` must be a known route"));
         format!(
             "status: {} {}\ncontent-type: {}\n\n{}",
             response.status, response.reason, response.content_type, response.body
@@ -3953,6 +4446,155 @@ mod golden {
             );
         }
         // A stray `UPDATE_UI_GOLDEN` must never read as a passing comparison.
+        assert!(
+            !update,
+            "UPDATE_UI_GOLDEN was set: captures were rewritten, not compared"
+        );
+    }
+
+    /// The `/search` and `/api/search` bodies, one capture per state the page
+    /// can be in. They are the states a zero can be, so pinning their wording
+    /// byte-for-byte is how a reworded sentence is noticed rather than shipped.
+    ///
+    /// The index is a stub, like the payload tier: the live index on this
+    /// machine is neither reproducible nor something a test may read.
+    const SEARCH_CASES: &[(&str, &str, SearchIndex)] = &[
+        ("search-no-query", "/search", SearchIndex::Complete),
+        ("search-hits", "/search?q=synthetic", SearchIndex::WithHits),
+        (
+            "search-hits-paged",
+            "/search?q=synthetic&limit=1&offset=1",
+            SearchIndex::WithHits,
+        ),
+        (
+            "search-no-index",
+            "/search?q=synthetic",
+            SearchIndex::Missing,
+        ),
+        (
+            "search-unreadable-index",
+            "/search?q=synthetic",
+            SearchIndex::Unreadable,
+        ),
+        (
+            "search-coverage-incomplete",
+            "/search?q=synthetic",
+            SearchIndex::ShortOnOneMachine,
+        ),
+        (
+            "search-query-too-short",
+            "/search?q=ab",
+            SearchIndex::Complete,
+        ),
+        (
+            "search-absent",
+            "/search?q=nothing-matches",
+            SearchIndex::Complete,
+        ),
+        (
+            "search-escaped-snippet",
+            "/search?q=script",
+            SearchIndex::Escaping,
+        ),
+        (
+            "api-search-hits",
+            "/api/search?q=synthetic",
+            SearchIndex::WithHits,
+        ),
+        (
+            "api-search-absent",
+            "/api/search?q=nothing-matches",
+            SearchIndex::Complete,
+        ),
+        (
+            "api-search-no-index",
+            "/api/search?q=synthetic",
+            SearchIndex::Missing,
+        ),
+        (
+            "search-sort-refused",
+            "/search?q=synthetic&sort=size-desc",
+            SearchIndex::Complete,
+        ),
+    ];
+
+    /// Which stub the `/search` captures run against.
+    #[derive(Clone, Copy)]
+    enum SearchIndex {
+        /// Every row in view indexed, nothing matching the query.
+        Complete,
+        /// A hit with a marked excerpt and a message to anchor to.
+        WithHits,
+        /// A hit whose excerpt is conversation text full of markup.
+        Escaping,
+        /// One machine short of the view.
+        ShortOnOneMachine,
+        Missing,
+        Unreadable,
+    }
+
+    fn search_index(kind: SearchIndex, data: &UiData) -> fixture::StubIndex {
+        use fixture::StubHit;
+        const ON_M1: &str = "m-1/claude-code.m-1.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        const ON_M2: &str = "m-2/claude-code.m-2.019bf00d-97b6-7eb2-9bf8-eacbacc09766";
+        match kind {
+            SearchIndex::Complete => fixture::StubIndex::covering(data, &["m-1", "m-2"]),
+            SearchIndex::ShortOnOneMachine => fixture::StubIndex::covering(data, &["m-1"]),
+            SearchIndex::Missing => fixture::StubIndex::missing(),
+            SearchIndex::Unreadable => {
+                fixture::StubIndex::unreadable("corrupt FTS index; use `chat-stasher index clear`")
+            }
+            SearchIndex::WithHits => {
+                fixture::StubIndex::covering(data, &["m-1", "m-2"]).with_hits(vec![
+                    StubHit::placed(ON_M1, "the \u{1}synthetic\u{2} first turn", 3),
+                    StubHit::in_label(ON_M2),
+                ])
+            }
+            SearchIndex::Escaping => {
+                fixture::StubIndex::covering(data, &["m-1", "m-2"]).with_hits(vec![
+                    StubHit::placed(
+                        ON_M1,
+                        "text <script>alert(1)</script> & \"quoted\" \u{1}script\u{2} tail",
+                        0,
+                    ),
+                ])
+            }
+        }
+    }
+
+    #[test]
+    fn every_search_body_is_byte_identical_to_the_recorded_capture() {
+        let update = std::env::var_os("UPDATE_UI_GOLDEN").is_some();
+        if update {
+            std::fs::create_dir_all(golden_path("search-no-query").parent().unwrap()).unwrap();
+        }
+        for (name, target, kind) in SEARCH_CASES {
+            let data = fixture::data();
+            let index = search_index(*kind, &data);
+            let (path, params) = split_target(target);
+            let response = handle(path, &params, "golden-token", &data, &NoContent, &index)
+                .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+            let live = format!(
+                "status: {} {}\ncontent-type: {}\n\n{}",
+                response.status, response.reason, response.content_type, response.body
+            );
+            if update {
+                std::fs::write(golden_path(name), &live).unwrap();
+                continue;
+            }
+            let recorded = std::fs::read_to_string(golden_path(name)).unwrap_or_else(|e| {
+                panic!(
+                    "missing capture {}: {e}; regenerate with UPDATE_UI_GOLDEN=1",
+                    golden_path(name).display()
+                )
+            });
+            assert_eq!(
+                live,
+                recorded,
+                "`{target}` changed since the capture in {}",
+                golden_path(name).display()
+            );
+        }
         assert!(
             !update,
             "UPDATE_UI_GOLDEN was set: captures were rewritten, not compared"
