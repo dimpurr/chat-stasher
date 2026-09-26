@@ -42,8 +42,63 @@ final class StatusTests: XCTestCase {
         XCTAssertEqual(value.severity, .healthy)
         XCTAssertEqual(attentionSentences(snapshot(unknown: 2, empty: 1).summary), [
             "2 conversations have no known time",
-            "1 conversations have no conversation content"
+            "1 conversation has no conversation content"
         ])
+    }
+
+    func testPluralAttentionSentencesAndBanner() {
+        XCTAssertEqual(attentionSentences(snapshot(unknown: 1, empty: 2).summary), [
+            "1 conversation has no known time",
+            "2 conversations have no conversation content"
+        ])
+        let machines = [
+            MachineFreshness(machine: "Demo A", newestSnapshotUnix: Int64(now.timeIntervalSince1970), health: "missing_index"),
+            MachineFreshness(machine: "Demo B", newestSnapshotUnix: Int64(now.timeIntervalSince1970), health: "writer_behind")
+        ]
+        let two = ArchiveSnapshot(
+            summary: Summary(machines: 2, harnesses: 1, sessions: 12,
+                             unknownTimeSessions: 0, noConversationContentSessions: 0),
+            refreshedAt: now, machines: machines, days: [], usedConversationFallback: false
+        )
+        XCTAssertEqual(archiveStatus(snapshot: two, failure: nil, now: now).sentence, "2 machines need attention")
+    }
+
+    func testMachineRowNeedsAttentionBeyondSevenDaysEvenWhenHealthy() {
+        XCTAssertTrue(machineNeedsAttention(machine(age: 9 * 86_400, health: "healthy"), now: now))
+        XCTAssertFalse(machineNeedsAttention(machine(age: 7 * 86_400, health: "healthy"), now: now))
+    }
+
+    func testMachineRowNeedsAttentionForMissingIndexWriterBehindAndUnknownHealth() {
+        for health in ["missing_index", "writer_behind", "unknown", "retired_harness"] {
+            XCTAssertTrue(machineNeedsAttention(machine(age: 0, health: health), now: now))
+        }
+        XCTAssertFalse(machineNeedsAttention(machine(age: 0, health: "healthy"), now: now))
+    }
+
+    func testMachineRowWithoutSnapshotTimeIsNotAttentionOnItsOwn() {
+        XCTAssertFalse(machineNeedsAttention(machine(age: 0, health: "healthy", noTime: true), now: now))
+    }
+
+    func testSilentBannerNamesTheLongestSilentMachine() {
+        let machines = [
+            MachineFreshness(machine: "Newer Mac", newestSnapshotUnix: Int64(now.timeIntervalSince1970) - 8 * 86_400, health: "healthy"),
+            MachineFreshness(machine: "Older Mac", newestSnapshotUnix: Int64(now.timeIntervalSince1970) - 20 * 86_400, health: "healthy")
+        ]
+        let value = archiveStatus(snapshot: ArchiveSnapshot(
+            summary: Summary(machines: 2, harnesses: 1, sessions: 12,
+                             unknownTimeSessions: 0, noConversationContentSessions: 0),
+            refreshedAt: now, machines: machines, days: [], usedConversationFallback: false
+        ), failure: nil, now: now)
+        XCTAssertEqual(value.sentence, "Older Mac has been silent for 20 days")
+        XCTAssertEqual(value.severity, .warning)
+    }
+
+    private func machine(age: Int64, health: String, noTime: Bool = false) -> MachineFreshness {
+        MachineFreshness(
+            machine: "Demo Mac",
+            newestSnapshotUnix: noTime ? nil : Int64(now.timeIntervalSince1970) - age,
+            health: health
+        )
     }
 
     func testAttentionSectionIsEmptyWhenCountsAreZero() {

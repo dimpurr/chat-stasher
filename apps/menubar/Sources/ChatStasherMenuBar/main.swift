@@ -138,7 +138,8 @@ enum ArchiveStatus {
     var sentence: String {
         switch self {
         case .unreadable: "Can't read the archive"
-        case .needsAttention(let count): "\(count) machine\(count == 1 ? "" : "s") needs attention"
+        case .needsAttention(let count):
+            count == 1 ? "1 machine needs attention" : "\(count) machines need attention"
         case .silent(let machine, let days): "\(machine) has been silent for \(days) days"
         case .healthy: "All backed up"
         }
@@ -166,10 +167,16 @@ func archiveStatus(snapshot: ArchiveSnapshot?, failure: String?, now: Date = Dat
         guard let unix = machine.newestSnapshotUnix else { return nil }
         let age = Int64(now.timeIntervalSince1970) - unix
         guard age > 7 * 86_400 else { return nil }
-        return (machine.machine, Int((age + 86_399) / 86_400), unix)
+        return (machine.machine, Int((age + 86_399) / 86_400), age)
     }.max { $0.2 < $1.2 }
     if let silent { return .silent(silent.0, silent.1) }
     return .healthy
+}
+
+func machineNeedsAttention(_ machine: MachineFreshness, now: Date) -> Bool {
+    if machine.health != "healthy" { return true }
+    guard let unix = machine.newestSnapshotUnix else { return false }
+    return Int64(now.timeIntervalSince1970) - unix > 7 * 86_400
 }
 
 @MainActor
@@ -377,9 +384,7 @@ private struct ArchivePopover: View {
             Button { showingAbout = true } label: {
                 Label("About Chat Stasher", systemImage: "info.circle").frame(maxWidth: .infinity, alignment: .leading)
             }.buttonStyle(.plain)
-            Button { NSApp.terminate(nil) } label: {
-                Label("Quit", systemImage: "power").frame(maxWidth: .infinity, alignment: .leading)
-            }.keyboardShortcut("q", modifiers: .command).buttonStyle(.plain)
+            action("Quit", icon: "power", shortcut: "Q", action: { NSApp.terminate(nil) })
         }
         .padding(16).frame(width: 320).onAppear { model.refresh() }
         .sheet(isPresented: $showingAbout) {
@@ -404,7 +409,7 @@ private struct ArchivePopover: View {
                 } else if let snapshot = model.snapshot {
                     Text("Latest conversation saved \(relativeTime(snapshot.machines.compactMap(\.newestSnapshotUnix).max(), now: snapshot.refreshedAt))")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
-                    HStack { Spacer(); Text("Updated \(snapshot.refreshedAt, style: .relative) ago") }
+                    HStack { Spacer(); Text("Updated \(snapshot.refreshedAt, style: .relative)") }
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
             }
@@ -441,7 +446,7 @@ private struct ArchivePopover: View {
                 }
             }
             HStack {
-                Text(hoveredDay.map { "\($0.count) conversations · \($0.date.formatted(date: .abbreviated, time: .omitted))" } ?? "Last 30 days")
+                Text(hoveredDay.map { "\(($0.count == 1) ? "1 conversation" : "\($0.count) conversations") · \($0.date.formatted(date: .abbreviated, time: .omitted))" } ?? "Last 30 days")
                 Spacer()
                 if snapshot.usedConversationFallback { Text("Older CLI data").foregroundStyle(.secondary) }
             }.font(.system(size: 10)).foregroundStyle(.secondary)
@@ -456,11 +461,12 @@ private struct ArchivePopover: View {
             Text("Machines").font(.system(size: 12, weight: .semibold))
             ForEach(snapshot.machines) { machine in
                 HStack(spacing: 6) {
-                    Circle().fill(machine.health == "healthy" ? Color.green : .yellow).frame(width: 7, height: 7)
+                    Circle().fill(machineNeedsAttention(machine, now: snapshot.refreshedAt) ? Color.yellow : .green)
+                        .frame(width: 7, height: 7)
                     Text(machine.machine).font(.system(size: 12)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(machineAge(machine, now: snapshot.refreshedAt)).font(.system(size: 11)).foregroundStyle(.secondary)
-                    if machine.health == "missing_index" || machine.health == "writer_behind" {
+                    if machineNeedsAttention(machine, now: snapshot.refreshedAt) {
                         Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(.yellow)
                     }
                 }
@@ -497,8 +503,16 @@ private struct ArchivePopover: View {
 
 func attentionSentences(_ summary: Summary) -> [String] {
     var sentences: [String] = []
-    if summary.unknownTimeSessions > 0 { sentences.append("\(summary.unknownTimeSessions) conversations have no known time") }
-    if summary.noConversationContentSessions > 0 { sentences.append("\(summary.noConversationContentSessions) conversations have no conversation content") }
+    if summary.unknownTimeSessions > 0 {
+        sentences.append(summary.unknownTimeSessions == 1
+            ? "1 conversation has no known time"
+            : "\(summary.unknownTimeSessions) conversations have no known time")
+    }
+    if summary.noConversationContentSessions > 0 {
+        sentences.append(summary.noConversationContentSessions == 1
+            ? "1 conversation has no conversation content"
+            : "\(summary.noConversationContentSessions) conversations have no conversation content")
+    }
     return sentences
 }
 
@@ -524,7 +538,7 @@ private func machineAge(_ machine: MachineFreshness, now: Date) -> String {
     if age < 3_600 { return "saved \(age / 60)m ago" }
     if age < 86_400 { return "saved \(age / 3_600)h ago" }
     let days = (age + 86_399) / 86_400
-    return age > 7 * 86_400 || machine.health != "healthy" ? "silent \(days) days" : "saved \(days)d ago"
+    return age > 7 * 86_400 ? "silent \(days) days" : "saved \(days)d ago"
 }
 
 private func relativeTime(_ unix: Int64?, now: Date) -> String {
