@@ -46,6 +46,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
+        .env("XDG_CACHE_HOME", sandbox.join("cache"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("CHAT_STASHER_REGISTRY", &registry)
@@ -292,6 +293,144 @@ fn first_json(bytes: &[u8]) -> serde_json::Value {
         .next()
         .expect("search --json must print an object")
         .expect("the first value must parse")
+}
+
+#[test]
+fn text_scan_reports_mode_and_keeps_metadata_gaps_visible() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let out = run(
+        sb.path(),
+        &[
+            "search",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-a",
+            "--text",
+            "hi",
+            "--scan",
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let result = first_json(&out.stdout);
+    assert_eq!(result["mode"], "scan");
+    assert_eq!(result["selected"], 2);
+    assert_eq!(result["matched"], 2);
+    assert_eq!(result["read_failures"], 0);
+    assert_eq!(result["metadata_unreadable_parts"], 0);
+    assert_eq!(result["unplaceable_sessions"], 0);
+    assert_eq!(result["metadata_answer_complete"], true);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("hi"));
+
+    let partial = run(
+        sb.path(),
+        &[
+            "search",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            "mbp-c",
+            "--day",
+            "2025-01-15",
+            "--text",
+            "hi",
+            "--scan",
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert_eq!(partial.status.code(), Some(3));
+    let partial = first_json(&partial.stdout);
+    assert_eq!(partial["metadata_unreadable_parts"], 0);
+    assert_eq!(partial["unplaceable_sessions"], 1);
+    assert_eq!(partial["metadata_answer_complete"], false);
+}
+
+#[test]
+fn text_fts_marks_a_valid_but_incomplete_index_unknown() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let repo_arg = repo.to_str().unwrap();
+    let key_arg = key.to_str().unwrap();
+    let built = run(
+        sb.path(),
+        &[
+            "index",
+            "build",
+            "--repo",
+            repo_arg,
+            "--key-file",
+            key_arg,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(built.status.success(), "index build failed: {built:?}");
+
+    let stage = stage_a(sb.path());
+    let added_id = "claude-code.mbp-a.019bf00d-97b6-7eb2-9bf8-eacbacc09768";
+    let added_line = cc_line("2025-01-15T13:00:00Z").replace("hi", "needlepeach");
+    write_shard(&stage, "mbp-a", added_id, &[added_line]);
+    let indexed = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "mbp-a",
+        ],
+    );
+    assert!(
+        indexed.status.success(),
+        "activity-index failed: {indexed:?}"
+    );
+    let pushed = run(
+        sb.path(),
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo_arg,
+            "--key-file",
+            key_arg,
+            "--machine",
+            "mbp-a",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(pushed.status.success(), "push failed: {pushed:?}");
+
+    let out = run(
+        sb.path(),
+        &[
+            "search",
+            "--repo",
+            repo_arg,
+            "--key-file",
+            key_arg,
+            "--machine",
+            "mbp-a",
+            "--text",
+            "needlepeach",
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    let result = first_json(&out.stdout);
+    assert_eq!(result["mode"], "fts");
+    assert_eq!(result["selected"], 3);
+    assert_eq!(result["matched"], 0);
+    assert_eq!(result["index_covered"], 2);
+    assert_eq!(result["index_missing"], 1);
 }
 
 /// A running `ui` server: its port, its token, and the child to reap.

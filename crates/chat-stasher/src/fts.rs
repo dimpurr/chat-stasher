@@ -1010,6 +1010,78 @@ mod tests {
     }
 
     #[test]
+    fn trigram_search_matches_title_body_and_cjk_known_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        index
+            .build(
+                &[
+                    SourceDoc {
+                        id: "synthetic/title-hit".into(),
+                        source_sha256: "synthetic-title-source".into(),
+                    },
+                    SourceDoc {
+                        id: "synthetic/body-hit".into(),
+                        source_sha256: "synthetic-body-source".into(),
+                    },
+                    SourceDoc {
+                        id: "synthetic/cjk-hit".into(),
+                        source_sha256: "synthetic-cjk-source".into(),
+                    },
+                ],
+                |id| {
+                    Ok(match id {
+                        "synthetic/title-hit" => {
+                            doc("synthetic apricot title", "ordinary synthetic body")
+                        }
+                        "synthetic/body-hit" => doc("ordinary title", "synthetic indigo body"),
+                        // Written as escapes, not as the characters themselves:
+                        // T5 refuses literal CJK anywhere under `crates/`, and a
+                        // test of CJK matching is not an exception to that.
+                        _ => doc(
+                            "synthetic title",
+                            "\u{5408}\u{6210}\u{4e2d}\u{6587}\u{68c0}\u{7d22}\u{6837}\u{672c}",
+                        ),
+                    })
+                },
+            )
+            .unwrap();
+
+        // Each query was written into exactly one document, and both searchable
+        // columns are exercised: the known answer is the id, so a column that
+        // quietly stopped being indexed fails as the wrong id, not as a short set.
+        let ids = |query: &str| {
+            index
+                .matches(query)
+                .unwrap()
+                .unwrap()
+                .matches
+                .into_iter()
+                .map(|found| found.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("apricot"), vec!["synthetic/title-hit"]);
+        assert_eq!(ids("indigo"), vec!["synthetic/body-hit"]);
+        assert_eq!(
+            ids("\u{4e2d}\u{6587}\u{68c0}\u{7d22}"),
+            vec!["synthetic/cjk-hit"],
+            "a four-character CJK query is above the trigram floor and must match"
+        );
+        // Below the floor the trigram tokenizer has no token to look for, so the
+        // same characters are refused rather than answered with an empty set:
+        // reporting "cannot evaluate" as "nothing matched" is the one answer
+        // this API exists to make unavailable.
+        assert_eq!(
+            index.matches("\u{4e2d}\u{6587}").unwrap(),
+            Err(QueryTooShort {
+                chars: 2,
+                minimum: 3,
+            })
+        );
+        assert!(index.matches("\u{4e2d}").unwrap().is_err());
+    }
+
+    #[test]
     fn extraction_keeps_user_and_assistant_text_only() {
         let raw = br#"{"title":"synthetic title","message":{"author":{"role":"user"},"content":{"parts":["synthetic question"]}}}
 {"role":"assistant","content":"synthetic answer"}
