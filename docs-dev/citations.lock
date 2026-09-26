@@ -565,39 +565,39 @@ crates/chat-stasher/src/main.rs:13194-13207  3f28f15c93b2  lines=14
   <- docs-dev/install.md:792  :: /// The scan half of `status`.
 crates/chat-stasher/src/main.rs:13202-13492  aac75b5f81dc  lines=291
   <- docs-dev/install.md:813  :: /// `sessions = true` restores the full per-session table —…
-crates/chat-stasher/src/nativehost.rs:140-153  b160255bd493  lines=14
+crates/chat-stasher/src/nativehost.rs:151-164  b160255bd493  lines=14
   <- docs-dev/privacy.md:639, docs-dev/threat-model.md:400  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
-crates/chat-stasher/src/nativehost.rs:400-611  695d9c4b44f3  lines=212
+crates/chat-stasher/src/nativehost.rs:411-622  695d9c4b44f3  lines=212
   <- docs-dev/install.md:1084  :: /// Default discovery root for a platform, derived from `ho…
-crates/chat-stasher/src/nativehost.rs:473-476  ea46ecf35e4c  lines=4
+crates/chat-stasher/src/nativehost.rs:484-487  ea46ecf35e4c  lines=4
   <- docs-dev/install.md:369, docs-dev/threat-model.md:482  :: /// * **Windows** — the manifest may live anywhere and the …
-crates/chat-stasher/src/nativehost.rs:484-597  7c2c0c3a86f8  lines=114
+crates/chat-stasher/src/nativehost.rs:495-608  7c2c0c3a86f8  lines=114
   <- docs-dev/install.md:367, docs-dev/privacy.md:639, docs-dev/threat-model.md:482  :: pub fn target(
-crates/chat-stasher/src/nativehost.rs:632-676  c611ef069f1c  lines=45
+crates/chat-stasher/src/nativehost.rs:643-687  c611ef069f1c  lines=45
   <- docs-dev/privacy.md:639, docs-dev/threat-model.md:400  :: pub fn render_manifest(
-crates/chat-stasher/src/nativehost.rs:755-757  022181b92c98  lines=3
+crates/chat-stasher/src/nativehost.rs:766-768  022181b92c98  lines=3
   <- docs-dev/install.md:380  :: if !force && !target.browser_present() {
-crates/chat-stasher/src/nativehost.rs:1245-1320  db2faa9e8dcf  lines=76
+crates/chat-stasher/src/nativehost.rs:1275-1350  db2faa9e8dcf  lines=76
   <- docs-dev/install.md:303, docs-dev/install.md:374  :: /// Resolve the config and the stage exactly as `ingest` re…
-crates/chat-stasher/src/nativehost.rs:1253-1320  62412070adbc  lines=68
+crates/chat-stasher/src/nativehost.rs:1283-1350  62412070adbc  lines=68
   <- docs-dev/install.md:461, docs-dev/threat-model.md:410  :: fn resolve_target() -> HostTarget {
-crates/chat-stasher/src/nativehost.rs:1308-1319  c1d3ca75f622  lines=12
+crates/chat-stasher/src/nativehost.rs:1338-1349  c1d3ca75f622  lines=12
   <- docs-dev/install.md:349, docs-dev/install.md:449  :: // Read-only: existence and kind are both checked, and neit…
-crates/chat-stasher/src/nativehost.rs:1325-1354  0317baf37da8  lines=30
+crates/chat-stasher/src/nativehost.rs:1355-1384  0317baf37da8  lines=30
   <- docs-dev/install.md:474, docs-dev/threat-model.md:410  :: /// Unlike every CLI command, the host never *creates* the …
-crates/chat-stasher/src/nativehost.rs:1467-1476  74f364fec566  lines=10
+crates/chat-stasher/src/nativehost.rs:1497-1506  74f364fec566  lines=10
   <- docs-dev/threat-model.md:421  :: // Recomputed over the UTF-8 bytes of the *decoded* payload…
-crates/chat-stasher/src/nativehost.rs:1469-1496  e3a387848c51  lines=28
+crates/chat-stasher/src/nativehost.rs:1499-1526  e3a387848c51  lines=28
   <- docs-dev/privacy.md:142, docs-dev/threat-model.md:41  :: let payload_sha = sha256_hex(parsed.payload.as_bytes());
-crates/chat-stasher/src/nativehost.rs:1483-1489  a444120e69ed  lines=7
+crates/chat-stasher/src/nativehost.rs:1513-1519  a444120e69ed  lines=7
   <- docs-dev/threat-model.md:425  :: // `invalid-bundle` is the answer for a payload this channe…
-crates/chat-stasher/src/nativehost.rs:1515-1519  4520d3869c60  lines=5
+crates/chat-stasher/src/nativehost.rs:1545-1549  4520d3869c60  lines=5
   <- docs-dev/install.md:464  :: Err(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:1706  3ed833506b60  lines=1
+crates/chat-stasher/src/nativehost.rs:1736  3ed833506b60  lines=1
   <- docs-dev/install.md:307  :: fn scan_stage(stage: &Path) -> StageScan {
-crates/chat-stasher/src/nativehost.rs:1969-1979  7a213899b5c2  lines=11
+crates/chat-stasher/src/nativehost.rs:1999-2009  7a213899b5c2  lines=11
   <- docs-dev/install.md:307  :: fn summary(request_id: Option<String>) -> serde_json::Value…
-crates/chat-stasher/src/nativehost.rs:2354-2388  6e78c5dd7bec  lines=35
+crates/chat-stasher/src/nativehost.rs:2384-2418  6e78c5dd7bec  lines=35
   <- docs-dev/privacy.md:639, docs-dev/threat-model.md:171, docs-dev/threat-model.md:405  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs-dev/threat-model.md:80, docs-dev/threat-model.md:493  :: //! Connection reaping for remote SSH backends.
