@@ -13,7 +13,7 @@
 # 默认模式只校验、不写这个文件。要接受一次真实变化, 显式跑:
 #   python3 scripts/check-citation-drift.py --update
 
-.gitignore:12  a182dd2acb58  lines=1
+./.gitignore:12  a182dd2acb58  lines=1
   <- docs-dev/install.md:330  :: apps/extension/.output/
 apps/extension/.gitignore:11  6ef40595ec0a  lines=1
   <- docs-dev/install.md:331  :: .output
@@ -35,30 +35,30 @@ apps/extension/entrypoints/background.ts:650-657  185eedd6b024  lines=8
   <- docs-dev/install.md:406  :: export async function hostStatusForPopup(): Promise<HostSta…
 apps/extension/entrypoints/background.ts:729-738  5e19fdb94397  lines=10
   <- docs-dev/privacy.md:349  :: const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_u…
-apps/extension/entrypoints/background.ts:924-927  03da1b2d652f  lines=4
+apps/extension/entrypoints/background.ts:939-942  03da1b2d652f  lines=4
   <- docs-dev/install.md:121  :: * 🔴 transportWired is not a static flag but the result of *…
-apps/extension/entrypoints/background.ts:1003-1033  e6c80301633c  lines=31
-  <- docs-dev/privacy.md:452  :: /**
-apps/extension/entrypoints/background.ts:1084-1153  f88d0e17df8a  lines=70
+apps/extension/entrypoints/background.ts:1019-1048  103ba6182213  lines=30
+  <- docs-dev/privacy.md:452  :: * 🔴 W49 · **Store one organization per scoped-platform row,…
+apps/extension/entrypoints/background.ts:1099-1158  48afac415c2f  lines=60
   <- docs-dev/threat-model.md:362  :: export async function applyAccountObservation(
-apps/extension/entrypoints/background.ts:1195-1210  fd6744a34f20  lines=16
+apps/extension/entrypoints/background.ts:1210-1222  2f5f79a89fcd  lines=13
   <- docs-dev/threat-model.md:362  :: async function applyAccountObservationForCapture(
-apps/extension/entrypoints/background.ts:1388-1448  98f08dc581d5  lines=61
+apps/extension/entrypoints/background.ts:1403-1463  98f08dc581d5  lines=61
   <- docs-dev/privacy.md:401, docs-dev/privacy.md:424, docs-dev/threat-model.md:691  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:1654-1685  5a34ba1bac26  lines=32
+apps/extension/entrypoints/background.ts:1669-1706  aafe2b1b9664  lines=38
   <- docs-dev/privacy.md:401  :: export async function registerBackfillTargetHere(): Promise<
-apps/extension/entrypoints/background.ts:1693-1737  9537eb587b77  lines=45
+apps/extension/entrypoints/background.ts:1708-1752  9537eb587b77  lines=45
   <- docs-dev/privacy.md:388  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1736  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1751  6539997ed831  lines=1
   <- docs-dev/privacy.md:390  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1957-2038  e14e2bd83366  lines=82
+apps/extension/entrypoints/background.ts:1972-2065  aab15b4f3245  lines=94
   <- docs-dev/install.md:1020, docs-dev/privacy.md:440, docs-dev/privacy.md:456  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2523-2594  bce6712b8ca2  lines=72
+apps/extension/entrypoints/background.ts:2576-2647  bce6712b8ca2  lines=72
   <- docs-dev/privacy.md:353  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:2843-2917  add884d9db90  lines=75
+apps/extension/entrypoints/background.ts:2896-2909  fe473cb85a10  lines=14
   <- docs-dev/privacy.md:354  :: if (message?.type === HOOK_STATUS_MESSAGE && !isHookStatusM…
-apps/extension/entrypoints/background.ts:2845-2919  581f55d2f229  lines=75
-  <- docs-dev/privacy.md:354  :: reason: HOOK_DECLINE_UNREADABLE_MESSAGE,
+apps/extension/entrypoints/background.ts:2937-2956  98dbbe3c6aef  lines=20
+  <- docs-dev/privacy.md:354  :: */
 apps/extension/entrypoints/dw-bridge.content.ts:450-456  ff11500827ff  lines=7
   <- docs-dev/privacy.md:128  :: function readKimiAccessToken(): string | null {
 apps/extension/entrypoints/dw-bridge.content.ts:613-639  c4f63f6e72e7  lines=27
@@ -223,9 +223,9 @@ apps/extension/lib/backfill/tab-port.ts:464-484  3a127cc35dfc  lines=21
   <- docs-dev/threat-model.md:305  :: *    has two more segments, so the two cannot collide by co…
 apps/extension/lib/backfill/tab-port.ts:1133-1150  18db841e280b  lines=18
   <- docs-dev/privacy.md:418  :: export async function askTabForClaudeOrg(
-apps/extension/lib/backfill/types.ts:1690-1700  dd63b47f4f10  lines=11
+apps/extension/lib/backfill/types.ts:1696-1706  dd63b47f4f10  lines=11
   <- docs-dev/privacy.md:347  :: accountLease?: AccountLease;
-apps/extension/lib/backfill/types.ts:1814-1834  1b6803d7d505  lines=21
+apps/extension/lib/backfill/types.ts:1820-1840  1b6803d7d505  lines=21
   <- docs-dev/privacy.md:347, docs-dev/threat-model.md:369  :: export interface AccountSuspension {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs-dev/install.md:413  :: export function badgeFor(state: OutboxSummary | null): Badg…
@@ -329,7 +329,7 @@ apps/extension/lib/native-host.ts:30  9da915f38ab1  lines=1
   <- docs-dev/privacy.md:140, docs-dev/threat-model.md:62  :: export const NATIVE_HOST_NAME = 'com.chat_stasher.host';
 apps/extension/lib/native-host.ts:760-810  90149cb2b330  lines=51
   <- docs-dev/privacy.md:140, docs-dev/threat-model.md:40  :: outcome: SendOutcome,
-apps/extension/lib/native-host.ts:988-997  d19b8c8b9924  lines=10
+apps/extension/lib/native-host.ts:992-1001  d19b8c8b9924  lines=10
   <- docs-dev/install.md:67, docs-dev/privacy.md:146, docs-dev/threat-model.md:43, docs-dev/threat-model.md:442  :: const classified = classify(outcome, (value) => {
 apps/extension/lib/outbox-alarm.ts:20-46  175432e0734b  lines=27
   <- docs-dev/privacy.md:668  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';

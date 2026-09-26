@@ -64,7 +64,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:988-997`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:992-1001`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:388-403`). There is no "probably delivered".
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:924-927`). That page does not have to
+`apps/extension/entrypoints/background.ts:939-942`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -327,7 +327,7 @@ and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
 A source build lands in `apps/extension/.output/` (excluded by the root ignore
-rule at `.gitignore:12` and the extension ignore rule at
+rule at `./.gitignore:12` and the extension ignore rule at
 `apps/extension/.gitignore:11`). Load that directory with your browser's **Load
 unpacked** menu. The exact menu path varies by browser and is unverified.
 
@@ -1017,7 +1017,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:1957-2038`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:1972-2065`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4630-4661`) is covered.

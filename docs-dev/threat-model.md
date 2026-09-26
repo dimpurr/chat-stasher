@@ -40,7 +40,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:760-810`;
    `crates/chat-stasher/src/nativehost.rs:1705-1732`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:988-997`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:992-1001`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:756-806`).
@@ -359,14 +359,14 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1084-1153`, `:1195-1210`). Two limits
+(`apps/extension/entrypoints/background.ts:1099-1158`, `:1210-1222`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
 a visible account is never accused, because an absence is not evidence of a
 switch. A suspension does not expire the way a backoff does — it is lifted by an
 observation that agrees with it, which in practice is that account being used
-again (`apps/extension/lib/backfill/types.ts:1814-1834`).
+again (`apps/extension/lib/backfill/types.ts:1820-1840`).
 
 ### The browser extension ecosystem — other extensions installed alongside ours
 
@@ -439,7 +439,7 @@ The properties that bound this boundary:
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
   (`crates/chat-stasher/src/nativehost.rs:1703-1712`;
-  `apps/extension/lib/native-host.ts:988-997`).
+  `apps/extension/lib/native-host.ts:992-1001`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
   (`crates/chat-stasher/src/nativehost.rs:1719-1725`).
@@ -688,7 +688,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-   `apps/extension/entrypoints/background.ts:1388-1448`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1403-1463`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
