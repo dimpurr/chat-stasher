@@ -424,14 +424,18 @@ Three things in that table deserve to be called out rather than buried:
   is made **only when the first two answered nothing**, it fetches your account's
   list of organizations and nothing else, and it is sent through the same
   allowlisted same-origin channel as every other backfill request
-  (`apps/extension/lib/backfill/claude-page.ts:96-107`). The resolution itself runs
+  (`apps/extension/lib/backfill/claude-page.ts:96-109`). The resolution itself runs
   **in the claude.ai page**, over the channel the backfill already uses, and only
   when the extension actually needs the organization: when you press the popup's
   start button for that platform, and on a wake-up whose recorded scope is not an
   organization yet. A page that is simply open and idle is asked nothing
-  (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-  `apps/extension/lib/backfill/tab-port.ts:1133-1150`). An account belonging to
-  several organizations, with neither of the first two sources naming one, stops
+  (`apps/extension/lib/backfill/claude-page.ts:70-150`;
+  `apps/extension/lib/backfill/tab-port.ts:1141-1158`). A 403 or 429 from that
+  request is reported to the machine-local host, which stores a platform cooldown
+  shared by installs on that machine; if the report fails, this profile pauses
+  backfill locally (`apps/extension/entrypoints/background.ts:750-762,
+  :1705-1709, :2073-2082`; `crates/chat-stasher/src/nativehost.rs:1350-1357`). An account belonging
+  to several organizations, with neither of the first two sources naming one, stops
   the leg instead of choosing: the value is never guessed and the organizations
   are never probed one by one, and once **this build** has recorded that answer
   the page is not asked again on every wake-up — the answer is already known

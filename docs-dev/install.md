@@ -1018,7 +1018,7 @@ confirmed in the code, not a temporary disclaimer.
   when the page's own requests and the cookie both named none — and an account
   belonging to several organizations stops with a sentence telling you to open a
   conversation in the one you want archived, rather than picking one
-  (`apps/extension/lib/backfill/claude-page.ts:70-148`). 🔴 **A Claude backfill
+  (`apps/extension/lib/backfill/claude-page.ts:70-150`). 🔴 **A Claude backfill
   checks every request against the organization established by the page. On a
   fresh `/new` page, it resolves that scope from an observed page request, the
   active-org cookie, or one unambiguous organizations response before allowing
