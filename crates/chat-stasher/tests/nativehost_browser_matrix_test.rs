@@ -223,11 +223,15 @@ const MATRIX: &[Row] = &[
         &["chat-stasher/NativeMessagingHosts/brave"],
         Support::Supported,
     ),
+    // Arc's Windows key is third-party evidence only (S10): located 2026-09-26
+    // where W204 §8 gap 7 had recorded "nothing found", so the tier is D5's
+    // promise again — `Supported`, no longer held back by the no-key rule that
+    // still governs Chrome Beta and Chrome Canary below.
     row(
         Browser::Arc,
         Platform::Windows,
         &["chat-stasher/NativeMessagingHosts/arc"],
-        Support::Unverified,
+        Support::Supported,
     ),
     row(
         Browser::ChromeBeta,
@@ -414,9 +418,14 @@ fn the_path_table_and_has_path_agree_on_every_pair() {
 /// The Windows manifest is only reachable through the registry, so a
 /// `supported` tier for a keyless browser would be a promise that cannot be
 /// kept — and, worse, one that `install-native-host` reports as *written*.
-/// Chrome Beta, Chrome Canary and Arc are the three: see
+/// Chrome Beta and Chrome Canary are the two: see
 /// [`nativehost::registry_subkey_of`] for why each returns `None` instead of a
 /// guess.
+///
+/// Arc was the third until 2026-09-26, when S10 located its key in a
+/// third-party implementation and it left this list. A browser leaving the
+/// refusal list must carry a source with it (as Arc's arm in the key table
+/// below now does); that is what keeps this list a rule rather than a fixture.
 #[test]
 fn windows_never_promises_a_browser_it_has_no_registry_key_for() {
     for browser in Browser::ALL {
@@ -435,9 +444,9 @@ fn windows_never_promises_a_browser_it_has_no_registry_key_for() {
         }
     }
 
-    // The three that refuse to guess, named so that removing one from the list
-    // above is a deliberate act rather than an oversight.
-    for browser in [Browser::ChromeBeta, Browser::ChromeCanary, Browser::Arc] {
+    // The two that refuse to guess, named so that removing one from the list
+    // is a deliberate act rather than an oversight.
+    for browser in [Browser::ChromeBeta, Browser::ChromeCanary] {
         assert_eq!(
             registry_subkey_of(browser),
             None,
@@ -456,7 +465,7 @@ fn windows_never_promises_a_browser_it_has_no_registry_key_for() {
 /// The keys that *are* known are the documented ones, per browser.
 #[test]
 fn the_known_windows_registry_keys_are_the_documented_ones() {
-    let expected: [(Browser, &str); 7] = [
+    let expected: [(Browser, &str); 8] = [
         (
             Browser::Chrome,
             "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
@@ -473,6 +482,11 @@ fn the_known_windows_registry_keys_are_the_documented_ones() {
         (
             Browser::Brave,
             "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts",
+        ),
+        // S10 — third-party evidence, the tier Brave's key already has.
+        (
+            Browser::Arc,
+            "HKCU\\Software\\ArcBrowser\\Arc\\NativeMessagingHosts",
         ),
         (
             Browser::Vivaldi,

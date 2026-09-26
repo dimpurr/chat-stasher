@@ -322,7 +322,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:1308-1319`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:1338-1349`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -387,7 +387,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1308-1319`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1338-1349`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -399,10 +399,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1002-1030`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1253-1320`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1283-1350`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:1515-1519`). In every case the reason
+  (`crates/chat-stasher/src/nativehost.rs:1545-1549`). In every case the reason
   names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -412,7 +412,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:1325-1354`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:1355-1384`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -998,7 +998,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Item | Status |
 | --- | --- |
 | Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:125`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
-| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:400-611`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
+| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:411-622`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
 | Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:78`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |

@@ -107,6 +107,17 @@
 //!   key and must not be confused with the manifest one.
 //! * **S9** Vivaldi — <https://github.com/vergenzt/TabFS/blob/master/install.sh>,
 //!   <https://github.com/AdguardTeam/AdguardForMac/issues/1152>.
+//! * **S10** Arc, Windows registry key
+//!   `HKCU\Software\ArcBrowser\Arc\NativeMessagingHosts` —
+//!   <https://github.com/chauncygu/collection-claude-code-source-code/blob/main/original-source-code/src/utils/claudeInChrome/common.ts>
+//!   (a deobfuscated mirror of Anthropic's Claude-in-Chrome registry table,
+//!   read 2026-09-26; echoed across ten-plus independent mirrors of the same
+//!   file). What makes a third-party table usable and not a guess: its sibling
+//!   keys for Chrome, Brave, Chromium, Edge, Vivaldi and Opera match S1, S4, S5,
+//!   S8 and S9 one for one, and the product it ships in installs this host at
+//!   scale on real Windows machines. Still `NO VENDOR DOC`: no Arc vendor
+//!   document for the key was located (as of 2026-09-26), and no live registry
+//!   has confirmed it — see [`registry_subkey_of`].
 //!
 //! Two consequences are load-bearing and are asserted by
 //! `tests/nativehost_browser_matrix_test.rs`:
@@ -842,7 +853,7 @@ impl RegistryCommand {
 /// The `HKCU` vendor subkey for a browser, or `None` when this build has not got
 /// one.
 ///
-/// # Why three browsers answer `None` on Windows
+/// # Why two browsers answer `None` on Windows
 ///
 /// The Windows half of the registration is a registry value pointing at the
 /// manifest, and a browser whose key we do not know is a browser that will never
@@ -855,13 +866,26 @@ impl RegistryCommand {
 ///   `SOFTWARE\Chromium\…` under `CHROMIUM_BRANDING`), with no per-channel key
 ///   in that file. No primary source for a `Chrome Beta` / `Chrome SxS`
 ///   NativeMessagingHosts key was located, so neither is invented.
-/// * **Arc** — no primary source was located for an Arc for Windows registry key
-///   either.
 ///
 /// `install-native-host` prints the honest line for these — *"no registry key
 /// known in this build — manifest written but NOT discoverable"* — and
 /// [`Browser::support`] reports them `unverified` on Windows rather than
 /// `supported`.
+///
+/// # Arc was here, and left on evidence, not on a guess
+///
+/// Arc answered `None` here too: W204 located no Arc-for-Windows key of any
+/// kind (its report §8 gap 7) and left Arc `unverified` on Windows even though
+/// D5 promises it. That absence was falsified on 2026-09-26 at the evidence
+/// tier this module already accepts for Brave's key (S8): Anthropic's
+/// Claude-in-Chrome registers Arc on Windows under
+/// `HKCU\Software\ArcBrowser\Arc\NativeMessagingHosts` (**S10**), in a table
+/// whose sibling keys match S1/S4/S5/S8/S9 one for one. The key is therefore
+/// carried from a third-party implementation, marked `NO VENDOR DOC`, and Arc
+/// reports `supported` on Windows as D5 wrote. Not located (as of 2026-09-26):
+/// an Arc vendor document, or a live-registry confirmation — the entire Windows
+/// registry path remains UNVERIFIED against real hardware, exactly as this
+/// file's own header warns for every key here.
 pub fn registry_subkey_of(browser: Browser) -> Option<&'static str> {
     match browser {
         // S1 / S4.
@@ -879,7 +903,13 @@ pub fn registry_subkey_of(browser: Browser) -> Option<&'static str> {
         // S7 — NO VENDOR DOC.
         Browser::Opera => Some("Opera Software"),
         Browser::Firefox => Some("Mozilla"),
-        Browser::ChromeBeta | Browser::ChromeCanary | Browser::Arc => None,
+        // S10 — NO VENDOR DOC. Arc for Windows is Chromium-based; the key is
+        // carried from a third-party implementation the way Brave's is (S8):
+        // no Arc vendor document for it was located, and nothing here has been
+        // executed against a live registry. The refusal this arm replaced — "no
+        // registry key known in this build" — was falsified, not relaxed.
+        Browser::Arc => Some("ArcBrowser\\Arc"),
+        Browser::ChromeBeta | Browser::ChromeCanary => None,
     }
 }
 

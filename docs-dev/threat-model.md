@@ -38,7 +38,7 @@ Understanding the roles below requires knowing the path the content takes.
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:755-805`;
-   `crates/chat-stasher/src/nativehost.rs:1469-1496`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:1499-1526`). The bundle leaves the
    outbox **only** on a matching `ack`
    (`apps/extension/lib/native-host.ts:933-942`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
@@ -168,7 +168,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:2354-2388`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:2384-2418`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -397,17 +397,17 @@ The properties that bound this boundary:
   pinned constants — `gihmdkkmmmkeiagjjiimacmgkdilofhi` and
   `chat-stasher@team.iopho.com` — and the extension's own Chrome id is pinned by
   a public key in its manifest, so it cannot vary per machine
-  (`crates/chat-stasher/src/nativehost.rs:140-153`, `:632-676`;
+  (`crates/chat-stasher/src/nativehost.rs:151-164`, `:643-687`;
   `apps/extension/wxt.config.ts:126-132`).
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:2354-2388`).
+  (`crates/chat-stasher/src/nativehost.rs:2384-2418`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:1253-1320`, `:1325-1354`).
+  (`crates/chat-stasher/src/nativehost.rs:1283-1350`, `:1355-1384`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -418,11 +418,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1467-1476`;
+  (`crates/chat-stasher/src/nativehost.rs:1497-1506`;
   `apps/extension/lib/native-host.ts:933-942`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1483-1489`).
+  (`crates/chat-stasher/src/nativehost.rs:1513-1519`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
