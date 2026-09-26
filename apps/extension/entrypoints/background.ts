@@ -12,6 +12,13 @@ import {
   type InboxBundle,
 } from '../lib/contract';
 import { accountFingerprintFor } from '../lib/account-fingerprint';
+import {
+  accountLeaseForScope,
+  agreesWithLease,
+  identityOf,
+  planHoldsAccountLease,
+  suspensionFor,
+} from '../lib/backfill/account-lease';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore, type BackfillStore } from '../lib/backfill/store';
 import {
@@ -53,8 +60,8 @@ import {
   tickBlockReason,
   type TickResult,
 } from '../lib/backfill/schedule';
-import { markScopeRetried, recordBackfillHalt, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
-import { unreadableStateRefusal, type LedgerRefusal } from '../lib/backfill/ledger';
+import { markScopeRetried, recordBackfillHalt, type AccountObservation, type BackfillOptions, type HttpPort } from '../lib/backfill/engine';
+import { openLedger, unreadableStateRefusal, type LedgerRefusal } from '../lib/backfill/ledger';
 import {
   armBackfillTick,
   BACKFILL_ALARM_NAME,
@@ -89,7 +96,7 @@ import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, stateKey, type HaltReason } from '../lib/backfill/types';
+import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -952,6 +959,215 @@ async function rememberScopedTarget(
 }
 
 /**
+ * 🔴 W199 · **A page-owned observation of which account is signed in, applied to every
+ *    scope of that platform.**
+ *
+ * This is the registry half of W128 step 2, and it is the half that does not depend on
+ * two response shapes agreeing: one capture proves which account the browser is signed
+ * in to, and every *other* scope of that platform whose lease says something comparable
+ * and different is **suspended** — pending queue untouched, nothing captured into it.
+ * The observing account's own scope is **lifted** if it was suspended, which is the
+ * "start/resume the scope for the new account" clause: the next wake finds it runnable.
+ *
+ * ## Why this is called from the live leg and not only from a run
+ *
+ * A run can only prove the account from its own traffic, and only for the scope it is
+ * already running. The live leg sees the account the *user* is actually using, which is
+ * the only signal that arrives while nothing is running — and it is also the only thing
+ * that can lift a suspension, because a suspended scope never runs (that is what
+ * suspended means, `scopeRetryDue`).
+ *
+ * ## Three outcomes per scope, and the third is not the second
+ *
+ *  · **`agrees`** — this scope's own account answered: clear the suspension, and clear an
+ *    `account-changed` halt with it (see below). Nothing else is touched;
+ *  · **`differs`** — a different account on the same salt: write the suspension;
+ *  · **incomparable** — no lease on one side, or two different salts. **Nothing is done
+ *    and nothing is written.** This is the case that must never be read as a switch: a
+ *    reinstall, a cleared `cs_account_salt_v1`, or a scope that has never had a visible
+ *    account all land here, and accusing any of them would invent a switch that did not
+ *    happen (step 1's salt rule, and W165's residual R5 for the scan itself).
+ *
+ * 🔴 **Why the lift also clears the halt.** A suspension is lifted precisely when the
+ *    scope's own account is answering again, which is exactly the fact an
+ *    `account-changed` halt asserts the absence of. Leaving the halt would keep the popup
+ *    saying "stopped — the account changed" for up to the ladder's two hours *after* the
+ *    user switched back. So the halt is cleared, and only when it is that reason: any
+ *    other record is another component's statement and is left alone. `haltRetried` goes
+ *    with it, because a scope with a spent-attempt marker and no halt on disk is read by
+ *    `scopeRetryDue` as "do not ask again", i.e. the lift would deadlock the scope it was
+ *    meant to free.
+ *
+ * 🔴 **Cost.** One header read per registered scope of that platform, and a write only
+ *    when something actually changed. `scope` and `platform` are the account and the
+ *    platform, so an observation is applied to at most `MAX_TARGET_ENTRIES` (8) scopes,
+ *    and in production to the one or two a browser profile has.
+ *
+ * 🔴 **What it never does.** It issues no request, reads no page, and never writes a
+ *    record it could not read as a header: a scope whose record does not parse is left
+ *    exactly as it was found, which is the rule every other writer here follows.
+ */
+export async function applyAccountObservation(
+  store: BackfillStore | null,
+  platform: string,
+  observed: AccountIdentity,
+  now: number,
+): Promise<{ suspended: string[]; lifted: string[]; unwritten: string[] }> {
+  /**
+   * 🔴 Three lists, and the third is not the second: a scope this pass **could not act on** is
+   *    not a scope it found nothing to say about. They are separated because the caller and any
+   *    reader have to be able to tell "nothing needed doing" from "we could not look" — the same
+   *    rule the whole project follows (CLAUDE.md invariant 1), applied to a report that would
+   *    otherwise collapse both into an empty list.
+   *
+   * 🔴 `unwritten` has exactly two causes and they are deliberately one list, because the
+   *    caller's question has one answer ("was this scope acted on?"): the record at that scope
+   *    is not one this build can read (so nothing could be decided about it — and its own run
+   *    already refuses by name, `state-unreadable`), or the write itself failed. Which of the
+   *    two it was is on the scope's own record and in the log line, not in this list.
+   */
+  const result: { suspended: string[]; lifted: string[]; unwritten: string[] } =
+    { suspended: [], lifted: [], unwritten: [] };
+  if (!store) return result;
+  // 🔴 One gate up front, and it is the plan's own declaration: a platform that does not
+  //    hold a lease has no scopes to compare, so a capture on it costs one table read and
+  //    nothing else. This is also what keeps ChatGPT and Claude out of this path.
+  if (!planHoldsAccountLease(platform)) return result;
+
+  for (const target of await loadTargets(store)) {
+    if (target.platform !== platform) continue;
+    const raw = await store.load(stateKey(platform, target.scope));
+    // 🔴 `null` is "no record yet" and is a value: a scope that has never run has no
+    //    lease to compare and is not accused of anything.
+    // 🔴 No record at all is "nothing to compare" and is skipped silently — a scope that has
+    //    never run has no lease and is never accused of anything. A record that is *there* and
+    //    unreadable is a different fact, and it is reported.
+    if (raw === null || raw === undefined) continue;
+    if (!isHeader(raw)) {
+      result.unwritten.push(target.scope);
+      continue;
+    }
+    const lease = readAccountLease(raw.accountLease);
+    const suspended = readAccountSuspension(raw.suspended);
+    const lift = agreesWithLease(lease, observed);
+    const suspend = suspensionFor(lease, observed, now);
+    if (!lift && !suspend) continue;
+    if (lift && suspended === undefined) continue;
+    if (suspend && suspended !== undefined) {
+      // Already suspended for this same account change: nothing to write.
+      if (suspended.observed?.value === suspend.observed?.value) continue;
+    }
+    try {
+      await patchScopeAccount(store, platform, target.scope, suspend ?? null);
+      if (suspend) result.suspended.push(target.scope);
+      else result.lifted.push(target.scope);
+    } catch (err) {
+      // Best-effort, like the registry write above it: a capture's own delivery must not
+      // be lost because a suspension could not be recorded. The next capture tries again.
+      console.warn('[chat-stasher] account-suspension write failed', (err as Error).message);
+    }
+  }
+  // 🔴 Named, not silent. A scope this pass could not act on leaves no other trace: its record
+  //    is untouched, so nothing on disk says a switch was ever observed for it. Only the
+  //    platform is logged — a scope is an account identifier and never goes into a log.
+  if (result.unwritten.length > 0) {
+    console.warn(
+      `[chat-stasher] account observation for ${platform}: ${result.unwritten.length} scope(s)`
+      + ' could not be read or written, so nothing was decided about them',
+    );
+  }
+  return result;
+}
+
+/**
+ * Write one scope's account half — the suspension, and (only on a lift) the halt it was
+ * standing in for.
+ *
+ * 🔴 It reads through `openLedger`, so a record this build cannot read is **refused**
+ *    rather than overwritten; a refusal is a thrown error the caller logs and moves on
+ *    from. And it writes through the ledger's own `save`, which diffs the debt sets: an
+ *    account edit never moves an id, so the debt store is not written at all.
+ */
+async function patchScopeAccount(
+  store: BackfillStore,
+  platform: string,
+  scope: string,
+  next: AccountSuspension | null,
+): Promise<void> {
+  const opened = await openLedger(store, platform, scope);
+  if (!opened.ok) {
+    throw new Error(`the record at this scope could not be read (${opened.refusal.reason})`);
+  }
+  const state = opened.state;
+  state.suspended = next ?? undefined;
+  if (next === null && state.halted?.reason === 'account-changed') {
+    state.halted = null;
+    state.haltRetried = undefined;
+  }
+  await opened.ledger.save(state);
+}
+
+/**
+ * The live leg's observation: one capture, fingerprinted by step 1's own function, fed
+ * to the registry half above.
+ *
+ * 🔴 `accountFingerprintFor` returns `unknown` (with a reason) rather than throwing when
+ *    no id is visible, and that case is a **return, not a comparison**: a capture whose
+ *    body carried nothing account-shaped says nothing about which account is signed in,
+ *    and treating an absence as evidence is the one move this whole task forbids. The
+ *    session id is resolved exactly as `buildBundle` resolves it, so the C21 guard
+ *    ("a per-session id is never an account id") is applied to one value, not two.
+ */
+async function applyAccountObservationForCapture(
+  store: BackfillStore | null,
+  platform: string,
+  captured: CapturedFetch,
+): Promise<void> {
+  try {
+    if (!store || !planHoldsAccountLease(platform)) return;
+    const identity = identityOf(
+      await accountFingerprintFor(captured, store, resolveSessionId(captured)),
+    );
+    if (!identity) return;
+    await applyAccountObservation(store, platform, identity, Date.now());
+  } catch (err) {
+    console.warn('[chat-stasher] account observation failed', (err as Error).message);
+  }
+}
+
+/**
+ * The alarm path's observation: a run proved a different account, so that account's
+ * scope is started and the sibling pass is applied.
+ *
+ * 🔴 The new scope is **registered, not resumed with state**: it has no ledger of its
+ *    own, so it begins as a fresh scope and its own first run takes its lease and
+ *    enumerates it. Nothing from the old scope crosses over — that is the point of
+ *    "keep its pending queue untouched".
+ *
+ * 🔴 Nothing is logged with the id in it. The only trace is the registry row and the
+ *    suspension written on the old scope, both of which carry fingerprints.
+ */
+async function applyRunAccountObservation(
+  store: BackfillStore | null,
+  target: { platform: string; origin: string },
+  report: { accountChangedTo: AccountObservation | null } | null | undefined,
+): Promise<void> {
+  const changed = report?.accountChangedTo;
+  if (!store || !changed) return;
+  try {
+    await rememberScopedTarget(store, {
+      platform: target.platform,
+      origin: target.origin,
+      scope: changed.id,
+      at: Date.now(),
+    });
+    await applyAccountObservation(store, target.platform, changed.identity, Date.now());
+  } catch (err) {
+    console.warn('[chat-stasher] account observation failed', (err as Error).message);
+  }
+}
+
+/**
  * 🔴 W31c · **Who can turn "this page" into an account scope.**
  *
  * The question this answers is not "which platform is this" (the platform table
@@ -1192,12 +1408,39 @@ async function tickHoldReason(
   platform: string,
   scope: string,
   now: number,
-): Promise<'halted' | 'waiting-retry' | null> {
+): Promise<'halted' | 'waiting-retry' | 'account-suspended' | null> {
+  /**
+   * 🔴 W199 · **An account suspension is a third kind of hold, and it is asked first.**
+   *
+   * W128 step 2 stops a scope twice over, and the two records say different things. The
+   * `account-changed` halt is the ordinary record of what happened and it expires like
+   * any transient record; the **suspension** is the statement that the scope must not be
+   * served again until its own account is observed. The halt alone is not enough, and the
+   * reason is the whole point: a transient halt comes back on its own after its ladder,
+   * and coming back here means issuing the same request under the same wrong account —
+   * a slow poll of another account's data.
+   *
+   * It is asked **before `scopeRetryDue`**, and that is deliberate rather than tidiness:
+   * the question here is not "is the stop that was written still the current answer"
+   * (`scopeRetryDue`'s, and it can legitimately say a scope is due again), it is "may
+   * this scope touch the platform at all". A suspended scope with an expired backoff and
+   * no `halted` record left — the halt was lost to a failed write, or cleared by a later
+   * run's stop — must still be held, and `scopeRetryDue` would answer "due" for it.
+   *
+   * 🔴 The three answers of `accountSuspensionHolds` are not two, and the third fails
+   *    **closed**: a `suspended` value this build cannot read holds the scope and issues
+   *    nothing, because the one thing we do know is that a record exists, and fetching
+   *    under an account we cannot vouch for is what this mechanism exists to prevent.
+   *    That is the opposite choice from the unreadable-*halt* line inside
+   *    `scopeRetryDue` (asking again there costs a question and can recover); here
+   *    asking again means sending a request, which cannot be taken back.
+   */
+  const raw = store ? await store.load(stateKey(platform, scope)) : null;
+  if (accountSuspensionHolds(raw) !== 'absent') return 'account-suspended';
   // 🔴 `scopeRetryDue` is *the* shared authority: it decides for the resolver
   //    path (asking the page) and here (running the engine). One answer to "is
   //    this scope due", exactly like the W59 note about `haltExpiredBecause`.
   if (await scopeRetryDue(store, platform, scope, now)) return null;
-  const raw = store ? await store.load(stateKey(platform, scope)) : null;
   const halted = raw && typeof raw === 'object' && (raw as { halted?: unknown }).halted
     ? (raw as { halted: { reason: string } }).halted
     : null;
@@ -1439,6 +1682,23 @@ export async function kickBackfill(
   } catch (err) {
     console.warn('[chat-stasher] backfill target registry write failed', (err as Error).message);
   }
+  /**
+   * 🔴 W199 · **The capture is a page-owned observation of the signed-in account, so it
+   *    is applied to every scope of that platform before this tick runs.**
+   *
+   * It runs here rather than inside the engine for two reasons, and both are about
+   * ordering: the engine only ever sees one scope, and this has to be able to suspend
+   * *sibling* scopes; and it has to happen even when this tick is gated (switch off, no
+   * host), because a scope suspended by a switch must not be left runnable just because
+   * the wake that noticed it was not allowed to fetch.
+   *
+   * It is awaited, but it can never affect this capture's own write-down: every failure
+   * inside it is caught and logged there, and a store that is missing makes it a no-op.
+   * The fingerprint is computed by step 1's own function through `preparePayload`'s path
+   * — the same value that goes on the bundle — so the observation and the archived
+   * record cannot disagree about which account this capture came from.
+   */
+  await applyAccountObservationForCapture(store, target.platform, captured);
   const result = await tickBackfill({
     ...target,
     store,
@@ -1454,6 +1714,14 @@ export async function kickBackfill(
     ...(await presetTickOptions(store)),
     ...(backfillPaceOverride ?? {}),
   });
+  /**
+   * 🔴 W199 · **The run's own discovery, after the live leg's.** The capture already told
+   *    the registry which account is signed in; this adds the case the live leg cannot
+   *    see — a run whose *responses* proved the account changed, which is how a switch
+   *    that produced no capture at all is still noticed (a run against a stored scope,
+   *    waking on the alarm, with the user having switched in between).
+   */
+  await applyRunAccountObservation(store, target, result.report);
   lastTick = result;
   return result;
 }
@@ -2053,6 +2321,21 @@ async function runAlarmTickBody(): Promise<TickResult> {
     await saveTickCursor(store, targets, target.platform, target.scope);
     schedule.served = target.platform;
     last = result;
+    /**
+     * 🔴 W199 · **A run that proved the account changed hands the discovery to the
+     *    registry.**
+     *
+     * This is W128 step 2's second half on the alarm's path: the run found that the
+     * responses for `target.scope` are being answered by another account, so that
+     * account's own scope is started (registered, which makes it wake-able, and its own
+     * first run takes its lease and enumerates it) while `target.scope` stays suspended
+     * with its pending queue untouched. The engine has already written the suspension and
+     * the halt; this is the registry write, which is why it is here and not in the engine.
+     *
+     * 🔴 Ordered after `saveTickCursor`: the cursor is about *this* target and this run,
+     *    and a failure in the registry half must not cost the tick its own bookkeeping.
+     */
+    await applyRunAccountObservation(store, target, result.report);
     break;
   }
   /**

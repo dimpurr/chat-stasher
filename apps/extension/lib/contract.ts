@@ -1029,6 +1029,20 @@ export interface InboxIdentity {
 export type AccountIdSource = 'request-url-organization' | 'response-body-platform-uid';
 
 /**
+ * 🔴 W199 · **The same set as a value**, for a reader that has a string off disk and
+ * has to decide whether it is one of these before acting on it — step 2's lease is
+ * compared before a request goes out, so a source label it cannot recognise has to
+ * make it stop rather than pass.
+ *
+ * Written out rather than derived from the type: a `keyof` chain cannot exist over a
+ * union of string literals without a second structure to derive from, and the
+ * alternative — casting the stored string — is the move that reads an unknown as a
+ * known. Two declarations in one file, three lines apart, is the cheapest way to keep
+ * them true to each other.
+ */
+export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = ['request-url-organization', 'response-body-platform-uid'];
+
+/**
  * 🔴 W128 step 1 · Why a bundle carries no fingerprint. Every value is a fact, and
  * none of them is the same fact as another:
  *  · 'platform-not-recognized'          — the capture's URL matched no platform

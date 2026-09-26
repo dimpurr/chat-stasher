@@ -98,6 +98,24 @@ export function haltNote(
       return t(halted.reason === 'org-ambiguous'
         ? 'popup.notes.halted.orgAmbiguous'
         : 'popup.notes.halted.orgUnresolved');
+    } else if (halted.reason === 'account-changed') {
+      // 🔴 W199 · **The one stop whose remedy is "use that account again", and the only one
+      //    whose record is a suspension rather than only a halt.**
+      //
+      //    It must not fall through to `waitingRetry`: that sentence says the leg is waiting
+      //    out a backoff and will come back by itself, and this stop is deliberately built so
+      //    that it will not — coming back means sending the same request under the same wrong
+      //    account. It must not fall through to `other` either: `other` prints the reason code
+      //    and the technical detail, which describes the record instead of the one thing the
+      //    user can do about it.
+      //
+      //    What the sentence has to carry, and why each half is there: **the account this
+      //    scope belongs to is not the account signed in** (the cause); **nothing was lost
+      //    and nothing is owed here was written off** (the fear a user has about a stopped
+      //    archive); and **it resumes when that account is used again** (the action). The
+      //    detail is appended for whoever reads the record, and it names the two segments'
+      //    comparison without either id.
+      return t('popup.notes.halted.accountChanged', { detail: halted.detail });
     } else if (halted.reason === 'detail-unsupported') {
       // 🔴 C26 · This one must **not** say "stopped before issuing any request" —
       //    the list request really went out and conversations really were listed.

@@ -29,6 +29,17 @@ import {
   type ReleaseChannel,
 } from '../contract';
 import { runningBuildId } from '../extension-build';
+import {
+  accountLeaseForScope,
+  compareAccountLease,
+  decideRunLease,
+  identityOf,
+  planHoldsAccountLease,
+  suspensionFor,
+  type RunLease,
+} from './account-lease';
+import { accountFingerprintFor, accountIdFromCapture } from '../account-fingerprint';
+import type { AccountIdentity } from './types';
 import { isClaudeOrgId } from './claude-org';
 import { recordDebtTimes } from './debt-store';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
@@ -399,7 +410,34 @@ export interface RunReport {
   enumTruncated: EnumTruncation | null;
   /** The milliseconds each gate() actually waited, kept separately for the two segments. */
   paceTrace: { enumerate: number[]; detail: number[] };
+  /**
+   * 🔴 W199 · **The account a response named when it disagreed with this run's lease**,
+   * or `null` when no response proved a different account.
+   *
+   * The raw id is here, and only here, because the target registry belongs to the
+   * caller and W128 step 2's second half — "start/resume the scope for the new
+   * account" — is a registry write. It is **never** logged, never written to the header
+   * and never archived: the header keeps the fingerprint (`state.suspended`), and the
+   * report is in-memory and dies with the run.
+   */
+  accountChangedTo: AccountObservation | null;
   state: BackfillState;
+}
+
+/**
+ * 🔴 W199 · One account a run observed that is not the account its scope belongs to.
+ *
+ * Two halves because they are for two different destinations: `identity` is the
+ * fingerprint the caller compares every sibling scope's lease against (and which is
+ * already on the suspension record), `id` is the account's own scope string, which the
+ * caller needs to register the new account's target.
+ */
+export interface AccountObservation {
+  identity: AccountIdentity;
+  /** The account's scope string. Never logged, never persisted, never archived. */
+  id: string;
+  /** Which segment proved it — the same word the halt detail carries. */
+  where: 'enumerate' | 'detail';
 }
 
 /**
@@ -885,6 +923,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       halted: state.halted,
       enumTruncated: null,
       paceTrace: emptyTrace,
+      // 🔴 W199 · No account was observed: these two exits happen before the lease is
+      //    taken (no store at all, and a ledger this build cannot open).
+      accountChangedTo: null,
       state,
     };
   }
@@ -932,6 +973,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       halted: refused.halted,
       enumTruncated: null,
       paceTrace: emptyTrace,
+      // 🔴 W199 · No account was observed: these two exits happen before the lease is
+      //    taken (no store at all, and a ledger this build cannot open).
+      accountChangedTo: null,
       state: refused,
     };
   }
@@ -940,6 +984,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const persist = async (s: BackfillState): Promise<void> => {
     await ledger.save(s);
   };
+
 
   /**
    * 🔴 W98 · **The one-time re-enumeration a parser fix owes a ledger that predates
@@ -1019,6 +1064,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   let skippedAlreadyPending = 0;
   let enumTruncated: EnumTruncation | null = state.enumCursor.truncated ?? null;
   const detailOutcomes = state.detailOutcomes ?? (state.detailOutcomes = []);
+  /**
+   * 🔴 W199 · The raw id of an account a response named that is not this scope's, or
+   * `null`. Set at most once — the first proven disagreement stops the run, so there
+   * is never a second — and it leaves the process through `RunReport.accountChangedTo`
+   * (the caller's registry write) and nowhere else.
+   */
+  let accountChangedTo: AccountObservation | null = null;
 
   /** C28: an empty body outcome is written into the same ledger first, before deciding whether to stop or to settle on a confirmed result. */
   const recordDetailOutcome = (
@@ -1319,6 +1371,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     halted: state.halted,
     enumTruncated,
     paceTrace: { enumerate: enumPacer.waits, detail: detailPacer.waits },
+    accountChangedTo,
     state,
   });
 
@@ -1360,6 +1413,168 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       await persist(state);
     }
     return report(stopped);
+  };
+
+  /**
+   * 🔴 W199 · **Take the run's account lease, before anything is fetched.**
+   *
+   * W128 step 2's first clause, and it is the one thing here that needs no request: for
+   * a plan that declares `accountInScope` the scope key *is* the account id
+   * (ADR-002's account axis), so the fingerprint can be taken from the address the work
+   * is already filed under and compared with the fingerprint recorded on this scope.
+   *
+   * The three outcomes are `decideRunLease`'s (lib/backfill/account-lease.ts) and only
+   * one of them stops the run. In order:
+   *
+   *  · **`'unleased'`** — this plan does not hold a lease, or the scope is the
+   *    `'default'` sentinel. Nothing is written and nothing is compared: byte-identical
+   *    to the pre-W199 behaviour, which is the correct answer for "there is no account
+   *    here to be wrong about".
+   *  · **`'refuse'`** — the recorded lease and the scope's own address name different
+   *    accounts on the same salt. One key cannot be two accounts, so the run does not
+   *    start. **Nothing is fetched and nothing is written**: this is a refusal about the
+   *    record, so the record is left exactly as it was found.
+   *  · **`'run'`** — the run speaks for `lease`. `take` says the lease has to be written
+   *    (there was none, or what was there is incomparable because the salt changed), and
+   *    that write happens in the same `persist` as the rest of the header, **before the
+   *    first request**, so a run that dies mid-fetch cannot leave a scope that ran
+   *    without a lease.
+   *
+   * 🔴 It is placed here — after the ledger is open, before the re-enumeration migration
+   *    and before any gate that can fetch — because both halves matter: it must be able
+   *    to write (so the ledger must be open) and it must precede the first request (so
+   *    nothing can be attributed under an account this run never claimed).
+   *
+   * 🔴 What it deliberately does **not** do: it does not contact a page, does not read
+   *    a platform body, and does not turn an unreadable salt into an accusation. A run
+   *    with no lease runs exactly as it did before this change.
+   */
+  const runLease: RunLease = planHoldsAccountLease(opts.platform)
+    ? decideRunLease(
+      state.accountLease,
+      await accountLeaseForScope(opts.platform, opts.scope, store, clock.now()),
+    )
+    : { kind: 'unleased', reason: 'platform-not-scoped' };
+  // Exposed to the two attribution checks below as the one comparison partner, so the
+  // list segment and the body segment cannot compare against different things.
+  const leaseIdentity: AccountIdentity | null =
+    runLease.kind === 'run'
+      ? { value: runLease.lease.value, saltId: runLease.lease.saltId, source: runLease.lease.source }
+      : null;
+  if (runLease.kind === 'refuse') {
+    // 🔴 The refusal **writes** — it is a stop like any other, and it goes through the
+    //    one funnel so the popup, the coverage page and `scopeRetryDue` read it the same
+    //    way. `halt()` also spends any re-decision marker and persists, which is what
+    //    keeps the next tick from re-deciding this from scratch: a refusal recorded only
+    //    in a returned report would be re-run (and re-refused, issuing nothing) on every
+    //    wake, with the trace visible for one tick and gone by the time anyone looked.
+    //    It settles and enqueues nothing, which is the whole of what "refuse" means here.
+    return halt('account-changed', runLease.detail);
+  }
+  if (runLease.kind === 'run' && runLease.take) {
+    state.accountLease = runLease.lease;
+    await persist(state);
+  }
+
+  /**
+   * 🔴 W199 · What one response said about this run's lease.
+   *
+   * `'differs'` carries everything the two consequences need: the fingerprint to record
+   * on the suspension, and the raw id (when the scan could read one) for the caller's
+   * registry write. `'unleased'` is the answer when this run has no lease at all, and it
+   * is kept distinct from `'incomparable'` because they are different facts — "there is
+   * no account here" versus "there is one and this response did not name it".
+   */
+  type AccountCheck =
+    | { verdict: 'agrees' | 'incomparable' | 'unleased' }
+    | { verdict: 'differs'; identity: AccountIdentity; id: string | null };
+
+  /**
+   * 🔴 W199 · **The one comparison the two attribution points share.**
+   *
+   * `text` is the body of a response this run just received, `url` the request that
+   * produced it. The account is derived by step 1's own function — the same one that
+   * stamps a bundle — so the value written on an archived conversation and the value
+   * compared here cannot drift: one construction, two readers.
+   *
+   * What the three verdicts mean for the caller, and the sentence worth reading twice:
+   *
+   *  · **`'differs'` is the only outcome that stops work**, and it is the only one that
+   *    produces an accusation. The scope is suspended (`state.suspended`), the halt is
+   *    written, nothing is enqueued and nothing is settled.
+   *  · **`'agrees'`** carries on.
+   *  · **`'incomparable'`** carries on **and is not a soft `'agrees'`**: it is the
+   *    answer when this body names no account at all (the ADR-002 scan found nothing),
+   *    which on these platforms is the ordinary case. Refusing to fetch on an
+   *    unverifiable body would stop backfill on the very platforms this task is for —
+   *    a worse trade than the risk, and not what issue #4's acceptance condition says
+   *    ("a **known** switch … cannot put account B's IDs or body into account A's
+   *    ledger"). The lease's own `unknown` state is what makes "we could not tell"
+   *    visible instead of guessed.
+   *
+   * 🔴 The raw id is read for one purpose only: the caller's registry write for the new
+   *    account. It is not logged and not persisted.
+   */
+  const accountCheckOf = async (
+    url: string,
+    text: string,
+    sessionId: string | null,
+  ): Promise<AccountCheck> => {
+    if (runLease.kind !== 'run' || leaseIdentity === null) return { verdict: 'unleased' };
+    // Built once and used twice: the fingerprint and the raw id are two readings of one
+    // response, and handing them two objects is how they would come to be two readings
+    // of two responses.
+    const seen: CapturedFetch = { url, method: 'GET', status: 200, text, capturedAt: clock.now() };
+    const identity = identityOf(await accountFingerprintFor(seen, store, sessionId));
+    const verdict = compareAccountLease(leaseIdentity, identity);
+    if (verdict === 'agrees') return { verdict: 'agrees' };
+    if (verdict === 'incomparable') return { verdict: 'incomparable' };
+    // `'differs'` requires both sides: `compareAccountLease` answers `'incomparable'`
+    // for a missing observation, so this branch is exactly where an identity exists.
+    if (identity === null) return { verdict: 'incomparable' };
+    const reading = accountIdFromCapture(seen, sessionId);
+    return { verdict: 'differs', identity, id: reading.kind === 'id' ? reading.id : null };
+  };
+
+  /**
+   * 🔴 W199 · **The stop for a proven account change, written once for both attribution
+   *    points.**
+   *
+   * Three things happen and they are three different records on purpose:
+   *
+   *  · **the suspension** goes on the header (`state.suspended`), and it is what keeps
+   *    the halt from expiring back into the same request: a transient halt alone would
+   *    come back after its ladder and ask again. It names the lease the scope was
+   *    running under and the fingerprint it saw instead — never an id;
+   *  · **the halt** (`account-changed`) is the ordinary record of what happened, so the
+   *    popup, the coverage page and `scopeRetryDue` all read one stop rather than three;
+   *  · **the raw id**, when the scan could read one, leaves through the report for the
+   *    caller's registry write ("start/resume the scope for the new account"). It is not
+   *    in either record above.
+   *
+   * 🔴 `where` says which segment proved it. The detail names no id and no
+   *    conversation — the two fingerprints are on the suspension record, and a log line
+   *    is the one place this project never puts an account identifier.
+   */
+  const stopForAccountChange = async (
+    check: Extract<AccountCheck, { verdict: 'differs' }>,
+    where: 'enumerate' | 'detail',
+  ): Promise<RunReport> => {
+    const suspended = suspensionFor(
+      runLease.kind === 'run' ? runLease.lease : undefined,
+      check.identity,
+      clock.now(),
+    );
+    if (suspended) state.suspended = suspended;
+    if (check.id !== null) {
+      accountChangedTo = { identity: check.identity, id: check.id, where };
+    }
+    return halt(
+      'account-changed',
+      `${where}: the response was answered for a different account than this scope's lease;`
+      + ' nothing was enqueued, nothing was settled, and this scope is suspended until its own'
+      + ' account is observed again',
+    );
   };
 
   // 🔴 W13 · A persisted halt is now **two different things**, and this is the line
@@ -1825,6 +2040,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     const listRefused = plan.refusalOf?.(res.text);
     if (listRefused) {
       return halt(listRefused.reason, `${listWhere()}: ${listRefused.detail}`);
+    }
+    /**
+     * 🔴 W199 · **Attribution point one: this list page's ids are about to be filed
+     *    under this scope.**
+     *
+     * The check runs here — after the refusal check, so a refusal keeps its own more
+     * honest reason, and **before `parseListPage` and before `enqueueDebts`** — because
+     * the one thing that must not happen is a single id of another account's list
+     * entering this ledger. Placing it after the enqueue would make the guard a report
+     * instead of a guard.
+     *
+     * `sessionId` is `null` on purpose: a list page is not a conversation, and passing a
+     * session id here would only give step 1's C21 guard something to reject a real
+     * account id against.
+     */
+    const listAccount = await accountCheckOf(url, res.text, null);
+    if (listAccount.verdict === 'differs') {
+      return stopForAccountChange(listAccount, 'enumerate');
     }
     const parsed = plan.parseListPage(res.text);
     if (!parsed.ok) {
@@ -2553,6 +2786,28 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    'detail-paged-unsupported' — real content that the plan knows is
      *    incomplete — which must neither be archived nor halt the leg.
      */
+    /**
+     * 🔴 W199 · **Attribution point two: this body is about to be called this scope's
+     *    conversation.**
+     *
+     * The check is placed here — on the **delivered** body, after the second step and
+     * after any assembled pages have replaced it, and **before every parse judgement
+     * below** — for the same reason the list check sits before `enqueueDebts`: the
+     * branches that follow do not merely archive, they *settle*. `detail-empty-confirmed`
+     * settles the debt as archived, `detail-tree-incomplete` drops it, the parked-empty
+     * streak moves — all of them are statements about **this scope's** conversation, and
+     * making any of them from another account's body is the misattribution issue #4
+     * names.
+     *
+     * `id` is passed as the session id, which is exactly the C21 value the write-down
+     * path uses (`engine.ts`'s `captured.sessionId`): a body whose only id-shaped value is
+     * this conversation's own id must not be read as an account id, and the guard that
+     * enforces that is step 1's, reused rather than re-spelled.
+     */
+    const detailAccount = await accountCheckOf(deliveredUrl, deliveredText, id);
+    if (detailAccount.verdict === 'differs') {
+      return stopForAccountChange(detailAccount, 'detail');
+    }
     const detailParsed = plan.parseDetailPage?.(deliveredText);
     if (detailParsed?.ok === false) {
       return halt('shape-changed', `detail body: ${detailParsed.detail}`);
