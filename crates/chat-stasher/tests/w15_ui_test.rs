@@ -15,6 +15,8 @@
 //! * Extension-delivered sessions (`deepseek.…`) are in the activity index and
 //!   therefore on the dashboard, with the reason their time is unknown.
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -31,27 +33,114 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
 }
 
-/// Run the CLI with a sandboxed HOME/XDG so nothing reads or writes the real
-/// machine's config, registry or stage.
-fn run(sandbox: &Path, args: &[&str]) -> Output {
-    let home = sandbox.join("home");
-    let registry = sandbox.join("registry.json");
-    fs::create_dir_all(&home).unwrap();
-    fs::write(
-        &registry,
-        r#"{"schema_version":1,"generated":"W15 synthetic","harnesses":[]}"#,
-    )
-    .unwrap();
-    bin()
-        .args(args)
-        .env("HOME", &home)
+/// The variables that hide this machine from a child: one list, applied to
+/// every child the sandbox starts, whether it is the CLI or the dashboard.
+///
+/// It is one list because the two are the same test's two halves. `index build`
+/// writes the index and the dashboard reads it, and the whole of what decides
+/// which file that is, is the platform cache root that `$XDG_CACHE_HOME` names
+/// — so a child given the variable and a child not given it are looking in two
+/// different directories while every path either one prints looks correct.
+/// `the_dashboard_is_handed_the_same_sandbox_as_the_cli` pins it.
+fn apply_sandbox_env(command: &mut Command, sandbox: &Path) {
+    command
+        .env("HOME", sandbox.join("home"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_CACHE_HOME", sandbox.join("cache"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
-        .env("CHAT_STASHER_REGISTRY", &registry)
-        .output()
-        .unwrap()
+        .env("CHAT_STASHER_REGISTRY", sandbox.join("registry.json"));
+}
+
+/// The CLI as the sandbox starts it: argv, and a HOME/XDG pointed inside the
+/// sandbox so nothing reads or writes the real machine's config, registry,
+/// cache or stage.
+///
+/// Returned rather than spawned so the environment can be inspected without a
+/// run — see `the_dashboard_is_handed_the_same_sandbox_as_the_cli`.
+fn cli_command(sandbox: &Path, args: &[&str]) -> Command {
+    let mut command = bin();
+    command.args(args);
+    apply_sandbox_env(&mut command, sandbox);
+    command
+}
+
+/// Run the CLI with a sandboxed HOME/XDG so nothing reads or writes the real
+/// machine's config, registry or stage.
+fn run(sandbox: &Path, args: &[&str]) -> Output {
+    fs::create_dir_all(sandbox.join("home")).unwrap();
+    fs::write(
+        sandbox.join("registry.json"),
+        r#"{"schema_version":1,"generated":"W15 synthetic","harnesses":[]}"#,
+    )
+    .unwrap();
+    cli_command(sandbox, args).output().unwrap()
+}
+
+/// The dashboard child must be handed the same sandbox the CLI child is.
+///
+/// `the_search_page_reads_the_index_the_cli_built` builds the index with one
+/// child (`run`) and reads it back through another (`Ui::start`), so "the same
+/// index" is a property of the two **environments**, not of either program: the
+/// index lives under the platform cache root, and a cache root set for one
+/// child and not the other puts the file the CLI writes and the file the page
+/// reads in different directories.
+///
+/// Nothing the page renders can show that on macOS, whose cache root ignores
+/// `$XDG_CACHE_HOME` — which is how the pair shipped green locally while
+/// ubuntu was red — so the property is pinned by reading both command lines
+/// rather than by trusting whichever platform is running to notice.
+#[test]
+fn the_dashboard_is_handed_the_same_sandbox_as_the_cli() {
+    let sb = sandbox();
+    let sandbox = sb.path();
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let env = |command: &Command| -> BTreeMap<OsString, Option<OsString>> {
+        command
+            .get_envs()
+            .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+            .collect()
+    };
+    let cli = env(&cli_command(sandbox, &["index", "build"]));
+    let dashboard = env(&Ui::command(sandbox, &repo, &key, &[], "ui"));
+    assert_eq!(
+        cli, dashboard,
+        "the CLI child and the dashboard child must be sandboxed identically; a \
+         variable set for one and not the other is how the index the CLI builds \
+         stops being the index the page reads"
+    );
+    // One variable is a file, not a preference: without it a child reads and
+    // writes the *real* user's cache, so it is pinned by value and not only by
+    // the two sides agreeing to leave it out together.
+    assert_eq!(
+        dashboard.get(OsStr::new("XDG_CACHE_HOME")),
+        Some(&Some(sandbox.join("cache").into_os_string())),
+        "the index is located under the cache root"
+    );
+    // Equal environments are only equal *indexes* if the derivation really is a
+    // function of them — and on the one platform where this test went red,
+    // `$XDG_CACHE_HOME` is the whole of that function. Named here, on Linux,
+    // because macOS ignores the variable and therefore cannot show the
+    // difference no matter what the two children are handed.
+    let value = |name: &str| {
+        dashboard
+            .get(OsStr::new(name))
+            .unwrap_or_else(|| panic!("{name} is part of the sandbox"))
+            .clone()
+            .unwrap_or_else(|| panic!("{name} is set to a directory, not removed"))
+    };
+    assert_eq!(
+        chat_stasher::scanner::user_cache_dirs_on(
+            "linux",
+            Path::new(&value("HOME")),
+            Some(Path::new(&value("XDG_CACHE_HOME"))),
+            None,
+        ),
+        vec![sandbox.join("cache")],
+        "a Linux dashboard handed the sandbox's `$XDG_CACHE_HOME` must look for \
+         the index under it, which is where the CLI child wrote it"
+    );
 }
 
 /// One synthetic claude-code line with an RFC 3339 timestamp.
@@ -441,16 +530,17 @@ struct Ui {
 }
 
 impl Ui {
-    /// Start `chat-stasher ui` and read its stdout until the URL appears.
-    ///
-    /// The stderr is redirected to a file so a chatty failure cannot fill a pipe
-    /// and deadlock `wait`.
-    fn start(sandbox: &Path, repo: &Path, key: &Path, extra: &[&str], subcommand: &str) -> Ui {
-        let home = sandbox.join("home");
-        let registry = sandbox.join("registry.json");
-        fs::create_dir_all(&home).unwrap();
-        let stderr_path = sandbox.join(format!("{subcommand}.stderr"));
-        let stderr = fs::File::create(&stderr_path).unwrap();
+    /// The dashboard as the sandbox starts it, argv and environment, without
+    /// spawning: returned so it can be compared with [`cli_command`] — the two
+    /// children have to be handed one sandbox, and only a test that reads both
+    /// environments can say so on a platform where the difference is invisible.
+    fn command(
+        sandbox: &Path,
+        repo: &Path,
+        key: &Path,
+        extra: &[&str],
+        subcommand: &str,
+    ) -> Command {
         let mut args: Vec<String> = vec![
             subcommand.to_string(),
             "--repo".into(),
@@ -463,13 +553,21 @@ impl Ui {
             "--keep-ssh-masters".into(),
         ];
         args.extend(extra.iter().map(|s| s.to_string()));
-        let mut child = bin()
-            .args(&args)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", sandbox.join("config"))
-            .env("XDG_DATA_HOME", sandbox.join("data"))
-            .env("XDG_STATE_HOME", sandbox.join("state"))
-            .env("CHAT_STASHER_REGISTRY", &registry)
+        let mut command = bin();
+        command.args(&args);
+        apply_sandbox_env(&mut command, sandbox);
+        command
+    }
+
+    /// Start `chat-stasher ui` and read its stdout until the URL appears.
+    ///
+    /// The stderr is redirected to a file so a chatty failure cannot fill a pipe
+    /// and deadlock `wait`.
+    fn start(sandbox: &Path, repo: &Path, key: &Path, extra: &[&str], subcommand: &str) -> Ui {
+        fs::create_dir_all(sandbox.join("home")).unwrap();
+        let stderr_path = sandbox.join(format!("{subcommand}.stderr"));
+        let stderr = fs::File::create(&stderr_path).unwrap();
+        let mut child = Ui::command(sandbox, repo, key, extra, subcommand)
             .stdout(Stdio::piped())
             .stderr(stderr)
             .spawn()
@@ -1090,25 +1188,21 @@ fn the_view_alias_is_deprecated_on_stderr_and_behaves_like_ui() {
 fn a_closed_stdout_does_not_fail_the_launch() {
     let sb = sandbox();
     let (repo, key) = build_repo(sb.path());
-    let home = sb.path().join("home");
-    fs::create_dir_all(&home).unwrap();
-    let mut child = bin()
-        .args([
-            "ui",
-            "--repo",
-            repo.to_str().unwrap(),
-            "--key-file",
-            key.to_str().unwrap(),
-            "--no-open",
-            "--idle-timeout",
-            "1",
-            "--keep-ssh-masters",
-        ])
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", sb.path().join("config"))
-        .env("XDG_DATA_HOME", sb.path().join("data"))
-        .env("XDG_STATE_HOME", sb.path().join("state"))
-        .env("CHAT_STASHER_REGISTRY", sb.path().join("registry.json"))
+    fs::create_dir_all(sb.path().join("home")).unwrap();
+    let mut command = bin();
+    command.args([
+        "ui",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--key-file",
+        key.to_str().unwrap(),
+        "--no-open",
+        "--idle-timeout",
+        "1",
+        "--keep-ssh-masters",
+    ]);
+    apply_sandbox_env(&mut command, sb.path());
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
