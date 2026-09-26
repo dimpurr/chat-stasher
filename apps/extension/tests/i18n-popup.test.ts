@@ -64,6 +64,14 @@ async function rendered() {
 }
 
 describe('i18n popup · the language switch changes what is on screen', () => {
+  it('shows when the native host cannot coordinate backfill', async () => {
+    const overlay = await import('../lib/i18n');
+    const view = await import('../lib/popup-view');
+    await overlay.applyUiLocale('en');
+    expect(view.popupText(view.renderPopup({ ...model(), coordinationUnavailable: true })))
+      .toContain(CATALOGS.en.popup_notes_coordinationUnavailable!.message);
+  });
+
   it('the same model renders Chinese under zh_CN and English under en', async () => {
     const { overlay, view } = await rendered();
 

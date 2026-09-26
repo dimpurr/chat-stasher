@@ -1226,6 +1226,202 @@ struct HasRequest {
     fingerprint: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CoordinationRequest {
+    request_id: String,
+    mode: String,
+    platform: String,
+    install_id: String,
+    segment: Option<String>,
+    status: Option<u16>,
+    retry_after_ms: Option<u64>,
+}
+
+/// EXT-3 coordination state. Native messaging starts a fresh host process per
+/// request, so SQLite's IMMEDIATE transaction is the cross-process mutex.
+fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let parsed: CoordinationRequest = match serde_json::from_value(request) {
+        Ok(parsed) => parsed,
+        Err(e) => return nack(request_id, NackKind::BadRequest, e.to_string()),
+    };
+    if !valid_request_id(&parsed.request_id)
+        || parsed.install_id.is_empty()
+        || parsed.install_id.len() > 128
+        || parsed.platform.is_empty()
+        || parsed.platform.len() > 64
+        || !matches!(
+            parsed.mode.as_str(),
+            "claim" | "token" | "release" | "rate_limit"
+        )
+        || (parsed.mode == "token"
+            && !matches!(parsed.segment.as_deref(), Some("enumerate" | "detail")))
+        || (parsed.mode == "rate_limit" && !matches!(parsed.status, Some(403 | 429)))
+    {
+        return nack(
+            request_id,
+            NackKind::BadRequest,
+            "malformed coordination request",
+        );
+    }
+    let request_id = parsed.request_id.clone();
+    let (machine, _) = match resolve_target() {
+        HostTarget::Ready { machine, stage } => (machine, stage),
+        HostTarget::Refused { kind, detail } => return nack(Some(request_id), kind, detail),
+    };
+    let state_dir = crate::collect::default_state_dir();
+    if let Err(e) = fs::create_dir_all(&state_dir) {
+        return nack(
+            Some(request_id),
+            NackKind::Io,
+            format!("cannot prepare coordination state: {e}"),
+        );
+    }
+    let conn = match rusqlite::Connection::open(state_dir.join("extension-coordination.sqlite3")) {
+        Ok(conn) => conn,
+        Err(e) => {
+            return nack(
+                Some(request_id),
+                NackKind::Io,
+                format!("cannot open coordination state: {e}"),
+            )
+        }
+    };
+    let setup = conn.execute_batch(
+        "PRAGMA busy_timeout=5000;
+         CREATE TABLE IF NOT EXISTS ext_install(platform TEXT NOT NULL, install_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id));
+         CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));"
+    );
+    if let Err(e) = setup {
+        return nack(
+            Some(request_id),
+            NackKind::Io,
+            format!("cannot initialize coordination state: {e}"),
+        );
+    }
+    if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
+        return nack(
+            Some(request_id),
+            NackKind::Io,
+            format!("cannot lock coordination state: {e}"),
+        );
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        conn.execute(
+            "DELETE FROM ext_install WHERE seen_at<=?1",
+            [now - 30 * 24 * 60 * 60 * 1000],
+        )?;
+        conn.execute("INSERT INTO ext_install(platform,install_id,seen_at) VALUES(?1,?2,?3) ON CONFLICT(platform,install_id) DO UPDATE SET seen_at=excluded.seen_at", rusqlite::params![parsed.platform, parsed.install_id, now])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO ext_platform(machine,platform) VALUES(?1,?2)",
+            rusqlite::params![machine, parsed.platform],
+        )?;
+        let (owner, lease_until, cooldown_until, next_enum, next_detail, detail_day, detail_count): (Option<String>,i64,i64,i64,i64,String,i64) = conn.query_row("SELECT owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+        conn.execute("UPDATE ext_platform SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND lease_until<=?3", rusqlite::params![machine,parsed.platform,now])?;
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ext_install WHERE platform=?1 AND seen_at>?2",
+            rusqlite::params![parsed.platform, now - 24 * 60 * 60 * 1000],
+            |r| r.get(0),
+        )?;
+        let mut granted = false;
+        let mut wait = 0i64;
+        let mut new_cooldown = cooldown_until;
+        match parsed.mode.as_str() {
+            "claim" => {
+                let owner_available =
+                    lease_until <= now || owner.as_deref() == Some(parsed.install_id.as_str());
+                wait = if cooldown_until > now {
+                    cooldown_until - now
+                } else if !owner_available {
+                    (lease_until - now).max(0)
+                } else {
+                    0
+                };
+                granted = owner_available && wait == 0;
+                if granted && wait == 0 {
+                    conn.execute("UPDATE ext_platform SET owner=?3,lease_until=?4 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,parsed.install_id,now+120_000])?;
+                }
+            }
+            "release" => {
+                conn.execute("UPDATE ext_platform SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND owner=?3", rusqlite::params![machine,parsed.platform,parsed.install_id])?;
+                granted = true;
+            }
+            "rate_limit" => {
+                let header = parsed
+                    .retry_after_ms
+                    .unwrap_or(0) // reason: missing Retry-After still applies the 60s machine cooldown floor.
+                    .min(30 * 24 * 60 * 60 * 1000) as i64;
+                new_cooldown = now + header.max(60_000);
+                conn.execute("UPDATE ext_platform SET cooldown_until=MAX(cooldown_until,?3),owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,new_cooldown])?;
+                wait = header.max(60_000);
+            }
+            _ => {
+                let is_detail = parsed.segment.as_deref() == Some("detail");
+                let owner_ok =
+                    owner.as_deref() == Some(parsed.install_id.as_str()) && lease_until > now;
+                let cooldown_wait = (cooldown_until - now).max(0);
+                let next = if is_detail { next_detail } else { next_enum };
+                let daily_count = if detail_day == today { detail_count } else { 0 };
+                let daily_wait = if is_detail && daily_count >= 400 {
+                    60_000
+                } else {
+                    0
+                };
+                wait = cooldown_wait.max((next - now).max(0)).max(daily_wait);
+                granted = owner_ok && wait == 0;
+                if granted {
+                    let interval = if is_detail {
+                        if active > 1 {
+                            45_000
+                        } else {
+                            20_000
+                        }
+                    } else if active > 1 {
+                        4_000
+                    } else {
+                        2_000
+                    };
+                    let next_at = now + interval;
+                    if is_detail {
+                        conn.execute("UPDATE ext_platform SET lease_until=?3,next_detail=?4,detail_day=?5,detail_count=CASE WHEN detail_day=?5 THEN detail_count+1 ELSE 1 END WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,now+120_000,next_at,today])?;
+                    } else {
+                        conn.execute("UPDATE ext_platform SET lease_until=?3,next_enum=?4 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,now+120_000,next_at])?;
+                    }
+                }
+            }
+        }
+        Ok(
+            serde_json::json!({"protocol":PROTOCOL,"type":"coordination","ok":true,"request_id":request_id,"granted":granted,"active_installs":active,"gentle":active>1,"cooldown_until":new_cooldown,"wait_ms":wait}),
+        )
+    })();
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => value,
+            Err(e) => nack(
+                Some(request_id),
+                NackKind::Io,
+                format!("cannot save coordination state: {e}"),
+            ),
+        },
+        Err(e) => {
+            let rollback = conn.execute_batch("ROLLBACK");
+            if let Err(rollback_error) = rollback {
+                return nack(
+                    Some(request_id),
+                    NackKind::Io,
+                    format!("coordination state failed: {e:#}; rollback failed: {rollback_error}"),
+                );
+            }
+            nack(
+                Some(request_id),
+                NackKind::Io,
+                format!("coordination state failed: {e:#}"),
+            )
+        }
+    }
+}
+
 /// `[A-Za-z0-9_-]{1,128}` (§6.2).
 fn valid_request_id(id: &str) -> bool {
     !id.is_empty()
@@ -1435,6 +1631,8 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
         Some("deliver") => deliver(request, echoed_id),
         // §6.6 — the content question, answered from the stage (W50c).
         Some("has") => has(request, echoed_id),
+        // EXT-3: host-persisted, machine-wide backfill arbitration.
+        Some("coordination") => coordination(request, echoed_id),
         // §6.4/§6.5 — the two parameterless read-only queries.
         Some("summary") => match no_parameters(&request) {
             Ok(()) => summary(echoed_id),

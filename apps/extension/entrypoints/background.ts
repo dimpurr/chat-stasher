@@ -28,7 +28,7 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { coordinate, deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { recordLiveCapture } from '../lib/live-capture';
 import {
   captureFingerprint,
@@ -97,7 +97,8 @@ import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
+import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
+import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, parseRetryAfterMs, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -725,6 +726,17 @@ export function configureBackfillPace(override: BackfillSeam | null): void {
   backfillPaceOverride = override;
 }
 
+const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_unavailable_v1';
+
+async function rememberCoordinationAvailability(unavailable: boolean): Promise<void> {
+  try {
+    const store = browserLocalStore();
+    if (store) await store.save(COORDINATION_UNAVAILABLE_KEY, unavailable);
+  } catch (err) {
+    console.warn('[chat-stasher] coordination availability status could not be saved', (err as Error).message);
+  }
+}
+
 /**
  * 🔴 W113 · **The speed preset this tick runs with** (ADR-032 §3, ADR-033).
  *
@@ -749,6 +761,55 @@ async function presetTickOptions(
     ? SPEED_PLANS[backfillPaceOverride.preset]
     : await readSpeedPlan(store);
   return { pace: plan.pace, maxDetails: plan.tickDetails };
+}
+
+/** Run through the native host arbiter when it supports EXT-3; older hosts keep
+ * today's local behavior and surface the missing coordination in diagnostics. */
+async function coordinatedTick(
+  platform: string,
+  http: HttpPort | undefined,
+  run: (http: HttpPort | undefined, gentle: boolean) => Promise<TickResult>,
+): Promise<TickResult> {
+  if (!http) {
+    // No request can be made on this tick, so the prior host-coordination result
+    // is not a current constraint on this install's backfill behavior.
+    await rememberCoordinationAvailability(false);
+    return run(undefined, false);
+  }
+  const install = await getInstallIdentity();
+  const claim = await coordinate({ mode: 'claim', platform, installId: install.install_id });
+  if (!claim.ok) {
+    await rememberCoordinationAvailability(true);
+    console.warn('[chat-stasher] backfill coordination unavailable; using per-install pacing', claim.reason ?? 'unknown');
+    return run(http, false);
+  }
+  await rememberCoordinationAvailability(false);
+  if (!claim.granted) return { ran: false, reason: 'already-running', report: null };
+  const coordinatedHttp: HttpPort = async (url, init) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const segment = coordinationSegmentForRequest(url);
+      const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment });
+      if (!token.ok) {
+        throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
+      }
+      if (token.granted) break;
+      if (attempt === 2 || token.waitMs > 60_000) throw new Error('machine-wide backfill request budget is waiting');
+      await new Promise((resolve) => setTimeout(resolve, Math.max(250, token.waitMs)));
+    }
+    const response = await http(url, init);
+    if (response.status === 403 || response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.retryAfter, Date.now()) ?? 0;
+      const report = await coordinate({ mode: 'rate_limit', platform, installId: install.install_id,
+        status: response.status, retryAfterMs });
+      if (!report.ok) console.warn('[chat-stasher] rate-limit cooldown could not be shared', report.reason ?? 'unknown');
+    }
+    return response;
+  };
+  try {
+    return await run(coordinatedHttp, claim.gentle);
+  } finally {
+    await coordinate({ mode: 'release', platform, installId: install.install_id });
+  }
 }
 
 /** The most recent tick's result (for tests and diagnosis, and for C18's popup). */
@@ -869,10 +930,17 @@ export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
   //    platform is it). Asking twice would allow a self-contradictory answer:
   //    "there is a channel, but I cannot say which platform".
   const live = await liveTransport();
+  let coordinationUnavailable = false;
+  try {
+    coordinationUnavailable = (await browserLocalStore()?.load(COORDINATION_UNAVAILABLE_KEY)) === true;
+  } catch (err) {
+    console.warn('[chat-stasher] coordination availability status could not be read', (err as Error).message);
+  }
   return {
     transportWired: live.wired,
     lastTickReason: lastTick?.reason ?? null,
     liveTarget: live.target,
+    ...(coordinationUnavailable ? { coordinationUnavailable: true } : {}),
   };
 }
 
@@ -1705,10 +1773,11 @@ export async function kickBackfill(
    * record cannot disagree about which account this capture came from.
    */
   await applyAccountObservationForCapture(store, target.platform, captured);
-  const result = await tickBackfill({
+  const http = await resolveHttpPort(target.origin, senderTabId);
+  const result = await coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
     ...target,
     store,
-    http: await resolveHttpPort(target.origin, senderTabId),
+    http: coordinated,
     // The archive exit = the backfill leg's own delivery function (**not through
     // the outbox**; see §10 and deliverBackfillItem).
     // 🔴 C20: **the return is mandatory**. This used to be
@@ -1719,7 +1788,8 @@ export async function kickBackfill(
     // W113 · The stored speed preset (ADR-032 §3), then the test seam over it.
     ...(await presetTickOptions(store)),
     ...(backfillPaceOverride ?? {}),
-  });
+    ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
+  }));
   /**
    * 🔴 W199 · **The run's own discovery, after the live leg's.** The capture already told
    *    the registry which account is signed in; this adds the case the live leg cannot
@@ -2191,19 +2261,20 @@ async function runAlarmTickBody(): Promise<TickResult> {
     };
     // `async` since W113: the preset is read per tick, and a body-less arrow cannot await.
     const tickOne = async (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
-      tickBackfill({
+      coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
         platform: target.platform,
         origin: target.origin,
         scope,
         store,
-        http,
+        http: coordinated,
         // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
         //    and one of them reporting while the other does not is not acceptable).
         sink: (c) => deliverBackfillItem(c),
         // W113 · The alarm's path. Read once per tick, the same as the live leg's kick.
         ...(await presetTickOptions(store)),
         ...(backfillPaceOverride ?? {}),
-      });
+        ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
+      }));
     let http = await resolveHttpPort(target.origin);
     if (http === undefined) {
       // 🔴 W76 · A target with no live tab is a **skip**, not a run: it must not
@@ -2264,6 +2335,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
         }
       }
       if (http === undefined) {
+        await rememberCoordinationAvailability(false);
         schedule.skipped.push({ platform: target.platform, reason: 'no-http-port' });
         // The page this target would have run against is gone — but a `proven` or
         // `possible` resolution means a request did go out earlier in this wake, and
