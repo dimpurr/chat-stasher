@@ -1701,6 +1701,59 @@ fn open_dashboard_without_a_configured_destination_is_refused_before_anything_st
     assert!(detail.contains("no default destination"), "{detail}");
 }
 
+// -------------------------------------------------------- EXT-3 coordination
+
+#[test]
+fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let ask = |request_id: &str, mode: &str, install_id: &str| {
+        let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+            "request_id":request_id,"mode":mode,"platform":"chatgpt","install_id":install_id})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        let response = one_frame(&out.stdout);
+        assert_matches_schema(&response);
+        response
+    };
+    let first = ask("claim-a", "claim", "install-a");
+    assert_eq!(first["granted"], true);
+    let contender = ask("claim-b", "claim", "install-b");
+    assert_eq!(contender["granted"], false);
+    assert_eq!(contender["active_installs"], 2);
+    assert_eq!(contender["gentle"], true);
+
+    let db = fixture
+        .home
+        .join("data/chat-stasher/state/extension-coordination.sqlite3");
+    let conn = rusqlite::Connection::open(db).expect("coordination database exists");
+    conn.execute(
+        "UPDATE ext_platform SET lease_until=0 WHERE platform='chatgpt'",
+        [],
+    )
+    .expect("expire lease");
+    drop(conn);
+    let after_expiry = ask("claim-c", "claim", "install-b");
+    assert_eq!(
+        after_expiry["granted"], true,
+        "expired lease can be claimed"
+    );
+
+    let limited = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"rate-a","mode":"rate_limit","platform":"chatgpt","install_id":"install-b",
+        "status":429,"retry_after_ms":300_000})));
+    let limited = one_frame(&limited.stdout);
+    assert_matches_schema(&limited);
+    let blocked = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"token-a","mode":"token","platform":"chatgpt","install_id":"install-b","segment":"detail"})));
+    let blocked = one_frame(&blocked.stdout);
+    assert_matches_schema(&blocked);
+    assert_eq!(blocked["granted"], false);
+    assert!(
+        blocked["wait_ms"].as_i64().unwrap_or_default() >= 299_000,
+        "cooldown reaches every install: {blocked}"
+    );
+}
+
 #[test]
 fn open_dashboard_naming_an_undeclared_destination_lists_what_is_declared() {
     let fixture = Fixture::new();

@@ -336,6 +336,10 @@ popup:
       history is being backfilled while not one conversation is. Saying plainly
       that it is not supported yet is the better answer.
   notes:
+    coordinationUnavailable: >-
+      Backfill coordination is unavailable from this native host. This install is
+      using its local pacing, so another browser profile on this machine may also
+      backfill at the same time.
     target: "This progress is for: platform {platform} · archive scope {scope}"
     noTarget: >-
       There is no backfill record for any platform yet, so there is no archive

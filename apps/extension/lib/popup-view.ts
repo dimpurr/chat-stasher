@@ -165,6 +165,8 @@ export interface BackfillRuntimeStatus {
    */
   liveTarget?: { platform: string; origin: string } | null;
   install?: { install_id: string; browser: string; profile_label: string | null };
+  /** The last coordination probe found an older or unreachable native host. */
+  coordinationUnavailable?: boolean;
   /**
    * 🔴 W2 · The conclusion of the most recent `hello` (§6.1), written to storage
    * by background after it asks. It is **a record of one question and answer**,
@@ -237,6 +239,8 @@ export interface PopupModel {
    * null / omitted ⇒ never asked ⇒ the wording says "never asked" as-is, never a guess.
    */
   nativeHost?: HostStatusRecord | null;
+  /** The last coordination probe found an older or unreachable native host. */
+  coordinationUnavailable?: boolean;
   /**
    * 🔴 W2 · The outbox as it stands. null = could not be read (IndexedDB
    * unavailable) ⇒ say so as-is. Omitted ⇒ treat as empty: existing call sites
@@ -1421,6 +1425,8 @@ function notesFor(model: PopupModel): string[] {
   const notes: string[] = [];
   // 🔴 Failure details come before every other note. If something was lost, say that first.
   if (model.failures.entries.length > 0) notes.push(failureNote(model.failures));
+
+  if (model.coordinationUnavailable) notes.push(t('popup.notes.coordinationUnavailable'));
 
   // 🔴 W43 · **Second, and before the tick note, because it outranks it.** A
   //    backfill that has not ticked yet is a wait; a page whose capture hook is

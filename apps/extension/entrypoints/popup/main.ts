@@ -230,6 +230,7 @@ async function collect(): Promise<PopupModel> {
     install: runtime.install,
     targetCount: targets.length,
     nativeHost,
+    coordinationUnavailable: runtime.coordinationUnavailable,
     outbox,
     hostPause,
     lastExport,
