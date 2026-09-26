@@ -105,6 +105,8 @@ import * as ui from './ui-strings';
  * download / badge / engine behind it) into the popup's bundle.
  */
 export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
+export const POPUP_INSTALL_LABEL_MESSAGE = 'cs-install-label';
+export const POPUP_SAVE_INSTALL_LABEL_MESSAGE = 'cs-save-install-label';
 
 /**
  * 🔴 C33 · Popup → background: "backfill THIS platform, I am saying so".
@@ -162,6 +164,7 @@ export interface BackfillRuntimeStatus {
    * way the button must not be shown.
    */
   liveTarget?: { platform: string; origin: string } | null;
+  install?: { install_id: string; browser: string; profile_label: string | null };
   /**
    * 🔴 W2 · The conclusion of the most recent `hello` (§6.1), written to storage
    * by background after it asks. It is **a record of one question and answer**,
@@ -220,6 +223,7 @@ export interface PopupModel {
    * nothing).
    */
   liveTarget?: { platform: string; origin: string } | null;
+  install?: { install_id: string; browser: string; profile_label: string | null };
   /**
    * 🔴 C33 · How many backfill targets are already in the registry.
    * Omitted ⇒ treat as 0? **No**: omitted is treated as "unknown", which is

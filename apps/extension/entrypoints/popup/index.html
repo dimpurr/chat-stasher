@@ -21,6 +21,8 @@
       .row { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
       .row label { cursor: pointer; user-select: none; }
       #status { font-weight: 600; }
+      #install-label { margin: -6px 0 8px; font-size: 12px; opacity: .85; }
+      #install-profile-label { width: 190px; font: inherit; }
       #channel { margin: 6px 0; font-size: 12px; opacity: .9; }
       /* W2: backfill paused because the host is unreachable. It is the reason
          "nothing is happening", so it has to be prominent. */
@@ -159,6 +161,11 @@
   </head>
   <body>
     <h1>Chat Stasher</h1>
+    <div id="install-label"></div>
+    <div id="install-name-row" class="row" hidden>
+      <input id="install-profile-label" maxlength="80" />
+      <button type="button" id="save-install-profile-label"></button>
+    </div>
     <div id="status"></div>
     <div id="channel"></div>
     <!-- W2: backfill paused (host unreachable). The whole block is hidden when it is not paused. -->

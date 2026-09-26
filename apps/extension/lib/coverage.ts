@@ -101,6 +101,8 @@ export interface CoverageScopeInput {
 }
 
 export interface CoverageInput {
+  /** Identity of the browser profile that produced this snapshot. */
+  install?: { install_id: string; browser: string; profile_label: string };
   scopes: readonly CoverageScopeInput[];
   /** The explicit switch (`cs_backfill_enabled_v1`). Off by default and off means nothing runs. */
   enabled: boolean;
@@ -267,6 +269,7 @@ export interface CoverageRow {
 }
 
 export interface CoverageReport {
+  install?: { install_id: string; browser: string; profile_label: string };
   generatedAt: number;
   preset: SpeedPreset;
   enabled: boolean;
@@ -537,6 +540,7 @@ export function buildCoverage(input: CoverageInput): CoverageReport {
   }
 
   return {
+    ...(input.install ? { install: input.install } : {}),
     generatedAt: input.now,
     preset: presetFrom(input.presetRaw),
     enabled: input.enabled,

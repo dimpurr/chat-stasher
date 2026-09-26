@@ -20,7 +20,8 @@
  *   · the quota meter's fill is `bodies/cap` exactly, and a stale counter draws no fill at all.
  *
  * 🔴 **This page issues no request to any chat platform, and never will.** It reads this browser's own
- *    `storage.local` and the backfill IndexedDB, and it writes exactly one thing: the speed preset, when
+ *    `storage.local` and the backfill IndexedDB, and it asks the background worker for the install label.
+ *    It writes exactly one thing: the speed preset, when
  *    the user picks one of the three radios. Everything that could reach a platform lives behind the
  *    content scripts and the alarm, and none of it is imported here — `lib/coverage-read.ts` is the only
  *    module that touches storage at all, and the model it feeds has no network code in it.
@@ -41,6 +42,8 @@ import { readCoverageInputs } from '../../lib/coverage-read';
 import { coverageView, type CoverageAlert, type CoverageCardView } from '../../lib/coverage-view';
 import { barGeometry, monthLabel, monthsGeometry, ringDash, unknownTimeTotal } from '../../lib/coverage-charts';
 import { initUiLocale, t } from '../../lib/i18n';
+import { POPUP_INSTALL_LABEL_MESSAGE } from '../../lib/popup-view';
+import { attachInstallIdentityToConsole } from '../../lib/install-identity';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 /** The bar's proportional coordinate space; widths divide out to exact percentages in CSS. */
@@ -474,7 +477,27 @@ function paintSpeed(
 async function render(store: ReturnType<typeof browserLocalStore>, now: number): Promise<void> {
   const host = hosts();
   const inputs = await readCoverageInputs(store, now);
-  const report = buildCoverage(inputs);
+  let install: { install_id: string; browser: string; profile_label: string | null } | null = null;
+  try {
+    const response = await browser.runtime.sendMessage({ type: POPUP_INSTALL_LABEL_MESSAGE });
+    install = response?.install ?? null;
+  } catch { /* the coverage data remains readable when identity cannot be queried */ }
+  const report = buildCoverage({
+    ...inputs,
+    ...(install ? { install: {
+      install_id: install.install_id,
+      browser: install.browser,
+      profile_label: install.profile_label ?? 'Unnamed profile',
+    } } : {}),
+  });
+  const installLabel = document.getElementById('install-label');
+  if (installLabel) installLabel.textContent = install
+    ? t('coverage.thisBrowser', { browser: install.browser, profile: install.profile_label ?? t('popup.install.unnamed') })
+    : t('coverage.installUnknown');
+  if (install) attachInstallIdentityToConsole({
+    ...install,
+    profile_label: install.profile_label ?? 'Unnamed profile',
+  });
   const view = coverageView(report, now);
 
   host.title.textContent = view.title;

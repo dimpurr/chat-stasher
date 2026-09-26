@@ -120,6 +120,9 @@ test('1 · a conversation response is captured, and stays queued with no native 
 
   const bundle = bundleOf(entry.payload);
   expect(bundle.schema).toBe('chat-stasher/inbox@2');
+  expect(bundle.install_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(bundle.browser).toBe('Chrome');
+  expect(bundle.profile_label).toBe('Unnamed profile');
   expect(bundle.platform).toBe('chatgpt');
   expect(bundle.sessionId).toBe(CHATGPT_SESSION_ID);
   expect(bundle.url).toBe(`https://chatgpt.com${CHATGPT_API_PATH}`);

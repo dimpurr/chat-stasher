@@ -1123,6 +1123,10 @@ export interface InboxBundle {
    * those two are different facts about a bundle.
    */
   account: AccountFingerprint;
+  /** Since W205: this browser profile's provenance. Older inbox@2 bundles omit these fields. */
+  install_id: string;
+  browser: string;
+  profile_label: string;
   /** Immutable source membership recorded by extension enumeration. */
   provenance?: ChatGptProvenance;
   /** Append-only later source observation, if one was separately delivered. */
