@@ -668,7 +668,17 @@ export type TickSkipReason =
   | 'halted'
   | 'waiting-retry'
   | 'daily-cap'
-  | 'state-unreadable';
+  | 'state-unreadable'
+  /**
+   * 🔴 W199 · The scope is held by an account suspension: its own account is not the one
+   * answering, and it stays held until that account is observed in use.
+   *
+   * A reason of its own rather than `halted` or `waiting-retry`, and the difference is what
+   * the reader does about it. `waiting-retry` would say the leg comes back by itself on a
+   * clock it does not have; `halted` would say the leg has stopped for good when a person
+   * using that account is the whole remedy. See `AccountSuspension` in ./types.ts.
+   */
+  | 'account-suspended';
 
 /**
  * 🔴 W76 · **The fairness half of the tick trace.**

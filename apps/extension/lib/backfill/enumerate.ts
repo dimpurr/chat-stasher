@@ -4326,6 +4326,46 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
  * the two tables below cover the rest, and tests/c22-enumplat.test.ts asserts
  * that every row of the platform table lands on exactly one side.
  */
+/**
+ * 🔴 W199 · **The plans whose run scope names an account AND whose account is visible
+ *    in the traffic the run itself receives** — W128 step 2's run identity lease
+ *    (lib/backfill/account-lease.ts).
+ *
+ * A table rather than a field on each of the four plans, and the reason is a fact about
+ * this repository rather than a preference: the plans' own bodies are cited by line
+ * range from six documents, and a field added inside one of those ranges is a citation
+ * the relocator cannot move and a human must repair. The four names are still a
+ * **declaration** — one place a reviewer reads, one line a future platform's author has
+ * to decide about — and it is one screen from `PLANS`, so it cannot be missed by
+ * someone editing the plan list.
+ *
+ * 🔴 **The four, and why not the other two.**
+ *  · **DeepSeek · Perplexity · Gemini · Grok** — the ADR-002 account axis is readable out
+ *    of the response body for these, and it is the same value the run scope is built
+ *    from, so a fingerprint taken at run start and an account seen in a response are
+ *    directly comparable.
+ *  · **ChatGPT** is out because its stable id is the `ChatGPT-Account-Id` **request
+ *    header** (ADR-031), which this build does not capture at all; W108 owns binding it.
+ *    Declaring it here would lease a value the platform mostly does not put in its body.
+ *  · **Claude** is out because it addresses conversations by **organization** and already
+ *    has its own page-side guard (`scopeInPath`); the same-organization gap is W128's
+ *    step 3, and a lease over an organization would not close it (an organization is not
+ *    a person — see farion1231/cc-switch v3.20.1's same-workspace account merge).
+ *
+ * 🔴 **What declaring one costs.** A scope on such a plan is fingerprinted at run start
+ *    and every response is compared against that lease. A *proven* disagreement stops the
+ *    run and suspends the scope; a response that names no account is `incomparable` and
+ *    changes nothing. So a platform added here whose traffic never carries an account
+ *    loses nothing — which is why the declaration is safe, and why it is still a decision
+ *    rather than a default.
+ */
+export const ACCOUNT_LEASE_PLATFORMS: readonly string[] = ['deepseek', 'perplexity', 'gemini', 'grok'];
+
+/** Whether this platform's run holds an account lease. See `ACCOUNT_LEASE_PLATFORMS`. */
+export function planHoldsAccountLease(platform: string): boolean {
+  return ACCOUNT_LEASE_PLATFORMS.includes(platform);
+}
+
 const PLANS: readonly BackfillEnumPlan[] = [
   DEEPSEEK_PLAN,
   PERPLEXITY_PLAN,

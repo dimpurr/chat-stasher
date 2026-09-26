@@ -19,6 +19,12 @@
 // 🔴 W16 · The one source of randomness, injected. `types.ts` still does no I/O
 //    of its own — this only pulls in a pure function and the production draw.
 import { systemRandom, uniformBetween, type RandomFn } from './random';
+// 🔴 W199 · Types only, and deliberately from the leaf module: `lib/contract.ts`
+//    imports nothing at all, so this direction cannot make a cycle. It is here for
+//    the one thing a lease has to be able to name — *how* an id was read — because
+//    that label is step 1's (`AccountIdSource`), and a second spelling of it would
+//    be a second thing to keep true.
+import { ACCOUNT_ID_SOURCES, type AccountIdSource } from '../contract';
 
 /**
  * 🔴 W18 · The **persisted layout** version, not the shape of the in-memory state.
@@ -279,7 +285,37 @@ export type HaltReason =
    *    refusal, and every round it is re-asked, the code and message are written
    *    down again.
    */
-  | 'refused-unknown';
+  | 'refused-unknown'
+  /**
+   * 🔴 W199 · **A response proved the account answering this scope is not the account
+   *    the scope belongs to.**
+   *
+   * This is the W128 step-2 stop. Its subject is the *attribution*, not the request:
+   * the request may have gone out and come back perfectly well — it came back as
+   * somebody else. So nothing is settled, nothing is enqueued, and the scope is
+   * suspended on top of the halt (see `AccountSuspension`), because the next thing
+   * this leg would otherwise do is issue the same request again under the same wrong
+   * account, and a backoff alone would make that a slow poll of another account's
+   * data.
+   *
+   * 🔴 Why it is **transient**, and why that is not a softening of the stop: the
+   *    engine's test for permanence is "waiting does not change it", and waiting —
+   *    specifically, the person signing back in — is exactly what changes this. That
+   *    is the same judgement `scope-mismatch` already carries. 🔴 But it does not
+   *    borrow `scope-mismatch`'s zero backoff: that reason is re-asked every tick by
+   *    a resolver which goes and looks at the page, and there is no such resolver
+   *    here, so an immediate retry would be a request per tick under the wrong
+   *    account. It borrows `auth-refused`'s ladder instead, for `auth-refused`'s own
+   *    stated reason: what makes the next attempt different is a person doing
+   *    something, not the clock.
+   *
+   * 🔴 It is not `shape-changed` and not `auth-refused`. `shape-changed` would send
+   *    the user to look for an API change that did not happen, and `auth-refused`
+   *    would say "log in again" about a session that is working — for the wrong
+   *    account. The detail names the segment and the two fingerprints (never an id),
+   *    so the record says exactly what was compared.
+   */
+  | 'account-changed';
 
 /**
  * 🔴 C28 · The two observable outcomes of an "empty" body.
@@ -500,6 +536,12 @@ export function haltSubjectOf(reason: HaltReason): HaltSubject {
     case 'org-ambiguous':
     case 'org-unresolved':
     case 'scope-mismatch':
+    // 🔴 W199 · `account-changed` is the same subject as `scope-mismatch` — a
+    //    statement about which account the work belongs to — reached a different
+    //    way: `scope-mismatch` is Claude asking the page and being told the
+    //    organization changed, this is a response proving the account changed on a
+    //    platform with no page to ask.
+    case 'account-changed':
       return 'account';
 
     // No store, an unreadable store, a store that lost rows, and "there is nowhere
@@ -921,6 +963,12 @@ export const TRANSIENT_RETRY_BASE_MS: Record<TransientHaltReason, number> = {
   'rate-limited': 15 * 60_000,
   'auth-refused': 30 * 60_000,
   'refused-unknown': 30 * 60_000,
+  // 🔴 W199 · The `auth-refused` rung, deliberately: a switch back is a person
+  //    signing in again, which is the same class of remedy as `auth-refused`'s and
+  //    arrives on the same order of time. Not `scope-mismatch`'s 0 — see the
+  //    reason's own note: there is no page to re-ask here, so 0 would be one
+  //    request per tick under the wrong account.
+  'account-changed': 30 * 60_000,
 };
 
 /** The ceiling of each ladder. Never exceeded, however long the streak runs. */
@@ -930,6 +978,7 @@ export const TRANSIENT_RETRY_MAX_MS: Record<TransientHaltReason, number> = {
   'rate-limited': 60 * 60_000,
   'auth-refused': 120 * 60_000,
   'refused-unknown': 120 * 60_000,
+  'account-changed': 120 * 60_000,
 };
 
 /**
@@ -944,10 +993,10 @@ export const TRANSIENT_RETRY_MAX_MS: Record<TransientHaltReason, number> = {
  *    table's own type would have silently accepted a union that no longer matched
  *    `haltClassOf`'s answer. Two edits that must agree are one edit here.
  */
-export type TransientHaltReason = 'scope-mismatch' | 'transport-error' | 'rate-limited' | 'auth-refused' | 'refused-unknown';
+export type TransientHaltReason = 'scope-mismatch' | 'transport-error' | 'rate-limited' | 'auth-refused' | 'refused-unknown' | 'account-changed';
 
 /** The reasons this ladder is defined for, as a runtime list — one place, so `isTransientReason` cannot disagree with the tables. */
-const TRANSIENT_REASONS: readonly TransientHaltReason[] = ['scope-mismatch', 'transport-error', 'rate-limited', 'auth-refused', 'refused-unknown'];
+const TRANSIENT_REASONS: readonly TransientHaltReason[] = ['scope-mismatch', 'transport-error', 'rate-limited', 'auth-refused', 'refused-unknown', 'account-changed'];
 
 /**
  * 🔴 The **one** list: `haltClassOf` (above) delegates to this, and the engine
@@ -1626,6 +1675,29 @@ export interface BackfillState {
    * progress invalidated.
    */
   reenumerated?: Record<string, number>;
+  /**
+   * 🔴 W199 · **The account this scope's work belongs to, as this install last
+   * recorded it.** See `AccountLease` for what it is and `lib/backfill/
+   * account-lease.ts` for how a run takes, confirms or refuses it.
+   *
+   * Optional, and its absence is a **value** rather than a gap: "no account has ever
+   * been visible for this scope". A scope in that state is runnable and is never
+   * accused of anything — there is nothing to compare, and inventing an accusation
+   * out of an absence is what CLAUDE.md's first invariant forbids. Every state
+   * written before W199 has no such field and reads back as undefined, byte-identical
+   * to before, with no version bump and no progress invalidated.
+   */
+  accountLease?: AccountLease;
+  /**
+   * 🔴 W199 · **Set when this scope was stopped for an account reason and must not
+   * run again until an observation agrees with it.** See `AccountSuspension`: this is
+   * not the halt, it is what keeps the halt from expiring back into the same wrong
+   * request.
+   *
+   * Optional, and absent means "not suspended" — including for every state written
+   * before W199, which is exactly right: those scopes have never been suspended.
+   */
+  suspended?: AccountSuspension;
   /** Non-null means this leg has stopped and left a trace. */
   halted: HaltRecord | null;
 }
@@ -1674,6 +1746,93 @@ export function initialState(platform: string, scope: string): BackfillState {
  * identical fields on `BackfillState`; they are spelled out here rather than
  * inherited so that a change to one is forced to be a change to the other.
  */
+/**
+ * 🔴 W199 · **One account, as a value: a fingerprint, the salt it was computed with,
+ * and how the id behind it was read.**
+ *
+ * This is step 1's `AccountFingerprint` fingerprint arm with no `kind` tag, because
+ * everything that carries one of these already knows it is a fingerprint — the
+ * `unknown` case is spelled by the field being absent, and by a named reason
+ * recorded next to it. It is *not* a second fingerprinting scheme: the value and the
+ * `saltId` are produced by `lib/account-fingerprint.ts`'s one HMAC construction, so
+ * a value here and a value on a bundle are comparable by construction.
+ *
+ * 🔴 Two of these may only be compared when their `saltId`s are equal. A cleared
+ *    `cs_account_salt_v1`, a reinstall or a second browser profile all produce
+ *    incomparable values, and reading that as "the account changed" would invent a
+ *    switch that never happened (step 1's salt rule, re-used rather than restated).
+ */
+export interface AccountIdentity {
+  /** Lowercase hex. Never the raw id, never an email. */
+  value: string;
+  /** The public half of the salt. Not the salt, and not derivable from it. */
+  saltId: string;
+  /** Which mechanism saw the id — step 1's labels, unchanged. */
+  source: AccountIdSource;
+}
+
+/**
+ * 🔴 W199 · **The account a scope's work belongs to, as this install last recorded it.**
+ *
+ * Written on the scope's own header, so it travels with the work it describes and
+ * the coverage page gets it for free (that page builds one row per header).
+ *
+ * Where the two halves come from, and why they are the *same* value: step 1 already
+ * stamped every captured bundle with a fingerprint of the id the archive-scope key is
+ * built from (ADR-002's account axis). A lease is that value, kept at the scope
+ * instead of only on each bundle, so a run can assert *before it fetches* which
+ * account it is about to speak for. A scope whose account was never visible records
+ * no lease at all and stays runnable — an unknown is not an accusation.
+ */
+export interface AccountLease extends AccountIdentity {
+  /** When this scope was first recorded as belonging to this account, ms since epoch. */
+  at: number;
+}
+
+/**
+ * 🔴 W199 · **Why a scope is not running although nothing else objects to it.**
+ *
+ * This is deliberately a *separate* field from `halted`, and the separation is the
+ * mechanism, not bookkeeping. A `halted` record is a stop that expires: it carries a
+ * `retryAt`, and after it the leg comes back and asks again. That is the right rule
+ * for a platform which refused a request, and the wrong one here — coming back and
+ * asking again would issue the same request under the same wrong account, and a
+ * backoff would only make it a slower poll of another account's data.
+ *
+ * So a suspension does not expire. It is lifted by an **observation that agrees with
+ * the scope's lease** — which, in practice, is the person signing back in and using
+ * that account, whose very next capture is that observation
+ * (`entrypoints/background.ts`'s `applyAccountObservation`). Both facts are on the
+ * record: `halted` says what happened, `suspended` says what must happen next.
+ *
+ * 🔴 It is stored and read as a validated value, never as a boolean: a value of
+ *    unknown shape at this key is "we cannot say a suspension is in force", which is
+ *    **not** the same as "it is", and not the same as "it is not". The reader
+ *    (`accountSuspensionHolds`) refuses to act on a record it cannot read, and the
+ *    coverage page prints the reason it could not read it.
+ */
+export interface AccountSuspension {
+  /** When the scope was suspended, ms since epoch. */
+  at: number;
+  /**
+   * The named cause. Always `'account-changed'` today, and written as a value rather
+   * than assumed so that a future cause cannot be read as this one.
+   */
+  reason: 'account-changed';
+  /**
+   * The lease the scope was running under — absent when the scope had no comparable lease
+   * at all.
+   *
+   * 🔴 The comparable half only (`AccountIdentity`), not the dated record: what matters here
+   *    is the value that disagreed, and carrying a second `at` would invite a reader to think
+   *    this is a fresh lease. It is not — it is the one that was current when the switch was
+   *    proved.
+   */
+  lease?: AccountIdentity;
+  /** The account actually observed, as a fingerprint. Never an id. */
+  observed?: AccountIdentity;
+}
+
 export interface BackfillHeader {
   v: typeof BACKFILL_STATE_VERSION;
   platform: string;
@@ -1703,6 +1862,10 @@ export interface BackfillHeader {
   haltRetried?: HaltRetry;
   /** W98 · Same meaning and same compatibility rule as `BackfillState.reenumerated`; spelled out here so a change to one is forced to be a change to the other. */
   reenumerated?: Record<string, number>;
+  /** 🔴 W199 · Same meaning and same compatibility rule as `BackfillState.accountLease`; spelled out here so a change to one is forced to be a change to the other. */
+  accountLease?: AccountLease;
+  /** 🔴 W199 · Same meaning and same compatibility rule as `BackfillState.suspended`; spelled out here so a change to one is forced to be a change to the other. */
+  suspended?: AccountSuspension;
   halted: HaltRecord | null;
 }
 
@@ -1741,6 +1904,8 @@ export function headerOf(state: BackfillState): BackfillHeader {
     haltExpired: state.haltExpired,
     haltRetried: state.haltRetried,
     reenumerated: state.reenumerated,
+    accountLease: state.accountLease,
+    suspended: state.suspended,
     halted: state.halted,
   };
 }
@@ -1786,8 +1951,79 @@ export function stateFrom(header: BackfillHeader, pending: string[], archived: s
     //    a storage key can be anything, and "we cannot say a migration ran" is not
     //    "it ran".
     reenumerated: isMigrationMarker(header.reenumerated) ? { ...header.reenumerated } : {},
+    // 🔴 W199 · Both are read back through their validators, so a value of unknown
+    //    shape at either key becomes `undefined` ("we cannot read one") rather than a
+    //    half-built record that a comparison would then act on. The two are separate
+    //    fields and are validated separately: a readable lease with an unreadable
+    //    suspension is a real state (a switch was proved and the record was damaged
+    //    since), and collapsing them would lose which half was lost.
+    accountLease: readAccountLease(header.accountLease),
+    suspended: readAccountSuspension(header.suspended),
     halted: header.halted,
   };
+}
+
+/** A lease this build can compare with, or `undefined` for "there is none we can read". */
+function isAccountIdentity(value: unknown): value is AccountIdentity {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Partial<AccountIdentity>;
+  return (
+    typeof v.value === 'string' && v.value.length > 0
+    && typeof v.saltId === 'string' && v.saltId.length > 0
+    && typeof v.source === 'string' && (ACCOUNT_ID_SOURCES as readonly string[]).includes(v.source)
+  );
+}
+
+export function readAccountLease(value: unknown): AccountLease | undefined {
+  if (!isAccountIdentity(value)) return undefined;
+  const at = (value as Partial<AccountLease>).at;
+  return {
+    value: value.value,
+    saltId: value.saltId,
+    source: value.source,
+    at: typeof at === 'number' && Number.isFinite(at) ? at : 0,
+  };
+}
+
+export function readAccountSuspension(value: unknown): AccountSuspension | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const v = value as Partial<AccountSuspension>;
+  if (typeof v.at !== 'number' || !Number.isFinite(v.at)) return undefined;
+  // 🔴 A cause this build does not know is not read as the one it does know: an
+  //    unreadable suspension is "we cannot say", and the caller is told that rather
+  //    than handed a `account-changed` it never wrote.
+  if (v.reason !== 'account-changed') return undefined;
+  const lease = readAccountLease(v.lease);
+  const observed = isAccountIdentity(v.observed) ? v.observed : undefined;
+  return {
+    at: v.at,
+    reason: 'account-changed',
+    ...(lease ? { lease } : {}),
+    ...(observed ? { observed } : {}),
+  };
+}
+
+/**
+ * 🔴 W199 · **Does a suspension still bar this scope from running?**
+ *
+ * Three answers, and the third is not the second — the same shape as every other
+ * read in this file:
+ *  · `'holds'` — a suspension this build can read is on the record;
+ *  · `'absent'` — nothing is there, so nothing bars the scope;
+ *  · `'unreadable'` — something is there and this build cannot read it. The caller
+ *    must say so rather than assume either way; the alarm's `tickHoldReason` fails
+ *    **closed** (no request is issued), because the one thing we do know is that a
+ *    record exists, and running a request under an account we cannot vouch for is
+ *    the failure this whole mechanism exists to prevent.
+ *
+ * It reads the **raw stored value**, not a typed view: a typed view of a header has
+ * already dropped what could not be parsed, which is precisely the evidence needed
+ * here.
+ */
+export function accountSuspensionHolds(raw: unknown): 'holds' | 'absent' | 'unreadable' {
+  const value = (raw as { suspended?: unknown } | null | undefined)?.suspended;
+  if (value === undefined || value === null) return 'absent';
+  return readAccountSuspension(value) ? 'holds' : 'unreadable';
 }
 
 /** Is this a plain object usable as the `reenumerated` marker map (not an array, not null)? */

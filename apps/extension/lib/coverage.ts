@@ -40,6 +40,7 @@
  * keys, and not three rows per workspace. `seeAlso` on the row carries the platform's own note.
  */
 
+import type { AccountIdSource } from './contract';
 import { t } from './i18n';
 import { describeFailureReason, droppedOf, failuresOf, type FailureEntry } from './backfill/failures';
 import { computeProgress, retryMinutesLeft, type ProgressInput } from './backfill/progress';
@@ -48,6 +49,10 @@ import { haltNote } from './halt-note';
 import {
   dayKeyOf,
   haltClassOf,
+  readAccountLease,
+  readAccountSuspension,
+  type AccountLease,
+  type AccountSuspension,
   type BackfillHeader,
   type HaltRecord,
   type TotalSource,
@@ -155,6 +160,16 @@ export type CoverageState =
   | 'host-paused'
   /** A stored stop still applies. `halt` carries it. */
   | 'halted'
+  /**
+   * 🔴 W199 · The scope is **suspended because its account is not the account answering**,
+   * and it will not run again until that account is observed in use.
+   *
+   * A state of its own rather than `halted`, and the difference is the action: a `halted`
+   * row's sentence is about a backoff that elapses by itself, and this one does not elapse.
+   * A reader who was told "waiting out a retry" about a scope that is waiting for *them*
+   * would wait for a leg that is not coming back.
+   */
+  | 'account-suspended'
   /** The header exists but the registry does not name it: a leftover from a removed target. */
   | 'unregistered'
   /** Today's drawn body cap is spent. Not a stop — it resumes tomorrow by itself. */
@@ -231,6 +246,15 @@ export interface CoverageRow {
   state: CoverageState;
   /** The stored stop, when there is one. `state === 'halted'` exactly when this is non-null. */
   halt: HaltRecord | null;
+  /**
+   * 🔴 W199 · **The account this scope's work belongs to**, as this install recorded it —
+   * a fingerprint and the mechanism that read it, never an id. `null` means no account has
+   * ever been visible for this scope, which is a fact worth showing: a switch cannot be
+   * detected here, and the row says so rather than looking like every other row.
+   */
+  accountLease: AccountLease | null;
+  /** 🔴 W199 · Why this scope is not running although nothing else objects. `null` = not suspended. */
+  suspended: AccountSuspension | null;
   /** What the last wake's walk decided about this scope, carried through for the renderer. */
   skippedReason: TickSkipReason | null;
   speed: CoverageSpeed;
@@ -375,6 +399,11 @@ function stateOf(input: CoverageScopeInput, enabled: boolean, hostPaused: boolea
   //    owe nothing right now is still halted, and reporting it as `done` would turn a named stop into a
   //    silent success. `stopStillApplies` is the *engine's* question and is answered by the engine (a halt
   //    that expired or that another build left is not in force); this model reports what the header holds.
+  // 🔴 W199 · The suspension is checked **before** the halt, because it is the stronger
+  //    fact: a suspended scope normally carries an `account-changed` halt too, and the
+  //    halt's sentence would describe a backoff that the suspension is there to say has
+  //    stopped being the whole story.
+  if (readAccountSuspension(header.suspended)) return 'account-suspended';
   if (header.halted) return 'halted';
   /**
    * 🔴 W113b · **The unregistered check is not conditioned on the debt being empty.**
@@ -468,6 +497,10 @@ function rowOf(input: CoverageScopeInput, opts: {
     timed: { archived: archivedMonths?.timed ?? 0, pending: pendingMonths?.timed ?? 0 },
     state: stateOf(input, opts.enabled, opts.hostPaused, speed, opts.now),
     halt: header.halted,
+    // 🔴 W199 · Read through the validators, so a record of unknown shape becomes `null`
+    //    ("we cannot read one") rather than a half-built lease a comparison would act on.
+    accountLease: readAccountLease(header.accountLease) ?? null,
+    suspended: readAccountSuspension(header.suspended) ?? null,
     skippedReason: input.skippedReason,
     speed,
     lastFetchAt: {
@@ -545,6 +578,8 @@ export function describeSkipReason(reason: string | null): string {
       return t('tick.skip.dailyCap');
     case 'state-unreadable':
       return t('tick.skip.stateUnreadable');
+    case 'account-suspended':
+      return t('tick.skip.accountSuspended');
     default:
       return t('tick.skip.unknown', { reason: reason ?? t('common.unknownShort') });
   }
@@ -567,6 +602,11 @@ export function stateNote(row: CoverageRow, now: number): string | null {
       // 🔴 The same sentence as the popup's, from the same function. It is the *action* half of the row:
       //    what the user has to do, in their own language, without a reason code in it.
       return row.halt ? haltNote(row.halt, row.platform, row.pending, now) : t('coverage.state.haltedNoRecord');
+    case 'account-suspended':
+      // 🔴 W199 · The action half, in the user's own language and without a reason code in
+      //    it: the account changed, so this leg is holding this account's place until that
+      //    account is used again — and nothing was lost while it waits.
+      return t('coverage.state.accountSuspended');
     case 'unregistered':
       return t('coverage.state.unregistered', { platform: row.platform });
     case 'capped':
@@ -579,6 +619,41 @@ export function stateNote(row: CoverageRow, now: number): string | null {
       return null;
   }
 }
+
+/**
+ * 🔴 W199 · **Which account this scope's work belongs to, in one sentence.**
+ *
+ * One of three facts, and the third is why this exists rather than being left out: a scope
+ * with **no** recorded account looks exactly like every other row on the page, and the
+ * reader has no way to learn that a switch here would go unnoticed. Saying "none recorded"
+ * is the difference between an unknown and an absence (CLAUDE.md invariant 1) at the last
+ * layer where it can still be told.
+ *
+ * 🔴 The fingerprint itself is not printed, and that is not only about length: it is a
+ *    keyed digest that means nothing to a person, and printing it would invite the reader to
+ *    compare two rows' values as though the comparison were meaningful — it is meaningful
+ *    only within one install, and `saltId` is what decides that (step 1's rule). What a
+ *    person can act on is **which mechanism** read the id, so that is what the sentence
+ *    names.
+ */
+export function accountNote(row: CoverageRow): string {
+  if (!row.accountLease) return t('coverage.account.none');
+  return t('coverage.account.known', {
+    source: t(ACCOUNT_SOURCE_KEY[row.accountLease.source]),
+  });
+}
+
+/**
+ * The two mechanisms step 1 records, each in the user's words. Exhaustive over
+ * `AccountIdSource` by construction, so a third mechanism cannot be added without a
+ * sentence for it — the same rule `describeSkipReason` follows for reason codes, minus the
+ * default arm, because `readAccountLease` has already refused a source this build cannot
+ * name.
+ */
+const ACCOUNT_SOURCE_KEY: Record<AccountIdSource, string> = {
+  'request-url-organization': 'coverage.account.sourceOrg',
+  'response-body-platform-uid': 'coverage.account.sourceBody',
+};
 
 /**
  * The speed and ETA sentence.

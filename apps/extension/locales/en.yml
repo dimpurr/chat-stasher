@@ -593,6 +593,25 @@ popup:
         number keeps climbing, whatever stopped it is persisting rather than
         being a one-off. Technical detail: {detail}
       other: "This leg has stopped and left a record: {reason} — {detail}"
+      # 🔴 W199 · **The account changed under this scope.** Its own sentence, and neither of its
+      #    two neighbours would do:
+      #     · `waitingRetry` says the leg waits out a backoff and comes back **by itself** — this stop
+      #       is built so that it does not, because coming back means sending the same request under
+      #       the same wrong account;
+      #     · `other` prints the reason code and the technical detail, which describes the record
+      #       instead of the one thing the reader can do about it.
+      #    The three clauses are deliberate, in this order: what happened (the account this scope
+      #    belongs to is not the one signed in), what did **not** happen (nothing was written off and
+      #    nothing is owed here was touched — the fear a stopped archive creates), and what to do
+      #    (use that account again; this scope resumes on its own when it is seen). The engine's own
+      #    detail is appended for whoever reads the record: it names which segment compared what, and
+      #    carries no account id.
+      accountChanged: >-
+        This account's history was being fetched while a different account was
+        signed in, so this leg stopped before storing anything else: nothing has
+        been written off, and everything still owed is still owed. It resumes by
+        itself once this account is signed in and used again. Technical detail:
+        {detail}
     # 🔴 W44 · **A stop that stopped applying, because the extension changed.**
     #
     # A stored stop whose reason is a judgement about the extension itself is tied
@@ -696,6 +715,7 @@ tick:
     waitingRetry: this platform is inside its backoff, and will be asked again by itself
     dailyCap: today's body quota for this platform was already spent
     stateUnreadable: this platform's saved progress record could not be read, so it was left untouched
+    accountSuspended: this platform is holding its place for its own account, and resumes once that account is used again
     unknown: "a skip reason this build does not know: {reason}"
 
 # ---------------------------------------------------------------------------
@@ -806,6 +826,21 @@ coverage:
       tomorrow.
     waiting: "Not running right now: {why}."
     done: Every conversation this platform has listed has been stored.
+    # 🔴 W199 · A suspension does not elapse, so this sentence may not borrow `waiting`'s patience
+    #    ("not running right now") or `halted`'s finality. It names the one action.
+    accountSuspended: >-
+      This leg is holding this account's place: the responses it was receiving
+      came from a different account, so it stopped before storing anything more.
+      Nothing was written off, and it resumes by itself once this account is used
+      again.
+  account:
+    known: "Account this scope belongs to: read from {source}."
+    none: >-
+      No account has ever been recorded for this scope, so a switch to another
+      account here could not be detected. This is not a stop — it is a limit of
+      what this platform's responses let the extension see.
+    sourceOrg: the page's own request
+    sourceBody: the response body
   counts:
     fromHeader: >-
       The stored debt list could not be read, so the archived and owed numbers
@@ -974,6 +1009,7 @@ coverage:
     retrying: retrying
     cappedToday: done for today
     stopped: stopped
+    holding: holding this account's place
     done: done
     off: switch off
     hostDown: host down
@@ -982,6 +1018,7 @@ coverage:
     summary: Details
   # Label column entries for the details disclosure rows.
   stateLabel: state
+  accountLabel: account
   speedLabel: speed and estimate
   countsLabel: counts
   preset:

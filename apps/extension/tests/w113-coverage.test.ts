@@ -774,6 +774,9 @@ describe('W149e · the retry bucket is worded for every reason that reaches it',
     'ledger-mismatch': true,
     'auth-refused': true,
     'refused-unknown': true,
+    // 🔴 W199 · The step-2 stop. It is transient (`haltClassOf`), so it lands in this bucket
+    //     and this sentence is printed over it — which is exactly why the test is exhaustive.
+    'account-changed': true,
   };
   const ALL_REASONS = Object.keys(EVERY_REASON) as HaltReason[];
   const TRANSIENT = ALL_REASONS.filter((reason) => haltClassOf(reason) === 'transient');

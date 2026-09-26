@@ -28,6 +28,7 @@
 
 import { t } from './i18n';
 import {
+  accountNote,
   countsNote,
   enumNote,
   failureNote,
@@ -97,6 +98,14 @@ export function chipOf(row: CoverageRow): StatusChip {
         : { word: t('coverage.chip.stopped'), tone: 'bad' };
     case 'unregistered':
       return { word: t('coverage.chip.stopped'), tone: 'bad' };
+    case 'account-suspended':
+      // 🔴 W199 · Neither of the two words beside it, for the same reason the sentence is its own:
+      //    "stopped" would say the leg is finished with this scope when a person using that account is
+      //    the whole remedy, and "retrying" would promise a clock that does not exist here (a suspension
+      //    does not elapse — see `AccountSuspension`). `row.halt` is deliberately not consulted: a
+      //    suspended scope usually carries an `account-changed` halt too, and reading it would put the
+      //    retrying word on a row whose sentence says it will not retry by itself.
+      return { word: t('coverage.chip.holding'), tone: 'wait' };
     case 'off':
       return { word: t('coverage.chip.off'), tone: 'muted' };
     case 'host-paused':
@@ -479,6 +488,12 @@ function cardOf(row: CoverageRow, now: number): CoverageCardView {
   if (state !== null) {
     detailRows.push({ label: t('coverage.stateLabel'), value: state });
   }
+
+  // 4b · 🔴 W199 · which account this scope belongs to. Always present for a scope that holds a
+  //      lease — including when the answer is "none recorded" — because that absence is the
+  //      fact a reader needs in order to know whether a switch here would be noticed, and a
+  //      row that simply omits it looks the same as one whose account is known.
+  detailRows.push({ label: t('coverage.accountLabel'), value: accountNote(row) });
 
   // 5 · the full speed sentence, whole, with its estimate labelled by the model's own wording.
   detailRows.push({ label: t('coverage.speedLabel'), value: speedNote(row, now) });
