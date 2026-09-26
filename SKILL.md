@@ -142,9 +142,11 @@ The browser extension needs the local host, registered with the **same stage**. 
 chat-stasher install-native-host --stage <stage>
 ```
 
-It prints every file it wrote, and `--uninstall` removes exactly those.
+It prints every file it wrote, and `--uninstall` removes exactly those. This half is per **machine**, not per browser profile: one run registers every installed browser, all of them pointing at the same stage, so never tell the user to run it again for another profile.
 
 **Human step:** the user downloads `chat-stasher-extension-X.Y.Z.zip` from the [latest release](https://github.com/dimpurr/chat-stasher/releases/latest), unzips it into a folder they keep, and loads it in `chrome://extensions` → Developer mode → **Load unpacked**. Then they reload any chat tabs that were already open, because a tab that existed before the extension was installed is not captured until it is reloaded. You cannot click these for them.
+
+**Ask which profiles, then repeat it in each one.** An extension is installed into a single browser profile, and `chrome://extensions` shows only that profile's extensions, so a user who chats in three profiles needs three `Load unpacked` passes, one in each profile. Ask before presenting the step: "which browser profiles do you chat in?" A profile they skip captures nothing, and the popup must be checked in each profile separately, because each copy has to reach the host on its own. Also tell them the host half is not repeated, and that `--uninstall` is machine-wide: it removes the delivery channel for every browser and profile at once, so it is not the way to drop one profile.
 
 ## Everyday use
 

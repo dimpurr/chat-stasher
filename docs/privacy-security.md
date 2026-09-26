@@ -16,7 +16,7 @@ This is the short version: what chat-stasher does with your conversations, who c
 
 | Place | Encrypted? | Who can read it |
 |---|---|---|
-| The extension's outbox, in your browser profile, until the host confirms delivery | **No** | Anything running as your user |
+| The extension's outbox, in your browser profile, until the host confirms delivery. There is one outbox per install, so a browser profile you chat in without the extension has none | **No** | Anything running as your user |
 | The stage folder on your disk | **No** | Anything running as your user |
 | The optional local full-text index, if you built one | **No** | Anything running as your user |
 | Your destination: local folder, SFTP or R2 | **Yes** | Only someone with the key file |
@@ -42,7 +42,7 @@ The **full-text index** is the one place conversation text is written outside th
 - **The archive keeps everything, by design.** It exists so that history a tool deleted still survives. Each run adds a snapshot. Nothing in chat-stasher deletes from an archive, and there is no command to delete one conversation from it.
 - **The only things chat-stasher deletes are its own copies, never yours**: the staged copy, and only after every destination proves it holds those exact bytes, and — when you ask with `chat-stasher index clear` — the local full-text index. Neither is an archive.
 - **To delete everything,** delete the destination (the local folder, or the bucket or folder at your provider) and its key file. [install.md → Uninstalling](install.md#uninstalling) lists every local path.
-- **Uninstalling the extension** also deletes captures it had not yet delivered.
+- **Uninstalling the extension in one profile** deletes the captures that profile had not yet delivered, and leaves every other profile and browser delivering as before. Removing the host registration is the larger action: `chat-stasher install-native-host --uninstall` is machine-wide, and stops delivery for every browser and profile at once, so their captures stay in their own outboxes instead. [install.md → Before you remove the host](install.md#before-you-remove-the-host) gives the order that avoids losing a queued capture.
 
 ## What chat-stasher does not protect you from
 
