@@ -547,37 +547,37 @@ crates/chat-stasher/src/main.rs:2021-2059  9ceb7d1eb0cd  lines=39
   <- docs-dev/install.md:387, docs-dev/privacy.md:712  :: if uninstall {
 crates/chat-stasher/src/main.rs:2128-2134  bd833f481e0e  lines=7
   <- docs-dev/install.md:387, docs-dev/privacy.md:712  :: if uninstall {
-crates/chat-stasher/src/main.rs:4823-4836  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:4830-4843  6e297c93e74c  lines=14
   <- docs-dev/install.md:514  :: Err(e) => {
-crates/chat-stasher/src/main.rs:4826-4834  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:4833-4841  7606cd68232e  lines=9
   <- docs-dev/install.md:553  :: }
-crates/chat-stasher/src/main.rs:4838-4847  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:4845-4854  a14261353a59  lines=10
   <- docs-dev/install.md:550  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:4859-4883  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:4866-4890  6d97af905715  lines=25
   <- docs-dev/install.md:518  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:5026-5082  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:5033-5089  d1e3f53d40dc  lines=57
   <- docs-dev/threat-model.md:569  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:6673-6680  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:6680-6687  f369ca3fd940  lines=8
   <- docs-dev/threat-model.md:558  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:6701-6797  9bab85dd14b4  lines=97
+crates/chat-stasher/src/main.rs:6708-6804  9bab85dd14b4  lines=97
   <- docs-dev/threat-model.md:556  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:6784-6796  fcc341adabd7  lines=13
+crates/chat-stasher/src/main.rs:6791-6803  fcc341adabd7  lines=13
   <- SECURITY.md:70  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:7033-7172  30a9e386a35b  lines=140
+crates/chat-stasher/src/main.rs:7040-7179  30a9e386a35b  lines=140
   <- docs-dev/threat-model.md:616  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:7334-7566  0cd0ab027103  lines=233
+crates/chat-stasher/src/main.rs:7341-7573  0cd0ab027103  lines=233
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:631  :: fn cmd_index(action: IndexAction) -> ExitCode {
-crates/chat-stasher/src/main.rs:9839-9849  2a1dbefed1f6  lines=11
+crates/chat-stasher/src/main.rs:9846-9856  2a1dbefed1f6  lines=11
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12869-12889  1156efd1ea2d  lines=21
+crates/chat-stasher/src/main.rs:12876-12896  1156efd1ea2d  lines=21
   <- docs-dev/install.md:836  :: // `status` is not a second exception to "an unusable confi…
-crates/chat-stasher/src/main.rs:12892-12894  a9f17cb346dc  lines=3
+crates/chat-stasher/src/main.rs:12899-12901  a9f17cb346dc  lines=3
   <- docs-dev/install.md:797  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:12925-12966  7f5acb93bd19  lines=42
+crates/chat-stasher/src/main.rs:12932-12973  7f5acb93bd19  lines=42
   <- docs-dev/install.md:826  :: // B84 — and the third case, the one that reads wrong in a …
-crates/chat-stasher/src/main.rs:13194-13207  3f28f15c93b2  lines=14
+crates/chat-stasher/src/main.rs:13201-13214  3f28f15c93b2  lines=14
   <- docs-dev/install.md:792  :: /// The scan half of `status`.
-crates/chat-stasher/src/main.rs:13202-13492  aac75b5f81dc  lines=291
+crates/chat-stasher/src/main.rs:13209-13499  aac75b5f81dc  lines=291
   <- docs-dev/install.md:813  :: /// `sessions = true` restores the full per-session table —…
 crates/chat-stasher/src/nativehost.rs:151-164  b160255bd493  lines=14
   <- docs-dev/privacy.md:639, docs-dev/threat-model.md:420  :: pub const HOST_NAME: &str = "com.chat_stasher.host";

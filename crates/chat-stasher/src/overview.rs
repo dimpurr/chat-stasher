@@ -275,6 +275,75 @@ pub fn overview_json(
     })
 }
 
+/// Additive per-machine freshness records for the menubar client. Missing
+/// snapshot timestamps remain JSON null so consumers can show unknown as an
+/// em dash; health uses the already-computed index and writer states.
+pub fn machine_freshness_json(
+    snapshot_times: &BTreeMap<String, i64>,
+    missing_index: &[String],
+    writers: &[crate::sidecar::MachineWriterStatus],
+    display_names: &BTreeMap<String, String>,
+) -> Vec<serde_json::Value> {
+    snapshot_times
+        .iter()
+        .map(|(machine, unix)| {
+            let writer = writers.iter().find(|writer| writer.machine == *machine);
+            let health = if missing_index.contains(machine) {
+                "missing_index"
+            } else {
+                match writer.and_then(|status| status.behind_newest_writer) {
+                    Some(true) => "writer_behind",
+                    Some(false) => "healthy",
+                    None => "unknown",
+                }
+            };
+            serde_json::json!({
+                "machine": display_name(machine, display_names),
+                "newest_snapshot_unix": unix,
+                "health": health,
+            })
+        })
+        .collect()
+}
+
+/// Serialize the stable overview document with the additive per-machine
+/// freshness field used by the menubar. The base schema remains version 1.
+pub fn overview_json_with_freshness(
+    rows: &[OverviewRow],
+    snapshot_machines: &BTreeSet<String>,
+    index_machines: &BTreeSet<String>,
+    declared_machines: &BTreeSet<String>,
+    display_names: &BTreeMap<String, String>,
+    exit_code: u8,
+    snapshot_times: &BTreeMap<String, i64>,
+    writers: &[crate::sidecar::MachineWriterStatus],
+) -> serde_json::Value {
+    let mut value = overview_json(
+        rows,
+        snapshot_machines,
+        index_machines,
+        declared_machines,
+        display_names,
+        exit_code,
+    );
+    let missing = crate::sidecar::missing_index_machines(snapshot_machines, index_machines);
+    if let Some(machines) = value
+        .get_mut("machines")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        machines.insert(
+            "by_machine".to_string(),
+            serde_json::json!(machine_freshness_json(
+                snapshot_times,
+                &missing,
+                writers,
+                display_names
+            )),
+        );
+    }
+    value
+}
+
 /// The `overview --json` object for a run that could not produce data at all
 /// (usage error exit 2, or unreadable archive exit 3). The `error` text is the
 /// same sentence `cmd_overview` prints to stderr; the object keeps stdout a
@@ -1553,6 +1622,75 @@ mod tests {
         assert_eq!(v["sessions"], serde_json::json!([]));
         // The snapshot-without-index machine is named, never dropped.
         assert_eq!(v["machines"]["missing_index"], serde_json::json!(["air"]));
+    }
+
+    #[test]
+    fn machine_freshness_json_preserves_snapshot_time_and_health_states() {
+        let times = BTreeMap::from([
+            ("air".to_string(), 1_700_000_001),
+            ("pro".to_string(), 1_700_000_002),
+            ("mini".to_string(), 1_700_000_003),
+            ("old".to_string(), 1_700_000_004),
+        ]);
+        let missing = vec!["pro".to_string()];
+        let writer = |machine: &str, behind| crate::sidecar::MachineWriterStatus {
+            machine: machine.to_string(),
+            chat_stasher_version: Some("1.0.0".to_string()),
+            version_recorded: true,
+            version_unreadable: false,
+            behind_newest_writer: behind,
+        };
+        let statuses = vec![
+            writer("air", Some(false)),
+            writer("pro", Some(false)),
+            writer("old", Some(true)),
+        ];
+        let labels = BTreeMap::from([("air".to_string(), "My Air".to_string())]);
+
+        let rows = machine_freshness_json(&times, &missing, &statuses, &labels);
+        assert_eq!(
+            rows[0],
+            serde_json::json!({
+                "machine": "My Air", "newest_snapshot_unix": 1_700_000_001, "health": "healthy"
+            })
+        );
+        assert_eq!(rows[1]["health"], "unknown");
+        assert_eq!(rows[2]["health"], "writer_behind");
+        assert_eq!(rows[3]["health"], "missing_index");
+        assert_eq!(rows[2]["newest_snapshot_unix"], 1_700_000_004);
+    }
+
+    #[test]
+    fn overview_json_adds_by_machine_without_bumping_schema_version() {
+        let (snap, idx, decl) = machines(&["air"], &["air"], &["air"]);
+        let display = BTreeMap::from([("air".to_string(), "Studio Mac".to_string())]);
+        let rows = vec![row(
+            "s1",
+            "air",
+            "codex",
+            Some(D1),
+            Some(D1),
+            1,
+            TimeSource::Exact,
+        )];
+        let times = BTreeMap::from([("air".to_string(), 1_700_000_000)]);
+        let writers = vec![crate::sidecar::MachineWriterStatus {
+            machine: "air".to_string(),
+            chat_stasher_version: Some("1.0.0".to_string()),
+            version_recorded: true,
+            version_unreadable: false,
+            behind_newest_writer: Some(false),
+        }];
+
+        let value =
+            overview_json_with_freshness(&rows, &snap, &idx, &decl, &display, 0, &times, &writers);
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["machines"]["by_machine"],
+            serde_json::json!([{
+                "machine": "Studio Mac", "newest_snapshot_unix": 1_700_000_000, "health": "healthy"
+            }])
+        );
     }
 
     /// The error shape (exit 2 / 3) carries the same fixed top-level keys plus

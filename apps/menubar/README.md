@@ -1,8 +1,8 @@
-# Chat Stasher menu bar prototype
+# Chat Stasher menu bar app
 
-A macOS 13+ SwiftUI `MenuBarExtra` prototype with a window-style popover. It runs `chat-stasher overview --json` when the popover appears and presents the measured summary fields without exposing session, machine, or harness labels. The **Open dashboard** action starts `chat-stasher ui`; the CLI keeps ownership of its loopback server, token, browser launch, and shutdown behavior.
+A macOS 13+ SwiftUI `MenuBarExtra` app that reads `chat-stasher overview --json` and presents archive health, one conversation count, a 30-day chart, and per-machine freshness. The app does not open the archive itself. **Open dashboard** starts `chat-stasher ui`.
 
-Build and package a local app bundle from this directory:
+Build and package a local app bundle:
 
 ```sh
 swift build
@@ -10,14 +10,14 @@ swift build
 open ".build/Chat Stasher.app"
 ```
 
-For a synthetic screenshot/demo that does not inspect an archive, package and open the demo bundle:
+Build a demo bundle, then run any of the synthetic screenshot states with `--demo=all-green`, `--demo=silent`, or `--demo=unreadable`:
 
 ```sh
 ./package-app.sh --demo
-open ".build/Chat Stasher Demo.app"
+open ".build/Chat Stasher Demo.app" --args --demo=all-green
 ```
 
-The CLI must be available on `PATH`. If multiple destinations are configured, set `CHAT_STASHER_DESTINATION` in the app's launch environment to the intended destination; the same value is passed to both commands. No background refresh runs while the popover is closed.
+Run app status sentence tests with `swift test`. The CLI must be available on `PATH`; set `CHAT_STASHER_DESTINATION` in the app launch environment if multiple destinations exist. The app refreshes when its popover opens or when **Refresh** is selected.
 
 ## Release build
 
@@ -60,12 +60,8 @@ do, are in [`RELEASING.md`](../../RELEASING.md) under "The menu bar app".
 
 ## Read-only data contract
 
-The app consumes only `chat-stasher overview --json` schema version 1. It requires `command == "overview"`, matching process and payload exit codes, and the numeric `summary` fields `machines`, `harnesses`, `sessions`, `lines`, `unknown_time_sessions`, and `no_conversation_content_sessions`. It does not read the archive, config, key file, or repository itself and does not write to them.
+The app consumes `chat-stasher overview --json` schema version 1. It requires `command == "overview"`, matching process and payload exit codes, and measured numeric summary fields. Missing fields, invalid JSON, unsupported schema versions, and exit codes 2 or 3 show the red unreadable state; an unknown count is never converted to zero.
 
-- Exit 0 means an index was read; the summary is measured.
-- Exit 1 means the archive was read completely and no activity index exists anywhere; the CLI's measured summary is shown with an explicit status.
-- Exit 2 (usage/configuration) and exit 3 (incomplete/unreadable archive) are shown as an unknown/error state. They are never converted to zero.
-- Missing fields, invalid JSON, and unsupported schema versions also show an unknown/error state.
-- The visible refresh time is the local time the successful command response was received; it is not an archive timestamp.
+`machines.by_machine` supplies newest snapshot time and health when available. With an older CLI that omits this additive field, the app derives each machine's latest known conversation time from `sessions[].last_unix`, preserves machines with no known time, and says that it is showing conversation time rather than backup time. The 30-day chart groups known `sessions[].first_unix` values by local calendar day.
 
-The prototype currently relies on the documented `overview --json` shape rather than defining a second endpoint or aggregation. Any incompatible schema change must update this decoder and the contract together.
+Sparkle 2 checks the GitHub Releases appcast at `https://github.com/dimpurr/chat-stasher/releases/latest/download/appcast.xml`. The app bundle uses `SUFeedURL` and `SUPublicEDKey`; release signing and appcast generation belong to the release workflow.
