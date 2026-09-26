@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:939-942`). That page does not have to
+`apps/extension/entrypoints/background.ts:958-961`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -1010,14 +1010,14 @@ confirmed in the code, not a temporary disclaimer.
   when the page's own requests and the cookie both named none — and an account
   belonging to several organizations stops with a sentence telling you to open a
   conversation in the one you want archived, rather than picking one
-  (`apps/extension/lib/backfill/claude-page.ts:70-148`). 🔴 **A Claude backfill
+  (`apps/extension/lib/backfill/claude-page.ts:70-150`). 🔴 **A Claude backfill
   checks every request against the organization established by the page. On a
   fresh `/new` page, it resolves that scope from an observed page request, the
   active-org cookie, or one unambiguous organizations response before allowing
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:1972-2065`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:1994-2092`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4630-4661`) is covered.

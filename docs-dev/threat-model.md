@@ -359,7 +359,7 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1099-1158`, `:1210-1222`). Two limits
+(`apps/extension/entrypoints/background.ts:1118-1177`, `:1229-1241`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
@@ -687,8 +687,8 @@ a real limitation of the current code.
    judgement written by another build is not this one's, and the attempt is
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
-   (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-   `apps/extension/entrypoints/background.ts:1403-1463`). Kimi's routes, by contrast, were measured in a logged-in session,
+   (`apps/extension/lib/backfill/claude-page.ts:70-150`;
+   `apps/extension/entrypoints/background.ts:1422-1482`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
