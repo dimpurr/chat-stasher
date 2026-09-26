@@ -1,6 +1,7 @@
 import AppKit
 import Charts
 import Sparkle
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -73,10 +74,12 @@ private struct SummaryMachine: Decodable {
 private struct SummarySource: Decodable {
     let harness: String
     let count: Int
+    let activeDays: Int
     let lastSavedUnix: Int64?
     let silenceAfterDays: Int?
     enum CodingKeys: String, CodingKey {
         case harness, count
+        case activeDays = "active_days"
         case lastSavedUnix = "last_saved_unix"
         case silenceAfterDays = "silence_after_days"
     }
@@ -205,10 +208,12 @@ struct SourceRow: Identifiable {
     let id: String; let label: String; let count: Int; let lastSavedUnix: Int64?
     let health: SourceHealth
     let silenceAfterDays: Int
+    let regularlyUsed: Bool
 
-    init(id: String, label: String, count: Int, lastSavedUnix: Int64?, health: SourceHealth, silenceAfterDays: Int = 7) {
+    init(id: String, label: String, count: Int, lastSavedUnix: Int64?, health: SourceHealth, silenceAfterDays: Int = 7, regularlyUsed: Bool? = nil) {
         self.id = id; self.label = label; self.count = count; self.lastSavedUnix = lastSavedUnix
         self.health = health; self.silenceAfterDays = silenceAfterDays
+        self.regularlyUsed = regularlyUsed ?? (count >= 3)
     }
 }
 enum SourceHealth: Equatable { case healthy, stopped, unused, unknown }
@@ -233,13 +238,15 @@ enum ArchiveStatus {
     case setup(String)
     case cliMissing
     case cliTooOld
+    case offline
+    case credentialsUnavailable
 
     enum Severity { case healthy, warning, error }
     var severity: Severity {
         switch self {
         case .healthy: .healthy
-        case .needsAttention, .silent, .waiting, .sourceStopped, .setup: .warning
-        case .unreadable, .localFailure, .cliMissing, .cliTooOld: .error
+        case .needsAttention, .silent, .waiting, .sourceStopped, .setup, .offline: .warning
+        case .unreadable, .localFailure, .cliMissing, .cliTooOld, .credentialsUnavailable: .error
         }
     }
     var sentence: String {
@@ -254,13 +261,16 @@ enum ArchiveStatus {
         case .sourceStopped(let source): "\(source) stopped saving"
         case .cliMissing: "Install the command-line tool"
         case .cliTooOld: "CLI too old: needs ≥ 0.5.0-rc.2"
+        case .offline: "Offline · showing cached result"
+        case .credentialsUnavailable: "Can't reach the destination: credentials aren't available to apps"
         }
     }
     var explanation: String? {
         switch self {
         case .unreadable(let reason), .localFailure(let reason), .setup(let reason): return reason
         case .cliMissing: return "Install chat-stasher from the project release page, then reopen this panel."
-        case .cliTooOld: return "Upgrade chat-stasher with the command for your installation method."
+        case .cliTooOld: return "Use the command for your install: brew upgrade chat-stasher; npm install -g chat-stasher; or rerun the install script."
+        case .credentialsUnavailable: return "Add credentials to chat-stasher's app-readable configuration."
         default: break
         }
         return nil
@@ -274,7 +284,7 @@ enum ArchiveStatus {
     }
 }
 
-func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: String?, now: Date = Date()) -> ArchiveStatus {
+func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: String?, now: Date = Date(), silenceThresholdOverrideDays: Int? = nil) -> ArchiveStatus {
     guard let snapshot else { return .unreadable(failure ?? "The overview response was unavailable.") }
     guard let local else { return .localFailure("Can't confirm local backup status.") }
     if local.cliNeedsUpdate { return .cliTooOld }
@@ -290,18 +300,40 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     let silent = snapshot.machines.compactMap { machine -> (String, Int, Int64)? in
         guard let unix = machine.newestSnapshotUnix else { return nil }
         let age = Int64(now.timeIntervalSince1970) - unix
-        guard age > Int64(machine.silenceAfterDays ?? 7) * 86_400 else { return nil }
+        guard age > Int64(silenceThresholdOverrideDays ?? machine.silenceAfterDays ?? 7) * 86_400 else { return nil }
         return (machine.machine, Int((age + 86_399) / 86_400), age)
     }.max { $0.2 < $1.2 }
     if let silent { return .silent(silent.0, silent.1) }
-    if let stopped = snapshot.sources.first(where: { $0.health == .stopped }) { return .sourceStopped(stopped.label) }
+    if let stopped = snapshot.sourceDetails.first(where: {
+        $0.regularlyUsed && sourceHealth(activeDays: 3, lastSavedUnix: $0.lastSavedUnix,
+                                        silenceAfterDays: silenceThresholdOverrideDays ?? $0.silenceAfterDays,
+                                        now: now) == .stopped
+    }) {
+        return .sourceStopped(stopped.label)
+    }
     return .healthy
 }
 
-func machineNeedsAttention(_ machine: MachineFreshness, now: Date) -> Bool {
+func classifyFailure(_ failure: String) -> ArchiveStatus {
+    if failure.localizedCaseInsensitiveContains("CLI too old")
+        || failure.localizedCaseInsensitiveContains("requires chat-stasher") { return .cliTooOld }
+    if failure.localizedCaseInsensitiveContains("credential") || failure.localizedCaseInsensitiveContains("authentication") {
+        return .credentialsUnavailable
+    }
+    if failure.localizedCaseInsensitiveContains("setup") || failure.localizedCaseInsensitiveContains("set up")
+        || failure.localizedCaseInsensitiveContains("configuration") {
+        return .setup("Set up chat-stasher")
+    }
+    if failure.localizedCaseInsensitiveContains("PATH") || failure.localizedCaseInsensitiveContains("command-line tool") {
+        return .cliMissing
+    }
+    return .unreadable(failure)
+}
+
+func machineNeedsAttention(_ machine: MachineFreshness, now: Date, silenceThresholdOverrideDays: Int? = nil) -> Bool {
     if machine.health != "healthy" { return true }
     guard let unix = machine.newestSnapshotUnix else { return false }
-    return Int64(now.timeIntervalSince1970) - unix > Int64(machine.silenceAfterDays ?? 7) * 86_400
+    return Int64(now.timeIntervalSince1970) - unix > Int64(silenceThresholdOverrideDays ?? machine.silenceAfterDays ?? 7) * 86_400
 }
 
 @MainActor
@@ -322,22 +354,21 @@ private final class ArchiveModel: ObservableObject {
     @Published var localSnapshot: LocalSnapshot?
     @Published var offline = false
     @Published var lastSuccessfulRefresh: Date?
+    @Published var launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+    @Published var launchAtLoginError: String?
+    @Published var shouldOfferLaunchAtLogin = false
+    @Published var silenceThresholdOverrideDays = UserDefaults.standard.object(forKey: "silenceThresholdOverrideDays") as? Int
     private var dashboardProcess: Process?
     private let updateDelegate = UpdateDelegate()
     private var updaterController: SPUStandardUpdaterController?
 
     var status: ArchiveStatus {
+        if offline, snapshot != nil { return .offline }
         guard snapshot == nil, let failure else {
-            return archiveStatus(snapshot: snapshot, local: localSnapshot, failure: failure)
+            return archiveStatus(snapshot: snapshot, local: localSnapshot, failure: failure,
+                                 silenceThresholdOverrideDays: silenceThresholdOverrideDays)
         }
-        if failure.localizedCaseInsensitiveContains("CLI too old") { return .cliTooOld }
-        if failure.localizedCaseInsensitiveContains("setup") || failure.localizedCaseInsensitiveContains("configuration") {
-            return .setup("Set up chat-stasher")
-        }
-        if failure.localizedCaseInsensitiveContains("PATH") || failure.localizedCaseInsensitiveContains("command-line tool") {
-            return .cliMissing
-        }
-        return .unreadable(failure)
+        return classifyFailure(failure)
     }
     var isDemo: Bool {
         ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--demo") })
@@ -385,7 +416,39 @@ private final class ArchiveModel: ObservableObject {
         updaterController.checkForUpdates(nil)
     }
 
+    func offerLaunchAtLoginPromptIfNeeded() {
+        guard !isDemo, !UserDefaults.standard.bool(forKey: "launchAtLoginPromptShown") else { return }
+        UserDefaults.standard.set(true, forKey: "launchAtLoginPromptShown")
+        shouldOfferLaunchAtLogin = true
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            launchAtLoginError = "Could not update the login setting: \(error.localizedDescription)"
+        }
+    }
+
+    func setSilenceThresholdOverride(_ days: Int) {
+        if days == 0 {
+            silenceThresholdOverrideDays = nil
+            UserDefaults.standard.removeObject(forKey: "silenceThresholdOverrideDays")
+        } else {
+            silenceThresholdOverrideDays = days
+            UserDefaults.standard.set(days, forKey: "silenceThresholdOverrideDays")
+        }
+    }
+
     func openDashboard() {
+        openDashboard(harness: nil)
+    }
+
+    func openDashboard(harness: String?) {
         guard dashboardProcess?.isRunning != true else {
             dashboardMessage = "Dashboard is already running."
             return
@@ -393,6 +456,7 @@ private final class ArchiveModel: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["chat-stasher", "ui"]
+        if let harness { process.arguments?.append(contentsOf: ["--harness", harness]) }
         if let destination = ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"], !destination.isEmpty {
             process.arguments?.append(contentsOf: ["--destination", destination])
         }
@@ -434,17 +498,23 @@ private final class ArchiveModel: ObservableObject {
             guard let date = Calendar.current.date(byAdding: .day, value: index - 29, to: Calendar.current.startOfDay(for: now)) else { return nil }
             return DailyCount(date: date, count: count)
         }
-        let sources = [
-            SourceRow(id: "coding", label: "Coding agents", count: 1_100,
-                      lastSavedUnix: Int64(now.timeIntervalSince1970) - 14 * 60,
-                      health: mode == "source-stopped" ? .stopped : .healthy),
-            SourceRow(id: "web", label: "Web chats", count: 184,
+        let codingSources = ["Claude Code", "Codex", "Cursor", "Windsurf"]
+        let webSources = ["ChatGPT", "Claude", "Gemini", "Perplexity"]
+        let coding = codingSources.enumerated().map { index, name in
+            SourceRow(id: name.lowercased().replacingOccurrences(of: " ", with: "-"), label: name,
+                      count: [420, 380, 180, 120][index],
+                      lastSavedUnix: Int64(now.timeIntervalSince1970) - ((mode == "source-stopped" && index == 0) ? 12 * 86_400 : 14 * 60),
+                      health: mode == "source-stopped" && index == 0 ? .stopped : .healthy)
+        }
+        let web = webSources.enumerated().map { index, name in
+            SourceRow(id: name.lowercased(), label: name, count: [90, 54, 24, 16][index],
                       lastSavedUnix: Int64(now.timeIntervalSince1970) - 2 * 86_400, health: .healthy)
-        ]
+        }
+        let sources = coding + web
         snapshot = ArchiveSnapshot(
             summary: Summary(machines: 3, harnesses: 8, sessions: 1_284, unknownTimeSessions: 3, noConversationContentSessions: 0),
             refreshedAt: now, machines: machines, days: days, usedConversationFallback: false,
-            sources: sources, destinations: 1
+            sources: sources, sourceDetails: sources, destinations: 1
         )
         localSnapshot = LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
                                       cliVersion: "0.5.0-rc.2", cliNeedsUpdate: mode == "cli-old")
@@ -485,13 +555,12 @@ private final class ArchiveModel: ObservableObject {
                 guard let date = ISO8601DateFormatter().date(from: item.date + "T12:00:00Z") else { return nil }
                 return DailyCount(date: date, count: item.count)
             }
-            let sources = sourceRows(document.sources, now: now)
             let details = detailedSourceRows(document.sources, now: now)
             let summary = Summary(machines: document.totals.machines, harnesses: document.totals.harnesses,
                                   sessions: document.totals.sessions, unknownTimeSessions: document.totals.unknownTimeSessions,
                                   noConversationContentSessions: document.totals.noConversationContentSessions)
             return .success(ArchiveSnapshot(summary: summary, refreshedAt: now, machines: machines,
-                                            days: days, usedConversationFallback: false, sources: sources, sourceDetails: details,
+                                            days: days, usedConversationFallback: false, sources: details, sourceDetails: details,
                                             destinations: local.destinationCount ?? 1), local)
         } catch {
             if error is DecodingError {
@@ -540,38 +609,69 @@ private enum OverviewResult {
     case failure(String)
 }
 
-private func sourceRows(_ values: [SummarySource], now: Date) -> [SourceRow] {
-    let webNames: Set<String> = ["chatgpt", "claude", "gemini", "deepseek", "grok", "perplexity", "web"]
-    func build(_ key: String, _ label: String, _ rows: [SummarySource]) -> SourceRow {
-        let count = rows.reduce(0) { $0 + $1.count }
-        let newest = rows.compactMap(\.lastSavedUnix).max()
-        let regular = rows.filter { $0.count >= 3 }
-        let health: SourceHealth
-        if regular.isEmpty { health = .unused }
-        else if regular.contains(where: { $0.lastSavedUnix == nil }) { health = .unknown }
-        else if regular.contains(where: {
-            guard let last = $0.lastSavedUnix else { return false }
-            return max(0, Int64(now.timeIntervalSince1970) - last) <= Int64($0.silenceAfterDays ?? 7) * 86_400
-        }) { health = .healthy }
-        else { health = .stopped }
-        return SourceRow(id: key, label: label, count: count, lastSavedUnix: newest, health: health)
-    }
-    let web = values.filter { webNames.contains($0.harness.lowercased()) }
-    let coding = values.filter { !webNames.contains($0.harness.lowercased()) }
-    return [build("coding", "Coding agents", coding), build("web", "Web chats", web)]
-}
-
 private func detailedSourceRows(_ values: [SummarySource], now: Date) -> [SourceRow] {
     values.map { source in
         let last = source.lastSavedUnix
-        let health: SourceHealth
-        if source.count < 3 { health = .unused }
-        else if last == nil { health = .unknown }
-        else if let last, max(0, Int64(now.timeIntervalSince1970) - last) <= Int64(source.silenceAfterDays ?? 7) * 86_400 { health = .healthy }
-        else { health = .stopped }
-        return SourceRow(id: source.harness, label: source.harness.replacingOccurrences(of: "-", with: " "),
+        let threshold = source.silenceAfterDays ?? 7
+        let health = sourceHealth(activeDays: source.activeDays, lastSavedUnix: last,
+                                  silenceAfterDays: threshold, now: now)
+        return SourceRow(id: source.harness, label: sourceDisplayName(source.harness),
                          count: source.count, lastSavedUnix: last, health: health,
-                         silenceAfterDays: source.silenceAfterDays ?? 7)
+                         silenceAfterDays: threshold,
+                         regularlyUsed: source.activeDays >= 3)
+    }
+}
+
+func sourceHealth(activeDays: Int, lastSavedUnix: Int64?, silenceAfterDays: Int, now: Date) -> SourceHealth {
+    guard activeDays >= 3 else { return .unused }
+    guard let lastSavedUnix else { return .unknown }
+    let age = max(0, Int64(now.timeIntervalSince1970) - lastSavedUnix)
+    return age <= Int64(silenceAfterDays) * 86_400 ? .healthy : .stopped
+}
+
+private func displayedSourceHealth(_ source: SourceRow, overrideDays: Int?, now: Date) -> SourceHealth {
+    guard source.regularlyUsed else { return .unused }
+    return sourceHealth(activeDays: 3, lastSavedUnix: source.lastSavedUnix,
+                        silenceAfterDays: overrideDays ?? source.silenceAfterDays, now: now)
+}
+
+private let webSourceNames: Set<String> = ["chatgpt", "claude", "gemini", "deepseek", "grok", "perplexity", "web"]
+
+private func sourceDisplayName(_ value: String) -> String {
+    let names: [String: String] = ["claude-code": "Claude Code", "codex": "Codex", "chatgpt": "ChatGPT"]
+    let normalized = value.lowercased()
+    return names[normalized] ?? value.replacingOccurrences(of: "-", with: " ").capitalized
+}
+
+private func sourceGroup(_ source: SourceRow) -> String {
+    webSourceNames.contains(source.id.lowercased()) ? "Web chats" : "Coding agents"
+}
+
+private func sourceSymbol(_ source: SourceRow) -> String {
+    switch source.id.lowercased() {
+    case "claude-code", "claude": "sparkles"
+    case "codex": "chevron.left.forwardslash.chevron.right"
+    case "cursor": "cursorarrow"
+    case "chatgpt": "bubble.left.and.bubble.right"
+    case "gemini": "diamond"
+    default: "app"
+    }
+}
+
+private func sourceStatusColor(_ health: SourceHealth) -> Color {
+    switch health {
+    case .healthy: .green
+    case .stopped: .yellow
+    case .unused, .unknown: .secondary
+    }
+}
+
+private func sourceStatusSymbol(_ health: SourceHealth) -> String {
+    switch health {
+    case .healthy: "checkmark.circle.fill"
+    case .stopped: "exclamationmark.circle.fill"
+    case .unused: "circle"
+    case .unknown: "questionmark.circle.fill"
     }
 }
 
@@ -613,7 +713,6 @@ private struct ArchivePopover: View {
     @ObservedObject var model: ArchiveModel
     @State private var hoveredDay: DailyCount?
     @State private var showingAbout = false
-    @State private var showingSourceDetails = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
@@ -640,6 +739,18 @@ private struct ArchivePopover: View {
             action("Open dashboard", icon: "arrow.up.right.square", shortcut: "D", action: model.openDashboard)
             action("Refresh", icon: "arrow.clockwise", shortcut: "R", action: { model.refresh(force: true) })
             if let message = model.dashboardMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
+            Toggle("Launch at login", isOn: Binding(
+                get: { model.launchAtLoginEnabled },
+                set: { model.setLaunchAtLogin($0) }
+            )).font(.system(size: 12))
+            if let error = model.launchAtLoginError { Text(error).font(.caption).foregroundStyle(.secondary) }
+            Picker("Silence threshold", selection: Binding(
+                get: { model.silenceThresholdOverrideDays ?? 0 },
+                set: { model.setSilenceThresholdOverride($0) }
+            )) {
+                Text("Use cadence").tag(0)
+                ForEach(2...30, id: \.self) { days in Text("\(days) days").tag(days) }
+            }.pickerStyle(.menu).font(.system(size: 12))
             Divider()
             Button(action: model.checkForUpdates) {
                 Label(model.updateReady ? "Update ready, restart now?" : "Check for Updates…",
@@ -651,7 +762,16 @@ private struct ArchivePopover: View {
             }.buttonStyle(.plain)
             action("Quit", icon: "power", shortcut: "Q", action: { NSApp.terminate(nil) })
         }
-        .padding(16).frame(width: 320).onAppear { model.refresh() }
+        .padding(16).frame(width: 320).onAppear {
+            model.refresh()
+            model.offerLaunchAtLoginPromptIfNeeded()
+        }
+        .alert("Launch Chat Stasher at login?", isPresented: $model.shouldOfferLaunchAtLogin) {
+            Button("Not now", role: .cancel) { }
+            Button("Enable") { model.setLaunchAtLogin(true) }
+        } message: {
+            Text("You can change this setting from the menu bar panel.")
+        }
         .sheet(isPresented: $showingAbout) {
             VStack(spacing: 8) {
                 Image(systemName: "archivebox.fill").font(.largeTitle).foregroundStyle(.tint)
@@ -678,7 +798,6 @@ private struct ArchivePopover: View {
                     Text("Latest conversation saved \(relativeTime(snapshot.machines.compactMap(\.newestSnapshotUnix).max(), now: snapshot.refreshedAt))")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     HStack {
-                        if model.offline { Text("Offline · showing cached result") }
                         Spacer(); Text("Updated \(snapshot.refreshedAt, style: .relative)")
                     }
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
@@ -687,6 +806,8 @@ private struct ArchivePopover: View {
             Spacer(minLength: 0)
             if model.isRefreshing { ProgressView().controlSize(.mini) }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(model.status.sentence). \(model.status.explanation ?? "")")
     }
 
     private var setupCard: some View {
@@ -701,49 +822,47 @@ private struct ArchivePopover: View {
                 Link("Get chat-stasher", destination: URL(string: "https://github.com/dimpurr/chat-stasher/releases/latest")!)
                     .font(.system(size: 12))
             }
+            if case .credentialsUnavailable = model.status {
+                Link("Destination setup guide", destination: URL(string: "https://github.com/dimpurr/chat-stasher/blob/main/docs/destinations.md")!)
+                    .font(.system(size: 12))
+            }
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func sourceList(_ snapshot: ArchiveSnapshot) -> some View {
-        return VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Sources").font(.system(size: 12, weight: .semibold))
-            ForEach(snapshot.sources) { source in
-                Button(action: model.openDashboard) {
-                    HStack(spacing: 6) {
-                        Image(systemName: source.health == .healthy ? "checkmark.circle.fill" :
-                              (source.health == .stopped ? "exclamationmark.circle.fill" :
-                               (source.health == .unknown ? "questionmark.circle.fill" : "circle")))
-                            .foregroundStyle(source.health == .healthy ? Color.green : (source.health == .stopped ? Color.yellow : Color.secondary))
-                        Text(source.label).font(.system(size: 12))
-                        Spacer(minLength: 2)
-                        Text("\(source.count.formatted()) · \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
-                            .font(.system(size: 10)).foregroundStyle(.secondary)
+            ForEach(["Coding agents", "Web chats"], id: \.self) { group in
+                let sources = snapshot.sourceDetails.filter { sourceGroup($0) == group }
+                if !sources.isEmpty {
+                    Text(group).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    ForEach(sources) { source in
+                        let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
+                                                           now: snapshot.refreshedAt)
+                        Button { model.openDashboard(harness: source.id) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: sourceSymbol(source)).frame(width: 13)
+                                Image(systemName: sourceStatusSymbol(health))
+                                    .foregroundStyle(sourceStatusColor(health)).frame(width: 11)
+                                Text(source.label).font(.system(size: 11))
+                                Spacer(minLength: 2)
+                                Text("\(source.count.formatted()) · \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .help(source.lastSavedUnix.map { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) } ?? "Saved time unavailable")
+                            .accessibilityLabel("\(source.label), \(health.accessibilityText), \(source.count.formatted()) conversations, saved \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
+                        }
+                        .buttonStyle(.plain)
+                        Rectangle().fill(sourceStatusColor(health)).frame(height: 2)
+                            .accessibilityHidden(true)
                     }
-                }.buttonStyle(.plain)
-                if source.id == "web" {
-                    Text("Extension status: see each browser's extension")
-                        .font(.system(size: 10)).foregroundStyle(.secondary).padding(.leading, 19)
-                }
-            }
-            Button(showingSourceDetails ? "Hide sources ▾" : "Show sources ▸") {
-                showingSourceDetails.toggle()
-            }.font(.system(size: 10)).buttonStyle(.plain)
-            if showingSourceDetails {
-                ForEach(snapshot.sourceDetails) { source in
-                    HStack(spacing: 5) {
-                        Image(systemName: source.health == .healthy ? "checkmark.circle.fill" :
-                              (source.health == .stopped ? "exclamationmark.circle.fill" :
-                               (source.health == .unknown ? "questionmark.circle.fill" : "circle")))
-                            .foregroundStyle(source.health == .healthy ? Color.green :
-                                             (source.health == .stopped ? Color.yellow : Color.secondary))
-                        Text(source.label).font(.system(size: 10))
-                        Spacer(minLength: 2)
-                        Text("\(source.count) · \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                    if group == "Web chats" {
+                        Text("Extension status: see each browser's extension")
+                            .font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 2)
                     }
-                    .contentShape(Rectangle()).onTapGesture { model.openDashboard() }
                 }
             }
         }
@@ -789,8 +908,8 @@ private struct ArchivePopover: View {
 
     private func machineList(_ snapshot: ArchiveSnapshot) -> some View {
         let sorted = snapshot.machines.sorted { a, b in
-            let aa = machineNeedsAttention(a, now: snapshot.refreshedAt)
-            let ba = machineNeedsAttention(b, now: snapshot.refreshedAt)
+            let aa = machineNeedsAttention(a, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays)
+            let ba = machineNeedsAttention(b, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays)
             if aa != ba { return aa }
             return a.machine < b.machine
         }
@@ -799,15 +918,16 @@ private struct ArchivePopover: View {
             ForEach(Array(sorted.prefix(5))) { machine in
                 HStack(spacing: 6) {
                     Image(systemName: machine.newestSnapshotUnix == nil ? "questionmark.circle.fill" :
-                          (machineNeedsAttention(machine, now: snapshot.refreshedAt) ? "exclamationmark.circle.fill" : "checkmark.circle.fill"))
+                          (machineNeedsAttention(machine, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays) ? "exclamationmark.circle.fill" : "checkmark.circle.fill"))
                         .foregroundStyle(machine.newestSnapshotUnix == nil ? Color.secondary :
-                                         (machineNeedsAttention(machine, now: snapshot.refreshedAt) ? Color.yellow : Color.green))
+                                         (machineNeedsAttention(machine, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays) ? Color.yellow : Color.green))
                         .accessibilityLabel(machine.newestSnapshotUnix == nil ? "Saved time unknown" :
-                                            (machineNeedsAttention(machine, now: snapshot.refreshedAt) ? "Needs attention" : "Healthy"))
+                                            (machineNeedsAttention(machine, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays) ? "Needs attention" : "Healthy"))
                     Text(machine.machine).font(.system(size: 12)).lineLimit(1)
+                        .help(machine.newestSnapshotUnix.map { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) } ?? "Saved time unavailable")
                     Spacer(minLength: 4)
-                    Text(machineAge(machine, now: snapshot.refreshedAt)).font(.system(size: 11)).foregroundStyle(.secondary)
-                    if machineNeedsAttention(machine, now: snapshot.refreshedAt) {
+                    Text(machineAge(machine, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays)).font(.system(size: 11)).foregroundStyle(.secondary)
+                    if machineNeedsAttention(machine, now: snapshot.refreshedAt, silenceThresholdOverrideDays: model.silenceThresholdOverrideDays) {
                         Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(.yellow)
                     }
                 }
@@ -819,7 +939,13 @@ private struct ArchivePopover: View {
     }
 
     @ViewBuilder private func attention(_ snapshot: ArchiveSnapshot) -> some View {
-        let sentences = attentionSentences(snapshot.summary)
+        let displaySources = snapshot.sourceDetails.map { source in
+            SourceRow(id: source.id, label: source.label, count: source.count,
+                      lastSavedUnix: source.lastSavedUnix,
+                      health: displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays, now: snapshot.refreshedAt),
+                      silenceAfterDays: source.silenceAfterDays, regularlyUsed: source.regularlyUsed)
+        }
+        let sentences = attentionSentences(snapshot.summary, sources: displaySources)
         if !sentences.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(sentences, id: \.self) { sentence in
@@ -841,7 +967,7 @@ private struct ArchivePopover: View {
     }
 }
 
-func attentionSentences(_ summary: Summary) -> [String] {
+func attentionSentences(_ summary: Summary, sources: [SourceRow] = []) -> [String] {
     var sentences: [String] = []
     if summary.unknownTimeSessions > 0 {
         sentences.append(summary.unknownTimeSessions == 1
@@ -853,7 +979,21 @@ func attentionSentences(_ summary: Summary) -> [String] {
             ? "1 conversation has no conversation content"
             : "\(summary.noConversationContentSessions) conversations have no conversation content")
     }
+    for source in sources where source.regularlyUsed && source.health == .stopped {
+        sentences.append("\(source.label) stopped saving")
+    }
     return sentences
+}
+
+private extension SourceHealth {
+    var accessibilityText: String {
+        switch self {
+        case .healthy: "saving recently"
+        case .stopped: "stopped saving"
+        case .unused: "not used regularly"
+        case .unknown: "status unknown"
+        }
+    }
 }
 
 func legacyMachineFreshness(sessions: [SessionRow], missingIndex: [String]) -> [MachineFreshness] {
@@ -871,14 +1011,15 @@ func legacyMachineFreshness(sessions: [SessionRow], missingIndex: [String]) -> [
     }.sorted { $0.machine < $1.machine }
 }
 
-private func machineAge(_ machine: MachineFreshness, now: Date) -> String {
+private func machineAge(_ machine: MachineFreshness, now: Date, silenceThresholdOverrideDays: Int? = nil) -> String {
     guard let unix = machine.newestSnapshotUnix else { return "saved time unknown" }
     let age = max(0, Int(now.timeIntervalSince1970) - Int(unix))
     if age < 60 { return "saved just now" }
     if age < 3_600 { return "saved \(age / 60)m ago" }
     if age < 86_400 { return "saved \(age / 3_600)h ago" }
     let days = (age + 86_399) / 86_400
-    return age > 7 * 86_400 ? "silent \(days) days" : "saved \(days)d ago"
+    return age > (silenceThresholdOverrideDays ?? machine.silenceAfterDays ?? 7) * 86_400
+        ? "silent \(days) days" : "saved \(days)d ago"
 }
 
 private func relativeTime(_ unix: Int64?, now: Date) -> String {

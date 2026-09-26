@@ -23,6 +23,11 @@ final class StatusTests: XCTestCase {
         XCTAssertEqual(value.severity, .error)
     }
 
+    func testFailureClassificationKeepsOldCliOnItsUpgradeCard() {
+        XCTAssertEqual(classifyFailure("This app requires chat-stasher ≥ 0.5.0-rc.2.").sentence,
+                       "CLI too old: needs ≥ 0.5.0-rc.2")
+    }
+
     func testLocalStatusWaitingFailureAndSourceStopHaveTheirOwnSentences() {
         let base = snapshot()
         XCTAssertEqual(archiveStatus(snapshot: base,
@@ -34,15 +39,41 @@ final class StatusTests: XCTestCase {
                                      failure: nil, now: now).severity, .error)
         let stopped = ArchiveSnapshot(summary: base.summary, refreshedAt: now, machines: base.machines, days: [],
                                       usedConversationFallback: false,
-                                      sources: [SourceRow(id: "coding", label: "Coding agents", count: 4,
-                                                          lastSavedUnix: 1, health: .stopped)])
-        XCTAssertEqual(archiveStatus(snapshot: stopped, local: cleanLocal, failure: nil, now: now).sentence, "Coding agents stopped saving")
+                                      sources: [SourceRow(id: "claude-code", label: "Claude Code", count: 4,
+                                                          lastSavedUnix: 1, health: .stopped)],
+                                      sourceDetails: [SourceRow(id: "claude-code", label: "Claude Code", count: 4,
+                                                               lastSavedUnix: 1, health: .stopped)])
+        XCTAssertEqual(archiveStatus(snapshot: stopped, local: cleanLocal, failure: nil, now: now).sentence, "Claude Code stopped saving")
+        XCTAssertEqual(attentionSentences(stopped.summary, sources: stopped.sourceDetails), ["Claude Code stopped saving"])
     }
 
     func testUnknownAndUnusedSourceNeverBecomeStopped() {
         let source = SourceRow(id: "web", label: "Web chats", count: 0, lastSavedUnix: nil, health: .unused)
         XCTAssertEqual(source.health, .unused)
         XCTAssertNil(source.lastSavedUnix)
+    }
+
+    func testSourceAlertsRequireActivityAcrossThreeDistinctDays() {
+        XCTAssertEqual(sourceHealth(activeDays: 1, lastSavedUnix: 1, silenceAfterDays: 2, now: now), .unused)
+        XCTAssertEqual(sourceHealth(activeDays: 2, lastSavedUnix: 1, silenceAfterDays: 2, now: now), .unused)
+        XCTAssertEqual(sourceHealth(activeDays: 3, lastSavedUnix: nil, silenceAfterDays: 2, now: now), .unknown)
+        XCTAssertEqual(sourceHealth(activeDays: 3, lastSavedUnix: Int64(now.timeIntervalSince1970), silenceAfterDays: 2, now: now), .healthy)
+        XCTAssertEqual(sourceHealth(activeDays: 3, lastSavedUnix: 1, silenceAfterDays: 2, now: now), .stopped)
+    }
+
+    func testSilenceThresholdOverrideAppliesToMachineAndSourceStatus() {
+        let base = snapshot(age: 3 * 86_400)
+        XCTAssertEqual(archiveStatus(snapshot: base, local: cleanLocal, failure: nil, now: now).sentence, "All saved")
+        XCTAssertEqual(archiveStatus(snapshot: base, local: cleanLocal, failure: nil, now: now,
+                                     silenceThresholdOverrideDays: 2).sentence, "Demo Mac has been silent for 3 days")
+        let source = SourceRow(id: "claude-code", label: "Claude Code", count: 9,
+                               lastSavedUnix: Int64(now.timeIntervalSince1970) - 3 * 86_400,
+                               health: .healthy, silenceAfterDays: 7, regularlyUsed: true)
+        let withSource = ArchiveSnapshot(summary: base.summary, refreshedAt: now, machines: [], days: [],
+                                         usedConversationFallback: false, sources: [source], sourceDetails: [source])
+        XCTAssertEqual(archiveStatus(snapshot: withSource, local: cleanLocal, failure: nil, now: now).sentence, "All saved")
+        XCTAssertEqual(archiveStatus(snapshot: withSource, local: cleanLocal, failure: nil, now: now,
+                                     silenceThresholdOverrideDays: 2).sentence, "Claude Code stopped saving")
     }
 
     func testUnknownLocalCountAndMissingSchedulerNeverSayAllSaved() {
@@ -92,6 +123,15 @@ final class StatusTests: XCTestCase {
             "2 conversations have no known time",
             "1 conversation has no conversation content"
         ])
+    }
+
+    func testOfflineCachedSnapshotNeverKeepsGreenAllSavedSentence() {
+        let cached = snapshot()
+        let value = ArchiveStatus.offline
+        XCTAssertEqual(value.sentence, "Offline · showing cached result")
+        XCTAssertNotEqual(value.severity, .healthy)
+        XCTAssertNotEqual(archiveStatus(snapshot: cached, local: cleanLocal, failure: "network unavailable", now: now).sentence,
+                          "Offline · showing cached result")
     }
 
     func testPluralAttentionSentencesAndBanner() {

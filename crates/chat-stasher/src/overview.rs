@@ -355,6 +355,17 @@ fn silence_after_days<'a>(
     ((median as f64 * 1.4).ceil() as u64).max(2)
 }
 
+fn active_days<'a>(
+    rows: impl Iterator<Item = &'a OverviewRow>,
+    day_of: &dyn Fn(i64) -> Option<NaiveDate>,
+) -> usize {
+    rows.filter(|row| row.has_known_time())
+        .filter_map(|row| row.first_unix.or(row.last_unix))
+        .filter_map(day_of)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
 fn summary_sources_json(
     rows: &[OverviewRow],
     day_of: &dyn Fn(i64) -> Option<NaiveDate>,
@@ -379,6 +390,10 @@ fn summary_sources_json(
                 "harness": harness,
                 "count": count,
                 "last_saved_unix": last.get(harness).copied(),
+                "active_days": active_days(
+                    rows.iter().filter(|row| row.harness == harness),
+                    day_of,
+                ),
                 "silence_after_days": silence_after_days(
                     rows.iter().filter(|row| row.harness == harness),
                     day_of,
@@ -2028,12 +2043,13 @@ mod tests {
                 "harness": "claude-code",
                 "count": 2,
                 "last_saved_unix": D1P1,
+                "active_days": 1,
                 "silence_after_days": 7,
             })
         );
         assert_eq!(
             v["sources"][1],
-            serde_json::json!({"harness": "codex", "count": 1, "last_saved_unix": D1, "silence_after_days": 7})
+            serde_json::json!({"harness": "codex", "count": 1, "last_saved_unix": D1, "active_days": 1, "silence_after_days": 7})
         );
 
         assert_eq!(v["days"].as_array().unwrap().len(), SUMMARY_WINDOW_DAYS);
@@ -2063,6 +2079,7 @@ mod tests {
             &day_of_offset(0),
         );
         assert_eq!(v["sources"][0]["count"], serde_json::json!(1));
+        assert_eq!(v["sources"][0]["active_days"], serde_json::json!(0));
         assert_eq!(
             v["sources"][0]["last_saved_unix"],
             serde_json::json!(null),
