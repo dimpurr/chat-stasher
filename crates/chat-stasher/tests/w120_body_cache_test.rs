@@ -68,12 +68,23 @@ fn incompressible(bytes: usize, seed: u64) -> Vec<u8> {
 /// Write `sessions` sessions of `bytes_each` into one stage.
 fn write_stage(stage: &Path, count: u32, bytes_each: usize) {
     for n in 0..count {
-        let body = incompressible(bytes_each, u64::from(n) + 1);
+        write_session_shards(stage, n, 1, bytes_each);
+    }
+}
+
+/// Write session `session` as `shards` sealed shard files of `bytes_each` soup
+/// bytes each. The seed mixes the session and shard numbers, so no two shards
+/// of one session — and no two sessions — chunk into the same blob: a session
+/// that spans several files therefore spans several blobs, for every chunker
+/// polynomial the destination may draw.
+fn write_session_shards(stage: &Path, session: u32, shards: u32, bytes_each: usize) {
+    for n in 0..shards {
+        let body = incompressible(bytes_each, u64::from(session) * 1_000 + u64::from(n) + 1);
         store::write_sealed_shard_raw_with_cap(
             StageWriter::Collect,
             stage,
             MACHINE,
-            &session_id(n),
+            &session_id(session),
             &body,
             store::DEFAULT_SHARD_BUCKET_CAP,
         )
@@ -91,13 +102,23 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(count: u32, bytes_each: usize) -> Self {
+        Self::new_with_stage(|stage| write_stage(stage, count, bytes_each))
+    }
+
+    /// One session spread over `shards` sealed shard files of `bytes_each`
+    /// each — the shape a session that accrued several collects has.
+    fn new_sharded_session(shards: u32, bytes_each: usize) -> Self {
+        Self::new_with_stage(|stage| write_session_shards(stage, 0, shards, bytes_each))
+    }
+
+    fn new_with_stage(fill: impl FnOnce(&Path)) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
-        let repo = root.join("repo");
-        let key = root.join("key.json");
         let stage = root.join("stage");
         fs::create_dir_all(&stage).expect("stage dir");
-        write_stage(&stage, count, bytes_each);
+        fill(&stage);
+        let repo = root.join("repo");
+        let key = root.join("key.json");
         let mk = MasterKey::new();
         store::persist_key_file(&cfg(&repo, &key), &mk).expect("persist key");
         let store = BackupStore::new(cfg(&repo, &key), MACHINE.to_string());
@@ -509,10 +530,23 @@ fn a_session_over_a_tenth_of_the_quota_is_not_stored() {
 
 #[test]
 fn entries_are_bounded_by_the_blob_not_by_the_session() {
-    // One 6 MB session with a quota that holds it whole. If the cache stored
-    // bodies, this would be one 6 MB file; it must be several bounded ones,
-    // because that is what keeps a large read's memory bounded by the blob.
-    let sandbox = Sandbox::new(1, 6_000_000);
+    // One 6 MB session written as three 2 MB shards, with a quota that holds
+    // it whole. If the cache stored bodies, this would be one 6 MB file; it
+    // must be several bounded ones, because that is what keeps a large read's
+    // memory bounded by the blob.
+    //
+    // The three shards are what makes that premise deterministic. The
+    // destination chunks each staged file with a Rabin polynomial drawn at
+    // random when this fresh repository is created (rustic_core-0.12.0
+    // `src/commands/init.rs:47`), and one 6 MB file is smaller than the
+    // chunker's 8 MiB maximum, so the number of blobs it splits into moves
+    // with the drawn polynomial — in roughly one repository out of two
+    // hundred no cut point falls in it at all and the whole session would be
+    // one blob, which is exactly how CI run 36264426622 failed once
+    // (entries=1 misses=1 usage=4476922). A session that spans several files
+    // spans several blobs for *every* polynomial, so the cut-point lottery
+    // cannot take this premise away.
+    let sandbox = Sandbox::new_sharded_session(3, 2_000_000);
     sandbox.set_quota("100MB");
     let output = sandbox.read(0);
     assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
