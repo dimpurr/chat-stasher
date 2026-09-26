@@ -16,6 +16,7 @@
 //! * Width is caller-driven (`width: usize`), never a hardcoded 80. The
 //!   heatmap picks day vs week buckets from the available width.
 
+use chrono::NaiveDate;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -275,6 +276,28 @@ pub fn overview_json(
     })
 }
 
+/// One machine's freshness verdict, from the index and writer states the
+/// caller already computed. `missing_index` outranks a stale writer: a machine
+/// whose index is absent is not "healthy but behind", it is unreadable.
+fn machine_health(
+    machine: &str,
+    missing_index: &[String],
+    writers: &[crate::sidecar::MachineWriterStatus],
+) -> &'static str {
+    if missing_index.contains(&machine.to_string()) {
+        return "missing_index";
+    }
+    match writers
+        .iter()
+        .find(|writer| writer.machine == machine)
+        .and_then(|status| status.behind_newest_writer)
+    {
+        Some(true) => "writer_behind",
+        Some(false) => "healthy",
+        None => "unknown",
+    }
+}
+
 /// Additive per-machine freshness records for the menubar client. Missing
 /// snapshot timestamps remain JSON null so consumers can show unknown as an
 /// em dash; health uses the already-computed index and writer states.
@@ -287,16 +310,7 @@ pub fn machine_freshness_json(
     snapshot_times
         .iter()
         .map(|(machine, unix)| {
-            let writer = writers.iter().find(|writer| writer.machine == *machine);
-            let health = if missing_index.contains(machine) {
-                "missing_index"
-            } else {
-                match writer.and_then(|status| status.behind_newest_writer) {
-                    Some(true) => "writer_behind",
-                    Some(false) => "healthy",
-                    None => "unknown",
-                }
-            };
+            let health = machine_health(machine, missing_index, writers);
             serde_json::json!({
                 "machine": display_name(machine, display_names),
                 "newest_snapshot_unix": unix,
@@ -304,6 +318,149 @@ pub fn machine_freshness_json(
             })
         })
         .collect()
+}
+
+/// How many local days [`overview_summary_json`]'s `days` histogram covers,
+/// including today. The menubar draws exactly this many mini-bars.
+pub const SUMMARY_WINDOW_DAYS: usize = 30;
+
+/// One record per source (harness), ordered by name: its session count and the
+/// newest conversation time among its known-time sessions.
+///
+/// `last_saved_unix` is a number or `null`. `null` means no session of that
+/// source has a known time — the same "unknown is not zero" rule the
+/// per-machine `newest_snapshot_unix` follows — and never a fabricated epoch.
+fn summary_sources_json(rows: &[OverviewRow]) -> Vec<serde_json::Value> {
+    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut last: BTreeMap<&str, i64> = BTreeMap::new();
+    for r in rows {
+        *counts.entry(r.harness.as_str()).or_insert(0) += 1;
+        if r.has_known_time() {
+            if let Some(at) = r.last_unix.or(r.first_unix) {
+                let entry = last.entry(r.harness.as_str()).or_insert(at);
+                if at > *entry {
+                    *entry = at;
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(harness, count)| {
+            serde_json::json!({
+                "harness": harness,
+                "count": count,
+                "last_saved_unix": last.get(harness).copied(),
+            })
+        })
+        .collect()
+}
+
+/// The last [`SUMMARY_WINDOW_DAYS`] local days' session-start counts, oldest
+/// first and zero-filled.
+///
+/// A session counts on the local day its *start* falls on (`first_unix`, or
+/// `last_unix` for a known-time session whose start is unknown); a
+/// time-unknown or no-content session is never placed in a bucket. `day_of`
+/// maps one unix second to the local calendar day, so the caller owns the
+/// timezone and DST rule and this stays pure and testable. A day with no
+/// session is a measured zero — the histogram always carries every day, so a
+/// missing bar is "none", never "not read".
+pub fn summary_daily_counts(
+    rows: &[OverviewRow],
+    today: NaiveDate,
+    day_of: &dyn Fn(i64) -> Option<NaiveDate>,
+) -> Vec<(String, u64)> {
+    let mut by_day: BTreeMap<NaiveDate, u64> = BTreeMap::new();
+    for r in rows {
+        if !r.has_known_time() {
+            continue;
+        }
+        let Some(anchor) = r.first_unix.or(r.last_unix) else {
+            continue;
+        };
+        let Some(day) = day_of(anchor) else {
+            continue;
+        };
+        *by_day.entry(day).or_insert(0) += 1;
+    }
+
+    let mut out = Vec::with_capacity(SUMMARY_WINDOW_DAYS);
+    for back in (0..SUMMARY_WINDOW_DAYS).rev() {
+        let Some(day) = today.checked_sub_days(chrono::Days::new(back as u64)) else {
+            continue;
+        };
+        // reason: `by_day` is written only for days that had a known-time
+        // session, so a day absent from it genuinely held none; 0 is that
+        // measured zero, not a substituted unknown.
+        let count = by_day.get(&day).copied().unwrap_or(0);
+        out.push((day.format("%Y-%m-%d").to_string(), count));
+    }
+    out
+}
+
+/// The additive `overview --json --summary` document: aggregate totals, one
+/// record per machine and per source, and the last [`SUMMARY_WINDOW_DAYS`]
+/// local days' counts — and deliberately no per-session array, which is the
+/// whole point of the variant for a large archive.
+///
+/// Per machine, `machine` is the raw archive partition id (the same value a
+/// session row carries) and `display` is its ADR-018 display name; the full
+/// document's `machines.by_machine` keeps its older display-in-`machine`
+/// shape, which is why this is a separate variant rather than an edit to it.
+/// `last_saved_unix` is nullable exactly as `newest_snapshot_unix` is.
+pub fn overview_summary_json(
+    rows: &[OverviewRow],
+    snapshot_times: &BTreeMap<String, i64>,
+    missing_index: &[String],
+    writers: &[crate::sidecar::MachineWriterStatus],
+    display_names: &BTreeMap<String, String>,
+    exit_code: u8,
+    today: NaiveDate,
+    day_of: &dyn Fn(i64) -> Option<NaiveDate>,
+) -> serde_json::Value {
+    let machines: Vec<serde_json::Value> = snapshot_times
+        .iter()
+        .map(|(machine, unix)| {
+            serde_json::json!({
+                "machine": machine,
+                "display": display_name(machine, display_names),
+                "newest_snapshot_unix": unix,
+                "health": machine_health(machine, missing_index, writers),
+            })
+        })
+        .collect();
+    let days: Vec<serde_json::Value> = summary_daily_counts(rows, today, day_of)
+        .into_iter()
+        .map(|(date, count)| serde_json::json!({"date": date, "count": count}))
+        .collect();
+    serde_json::json!({
+        "schema_version": 1,
+        "command": "overview",
+        "variant": "summary",
+        "healthy": exit_code == 0,
+        "exit_code": exit_code,
+        "no_index_anywhere": rows.is_empty(),
+        "totals": {
+            "machines": machine_count(rows),
+            "sources": harness_count(rows),
+            "sessions": rows.len(),
+            "lines": total_lines(rows),
+            // ADR-035, same split as the full document: a session with no
+            // conversation content is never folded into time-unknown.
+            "unknown_time_sessions": rows
+                .iter()
+                .filter(|r| !r.has_known_time() && !r.is_no_conversation_content())
+                .count(),
+            "no_conversation_content_sessions": rows
+                .iter()
+                .filter(|r| r.is_no_conversation_content())
+                .count(),
+        },
+        "machines": machines,
+        "sources": summary_sources_json(rows),
+        "days": days,
+    })
 }
 
 /// Serialize the stable overview document with the additive per-machine
@@ -1707,6 +1864,217 @@ mod tests {
         assert_eq!(v["exit_code"], serde_json::json!(3));
         assert_eq!(v["error"], serde_json::json!("no key"));
         assert_eq!(v["healthy"], serde_json::json!(false));
+    }
+
+    // ---- `overview --json --summary` ------------------------------------
+
+    /// A closure that converts a unix second to a date in a fixed offset,
+    /// standing in for the caller's local-zone rule.
+    fn day_of_offset(offset_secs: i32) -> impl Fn(i64) -> Option<NaiveDate> {
+        use chrono::{FixedOffset, TimeZone};
+        // reason: the fixed offset is constructed from a valid, small value
+        // supplied by the test itself; a bad offset is a test bug, not input.
+        let tz = FixedOffset::east_opt(offset_secs).unwrap();
+        move |unix| tz.timestamp_opt(unix, 0).single().map(|dt| dt.date_naive())
+    }
+
+    #[test]
+    fn summary_json_has_no_sessions_and_carries_aggregates() {
+        let rows = vec![
+            row(
+                "s1",
+                "air",
+                "claude-code",
+                Some(D1),
+                Some(D1P1),
+                42,
+                TimeSource::Exact,
+            ),
+            row(
+                "s2",
+                "pro",
+                "codex",
+                Some(D1),
+                Some(D1),
+                5,
+                TimeSource::Exact,
+            ),
+            row(
+                "s3",
+                "air",
+                "claude-code",
+                None,
+                None,
+                3,
+                TimeSource::Unknown {
+                    why: "no time".into(),
+                },
+            ),
+        ];
+        let times = BTreeMap::from([
+            ("air".to_string(), 1_700_000_001),
+            ("pro".to_string(), 1_700_000_002),
+            ("ghost".to_string(), 1_700_000_003),
+        ]);
+        let missing = vec!["pro".to_string()];
+        let writer = |machine: &str, behind| crate::sidecar::MachineWriterStatus {
+            machine: machine.to_string(),
+            chat_stasher_version: Some("1.0.0".to_string()),
+            version_recorded: true,
+            version_unreadable: false,
+            behind_newest_writer: behind,
+        };
+        let writers = vec![writer("air", Some(false)), writer("pro", Some(false))];
+        let display = BTreeMap::from([("air".to_string(), "Studio Mac".to_string())]);
+        let today = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+
+        let v = overview_summary_json(
+            &rows,
+            &times,
+            &missing,
+            &writers,
+            &display,
+            0,
+            today,
+            &day_of_offset(0),
+        );
+
+        let obj = v.as_object().expect("summary json is an object");
+        assert_eq!(
+            obj.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "command",
+                "days",
+                "exit_code",
+                "healthy",
+                "machines",
+                "no_index_anywhere",
+                "schema_version",
+                "sources",
+                "totals",
+                "variant",
+            ]
+        );
+        assert!(
+            obj.get("sessions").is_none(),
+            "the summary variant must not carry the per-session array"
+        );
+        assert_eq!(v["variant"], serde_json::json!("summary"));
+        assert_eq!(v["totals"]["sessions"], serde_json::json!(3));
+        assert_eq!(v["totals"]["sources"], serde_json::json!(2));
+        assert_eq!(v["totals"]["machines"], serde_json::json!(2));
+        assert_eq!(v["totals"]["lines"], serde_json::json!(50));
+        assert_eq!(v["totals"]["unknown_time_sessions"], serde_json::json!(1));
+
+        // Per-machine: raw id in `machine`, ADR-018 name in `display`.
+        assert_eq!(
+            v["machines"][0],
+            serde_json::json!({
+                "machine": "air",
+                "display": "Studio Mac",
+                "newest_snapshot_unix": 1_700_000_001,
+                "health": "healthy",
+            })
+        );
+        // `snapshot_times` is a BTreeMap, so machines are ordered by raw id.
+        assert_eq!(v["machines"][1]["health"], serde_json::json!("unknown"));
+        assert_eq!(v["machines"][1]["display"], serde_json::json!("ghost"));
+        assert_eq!(
+            v["machines"][2]["health"],
+            serde_json::json!("missing_index")
+        );
+
+        // Per-source: count and the newest known conversation time.
+        assert_eq!(
+            v["sources"][0],
+            serde_json::json!({
+                "harness": "claude-code",
+                "count": 2,
+                "last_saved_unix": D1P1,
+            })
+        );
+        assert_eq!(
+            v["sources"][1],
+            serde_json::json!({"harness": "codex", "count": 1, "last_saved_unix": D1})
+        );
+
+        assert_eq!(v["days"].as_array().unwrap().len(), SUMMARY_WINDOW_DAYS);
+    }
+
+    #[test]
+    fn summary_source_with_no_known_time_is_null_not_zero() {
+        let rows = vec![row(
+            "u1",
+            "air",
+            "claude-code",
+            None,
+            None,
+            4,
+            TimeSource::Unknown {
+                why: "mtime absent".into(),
+            },
+        )];
+        let v = overview_summary_json(
+            &rows,
+            &BTreeMap::new(),
+            &[],
+            &[],
+            &BTreeMap::new(),
+            0,
+            NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            &day_of_offset(0),
+        );
+        assert_eq!(v["sources"][0]["count"], serde_json::json!(1));
+        assert_eq!(
+            v["sources"][0]["last_saved_unix"],
+            serde_json::json!(null),
+            "no known time must be null, never a fabricated epoch"
+        );
+    }
+
+    #[test]
+    fn summary_daily_counts_bucket_by_local_day_and_zero_fill() {
+        let rows = vec![
+            row("s1", "air", "h", Some(D1), Some(D1), 1, TimeSource::Exact),
+            row(
+                "s2",
+                "air",
+                "h",
+                Some(D1P1),
+                Some(D1P1),
+                1,
+                TimeSource::Exact,
+            ),
+            row(
+                "s3",
+                "air",
+                "h",
+                None,
+                None,
+                1,
+                TimeSource::Unknown {
+                    why: "no time".into(),
+                },
+            ),
+        ];
+        let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        // UTC: D1 is 2026-05-01, D1P1 is 2026-05-02.
+        let utc = summary_daily_counts(&rows, today, &day_of_offset(0));
+        assert_eq!(utc.len(), SUMMARY_WINDOW_DAYS);
+        assert_eq!(utc.last().unwrap().0, "2026-05-02");
+        assert_eq!(utc.last().unwrap().1, 1);
+        assert_eq!(utc[utc.len() - 2].0, "2026-05-01");
+        assert_eq!(utc[utc.len() - 2].1, 1);
+        // An earlier day in the window is a measured zero, not omitted.
+        assert_eq!(utc[0].0, "2026-04-03");
+        assert_eq!(utc[0].1, 0);
+
+        // +08:00 pushes D1 (2026-05-01T16:00Z) onto 2026-05-02 local, while
+        // D1P1 lands on 2026-05-03 and falls outside the window's last day.
+        let east = summary_daily_counts(&rows, today, &day_of_offset(8 * 3600));
+        assert_eq!(east.last().unwrap().0, "2026-05-02");
+        assert_eq!(east.last().unwrap().1, 1);
+        assert_eq!(east[east.len() - 2].1, 0);
     }
 
     // ---- test-only calendar helpers ----

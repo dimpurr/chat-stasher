@@ -233,7 +233,7 @@ chat-stasher is built to be driven by scripts and agents that act on its answers
 | `3` | Could not finish, so a "0" would be unproven | The scan itself did not complete |
 | `2` | Usage error | Usage error |
 
-- `doctor --json` and `status --json` print exactly one JSON object. An unknown value is tagged `{"kind":"unknown","why":…}`, never written as `0` or `null`.
+- `doctor --json` and `status --json` print exactly one JSON object. An unknown value is tagged `{"kind":"unknown","why":…}`, never written as `0` or `null`. `status --json` also carries a `local` layer — whether the scheduler units are installed, the last run, and the staged sessions still waiting to upload — and `overview --json --summary` returns aggregate totals, one record per machine and per source, and the last 30 local days, with no per-session array.
 - `status` writes its human report to **stderr**, so `status | head` hides its exit code.
 - `run-once` is safe to run again at any time.
 - Never put credentials on the command line.

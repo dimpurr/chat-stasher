@@ -699,6 +699,75 @@ pub fn install_targets(declared: &[String], requested: &[String]) -> Vec<Option<
     declared.iter().cloned().map(Some).collect()
 }
 
+/// Whether the unit files `schedule install` writes are present on this
+/// machine.
+///
+/// This is **file presence**, which is what [`install_launchd_agents`] and
+/// [`install_systemd_units`] create and what [`uninstall_launchd_agents`] /
+/// [`uninstall_systemd_units`] remove; it is not a claim that the scheduler has
+/// *loaded* the unit. [`next_run`] is the loaded-state probe, and the two are
+/// reported side by side rather than one standing in for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleInstall {
+    /// Every expected unit file exists.
+    Installed,
+    /// No expected unit file exists.
+    NotInstalled,
+    /// Some expected unit files exist and some do not: an interrupted install
+    /// or a hand-removed unit, which is neither of the two clean states.
+    Partial { present: usize, expected: usize },
+}
+
+/// The path of the timer/service file a `schedule install` for one
+/// destination writes, for the format's own directory.
+fn install_dir(format: Format, home: &Path) -> PathBuf {
+    match format {
+        Format::Launchd => home.join("Library/LaunchAgents"),
+        Format::Systemd => home.join(".config/systemd/user"),
+    }
+}
+
+/// One installed unit's on-disk path, named exactly as the installer names it.
+fn unit_file_path(unit: Unit, format: Format, destination: Option<&str>, home: &Path) -> PathBuf {
+    install_dir(format, home).join(unit_file_name(unit, format, destination))
+}
+
+/// The file name (not the path) of one unit, as the installer writes it.
+pub fn unit_file_name(unit: Unit, format: Format, destination: Option<&str>) -> String {
+    match format {
+        Format::Launchd => {
+            format!("{}.plist", launchd_label_for_destination(unit, destination))
+        }
+        Format::Systemd => systemd_timer_name_for_destination(unit, destination),
+    }
+}
+
+/// Classify the presence of the units in `targets`. An empty `targets` is
+/// [`ScheduleInstall::NotInstalled`]: there is no unit to be present, and
+/// calling that "installed" would invert the answer.
+pub fn schedule_install_state(
+    unit: Unit,
+    format: Format,
+    targets: &[Option<String>],
+    home: &Path,
+) -> ScheduleInstall {
+    if targets.is_empty() {
+        return ScheduleInstall::NotInstalled;
+    }
+    let expected = targets.len();
+    let present = targets
+        .iter()
+        .filter(|destination| unit_file_path(unit, format, destination.as_deref(), home).is_file())
+        .count();
+    if present == expected {
+        ScheduleInstall::Installed
+    } else if present == 0 {
+        ScheduleInstall::NotInstalled
+    } else {
+        ScheduleInstall::Partial { present, expected }
+    }
+}
+
 /// Ask the scheduler for the next run of the units that were just installed.
 ///
 /// Nothing here is estimated. systemd is asked through `systemctl --user
@@ -2228,5 +2297,69 @@ mod tests {
             vec![Some("b".to_string())]
         );
         assert_eq!(install_targets(&[], &[]), vec![None]);
+    }
+
+    /// The three clean states of an install, read from the on-disk unit files
+    /// the installer writes — no `launchctl`/`systemctl` call.
+    #[test]
+    fn schedule_install_state_reads_the_unit_files() {
+        let home = tempfile::TempDir::new().unwrap();
+        let targets = vec![Some("a".to_string()), Some("b".to_string())];
+        let dir = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            ScheduleInstall::NotInstalled
+        );
+        let a = dir.join(format!(
+            "{}.plist",
+            launchd_label_for_destination(Unit::RunOnce, Some("a"))
+        ));
+        fs::write(&a, b"<plist/>").unwrap();
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            ScheduleInstall::Partial {
+                present: 1,
+                expected: 2
+            }
+        );
+        let b = dir.join(format!(
+            "{}.plist",
+            launchd_label_for_destination(Unit::RunOnce, Some("b"))
+        ));
+        fs::write(&b, b"<plist/>").unwrap();
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            ScheduleInstall::Installed
+        );
+
+        // No expected unit is no install, never "trivially installed".
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Launchd, &[], home.path()),
+            ScheduleInstall::NotInstalled
+        );
+    }
+
+    /// systemd reads the same state from the timer unit path.
+    #[test]
+    fn schedule_install_state_reads_systemd_timer_files() {
+        let home = tempfile::TempDir::new().unwrap();
+        let targets = vec![None];
+        let dir = home.path().join(".config/systemd/user");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Systemd, &targets, home.path()),
+            ScheduleInstall::NotInstalled
+        );
+        fs::write(dir.join(SYSTEMD_TIMER), b"[Timer]\n").unwrap();
+        assert_eq!(
+            schedule_install_state(Unit::RunOnce, Format::Systemd, &targets, home.path()),
+            ScheduleInstall::Installed
+        );
+        assert_eq!(
+            unit_file_name(Unit::RunOnce, Format::Systemd, None),
+            SYSTEMD_TIMER
+        );
     }
 }

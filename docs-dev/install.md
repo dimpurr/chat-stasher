@@ -264,11 +264,11 @@ The config file lives at `~/.config/chat-stasher/config.toml`, or under
 otherwise.** If it does not parse, if a value has the wrong type, or if a path in
 it cannot be resolved, every command that reads it stops with **exit code `3`**
 and prints the file, the position and the reason
-(`crates/chat-stasher/src/config.rs:367-379,914-921`). It does **not** warn
+(`crates/chat-stasher/src/config.rs:367-379,923-930`). It does **not** warn
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:9846-9856`).
+(`crates/chat-stasher/src/main.rs:9886-9896`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -304,7 +304,7 @@ What one install per profile means, once done:
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:1999-2009`, `:1736`).
+  (`crates/chat-stasher/src/nativehost.rs:2003-2013`, `:1740`).
 
 **It is not yet on any app store** (see section 6 for details). Stable releases
 include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
@@ -370,13 +370,13 @@ sentence the surrounding documents have to get right:
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:1970-1985`;
+  (`crates/chat-stasher/src/main.rs:1978-1993`;
   `crates/chat-stasher/src/nativehost.rs:1275-1350`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
-  (`crates/chat-stasher/src/main.rs:1912-1922`;
+  (`crates/chat-stasher/src/main.rs:1920-1930`;
   `crates/chat-stasher/src/nativehost.rs:766-768`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
@@ -384,7 +384,7 @@ sentence the surrounding documents have to get right:
   chrome` limits it to the ones named, and `--stage` cannot be combined with it
   at all, exit 2), and it leaves the config, the stage, the sealed captures and
   every other vendor's manifest untouched
-  (`crates/chat-stasher/src/main.rs:1856-1862`, `:2021-2059`, `:2128-2134`).
+  (`crates/chat-stasher/src/main.rs:1864-1870`, `:2029-2067`, `:2136-2142`).
   "It is per-user" does **not** mean "it is per profile": removing the extension
   from one profile is done on that profile's own extension page, and doing it
   with `--uninstall` takes the channel away from the profiles you kept, whose
@@ -511,11 +511,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:4830-4843`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:4870-4883`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:4866-4890`). An
+it does anything else (`crates/chat-stasher/src/main.rs:4906-4930`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -547,10 +547,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:4845-4854`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:4885-4894`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:4833-4841`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:4873-4881`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -672,14 +672,32 @@ owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
 and nothing about it is wrong — it is a secret on a disk.
 
 A value spelled `env:NAME` is instead resolved at config load, out of the
-process environment (`crates/chat-stasher/src/config.rs:1023`). The four ways
+process environment (`crates/chat-stasher/src/config.rs:1032`). The four ways
 that can fail — the name is not a legal variable name, the variable is set but
 empty, it is set to a value that is not valid Unicode, it is not set at all —
 are four different messages, and none of them quotes the value
-(`crates/chat-stasher/src/config.rs:942-959`; the warning is printed at `:901`).
+(`crates/chat-stasher/src/config.rs:951-968`; the warning is printed at `:901`).
 A reference that cannot be resolved **removes that option** rather than
 substituting an empty string, so the failure is a credential error, not a
 silently-empty one.
+
+**Without a login shell: `file:`, `env-file:` and `keychain:`.** A value may
+also be one of three persistent references, which resolve from a file or the
+macOS keychain and so do not need a shell environment — the shape a scheduled
+run and a GUI app require (`crates/chat-stasher/src/credentials.rs:1-25`):
+
+- `file:PATH` — the secret is the file's contents, with one trailing newline
+  trimmed. Keep the file owner-only-readable.
+- `env-file:PATH:NAME` — the secret is the `NAME=` entry of a dotenv-style file
+  (`NAME=value` lines, `#` comments, an optional `export ` prefix).
+- `keychain:ACCOUNT` (or `keychain:SERVICE:ACCOUNT`) — the secret is a macOS
+  generic-password item, service `chat-stasher` by default. Store one with
+  `security add-generic-password -s chat-stasher -a ACCOUNT -w`.
+
+Unlike `env:NAME`, these three are **fail-closed**: a reference that cannot be
+resolved refuses the config with a message naming the option and the missing
+credential, so a scheduled run or the menubar app says why instead of dropping
+the option and failing later for an unstated reason.
 
 🔴 **`env:NAME` means the variable must be in the environment of *every*
 invocation, including anything a scheduler runs.** A scheduled run that does not
@@ -789,12 +807,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:13201-13214`). This is the
+does not (`crates/chat-stasher/src/main.rs:13378-13391`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:12899-12901`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:12939-12941`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -810,7 +828,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:13209-13499`):
+(`crates/chat-stasher/src/main.rs:13386-13676`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -823,7 +841,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:12932-12973`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:12972-13013`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -833,7 +851,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:12876-12896`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:12916-12936`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -905,7 +923,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` command — nothing puts a session back into a
   harness's own directory, and that is not in phase one.** The subcommand table
-  has no `restore` entry (`crates/chat-stasher/src/main.rs:161-1170`). Getting
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:161-1176`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
   (`crates/chat-stasher/src/main.rs:638-718`), and `read` dumps **one**
