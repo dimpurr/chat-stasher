@@ -419,3 +419,59 @@ fn a_scheduled_run_refuses_loudly_and_records_the_step() {
         "no shard can have been written: {raw}"
     );
 }
+
+/// A persistent credential reference that cannot be resolved refuses the
+/// command and **names the option and the missing credential** — the clear
+/// error a menubar app or a scheduled run needs, instead of a destination that
+/// is silently unknown.
+#[test]
+fn an_unresolvable_credential_reference_stops_the_command_naming_the_option() {
+    let sandbox = tempfile::tempdir().unwrap();
+    write_config(
+        sandbox.path(),
+        "[destinations.d1]\nrepo = \"opendal:s3\"\n\n[destinations.d1.options]\naccess_key_id = \"file:/no/such/credential\"\n",
+    );
+    let out = isolated_env(sandbox.path(), &["status", "--json"]);
+    assert_eq!(
+        code(&out),
+        3,
+        "an unresolvable credential must stop the command"
+    );
+    let text = combined(&out);
+    assert!(
+        text.contains("destinations.d1.options.access_key_id"),
+        "the error must name the option:\n{text}"
+    );
+    assert!(
+        text.contains("could not be read"),
+        "the error must name the missing credential:\n{text}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["exit_code"], serde_json::json!(3));
+    assert_eq!(v["command"], serde_json::json!("status"));
+}
+
+/// The same reference, with the file present, resolves **with no environment
+/// variable at all**: `isolated_env` clears the environment, so this is the
+/// scheduler/app case the env-file and keychain forms exist for.
+#[test]
+fn a_file_credential_resolves_with_no_shell_environment() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let secret = sandbox.path().join("r2-secret");
+    fs::write(&secret, "resolved-without-env\n").unwrap();
+    write_config(
+        sandbox.path(),
+        &format!(
+            "[destinations.d1]\nrepo = \"opendal:s3\"\n\n[destinations.d1.options]\naccess_key_id = \"file:{}\"\n",
+            secret.display()
+        ),
+    );
+    let out = isolated_env(sandbox.path(), &["status", "--json"]);
+    // No run record exists, so `status` is unhealthy (1) — but the config was
+    // read (`config_source: "file"`), which is what this test is about: the
+    // credential resolved from the file with no environment variable present.
+    assert_eq!(code(&out), 1);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["config_source"], serde_json::json!("file"));
+    assert_eq!(v["exit_code"], serde_json::json!(1));
+}

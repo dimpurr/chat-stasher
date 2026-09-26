@@ -900,6 +900,15 @@ fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
     for problem in &env_problems {
         eprintln!("warning: backend option environment reference was omitted: {problem}");
     }
+    // The persistent credential references are fail-closed, unlike `env:NAME`:
+    // a `file:` / `env-file:` / `keychain:` reference that cannot be resolved
+    // refuses the config, naming the option and the missing credential. This is
+    // the fix for a scheduler or GUI process, which has no login shell and so
+    // would otherwise find the option quietly gone and the destination
+    // unreachable for no stated reason.
+    if let Err(reason) = resolve_option_credential_refs(cfg) {
+        return Err(unusable_config(&config_path(), reason));
+    }
     Ok(())
 }
 
@@ -1047,6 +1056,33 @@ fn resolve_option_env_refs(cfg: &mut Config, problems: &mut Vec<String>) {
             entry.options.remove(&key);
         }
     }
+}
+
+/// Resolve the persistent credential references (`file:`, `env-file:`,
+/// `keychain:`) in every destination option, replacing each with its secret.
+///
+/// Returns the first failure as a sentence naming the option and the missing
+/// credential, or `Ok(())` when every reference resolved (or none was one).
+/// Unlike [`resolve_option_env_refs`] this is **fail-closed**: a reference that
+/// cannot be used refuses the whole config, because silently dropping it is
+/// exactly how a scheduled run and the menubar app end up unable to reach a
+/// destination for a reason nobody can see. The rule and the reference syntax
+/// live in [`crate::credentials`].
+fn resolve_option_credential_refs(cfg: &mut Config) -> Result<(), String> {
+    for (destination, entry) in &mut cfg.destinations {
+        for (key, value) in &mut entry.options {
+            match crate::credentials::resolve(value) {
+                crate::credentials::Resolved::NotReference => {}
+                crate::credentials::Resolved::Value(secret) => *value = secret,
+                crate::credentials::Resolved::Missing(reason) => {
+                    return Err(format!(
+                        "destinations.{destination}.options.{key}: {reason}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The two lines a backslash-repaired config is reported with.
@@ -1807,6 +1843,45 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
+    }
+
+    /// The persistent credential references resolve without a process
+    /// environment, and one that cannot be resolved refuses the config naming
+    /// the option — while `env:NAME` keeps its documented lenient behaviour.
+    #[test]
+    fn credential_references_resolve_and_a_missing_one_refuses_the_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let secret_file = dir.path().join("secret");
+        std::fs::write(&secret_file, "from-file\n").unwrap();
+
+        let good = format!(
+            "[destinations.d1.options]\naccess_key_id = \"file:{}\"\nsecret_access_key = \"literal\"\n",
+            secret_file.display()
+        );
+        let cfg = Config::from_text(&good).expect("a resolvable file reference must load");
+        assert_eq!(
+            cfg.destinations["d1"].options["access_key_id"], "from-file",
+            "the trailing newline must be trimmed"
+        );
+
+        let missing = "[destinations.d1.options]\naccess_key_id = \"file:/no/such/credential\"\n";
+        let err = Config::from_text(missing)
+            .expect_err("a credential file that cannot be read must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("destinations.d1.options.access_key_id"),
+            "the error must name the option: {text}"
+        );
+        assert!(
+            text.contains("could not be read"),
+            "the error must name the missing credential: {text}"
+        );
+
+        let lenient =
+            "[destinations.d1.options]\naccess_key_id = \"env:CHAT_STASHER_TEST_UNSET_XYZ\"\n";
+        let cfg = Config::from_text(lenient)
+            .expect("an unset `env:` reference is omitted, not fatal (install.md §4.5)");
+        assert!(!cfg.destinations["d1"].options.contains_key("access_key_id"));
     }
 
     #[test]

@@ -1733,7 +1733,11 @@ pub struct StageScan {
 /// and never a path below the stage: the machine partition is identified by
 /// [`crate::store::machine_fingerprint`], the same digest `validate_stage_machines`
 /// uses in its diagnostics.
-fn scan_stage(stage: &Path) -> StageScan {
+///
+/// Public because `status`'s local layer reports the same stage sessions the
+/// `summary` protocol answer does; a second walk of `<stage>/sessions/` would be
+/// a second definition of "what counts as a stage session".
+pub fn scan_stage(stage: &Path) -> StageScan {
     let mut scan = StageScan::default();
     let sessions_root = stage.join(crate::store::SESSIONS_DIR);
     let machines = match fs::read_dir(&sessions_root) {

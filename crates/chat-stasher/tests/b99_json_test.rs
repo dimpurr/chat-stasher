@@ -155,6 +155,91 @@ fn status_json_known_run_state_is_explicit() {
     assert_eq!(v["run_state"]["outcome"], serde_json::json!("noop"));
 }
 
+/// The `status --json` local layer names the scheduler state, the last run,
+/// and the local stage; a staged session written after the last archiving pass
+/// is counted as waiting to upload, and every count is a tagged `known`/`unknown`.
+#[test]
+fn status_json_local_layer_reports_stage_and_schedule() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let shard_dir = stage
+        .join("sessions/mbp-test/claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765/000");
+    fs::create_dir_all(&shard_dir).unwrap();
+    fs::write(shard_dir.join("000001.jsonl"), b"{}\n").unwrap();
+
+    // A `[native_host] stage` is how `status` learns which local stage to read.
+    let config_dir = sb.path().join("xdg-config/chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!("[native_host]\nstage = {:?}\n", stage.to_string_lossy()),
+    )
+    .unwrap();
+
+    // A `completed` pass an hour ago: the shard written just now is newer, so
+    // it is waiting to upload.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let state_dir = sb.path().join("xdg-data/chat-stasher/state");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("run-state.json"),
+        format!(
+            r#"{{"version":1,"finished_at_unix":{},"duration_ms":5,"outcome":"completed","failed_step":null,"shards_written":1,"stage_shards":1,"snapshot_created":true,"collect_errors":0,"archive_gaps":0,"machine_digest":"0123456789ab"}}"#,
+            now - 3600
+        ),
+    )
+    .unwrap();
+
+    let out = run(sb.path(), &["status", "--json"]);
+    assert_exit(&out, 0);
+    let v = json_stdout(&out);
+
+    let local = &v["local"];
+    assert!(local.is_object(), "status --json gains a local layer: {v}");
+    // Schedule: a tri-state kind plus whether the unit files are on disk.
+    assert!(local["schedule"]["kind"].is_string());
+    assert!(local["schedule"]["installed"].is_boolean());
+    assert!(local["schedule"]["units"].is_array());
+    // Last run mirrors the top-level run_state (same record, one serialiser).
+    assert_eq!(local["last_run"], v["run_state"]);
+    assert_eq!(local["last_run"]["kind"], serde_json::json!("known"));
+    // Stage: a measured session count and a waiting count, both tagged.
+    assert_eq!(
+        local["stage"]["path"],
+        serde_json::json!(stage.to_string_lossy())
+    );
+    assert_eq!(
+        local["stage"]["sessions"],
+        serde_json::json!({"kind":"known","count":1})
+    );
+    assert_eq!(
+        local["stage"]["waiting_to_upload"],
+        serde_json::json!({"kind":"known","count":1}),
+        "the shard written after the last archiving pass is waiting: {local}"
+    );
+}
+
+/// With no `[native_host] stage`, the stage counts are `unknown` with a reason
+/// — never zero, which would claim the stage was read and found empty.
+#[test]
+fn status_json_local_stage_absent_is_unknown_not_zero() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = sandbox();
+    let out = run(sb.path(), &["status", "--json"]);
+    let v = json_stdout(&out);
+    assert_eq!(v["local"]["stage"]["path"], serde_json::json!(null));
+    assert_eq!(
+        v["local"]["stage"]["sessions"]["kind"],
+        serde_json::json!("unknown")
+    );
+    assert!(v["local"]["stage"]["sessions"]["why"].is_string());
+    assert!(v["local"]["stage"]["waiting_to_upload"]["why"].is_string());
+}
+
 /// A corrupt run-state file is `run_state.kind == "unreadable"`, never
 /// `known` with a guessed time — and never exit 0.
 #[test]
@@ -189,6 +274,7 @@ fn status_json_top_level_schema_is_stable() {
             "exit_code",
             "exit_semantics",
             "healthy",
+            "local",
             "run_state",
             "scanner",
             "schema_version",
@@ -302,6 +388,26 @@ fn overview_json_no_destination_is_error_exit_2() {
     assert_eq!(v["exit_code"], serde_json::json!(2));
     assert_eq!(v["healthy"], serde_json::json!(false));
     assert!(v["error"].is_string());
+}
+
+/// `--summary` is a JSON-only variant: using it without `--json` is a usage
+/// error (exit 2), never a silently different human report.
+#[test]
+fn overview_summary_requires_json() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = sandbox();
+    let out = run(
+        sb.path(),
+        &[
+            "overview",
+            "--summary",
+            "--repo",
+            sb.path().join("nope-repo").to_str().unwrap(),
+            "--key-file",
+            sb.path().join("nope-key").to_str().unwrap(),
+        ],
+    );
+    assert_exit(&out, 2);
 }
 
 /// Unreadable archive (missing key): one JSON object on stdout, exit 3. "Could

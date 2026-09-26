@@ -214,6 +214,107 @@ fn machine_with_snapshot_but_no_index_is_listed_missing() {
     );
 }
 
+/// `overview --json --summary` over a real repository: aggregate totals, one
+/// record per machine and per source, and exactly 30 local days — and
+/// deliberately no per-session array, which is the variant's whole point for a
+/// large archive.
+#[test]
+fn overview_json_summary_is_aggregate_only() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            cc_line("2025-01-15T12:34:56.789Z"),
+            cc_line("2025-01-15T13:45:07Z"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}",
+        out.status
+    );
+
+    let repo = sb.path().join("repo");
+    let key = sb.path().join("keys").join("masterkey.json");
+    let push = run(
+        sb.path(),
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            machine,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(push.status.success(), "push failed: {:?}", push.status);
+
+    // Deliberately no `--keep-ssh-masters`: the `[reap] …` line that flag
+    // prints goes to stdout and would break the one-JSON-object contract (a
+    // pre-existing defect recorded at `tests/w15_ui_test.rs:375`). A local
+    // `--repo` has no endpoint, so reaping prints nothing.
+    let ov = run(
+        sb.path(),
+        &[
+            "overview",
+            "--json",
+            "--summary",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        ov.status.code(),
+        Some(0),
+        "overview --summary must exit 0\n{}",
+        String::from_utf8_lossy(&ov.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&ov.stdout).unwrap();
+    assert_eq!(v["schema_version"], serde_json::json!(1));
+    assert_eq!(v["variant"], serde_json::json!("summary"));
+    assert!(
+        v.get("sessions").is_none(),
+        "the summary variant must not carry the per-session array: {v}"
+    );
+    assert!(
+        v["totals"]["sessions"].as_u64().unwrap() >= 1,
+        "totals must count the archived session: {v}"
+    );
+    assert_eq!(v["machines"][0]["machine"], serde_json::json!("mbp-test"));
+    assert!(
+        v["machines"][0]["display"].is_string(),
+        "the machine record carries a display name: {v}"
+    );
+    assert_eq!(v["sources"][0]["harness"], serde_json::json!("claude-code"));
+    assert!(
+        v["sources"][0]["last_saved_unix"].is_number(),
+        "a known-time source has a numeric last_saved_unix: {v}"
+    );
+    assert_eq!(v["days"].as_array().unwrap().len(), 30);
+}
+
 /// An unreadable / un-openable repository is "could not finish reading": exit 3,
 /// never 1. "No index" (1) must stay distinct from "could not look" (3).
 #[test]

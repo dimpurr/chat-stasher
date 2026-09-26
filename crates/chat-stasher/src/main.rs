@@ -1133,6 +1133,12 @@ enum Command {
         /// reason in `error`.
         #[arg(long)]
         json: bool,
+        /// With `--json`, emit the aggregate summary variant instead of the
+        /// full document: totals, one record per machine and per source, and
+        /// the last 30 local days' counts, with no per-session array. The
+        /// variant is named `"summary"` in the object.
+        #[arg(long, requires = "json")]
+        summary: bool,
         /// Repository path override.
         #[arg(long)]
         repo: Option<String>,
@@ -1806,6 +1812,7 @@ fn run() -> ExitCode {
             destination,
             width,
             json,
+            summary,
             repo,
             key_file,
             connections,
@@ -1815,6 +1822,7 @@ fn run() -> ExitCode {
             destination,
             width,
             json,
+            summary,
             repo,
             key_file,
             connections,
@@ -3148,6 +3156,7 @@ fn cmd_overview(
     destination: Option<String>,
     width: usize,
     json: bool,
+    summary: bool,
     repo: Option<String>,
     key_file: Option<String>,
     connections: Option<usize>,
@@ -3243,26 +3252,57 @@ fn cmd_overview(
             .map(|machine| (machine.clone(), display(machine)))
             .collect();
         let exit_code = if rows.is_empty() { 1 } else { 0 };
-        let mut value = overview::overview_json_with_freshness(
-            &rows,
-            &snapshot_machines,
-            &index_machines,
-            &declared_machines,
-            &display_names,
-            exit_code,
-            &snapshot_times,
-            &writer_status,
-        );
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "writer_versions".to_string(),
-                serde_json::json!(writer_status),
+        let missing = sidecar::missing_index_machines(&snapshot_machines, &index_machines);
+        let value = if summary {
+            // The local calendar day, and the mapping from an archived unix
+            // second to it, both come from the machine's own zone; `overview`
+            // is pure, so they are handed in rather than read there. `earliest`
+            // resolves a repeated wall-clock time (the autumn fall-back) the
+            // same way `schedule`'s next-run probe does.
+            let today = chrono::Local::now().date_naive();
+            let day_of = |unix: i64| -> Option<chrono::NaiveDate> {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(unix, 0)
+                    .earliest()
+                    .map(|dt| dt.date_naive())
+            };
+            overview::overview_summary_json(
+                &rows,
+                &snapshot_times,
+                &missing,
+                &writer_status,
+                &display_names,
+                exit_code,
+                today,
+                &day_of,
+            )
+        } else {
+            let mut value = overview::overview_json_with_freshness(
+                &rows,
+                &snapshot_machines,
+                &index_machines,
+                &declared_machines,
+                &display_names,
+                exit_code,
+                &snapshot_times,
+                &writer_status,
             );
-        }
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "writer_versions".to_string(),
+                    serde_json::json!(writer_status),
+                );
+            }
+            value
+        };
         println!("{}", json_string(&value));
         reap_remote(&cfg, keep_ssh_masters);
         return ExitCode::from(exit_code);
     }
+    // `--summary` requires `--json`; clap enforces that before dispatch, so
+    // reaching here with `summary` set would be a wiring bug, not user input.
+    debug_assert!(!summary, "overview --summary requires --json");
 
     println!("[overview] repo         : {}", cfg.repo_root);
     println!("[overview] width        : {width}");
@@ -13001,6 +13041,7 @@ fn cmd_status(
     }
 
     if json {
+        let local = local_layer_json(&config, &info);
         match &scan {
             Ok(report) => {
                 println!(
@@ -13008,6 +13049,7 @@ fn cmd_status(
                     status_json(
                         config.source,
                         &info,
+                        &local,
                         Ok(report),
                         exit_code,
                         writer_versions.as_deref(),
@@ -13020,6 +13062,7 @@ fn cmd_status(
                 status_json(
                     config.source,
                     &info,
+                    &local,
                     Err(e.to_string()),
                     exit_code,
                     writer_versions.as_deref(),
@@ -13147,6 +13190,138 @@ fn status_json_config_error(why: &str) -> String {
     }))
 }
 
+/// The `status --json` **local layer**: this machine's scheduler, its last run
+/// record, and how much of the local stage has not been pushed.
+///
+/// These are questions about the machinery on the machine, which the archived
+/// `scanner` half of `status` cannot answer. Every count is a tagged
+/// `known`/`unknown`; an unknown carries a reason and is never reported as a
+/// zero.
+///
+/// "Waiting to upload" is defined against the last run record that *archived*
+/// the stage — a `completed` pass (a snapshot was created) or a `noop` pass
+/// (nothing had changed, so the stage already matched the archive). A session
+/// counts when its newest sealed shard was written **after** that instant; a
+/// session with no readable shard mtime, or a stage part that could not be
+/// listed, makes the count a lower bound and it is reported `unknown` rather
+/// than understated.
+fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
+    use chat_stasher::json_out::CountState;
+    use chat_stasher::runstate::{RunOutcome, RunStateRead};
+
+    let format = setup_schedule_format();
+    let mut declared: Vec<String> = config.destinations.keys().cloned().collect();
+    declared.sort_unstable();
+    let targets = schedule::install_targets(&declared, &[]);
+    let install = schedule::schedule_install_state(
+        schedule::Unit::RunOnce,
+        format,
+        &targets,
+        &config::home_dir(),
+    );
+    let (schedule_kind, installed) = match install {
+        schedule::ScheduleInstall::Installed => ("installed", true),
+        schedule::ScheduleInstall::NotInstalled => ("not_installed", false),
+        schedule::ScheduleInstall::Partial { .. } => ("partial", false),
+    };
+    let next_run = schedule::next_run(
+        schedule::Unit::RunOnce,
+        format,
+        &targets,
+        &config::home_dir(),
+        &scheduler_tool_path(format),
+        chrono::Local::now(),
+    );
+    let units: Vec<String> = targets
+        .iter()
+        .map(|destination| {
+            schedule::unit_file_name(schedule::Unit::RunOnce, format, destination.as_deref())
+        })
+        .collect();
+
+    let stage_path = config
+        .native_host
+        .as_ref()
+        .and_then(|native_host| native_host.stage.as_deref());
+    let stage_json = match stage_path {
+        None => serde_json::json!({
+            "path": serde_json::Value::Null,
+            "sessions": CountState::unknown(
+                "no `[native_host] stage` is configured, so there is no local stage to read"
+            ),
+            "waiting_to_upload": CountState::unknown(
+                "no `[native_host] stage` is configured, so there is no local stage to read"
+            ),
+        }),
+        Some(path) => {
+            let scan = nativehost::scan_stage(Path::new(path));
+            let sessions = if scan.unreadable.is_empty() {
+                CountState::known(scan.sessions.len() as u64)
+            } else {
+                CountState::unknown(format!(
+                    "{} part(s) of the stage could not be listed, so the session count is a \
+                     lower bound, not a measurement; the first was: {}",
+                    scan.unreadable.len(),
+                    scan.unreadable[0]
+                ))
+            };
+
+            // The instant the stage was last proven archived. Only a
+            // `completed` or `noop` pass establishes it: a failed pass and an
+            // absent record prove nothing about what is already uploaded.
+            let archived_through = match &info.read {
+                RunStateRead::Present(state)
+                    if matches!(state.outcome, RunOutcome::Completed | RunOutcome::Noop) =>
+                {
+                    Some(state.finished_at_unix as i64)
+                }
+                _ => None,
+            };
+            let unreadable = !scan.unreadable.is_empty();
+            let mtime_unknown = scan.sessions.iter().any(|s| s.newest_mtime.is_none());
+            let waiting = match archived_through {
+                None => CountState::unknown(
+                    "no run-once pass has recorded a completed or no-change pass, so which staged \
+                     sessions are already archived cannot be established"
+                        .to_string(),
+                ),
+                Some(_) if unreadable || mtime_unknown => CountState::unknown(format!(
+                    "some stage sessions could not be dated ({} unreadable part(s), {mtime_unknown} \
+                     with no readable shard mtime), so the waiting count is a lower bound",
+                    scan.unreadable.len()
+                )),
+                Some(at) => CountState::known(
+                    scan.sessions
+                        .iter()
+                        .filter(|session| session.newest_mtime.is_some_and(|mtime| mtime > at))
+                        .count() as u64,
+                ),
+            };
+            serde_json::json!({
+                "path": path,
+                "sessions": sessions,
+                "waiting_to_upload": waiting,
+            })
+        }
+    };
+
+    serde_json::json!({
+        "schedule": {
+            "kind": schedule_kind,
+            "installed": installed,
+            "units": units,
+            "next_run": next_run.value(),
+            "next_run_why": next_run.note(),
+        },
+        "last_run": chat_stasher::runstate::run_state_json(
+            &info.read,
+            info.now_unix,
+            info.stale_after_secs,
+        ),
+        "stage": stage_json,
+    })
+}
+
 /// The `status --json` object. `scan` is `Ok` when the registry-driven scan
 /// ran (then every count is measured); `Err(reason)` when it could not run —
 /// the `scanner` object is then `{"kind":"failed","why":…}` instead of an
@@ -13154,6 +13329,7 @@ fn status_json_config_error(why: &str) -> String {
 fn status_json(
     config_source: config::ConfigSource,
     info: &RunStateInfo,
+    local: &serde_json::Value,
     scan: Result<&scanner::ScanReport, String>,
     exit_code: u8,
     writer_versions: Option<&[sidecar::MachineWriterStatus]>,
@@ -13183,6 +13359,7 @@ fn status_json(
             info.now_unix,
             info.stale_after_secs
         ),
+        "local": local,
         "scanner": scanner_value,
     });
     json_string(&value)
