@@ -4,6 +4,7 @@
 //! and quoted attributes, unit-carrying byte/instant/age formats (never a bare
 //! ratio), and the three statements [`footer`] puts on every page.
 
+use crate::schedule::sh_single_quote;
 use crate::selector::Selector;
 
 use super::{DestinationState, UiData, UiSession, DAY};
@@ -478,6 +479,16 @@ pub fn describe_selector(selector: &Selector) -> Option<String> {
 /// twin, generated from the same selector walk
 /// [`describe_selector`] renders — reuse, not a second describer).
 ///
+/// Every interpolateable value — machine, session prefix, the joined harness
+/// list, window texts — prints as one single-quoted shell word
+/// ([`crate::schedule::sh_single_quote`], XCU §2.2.2): a machine or prefix can
+/// arrive from a URL's `?machine=`/`?session=`, and a value's spaces, breaks
+/// or `$()` must stay the *filter's* bytes, never live syntax of the shell
+/// the reader pastes the command into. Quoting is unconditional, tame values
+/// too — "looks safe" is not a judgement a renderer may make about input it
+/// did not choose, and round-tripping through the CLI's own flag reader sees
+/// the same value either way.
+///
 /// `Ok` is a possibly-empty flag string (empty == no constraint, the whole
 /// view). `Err` is a filter that selects something real but that **no single
 /// command line can spell** — the honest answer for those is the reason, not
@@ -486,8 +497,8 @@ pub fn selector_cli_flags(selector: &Selector) -> Result<String, String> {
     let mut flags: Vec<String> = Vec::new();
     for c in constraints(selector) {
         match c {
-            Constraint::Machine(m) => flags.push(format!("--machine {m}")),
-            Constraint::Prefix(p) => flags.push(format!("--session {p}")),
+            Constraint::Machine(m) => flags.push(format!("--machine {}", sh_single_quote(m))),
+            Constraint::Prefix(p) => flags.push(format!("--session {}", sh_single_quote(p))),
             Constraint::Harnesses(h) => {
                 if h.is_empty() {
                     return Err(
@@ -498,7 +509,7 @@ pub fn selector_cli_flags(selector: &Selector) -> Result<String, String> {
                 }
                 flags.push(format!(
                     "--harness {}",
-                    h.iter().cloned().collect::<Vec<_>>().join(",")
+                    sh_single_quote(&h.iter().cloned().collect::<Vec<_>>().join(","))
                 ));
             }
             Constraint::Window(w) => flags.push(window_flags(w)?),
@@ -509,7 +520,10 @@ pub fn selector_cli_flags(selector: &Selector) -> Result<String, String> {
 
 /// The flag spelling of one window. Where a bound came with the text that was
 /// typed for it, that text is what is printed — a round trip through the CLI
-/// resolver produces the same window, and no other spelling is claimed.
+/// resolver produces the same window, and no other spelling is claimed. That
+/// text goes out single-quoted like every other value: the genuine spellings
+/// reach here already-validated, but the quoting is positional, so no future
+/// text-bearing bound can print unquoted by accident.
 fn window_flags(w: &crate::selector::TimeWindow) -> Result<String, String> {
     let bound = |unix: Option<i64>, text: Option<&str>| -> Result<String, String> {
         match (unix, text) {
@@ -537,23 +551,23 @@ fn window_flags(w: &crate::selector::TimeWindow) -> Result<String, String> {
                 // One inclusive local day. `--day D` is documented as
                 // identical to `--since D --until D`, and the shorter form is
                 // the one a reader types.
-                return Ok(format!("--day {since}"));
+                return Ok(format!("--day {}", sh_single_quote(&since)));
             }
             if !since.is_empty() {
-                flags.push(format!("--since {since}"));
+                flags.push(format!("--since {}", sh_single_quote(&since)));
             }
             if !until.is_empty() {
-                flags.push(format!("--until {until}"));
+                flags.push(format!("--until {}", sh_single_quote(&until)));
             }
         }
         crate::selector::WindowHow::UnixSeconds => {
             let since = bound(w.since_unix, w.since_text.as_deref())?;
             let until = bound(w.until_unix, w.until_text.as_deref())?;
             if !since.is_empty() {
-                flags.push(format!("--since-unix {since}"));
+                flags.push(format!("--since-unix {}", sh_single_quote(&since)));
             }
             if !until.is_empty() {
-                flags.push(format!("--until-unix {until}"));
+                flags.push(format!("--until-unix {}", sh_single_quote(&until)));
             }
         }
     }
@@ -696,24 +710,116 @@ mod tests {
     /// very `SelectorArgs` `search`/`export` read — into the same selector.
     /// A flag that cannot round-trip is a command the page cannot honestly
     /// print, so broken round trips must fail here rather than on a page.
+    /// The line is read the way the reader's shell would read it first —
+    /// quotes resolve to the value they carry — which is also why quoting
+    /// every value is a no-op for this contract, never a change of flags.
     fn parse_back(flags: &str) -> crate::selector::Resolved {
         let mut args = SelectorArgs::default();
-        let mut parts = flags.split_whitespace().peekable();
-        while let Some(flag) = parts.next() {
-            let value = parts.next().expect("every flag takes one value");
-            match flag {
-                "--machine" => args.machine = Some(value.to_string()),
-                "--session" => args.session = Some(value.to_string()),
+        let mut words = shell_words(flags).into_iter().peekable();
+        while let Some(flag) = words.next() {
+            let value = words.next().expect("every flag takes one value");
+            match flag.as_str() {
+                "--machine" => args.machine = Some(value),
+                "--session" => args.session = Some(value),
                 "--harness" => args.harness = Some(value.split(',').map(String::from).collect()),
-                "--day" => args.day = Some(value.to_string()),
-                "--since" => args.since = Some(value.to_string()),
-                "--until" => args.until = Some(value.to_string()),
+                "--day" => args.day = Some(value),
+                "--since" => args.since = Some(value),
+                "--until" => args.until = Some(value),
                 "--since-unix" => args.since_unix = value.parse().ok(),
                 "--until-unix" => args.until_unix = value.parse().ok(),
                 other => panic!("a flag nobody reads came out of the renderer: {other}"),
             }
         }
         args.resolve().expect("printed flags must resolve")
+    }
+
+    /// Split a line the way a POSIX shell reading it would (XCU §2.2.1–§2.2.3,
+    /// §2.3 token recognition): single-quoted spans are literal to the next
+    /// `'`, double-quoted spans to the next `"` (the renderer only ever puts a
+    /// lone `'` inside those), a backslash outside quotes keeps the next
+    /// character literal, and unquoted blanks end a word. Unterminated quotes
+    /// are a paste hazard, not a value, so they panic rather than split.
+    fn shell_words(line: &str) -> Vec<String> {
+        let mut words: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut started = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => {
+                    started = true;
+                    loop {
+                        match chars.next() {
+                            Some('\'') => break,
+                            Some(other) => cur.push(other),
+                            None => panic!("unterminated single quote — unsafe to paste"),
+                        }
+                    }
+                }
+                '"' => {
+                    started = true;
+                    loop {
+                        match chars.next() {
+                            Some('"') => break,
+                            Some(other) => cur.push(other),
+                            None => panic!("unterminated double quote — unsafe to paste"),
+                        }
+                    }
+                }
+                '\\' => {
+                    started = true;
+                    match chars.next() {
+                        Some(escaped) => cur.push(escaped),
+                        None => panic!("dangling escape — unsafe to paste"),
+                    }
+                }
+                ' ' | '\t' | '\n' => {
+                    if started {
+                        words.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                other => {
+                    started = true;
+                    cur.push(other);
+                }
+            }
+        }
+        if started {
+            words.push(cur);
+        }
+        words
+    }
+
+    /// Every shell metacharacter that appears OUTSIDE quotes in a rendered
+    /// command line, excluding the spaces that separate the words themselves:
+    /// no separator (`;|&`), substitution (`$()`, backticks), redirection
+    /// (`<>`) or line/tab break may live outside quotes, because that alone
+    /// would let a pasted line mean something the page did not say. (An
+    /// unquoted *value* would also split into several words, which the
+    /// `shell_words` equality catches; a page never legitimately emits tab or
+    /// newline outside a value.)
+    fn metachars_unquoted(line: &str) -> String {
+        let mut seen = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if !in_single && !in_double => {
+                    let _ = chars.next();
+                }
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '\t' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')' | '$' | '`' | '\''
+                    if !in_single && !in_double =>
+                {
+                    seen.push(c);
+                }
+                _ => {}
+            }
+        }
+        seen
     }
 
     #[test]
@@ -786,9 +892,10 @@ mod tests {
         let s = args.resolve().unwrap().selector;
         assert_eq!(
             selector_cli_flags(&s).unwrap(),
-            "--machine m-3 --session 019bf0 --harness claude-code,codex \
-             --since 2026-01-15 --until 2026-01-16",
-            "sorted harness list (a BTreeSet, not the typed order), one space between flags"
+            "--machine 'm-3' --session '019bf0' --harness 'claude-code,codex' \
+             --since '2026-01-15' --until '2026-01-16'",
+            "sorted harness list (a BTreeSet, not the typed order), one space between flags, \
+             every value a single-quoted shell word"
         );
         // A same-day window prints its shortest honest form.
         let day = SelectorArgs {
@@ -798,7 +905,7 @@ mod tests {
         .resolve()
         .unwrap()
         .selector;
-        assert_eq!(selector_cli_flags(&day).unwrap(), "--day 2026-01-15");
+        assert_eq!(selector_cli_flags(&day).unwrap(), "--day '2026-01-15'");
         // An all-constraint selector still has its prose sentence — reused,
         // not rebuilt, by the page.
         assert_eq!(
@@ -806,6 +913,93 @@ mod tests {
             "machine `m-3` · session id starts with `019bf0` · harness in {claude-code, codex} \
              · local day(s) 2026-01-15 .. 2026-01-16 inclusive \
              (each day = 00:00:00–23:59:59 local)"
+        );
+    }
+
+    /// The hostile-value regression W195's FIX-FIRST review demanded: a machine,
+    /// session prefix, harness name or window text that carries shell syntax
+    /// must reach the printed command as ONE quoted shell word, so pasting the
+    /// command cannot let a value's syntax run (the payloads here are inert
+    /// sentinels — if any ever executed, split a word or turned a page's filter
+    /// into live syntax, the assertions below stop passing).
+    #[test]
+    fn hostile_selector_values_print_as_one_quoted_shell_word_each() {
+        let machine = "m 3; $(pwned) `bt` 'q' \"d\"\nEnd";
+        let prefix = "019 'x;$(y)";
+        let harnesses: Option<BTreeSet<String>> = Some(
+            ["ha r;ne$(x)s".to_string(), "tu\"ck".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let selector = Selector {
+            session_id_prefix: Some(prefix.into()),
+            machine: Some(machine.into()),
+            harnesses,
+            window: Some(crate::selector::TimeWindow {
+                since_unix: Some(1),
+                until_unix: Some(2),
+                how: crate::selector::WindowHow::LocalDays,
+                since_text: Some("2026-01-15$(rm)".into()),
+                until_text: Some("2026-01-16;x".into()),
+            }),
+        };
+        // The exact string the page is allowed to print for this view: every
+        // value wrapped in single quotes, every embedded single quote spelled
+        // close-double-quote-open (`'"'"'`), so a POSIX shell reading the line
+        // reconstructs each value as one literal word.
+        assert_eq!(
+            selector_cli_flags(&selector).unwrap(),
+            "--machine 'm 3; $(pwned) `bt` '\"'\"'q'\"'\"' \"d\"\nEnd' \
+             --session '019 '\"'\"'x;$(y)' \
+             --harness 'ha r;ne$(x)s,tu\"ck' \
+             --since '2026-01-15$(rm)' --until '2026-01-16;x'",
+            "every value must arrive quoted, in the selector walk's order"
+        );
+        // And the line is safe to paste: a shell reading it yields each value
+        // back as one intact word, and holds no metacharacter outside quotes.
+        let flags = selector_cli_flags(&selector).unwrap();
+        assert_eq!(
+            shell_words(&flags),
+            vec![
+                "--machine",
+                machine,
+                "--session",
+                prefix,
+                "--harness",
+                "ha r;ne$(x)s,tu\"ck",
+                "--since",
+                "2026-01-15$(rm)",
+                "--until",
+                "2026-01-16;x",
+            ],
+            "the payloads must ride as single literal words, never as syntax"
+        );
+        assert_eq!(
+            metachars_unquoted(&flags),
+            "",
+            "no separator, substitution or redirection may live outside quotes \
+             (a hostile value's space is caught above, as a split word)"
+        );
+        // And the command still means what the page says it means: with a
+        // window the CLI resolver accepts, the quoted hostile values round-trip
+        // through the reader `chat-stasher export` itself uses — the very
+        // `SelectorArgs` path — into the same selector. Quoting changed nothing
+        // about which sessions the pasted command would select.
+        let hostile = SelectorArgs {
+            session: Some(prefix.into()),
+            machine: Some(machine.into()),
+            harness: Some(vec!["ha r;ne$(x)s".into(), "tu\"ck".into()]),
+            day: Some("2026-01-15".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap();
+        let printed = selector_cli_flags(&hostile.selector).unwrap();
+        assert_eq!(
+            parse_back(&printed).selector,
+            hostile.selector,
+            "quoted hostile values must still select the same set via the CLI's own reader: \
+             {printed}"
         );
     }
 
@@ -835,7 +1029,7 @@ mod tests {
         .selector;
         assert_eq!(
             conjoined_flags(&launch, &query).unwrap(),
-            "--machine m-1 --session 019bf0 --harness claude-code,codex --day 2026-01-15"
+            "--machine 'm-1' --session '019bf0' --harness 'claude-code,codex' --day '2026-01-15'"
         );
         // Harness sets intersect rather than union: the view a facet link
         // narrows is the set both filters keep.
@@ -845,7 +1039,7 @@ mod tests {
         };
         assert_eq!(
             conjoined_flags(&launch, &query_harness).unwrap(),
-            "--machine m-1 --harness codex"
+            "--machine 'm-1' --harness 'codex'"
         );
         // One window inside another is the inner one.
         let launch_day = SelectorArgs {
@@ -865,7 +1059,7 @@ mod tests {
         .selector;
         assert_eq!(
             conjoined_flags(&launch_day, &query_day).unwrap(),
-            "--day 2026-01-15"
+            "--day '2026-01-15'"
         );
         // A branch-filter-derived prefix narrows a launch prefix.
         let launch_prefix = Selector {
@@ -878,7 +1072,7 @@ mod tests {
         };
         assert_eq!(
             conjoined_flags(&launch_prefix, &query_prefix).unwrap(),
-            "--session 019bf0d-"
+            "--session '019bf0d-'"
         );
     }
 

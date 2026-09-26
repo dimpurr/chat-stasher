@@ -2390,8 +2390,8 @@ fn the_sessions_page_prints_the_equivalent_cli_command_and_the_download_link() {
         "vs `--repo`, but the command must name a target: {html}"
     );
     assert!(
-        html.contains("--machine mbp-a --harness claude-code --out ~/out"),
-        "the filters this page applied, spelled as flags: {html}"
+        html.contains("--machine &#39;mbp-a&#39; --harness &#39;claude-code&#39; --out ~/out"),
+        "the filters this page applied, spelled as quoted flags: {html}"
     );
 
     // The command is not decoration: it must select the set the page shows.
@@ -2444,6 +2444,175 @@ fn the_sessions_page_prints_the_equivalent_cli_command_and_the_download_link() {
     assert!(
         page.contains("X-Checksum-Sha256</code>"),
         "the digest statement rides the link: {page}"
+    );
+}
+
+/// Percent-encode like the server's `percent_encode` (everything outside the
+/// unreserved set), so a hostile-value probe rides the URL byte-exact.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Undo the server-side `esc` — what a browser renders before the reader
+/// copies it. `&amp;` must go first so an escaped ampersand cannot be
+/// re-decoded as a second entity.
+fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+/// W195b FIX-FIRST: hostile filter values in the URL must reach the footer
+/// command as one quoted shell word each, and the block must stay
+/// HTML-escaped on the wire. All-platform half of the paste-safety proof:
+/// the exact bytes a browser renders. The payloads are inert sentinels; if
+/// the renderer ever went back to raw interpolation, these bytes cannot
+/// match.
+#[test]
+fn the_footer_command_quotes_hostile_filter_values_on_the_page() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let machine = "mbp-a; printf PWNED; $(printf SUBST) `printf TICK` 'q' \"d\"\nEnd";
+    let (status, html) = ui.get(&format!("/sessions?machine={}", url_encode(machine)));
+    assert_eq!(status, 200, "{html}");
+    let section = html
+        .split("<section id=export-cli>")
+        .nth(1)
+        .expect("the block exists even for a zero-match view")
+        .split("</section>")
+        .next()
+        .unwrap();
+    let pre = section
+        .split("<pre>")
+        .nth(1)
+        .and_then(|rest| rest.split("</pre>").next())
+        .expect("the block prints the command");
+    // Still HTML-escaped: the quoting rides as entities, and no quote travels
+    // raw — a raw `'` on this line is the escaping half of the same bug.
+    assert!(
+        pre.contains("&#39;") && pre.contains("&quot;"),
+        "quoting must survive the HTML escaper: {pre}"
+    );
+    assert!(!pre.contains('\''), "raw quotes must be escaped: {pre}");
+    assert!(!pre.contains('"'), "raw quotes must be escaped: {pre}");
+    assert_eq!(
+        pre,
+        r##"chat-stasher export --repo &lt;this dashboard&#39;s repository&gt; --machine &#39;mbp-a; printf PWNED; $(printf SUBST) `printf TICK` &#39;&quot;&#39;&quot;&#39;q&#39;&quot;&#39;&quot;&#39; &quot;d&quot;
+End&#39; --out ~/out"##,
+        "the exact command a browser renders for a hostile machine filter"
+    );
+}
+
+/// W195b FIX-FIRST: the real-shell half of the paste proof. A POSIX `sh`
+/// reading the exact command the block prints — hostile filter values and
+/// all, with the one placeholder the block already tells the reader to fill
+/// in filled with this test's own synthetic repository — must reach one
+/// `chat-stasher` invocation with the payloads intact as single arguments,
+/// and nothing the payloads spelled may run on its own: `sh -n` accepts the
+/// line, then a PATH stub prints every argument the shell handed it.
+///
+/// `#[cfg(unix)]` states a property gap rather than silencing it: parsing a
+/// pasted command is defined BY a POSIX shell (XCU §2.2), which does not
+/// exist on Windows; the all-platform halves of this proof — the block's
+/// exact bytes — run in the test above.
+#[cfg(unix)]
+#[test]
+fn the_footer_command_pastes_into_a_posix_shell_as_one_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let machine = "mbp-a; printf PWNED; $(printf SUBST) `printf TICK` 'q' \"d\"\nEnd";
+    let (status, html) = ui.get(&format!("/sessions?machine={}", url_encode(machine)));
+    assert_eq!(status, 200, "{html}");
+    let section = html
+        .split("<section id=export-cli>")
+        .nth(1)
+        .expect("the block exists even for a zero-match view")
+        .split("</section>")
+        .next()
+        .unwrap();
+    let pre = section
+        .split("<pre>")
+        .nth(1)
+        .and_then(|rest| rest.split("</pre>").next())
+        .expect("the block prints the command");
+    let command = html_unescape(pre);
+    // The one thing the reader must supply: the repository the block refuses
+    // to name. Filling it — and nothing else — is the faithful paste.
+    let placeholder = "--repo <this dashboard's repository>";
+    let repo_flag = format!("--repo {}", repo.to_str().unwrap());
+    assert!(
+        command.contains(placeholder),
+        "the block names the one thing the reader fills in: {command}"
+    );
+    let pasted = command.replace(placeholder, &repo_flag);
+
+    // Parse, do not execute: a line that parses cleanly cannot have an
+    // unterminated quote or live rediression in it.
+    let script = sb.path().join("pasted-command.sh");
+    fs::write(&script, &pasted).unwrap();
+    let parsed = Command::new("sh").arg("-n").arg(&script).output().unwrap();
+    assert!(
+        parsed.status.success(),
+        "the pasted line must parse: {}",
+        String::from_utf8_lossy(&parsed.stderr)
+    );
+
+    // Execute through a stub that answers to `chat-stasher` and prints the
+    // argument list the shell assembled — the paste's argv, on the record.
+    let stub_dir = sb.path().join("stubbin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub = stub_dir.join("chat-stasher");
+    fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let home = sb.path().join("home");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&pasted)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the stubbed paste run failed: {out:?}"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "nothing the payloads spelled may run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = format!(
+        "export\n--repo\n{}\n--machine\n{}\n--out\n{}\n",
+        repo.to_str().unwrap(),
+        machine,
+        home.join("out").to_str().unwrap(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        expected,
+        "one chat-stasher invocation, each payload intact as one argument"
     );
 }
 

@@ -3928,7 +3928,7 @@ mod tests {
         let plain = req("/sessions", &fixture::data(), &NoContent).body;
         assert!(
             plain.contains(
-                "<pre>chat-stasher export --destination dest-under-test --out ~/out</pre>"
+                "<pre>chat-stasher export --destination &#39;dest-under-test&#39; --out ~/out</pre>"
             ),
             "an unfiltered view still gets the command — the whole view is a set too: {plain}"
         );
@@ -3939,7 +3939,9 @@ mod tests {
         )
         .body;
         assert!(
-            filtered.contains("--machine m-1 --harness claude-code --out ~/out</pre>"),
+            filtered.contains(
+                "--machine &#39;m-1&#39; --harness &#39;claude-code&#39; --out ~/out</pre>"
+            ),
             "the page's own flags, verbatim copyable: {filtered}"
         );
         // A dashboard opened with `--repo` has no destination its command can
@@ -3973,8 +3975,8 @@ mod tests {
         assert_eq!(d.sessions.len(), 2);
         let html = req("/sessions?harness=claude-code", &d, &NoContent).body;
         assert!(
-            html.contains("--machine m-1 --harness claude-code --out ~/out"),
-            "launch AND page filters: {html}"
+            html.contains("--machine &#39;m-1&#39; --harness &#39;claude-code&#39; --out ~/out"),
+            "launch AND page filters, every value a quoted shell word: {html}"
         );
         // …and a page filter that contradicts the launched one is refused
         // with the reason, not a near-miss command.
@@ -4237,6 +4239,11 @@ mod tests {
         assert!(
             html.contains("activity-index --rebuild"),
             "the note names the repair command: {html}"
+        );
+        assert!(
+            html.contains("--machine &#39;m-1&#39;"),
+            "the machine name inside the repair command is a quoted shell word — the \
+             archive, not the reader, chose those bytes: {html}"
         );
         // A fresh machine's page gets no coverage note at all.
         let fresh = req("/sessions?machine=m-2", &d, &NoContent).body;

@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 
 use crate::activity::{TimeSource, TitleSource};
+use crate::schedule::sh_single_quote;
 use crate::search::SessionLabel;
 use crate::selector::{Resolved, UnplacedBy};
 
@@ -231,7 +232,10 @@ fn page_sessions(
 /// the single-session download. The command's flags come from
 /// [`conjoined_flags`] — the same selector constraint walk
 /// [`describe_selector`] renders — so the page's prose sentence about the
-/// filter and the command it prints cannot drift apart.
+/// filter and the command it prints cannot drift apart. Every value the
+/// command interpolates travels single-quoted for a POSIX shell, because the
+/// block's own words are "ready to copy": a value's bytes must stay the
+/// filter's, not the shell's.
 ///
 /// `Err` from the walk is a filter pair that cannot both hold (or cannot be
 /// spelled on one command line). The block then says so and prints no
@@ -250,11 +254,14 @@ fn export_cli_block(resolved: &Resolved, data: &UiData) -> String {
             // A dashboard opened with `--repo` has no destination to name; its
             // label is a placeholder word, and the repository path itself stays
             // off the page. The command carries the flag the reader fills in,
-            // never an argument nobody can type.
+            // never an argument nobody can type. A real destination is a value
+            // the page did not choose the bytes of, so it prints single-quoted
+            // like every other value (XCU §2.2.2) — pasting the command cannot
+            // hand the shell syntax a destination name might carry.
             let target = if data.destination_label == EXPLICIT_REPO_LABEL {
                 "--repo <this dashboard's repository>".to_string()
             } else {
-                format!("--destination {}", data.destination_label)
+                format!("--destination {}", sh_single_quote(&data.destination_label))
             };
             let mut command = format!("chat-stasher export {target}");
             if !flags.is_empty() {
@@ -460,11 +467,15 @@ fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
     // A dashboard opened with `--repo` cannot name a destination; the repair
     // command then uses the same `--repo` flag the user opened this dashboard
     // with, and the repository path itself stays off the page (see the module
-    // privacy line).
+    // privacy line). A real destination, and the machine name inside the
+    // command, are values the page did not choose the bytes of (the machine
+    // is an archive-recorded partition id), so both print single-quoted
+    // (XCU §2.2.2) — staying literal and inert is exactly what this
+    // fill-me-in command asks of them.
     let dest_flag = if data.destination_label == EXPLICIT_REPO_LABEL {
-        "--repo <repository>"
+        "--repo <repository>".to_string()
     } else {
-        &format!("--destination {}", &data.destination_label)
+        format!("--destination {}", sh_single_quote(&data.destination_label))
     };
     legacy
         .iter()
@@ -474,11 +485,12 @@ fn label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
                  <span class=mono>{m}</span>'s activity index predates labels, so its rows \
                  show <i>label unknown</i> — that is the index's age, not a session with no \
                  label. Backfill with <span class=mono>chat-stasher activity-index \
-                 --rebuild {dest_flag} --machine {m} --stage <an existing empty work \
+                 --rebuild {dest_flag} --machine {cmd_machine} --stage <an existing empty work \
                  directory></span>: the rebuild restores that machine's archived shards \
                  itself and appends a fresh snapshot.</div>\n",
                 m = esc(m),
-                dest_flag = esc(dest_flag),
+                dest_flag = esc(&dest_flag),
+                cmd_machine = esc(&sh_single_quote(m)),
             )
         })
         .collect()

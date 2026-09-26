@@ -83,7 +83,7 @@ nav.sub{display:flex;gap:1rem}
 <section id=export-cli>
 <h2>Export this view (CLI)</h2>
 <p>The same filters this page applied, spelled as <code>chat-stasher export</code> flags, ready to copy.</p>
-<pre>chat-stasher export --destination dest-under-test --out ~/out</pre>
+<pre>chat-stasher export --destination &#39;dest-under-test&#39; --out ~/out</pre>
 <p class=sub>Running it writes one file per selected session under <code>--out</code> — <code>&lt;out&gt;/&lt;machine&gt;/&lt;harness&gt;/&lt;session-id&gt;.jsonl</code>, and <code>--out</code> must name a new or empty directory — byte-identical to what <code>chat-stasher read</code> returns for that session, and <code>--dry-run</code> prints what it will do before it does any of it. One session needs no command: its session page offers a <b>download .jsonl</b> link whose bytes are exactly <code>read</code>'s, with the same digest the command prints riding the response as <code>X-Checksum-Sha256</code>.</p>
 </section>
 <footer>

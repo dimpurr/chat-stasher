@@ -1198,9 +1198,16 @@ fn cap_line(path: &Path, cap: usize) -> String {
     )
 }
 
-/// Single-quote a string for use inside a POSIX sh command. A single quote in
-/// the input is closed, re-opened around a double-quoted quote, and continued.
-fn sh_single_quote(value: &str) -> String {
+/// One value spelled so a POSIX `sh` reading it sees exactly the value and
+/// nothing else: wrapped in single-quotes (XCU §2.2.2, where every character
+/// is literal), and a single quote in the input is closed, re-opened around
+/// a double-quoted quote, and continued (`'"'"'` — the `'` is literal inside
+/// double-quotes, XCU §2.2.3). Shared by the cron/launchd command lines here
+/// and by the UI's copyable `chat-stasher export` command, so the binary
+/// carries one quoting idiom, not two. Quoting is unconditional: deciding
+/// per value whether it "looks safe" is the renderer judging input it does
+/// not control.
+pub(crate) fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
@@ -1426,6 +1433,13 @@ mod tests {
     fn sh_single_quote_escapes_embedded_quotes() {
         assert_eq!(sh_single_quote("plain"), "'plain'");
         assert_eq!(sh_single_quote("a'b"), "'a'\"'\"'b'");
+        // The hostile classes the shared callers pay it to survive: a value
+        // whose space, `$()`, backtick, `;` or newline must never become shell
+        // behavior when the rendered line is pasted.
+        assert_eq!(
+            sh_single_quote("m 3; $(pwned) `bt` 'q' \"d\"\nEnd"),
+            "'m 3; $(pwned) `bt` '\"'\"'q'\"'\"' \"d\"\nEnd'"
+        );
     }
 
     #[test]
