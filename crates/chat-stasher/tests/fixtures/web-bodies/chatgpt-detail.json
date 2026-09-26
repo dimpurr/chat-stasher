@@ -1,0 +1,80 @@
+{
+  "title": "Synthetic chatgpt conversation",
+  "create_time": 1736944400.5,
+  "update_time": 1736944600.25,
+  "default_model_slug": "synthetic-model",
+  "current_node": "n4",
+  "mapping": {
+    "root": {
+      "id": "root",
+      "message": null,
+      "parent": null,
+      "children": ["n1"]
+    },
+    "n1": {
+      "id": "n1",
+      "message": {
+        "id": "n1",
+        "author": { "role": "user", "name": null, "metadata": {} },
+        "create_time": 1736944400.5,
+        "content": { "content_type": "text", "parts": ["Synthetic question one"] },
+        "status": "finished_successfully",
+        "recipient": "all"
+      },
+      "parent": "root",
+      "children": ["n2"]
+    },
+    "n2": {
+      "id": "n2",
+      "message": {
+        "id": "n2",
+        "author": { "role": "assistant", "name": null, "metadata": {} },
+        "create_time": 1736944450.5,
+        "content": { "content_type": "text", "parts": ["Synthetic answer one"] },
+        "status": "finished_successfully",
+        "recipient": "all"
+      },
+      "parent": "n1",
+      "children": ["n3", "side"]
+    },
+    "side": {
+      "id": "side",
+      "message": {
+        "id": "side",
+        "author": { "role": "assistant", "name": null, "metadata": {} },
+        "create_time": 1736944460.5,
+        "content": { "content_type": "text", "parts": ["Synthetic abandoned answer"] },
+        "status": "finished_successfully",
+        "recipient": "all"
+      },
+      "parent": "n2",
+      "children": []
+    },
+    "n3": {
+      "id": "n3",
+      "message": {
+        "id": "n3",
+        "author": { "role": "user", "name": null, "metadata": {} },
+        "create_time": 1736944500.5,
+        "content": { "content_type": "text", "parts": ["Synthetic question two"] },
+        "status": "finished_successfully",
+        "recipient": "all"
+      },
+      "parent": "n2",
+      "children": ["n4"]
+    },
+    "n4": {
+      "id": "n4",
+      "message": {
+        "id": "n4",
+        "author": { "role": "assistant", "name": null, "metadata": {} },
+        "create_time": 1736944600.25,
+        "content": { "content_type": "text", "parts": ["Synthetic answer two"] },
+        "status": "finished_successfully",
+        "recipient": "all"
+      },
+      "parent": "n3",
+      "children": []
+    }
+  }
+}

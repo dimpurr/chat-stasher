@@ -7,6 +7,7 @@
 
 use crate::activity::TimeSource;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// One extractor file per harness, dispatched by [`normalize_value`]. A
 /// harness with no arm there is served the raw view only — see
@@ -233,13 +234,13 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
     conversation
 }
 
-/// The harnesses this build reads as a conversation. This is the registry:
-/// one arm per extractor file, and the `""` row that carries no harness id
-/// at all (it keeps the structural attempt and its distinct
-/// provenance-unknown state). Every other id — the registry harnesses with
-/// no extractor yet (github-copilot-cli, aider, crush, zed, continue, grok)
-/// and the web-platform ids whose readers ship separately (gemini,
-/// perplexity, kimi) — is served the raw view only.
+/// The harnesses this build reads as a conversation. This is the registry: one
+/// arm per extractor file, one row for the web-platform ids whose archived line
+/// is an inbox bundle (see [`is_web_bundle`], whose reader is the generic one),
+/// and the `""` row that carries no harness id at all (it keeps the structural
+/// attempt and its distinct provenance-unknown state). Every other id — the
+/// registry harnesses with no extractor yet (github-copilot-cli, aider, crush,
+/// zed, continue) — is served the raw view only.
 fn harness_has_a_reader(harness: &str) -> bool {
     matches!(
         harness,
@@ -253,7 +254,22 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "deepseek"
             | "claude"
             | ""
-    )
+    ) || is_web_bundle(harness)
+}
+
+/// A harness whose archived line is an inbox bundle rather than a message line:
+/// the platform's own JSON body sits under `raw.text`, the envelope every
+/// extractor above unwraps for itself. Such a platform's reader is the generic
+/// one (29-UI-DESIGN W140: the web bodies whose shape no extractor of its own
+/// reads go to the generic reader), so a platform with no extractor is read
+/// from its body instead of being counted as one unreadable bundle. A bundle
+/// whose `raw.text` is not JSON is a body this reader cannot read at all, and
+/// stays counted.
+///
+/// `activity::WEB_HARNESSES` is the same list the capture side and the time
+/// reader use, so this rule cannot drift away from the line shape it names.
+fn is_web_bundle(harness: &str) -> bool {
+    crate::activity::WEB_HARNESSES.contains(&harness)
 }
 
 fn mark_raw_view_only(harness: &str, conversation: &mut Conversation) {
@@ -283,6 +299,16 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         // claim, the provenance-unknown state is already recorded, and the
         // envelope probe below is the only honest structural attempt left.
         "" => normalize_generic(value, conversation),
+        // A web platform with no extractor of its own lands here: its archived
+        // line is an inbox bundle rather than the platform's body, so the body
+        // is unwrapped and read by the generic reader — the platform is read
+        // rather than counted as one unreadable bundle. The three web platforms
+        // that do have an extractor of their own are matched above and never
+        // reach this arm.
+        _ if is_web_bundle(harness) => match payload(value) {
+            Some(body) => normalize_generic(&body, conversation),
+            None => conversation.unrendered_lines += 1,
+        },
         // Unreachable while `normalize` gates on `harness_has_a_reader`, and
         // this same arm is the fallback a new harness id deserves if the two
         // ever disagree: no interpretation, no counts, raw view only.
@@ -431,7 +457,7 @@ fn normalize_claude_web(value: &Value, conversation: &mut Conversation) {
         conversation.canonical_follows_active = false;
         return;
     };
-    for item in messages {
+    for item in claude_active_thread(&raw, messages, conversation) {
         let role = item
             .get("sender")
             .or_else(|| item.get("role"))
@@ -458,6 +484,124 @@ fn normalize_claude_web(value: &Value, conversation: &mut Conversation) {
             blocks,
         });
     }
+}
+
+/// The parent-link spellings a claude.ai body has been seen to use. Two, not
+/// one, because reference implementations on this platform disagree — the same
+/// pair the capture side accepts, so a body the archive accepted is a body this
+/// reader can walk.
+const CLAUDE_PARENT_KEYS: [&str; 2] = ["parent_message_uuid", "parent_uuid"];
+
+/// The message a claude.ai record names as its parent, if it names one.
+///
+/// The first spelling that carries a **non-empty** string wins, and an empty
+/// one does not end the search: the capture side reads the pair exactly this way
+/// (`claudeParentKeyOf` accepts a message when *either* key holds a non-empty
+/// string), so a message that spells one key `""` and the other as a real uuid
+/// was accepted for capture and has to walk here too. A message whose both keys
+/// are absent or empty names no parent and is a root, not an unwalkable branch.
+fn claude_parent(message: &Value) -> Option<&str> {
+    CLAUDE_PARENT_KEYS.iter().find_map(|key| {
+        message
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|parent| !parent.is_empty())
+    })
+}
+
+/// The messages of a claude.ai body, on its active branch, oldest first.
+///
+/// The body is a flat `chat_messages` array that still carries a tree: every
+/// message names its parent, and `current_leaf_message_uuid` names the branch
+/// that is current. The chain of parent links up from that leaf is the
+/// conversation; the messages off it are abandoned branches, counted in
+/// `branch_nodes` rather than rendered as if they had been said.
+///
+/// Three states, kept apart rather than collapsed into each other:
+///
+/// * **no message names a parent** — the response is flat and there is no tree
+///   to follow, so every message is the conversation and nothing is hidden.
+///   (Reference implementations take the same branch for this shape:
+///   `resolveClaudeActiveBranch` reports a body with no parent links as
+///   complete.)
+/// * **the chain ends at a parent the body does not carry** — the normal end.
+///   The wire ends every branch at a shared tree-root sentinel that no body
+///   carries (measured on the capture side, 2026-09-24), so this is a root, not
+///   a dropped message.
+/// * **a leaf the body does not carry, or a cycle** — the walk proves nothing.
+///   The messages are shown in the body's own order and the caller is told the
+///   branch provenance is unknown: which branch is current is never guessed.
+fn claude_active_thread<'a>(
+    raw: &Value,
+    messages: &'a [Value],
+    conversation: &mut Conversation,
+) -> Vec<&'a Value> {
+    if !messages
+        .iter()
+        .any(|message| claude_parent(message).is_some())
+    {
+        return messages.iter().collect();
+    }
+    let leaf = raw
+        .get("current_leaf_message_uuid")
+        .and_then(Value::as_str)
+        .filter(|leaf| !leaf.is_empty());
+    let by_id = claude_by_id(messages);
+    let chain = leaf.and_then(|leaf| claude_chain(leaf, &by_id));
+    let Some(chain) = chain else {
+        conversation.canonical_follows_active = false;
+        return messages.iter().collect();
+    };
+    let thread: Vec<&Value> = chain
+        .iter()
+        .filter_map(|id| by_id.get(id).copied())
+        .collect();
+    // Every message the chain did not consume is off the active branch: an
+    // abandoned sibling, a re-answer, or a record this walk cannot place. The
+    // count is the array's own arithmetic, not an estimate.
+    conversation.branch_nodes += messages.len().saturating_sub(thread.len());
+    thread
+}
+
+/// A claude.ai body's messages keyed by the id its parent links name them with.
+/// A message that carries no uuid cannot be named by any link, so it is absent
+/// here — and therefore off every branch this walk can find.
+fn claude_by_id(messages: &[Value]) -> HashMap<&str, &Value> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            message
+                .get("uuid")
+                .and_then(Value::as_str)
+                .map(|id| (id, message))
+        })
+        .collect()
+}
+
+/// Walk `parent_message_uuid` up from `leaf` to the branch root, returning the
+/// ids oldest-first. `None` when the walk cannot reach a root — the leaf is not
+/// in the body, or the links cycle — which is the state that must not be
+/// reported as a whole conversation.
+fn claude_chain<'a>(leaf: &'a str, by_id: &HashMap<&'a str, &'a Value>) -> Option<Vec<&'a str>> {
+    let mut chain: Vec<&str> = Vec::new();
+    let mut current = Some(leaf);
+    while let Some(id) = current {
+        let Some(message) = by_id.get(id) else {
+            // The one parent no branch carries is the shared tree-root
+            // sentinel: the walk is over, and the chain is complete.
+            break;
+        };
+        if chain.contains(&id) {
+            return None;
+        }
+        chain.push(id);
+        current = claude_parent(message);
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    chain.reverse();
+    Some(chain)
 }
 
 fn normalize_deepseek(value: &Value, conversation: &mut Conversation) {
@@ -507,10 +651,24 @@ fn normalize_deepseek(value: &Value, conversation: &mut Conversation) {
     }
 }
 
+/// The fallback reader: a harness with no extractor of its own.
+///
+/// A web platform's archived body is the platform's own response, and two
+/// top-level shapes carry messages: an object with a `messages` array, and an
+/// array of records. Both are read here, so a platform we have no extractor for
+/// is read rather than counted as one unreadable line. Records the reader
+/// cannot turn into a message stay counted, one per record — the array's own
+/// arithmetic, not a claim about the whole body.
 fn normalize_generic(value: &Value, conversation: &mut Conversation) {
-    let Some(messages) = value.get("messages").and_then(Value::as_array) else {
-        conversation.unrendered_lines += 1;
-        return;
+    let messages = match value {
+        Value::Array(messages) => messages,
+        _ => match value.get("messages").and_then(Value::as_array) {
+            Some(messages) => messages,
+            None => {
+                conversation.unrendered_lines += 1;
+                return;
+            }
+        },
     };
     for item in messages {
         let Some(message) =
