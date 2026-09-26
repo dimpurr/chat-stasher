@@ -165,7 +165,7 @@
     "profile_label": {
       "type": "string",
       "minLength": 1,
-      "description": "Since W205. User-provided browser profile label; older bundles may omit it. Until the user names the profile in the popup, bundles carry the literal placeholder \"Unnamed profile\". The placeholder is not an identity claim: hosts must not treat it as establishing or violating an install-id binding (see EXT-2 / D4)."
+      "description": "Since W205. User-provided browser profile label; older bundles may omit it. Until the user names the profile in the popup, bundles carry the literal placeholder \"Unnamed profile\". The placeholder is not an identity claim: hosts must not treat it as establishing or violating an install-id binding (see EXT-2 / D4). The popup saves a label once and has no rename step today; directly editing the stored record afterwards, once a first user-named label was already sealed under this install_id, makes later bundles carry a second user-named label under the same install_id, which hosts refuse until that install regenerates its identity."
     },
     "provenance": {
       "type": "object",
