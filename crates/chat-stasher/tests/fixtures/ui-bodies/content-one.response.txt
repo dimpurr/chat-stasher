@@ -66,7 +66,7 @@ nav.sub{display:flex;gap:1rem}
 
 <h1>Session <span class=mono>deepseek~e4009d</span> · content</h1>
 <p class=sub>machine <span class=mono>m-1</span> · source deepseek</p>
-<p>Loaded <b>3 B</b> of shard data across 1 shard(s). Concatenation sha256 <span class=mono>cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd</span>.</p>
+<p>Loaded <b>8 B</b> of shard data across 1 shard(s). Concatenation sha256 <span class=mono>e346432021b04179518d9614f3560ccd71354a4ee101ddcb893d6959a9d6301c</span>.</p>
 <ul><li class=mono>000001.jsonl sha256=abababababab</li>
 </ul>
 <p class=sub>The same digest <code>chat-stasher read</code> prints for the concatenation of these shards.</p>

@@ -4638,8 +4638,11 @@ impl UiDestination {
     }
 }
 
-/// The one implementation of the payload tier: the `/content` route asks this
-/// for one session's shards, and nothing else does.
+/// The one implementation of the payload tier: the `/content`, `/reader` and
+/// `/export` routes ask this for one session's shards, and nothing else does.
+/// All three share this one fetch, so no route can grow a second encoder for
+/// the same bytes and a downloaded file, the reader and `read` cannot disagree
+/// about a session's content.
 ///
 /// With several destinations a merged row exists in more than one copy, and
 /// this reads it from the copy the row itself describes — the first destination
@@ -4648,7 +4651,10 @@ impl UiDestination {
 /// second while the page shows the first's metadata would be a read the page
 /// never claimed to make. A failure to read stays a failure, which is the one
 /// thing `/content` has always done — and the destination column says the other
-/// copy exists, so the reader can name it and read it deliberately.
+/// copy exists, so the reader can name it and read it deliberately. That same
+/// rule is what keeps `/export` unambiguous under a merged view: a row names one
+/// copy, so a download has one source, and there is no view-wide export to
+/// resolve.
 struct MergedContent<'a> {
     parts: &'a [UiDestination],
     /// Which copy each row is read from, keyed the way the archive keys a
@@ -4703,12 +4709,13 @@ impl chat_stasher::ui::ContentSource for MergedContent<'_> {
         let (bytes, shards) = store
             .read_session_concat(machine, session_id, mk)
             .map_err(|e| format!("destination `{}`: {e:#}", part.label))?;
-        Ok(chat_stasher::ui::Content {
-            concat_sha256: sha256_hex(&bytes),
-            bytes: bytes.len(),
-            body: String::from_utf8_lossy(&bytes).into_owned(),
-            shards,
-        })
+        // The one fetch path `/content`, `/reader` and `/export` all share
+        // (29-UI-DESIGN §4.7): `read_session_concat` is the same rule `export`
+        // reads with, so no route can write a second encoder for these bytes.
+        // `from_concat` is the one place the digest, the length and the display
+        // body are derived from the bytes, so no route can serve a download
+        // whose `X-Checksum-Sha256` describes something other than the file.
+        Ok(chat_stasher::ui::Content::from_concat(bytes, shards))
     }
 }
 

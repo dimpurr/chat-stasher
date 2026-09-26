@@ -4,6 +4,7 @@
 //! and quoted attributes, unit-carrying byte/instant/age formats (never a bare
 //! ratio), and the three statements [`footer`] puts on every page.
 
+use crate::schedule::sh_single_quote;
 use crate::selector::Selector;
 
 use super::{DestinationState, UiData, UiSession, DAY};
@@ -413,32 +414,744 @@ pub(super) fn launch_banner(data: &UiData) -> String {
     }
 }
 
+/// One constraint a [`Selector`] carries, in the one place its parts are
+/// enumerated. Both things the pages say about a filter are rendered from
+/// this walk and nothing else: the prose sentence ([`describe_selector`]) and
+/// the CLI flags of the parity command ([`selector_cli_flags`]). A field added
+/// to `Selector` must appear here once, or both renderers miss it together —
+/// rather than one drifting while the other still names it.
+enum Constraint<'a> {
+    Machine(&'a str),
+    Prefix(&'a str),
+    Harnesses(&'a std::collections::BTreeSet<String>),
+    Window(&'a crate::selector::TimeWindow),
+}
+
+fn constraints(selector: &Selector) -> Vec<Constraint<'_>> {
+    let mut parts: Vec<Constraint<'_>> = Vec::new();
+    if let Some(m) = &selector.machine {
+        parts.push(Constraint::Machine(m));
+    }
+    if let Some(p) = &selector.session_id_prefix {
+        parts.push(Constraint::Prefix(p));
+    }
+    if let Some(h) = &selector.harnesses {
+        parts.push(Constraint::Harnesses(h));
+    }
+    if let Some(w) = &selector.window {
+        parts.push(Constraint::Window(w));
+    }
+    parts
+}
+
 /// One sentence naming every constraint the page is showing, or `None` when
 /// there is none. Never "no results" — the constraint itself is the answer.
 pub fn describe_selector(selector: &Selector) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(m) = &selector.machine {
-        parts.push(format!("machine `{m}`"));
+    let rendered: Vec<String> = constraints(selector)
+        .into_iter()
+        .map(|c| match c {
+            Constraint::Machine(m) => format!("machine `{m}`"),
+            Constraint::Prefix(p) => format!("session id starts with `{p}`"),
+            Constraint::Harnesses(h) => {
+                if h.is_empty() {
+                    "harness list is empty (matches nothing)".to_string()
+                } else {
+                    format!(
+                        "harness in {{{}}}",
+                        h.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                }
+            }
+            Constraint::Window(w) => w.describe(),
+        })
+        .collect();
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered.join(" · "))
     }
-    if let Some(p) = &selector.session_id_prefix {
-        parts.push(format!("session id starts with `{p}`"));
+}
+
+/// The command-line flags that select exactly what `selector` selects — the
+/// same flag vocabulary `search`/`export` read ([`crate::selector::SelectorArgs`]),
+/// spelled so that pasting them onto `chat-stasher export` reproduces this
+/// filter (29-UI-DESIGN §3.5/§6.5: the command the UI prints *is* the CLI
+/// twin, generated from the same selector walk
+/// [`describe_selector`] renders — reuse, not a second describer).
+///
+/// Every interpolateable value — machine, session prefix, the joined harness
+/// list, window texts — prints as one single-quoted shell word
+/// ([`crate::schedule::sh_single_quote`], XCU §2.2.2): a machine or prefix can
+/// arrive from a URL's `?machine=`/`?session=`, and a value's spaces, breaks
+/// or `$()` must stay the *filter's* bytes, never live syntax of the shell
+/// the reader pastes the command into. Quoting is unconditional, tame values
+/// too — "looks safe" is not a judgement a renderer may make about input it
+/// did not choose, and round-tripping through the CLI's own flag reader sees
+/// the same value either way.
+///
+/// `Ok` is a possibly-empty flag string (empty == no constraint, the whole
+/// view). `Err` is a filter that selects something real but that **no single
+/// command line can spell** — the honest answer for those is the reason, not
+/// a near-miss command that would quietly select something else.
+pub fn selector_cli_flags(selector: &Selector) -> Result<String, String> {
+    let mut flags: Vec<String> = Vec::new();
+    for c in constraints(selector) {
+        match c {
+            Constraint::Machine(m) => flags.push(format!("--machine {}", sh_single_quote(m))),
+            Constraint::Prefix(p) => flags.push(format!("--session {}", sh_single_quote(p))),
+            Constraint::Harnesses(h) => {
+                if h.is_empty() {
+                    return Err(
+                        "the harness filter names an empty set, which matches nothing and which \
+                         no command line can spell"
+                            .to_string(),
+                    );
+                }
+                flags.push(format!(
+                    "--harness {}",
+                    sh_single_quote(&h.iter().cloned().collect::<Vec<_>>().join(","))
+                ));
+            }
+            Constraint::Window(w) => flags.push(window_flags(w)?),
+        }
     }
-    if let Some(h) = &selector.harnesses {
-        if h.is_empty() {
-            parts.push("harness list is empty (matches nothing)".to_string());
-        } else {
-            parts.push(format!(
-                "harness in {{{}}}",
-                h.iter().cloned().collect::<Vec<_>>().join(", ")
+    Ok(flags.join(" "))
+}
+
+/// The flag spelling of one window. Where a bound came with the text that was
+/// typed for it, that text is what is printed — a round trip through the CLI
+/// resolver produces the same window, and no other spelling is claimed. That
+/// text goes out single-quoted like every other value: the genuine spellings
+/// reach here already-validated, but the quoting is positional, so no future
+/// text-bearing bound can print unquoted by accident.
+fn window_flags(w: &crate::selector::TimeWindow) -> Result<String, String> {
+    let bound = |unix: Option<i64>, text: Option<&str>| -> Result<String, String> {
+        match (unix, text) {
+            // A bound nobody can spell — the selector holds an instant with no
+            // typed form — cannot be handed to the reader as if it had one.
+            (Some(_), None) => Err(
+                "the time window carries a bound with no command-line spelling; reopen the \
+                 dashboard with the window spelled as a date flag"
+                    .to_string(),
+            ),
+            (Some(_), Some(t)) => Ok(t.to_string()),
+            (None, _) => Ok(String::new()),
+        }
+    };
+    let mut flags: Vec<String> = Vec::new();
+    match w.how {
+        crate::selector::WindowHow::LocalDays => {
+            let since = bound(w.since_unix, w.since_text.as_deref())?;
+            let until = bound(w.until_unix, w.until_text.as_deref())?;
+            if w.since_unix.is_some()
+                && w.until_unix.is_some()
+                && w.since_text.is_some()
+                && w.since_text == w.until_text
+            {
+                // One inclusive local day. `--day D` is documented as
+                // identical to `--since D --until D`, and the shorter form is
+                // the one a reader types.
+                return Ok(format!("--day {}", sh_single_quote(&since)));
+            }
+            if !since.is_empty() {
+                flags.push(format!("--since {}", sh_single_quote(&since)));
+            }
+            if !until.is_empty() {
+                flags.push(format!("--until {}", sh_single_quote(&until)));
+            }
+        }
+        crate::selector::WindowHow::UnixSeconds => {
+            let since = bound(w.since_unix, w.since_text.as_deref())?;
+            let until = bound(w.until_unix, w.until_text.as_deref())?;
+            if !since.is_empty() {
+                flags.push(format!("--since-unix {}", sh_single_quote(&since)));
+            }
+            if !until.is_empty() {
+                flags.push(format!("--until-unix {}", sh_single_quote(&until)));
+            }
+        }
+    }
+    Ok(flags.join(" "))
+}
+
+/// The flags that select the conjunction of the launch filter and a page's
+/// drill-down filter — what "this view" actually is, because the page's rows
+/// are the two filters applied together (the launch banner's own rule: no
+/// drill-down link can escape it, and neither may the command that claims to
+/// reproduce the view).
+///
+/// `Err` is one sentence naming the pair of filters that cannot hold at once
+/// or cannot be spelled together; the caller shows the sentence and prints no
+/// command, because a command that almost matches is worse than none.
+pub fn conjoined_flags(launch: &Selector, query: &Selector) -> Result<String, String> {
+    let machine = match (&launch.machine, &query.machine) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(format!(
+                "the launch filter names machine `{a}` and this page's filter names `{b}` — \
+                 no session can match both, so the view is not spellable on one command line"
+            ))
+        }
+        (Some(a), Some(_)) => Some(a.clone()),
+        (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+        (None, None) => None,
+    };
+    let session_id_prefix = match (&launch.session_id_prefix, &query.session_id_prefix) {
+        (Some(a), Some(b)) => {
+            if a.starts_with(b.as_str()) {
+                Some(a.clone())
+            } else if b.starts_with(a.as_str()) {
+                Some(b.clone())
+            } else {
+                return Err(format!(
+                    "the launch filter's session prefix `{a}` and this page's `{b}` cannot both \
+                     hold, so the view is not spellable on one command line"
+                ));
+            }
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+        (None, None) => None,
+    };
+    let harnesses = match (&launch.harnesses, &query.harnesses) {
+        (Some(a), Some(b)) => {
+            let both = a & b;
+            if both.is_empty() {
+                return Err(format!(
+                    "the launch filter's harnesses {{{}}} and this page's {{{}}} share none, so \
+                     the view is not spellable on one command line",
+                    a.iter().cloned().collect::<Vec<_>>().join(", "),
+                    b.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            Some(both)
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+        (None, None) => None,
+    };
+    let window = match (&launch.window, &query.window) {
+        (Some(a), Some(b)) => Some(conjoined_window(a, b)?),
+        (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+        (None, None) => None,
+    };
+    selector_cli_flags(&Selector {
+        session_id_prefix,
+        machine,
+        harnesses,
+        window,
+    })
+}
+
+/// The intersection of two conversation-time windows: whichever window
+/// constrains more is the bound that survives, carrying the spelling it was
+/// typed with. The intersection can be genuinely empty — the filters then hold
+/// no session at all, and a command line spelling of "nothing" is not the same
+/// thing as an empty flag list, so it is reported rather than faked.
+fn conjoined_window(
+    a: &crate::selector::TimeWindow,
+    b: &crate::selector::TimeWindow,
+) -> Result<crate::selector::TimeWindow, String> {
+    use crate::selector::TimeWindow;
+    // The later lower bound and the earlier upper bound. `None` is the absence
+    // of that bound's constraint, i.e. the losing side for a `max`/`min`.
+    let since = match (a.since_unix, b.since_unix) {
+        (Some(x), Some(y)) if x >= y => Some((x, a.since_text.clone(), a.how)),
+        (Some(_), Some(y)) => Some((y, b.since_text.clone(), b.how)),
+        (Some(x), None) => Some((x, a.since_text.clone(), a.how)),
+        (None, Some(y)) => Some((y, b.since_text.clone(), b.how)),
+        (None, None) => None,
+    };
+    let until = match (a.until_unix, b.until_unix) {
+        (Some(x), Some(y)) if x <= y => Some((x, a.until_text.clone(), a.how)),
+        (Some(_), Some(y)) => Some((y, b.until_text.clone(), b.how)),
+        (Some(x), None) => Some((x, a.until_text.clone(), a.how)),
+        (None, Some(y)) => Some((y, b.until_text.clone(), b.how)),
+        (None, None) => None,
+    };
+    let how = match (&since, &until) {
+        (Some((_, _, how)), Some((_, _, other))) => {
+            if how != other {
+                return Err(
+                    "one filter's window was spelled as local calendar days and the other as \
+                     unix seconds, so the intersection cannot be spelled on one command line"
+                        .to_string(),
+                );
+            }
+            *how
+        }
+        (Some((_, _, how)), None) | (None, Some((_, _, how))) => *how,
+        (None, None) => return Err("the two filters' windows constrain nothing".to_string()),
+    };
+    if let (Some((s, _, _)), Some((u, _, _))) = (&since, &until) {
+        if s > u {
+            return Err(format!(
+                "the launch filter's window ({}) and this page's window ({}) do not overlap, so \
+                 no session can be in this view",
+                a.describe(),
+                b.describe()
             ));
         }
     }
-    if let Some(w) = &selector.window {
-        parts.push(w.describe());
+    Ok(TimeWindow {
+        since_unix: since.as_ref().map(|(v, _, _)| *v),
+        until_unix: until.as_ref().map(|(v, _, _)| *v),
+        how,
+        since_text: since.map(|(_, t, _)| t).flatten(),
+        until_text: until.map(|(_, t, _)| t).flatten(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selector::SelectorArgs;
+    use std::collections::BTreeSet;
+
+    /// The flags renderer's own contract: `describe_selector` is prose of the
+    /// same walk, and the flags a selector prints must parse back — via the
+    /// very `SelectorArgs` `search`/`export` read — into the same selector.
+    /// A flag that cannot round-trip is a command the page cannot honestly
+    /// print, so broken round trips must fail here rather than on a page.
+    /// The line is read the way the reader's shell would read it first —
+    /// quotes resolve to the value they carry — which is also why quoting
+    /// every value is a no-op for this contract, never a change of flags.
+    fn parse_back(flags: &str) -> crate::selector::Resolved {
+        let mut args = SelectorArgs::default();
+        let mut words = shell_words(flags).into_iter().peekable();
+        while let Some(flag) = words.next() {
+            let value = words.next().expect("every flag takes one value");
+            match flag.as_str() {
+                "--machine" => args.machine = Some(value),
+                "--session" => args.session = Some(value),
+                "--harness" => args.harness = Some(value.split(',').map(String::from).collect()),
+                "--day" => args.day = Some(value),
+                "--since" => args.since = Some(value),
+                "--until" => args.until = Some(value),
+                "--since-unix" => args.since_unix = value.parse().ok(),
+                "--until-unix" => args.until_unix = value.parse().ok(),
+                other => panic!("a flag nobody reads came out of the renderer: {other}"),
+            }
+        }
+        args.resolve().expect("printed flags must resolve")
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
+
+    /// Split a line the way a POSIX shell reading it would (XCU §2.2.1–§2.2.3,
+    /// §2.3 token recognition): single-quoted spans are literal to the next
+    /// `'`, double-quoted spans to the next `"` (the renderer only ever puts a
+    /// lone `'` inside those), a backslash outside quotes keeps the next
+    /// character literal, and unquoted blanks end a word. Unterminated quotes
+    /// are a paste hazard, not a value, so they panic rather than split.
+    fn shell_words(line: &str) -> Vec<String> {
+        let mut words: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut started = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => {
+                    started = true;
+                    loop {
+                        match chars.next() {
+                            Some('\'') => break,
+                            Some(other) => cur.push(other),
+                            None => panic!("unterminated single quote — unsafe to paste"),
+                        }
+                    }
+                }
+                '"' => {
+                    started = true;
+                    loop {
+                        match chars.next() {
+                            Some('"') => break,
+                            Some(other) => cur.push(other),
+                            None => panic!("unterminated double quote — unsafe to paste"),
+                        }
+                    }
+                }
+                '\\' => {
+                    started = true;
+                    match chars.next() {
+                        Some(escaped) => cur.push(escaped),
+                        None => panic!("dangling escape — unsafe to paste"),
+                    }
+                }
+                ' ' | '\t' | '\n' => {
+                    if started {
+                        words.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                other => {
+                    started = true;
+                    cur.push(other);
+                }
+            }
+        }
+        if started {
+            words.push(cur);
+        }
+        words
+    }
+
+    /// Every shell metacharacter that appears OUTSIDE quotes in a rendered
+    /// command line, excluding the spaces that separate the words themselves:
+    /// no separator (`;|&`), substitution (`$()`, backticks), redirection
+    /// (`<>`) or line/tab break may live outside quotes, because that alone
+    /// would let a pasted line mean something the page did not say. (An
+    /// unquoted *value* would also split into several words, which the
+    /// `shell_words` equality catches; a page never legitimately emits tab or
+    /// newline outside a value.)
+    fn metachars_unquoted(line: &str) -> String {
+        let mut seen = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if !in_single && !in_double => {
+                    let _ = chars.next();
+                }
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '\t' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')' | '$' | '`' | '\''
+                    if !in_single && !in_double =>
+                {
+                    seen.push(c);
+                }
+                _ => {}
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn the_printed_flags_round_trip_into_the_same_selector() {
+        for args in [
+            SelectorArgs::default(),
+            SelectorArgs {
+                machine: Some("m-3".into()),
+                ..Default::default()
+            },
+            SelectorArgs {
+                session: Some("019bf0".into()),
+                machine: Some("m-3".into()),
+                harness: Some(vec!["claude-code".into(), "codex".into()]),
+                ..Default::default()
+            },
+            SelectorArgs {
+                day: Some("2026-01-15".into()),
+                ..Default::default()
+            },
+            SelectorArgs {
+                since: Some("2026-01-15".into()),
+                until: Some("2026-01-17".into()),
+                ..Default::default()
+            },
+            SelectorArgs {
+                since: Some("2026-01-15".into()),
+                ..Default::default()
+            },
+            SelectorArgs {
+                until: Some("2026-01-15".into()),
+                ..Default::default()
+            },
+            SelectorArgs {
+                since_unix: Some(100),
+                until_unix: Some(200),
+                ..Default::default()
+            },
+        ] {
+            let resolved = args.resolve().unwrap();
+            let flags = selector_cli_flags(&resolved.selector)
+                .unwrap_or_else(|e| panic!("flags must spell: {e}"));
+            let back = parse_back(&flags);
+            assert_eq!(
+                back.selector, resolved.selector,
+                "flags `{flags}` do not round-trip"
+            );
+            // And the sentence is the same information in prose of the same
+            // walk — both exist for the same selector or neither does.
+            assert_eq!(
+                describe_selector(&resolved.selector).is_some(),
+                !flags.is_empty(),
+                "prose and flags must agree on emptiness for `{flags}`"
+            );
+        }
+    }
+
+    /// The flags that pin the word order of the printed command, so review
+    /// sees the exact string the pages print rather than deriving it.
+    #[test]
+    fn the_flag_words_are_the_exact_strings_the_pages_print() {
+        let args = SelectorArgs {
+            session: Some("019bf0".into()),
+            machine: Some("m-3".into()),
+            harness: Some(vec!["codex".into(), "claude-code".into()]),
+            since: Some("2026-01-15".into()),
+            until: Some("2026-01-16".into()),
+            ..Default::default()
+        };
+        let s = args.resolve().unwrap().selector;
+        assert_eq!(
+            selector_cli_flags(&s).unwrap(),
+            "--machine 'm-3' --session '019bf0' --harness 'claude-code,codex' \
+             --since '2026-01-15' --until '2026-01-16'",
+            "sorted harness list (a BTreeSet, not the typed order), one space between flags, \
+             every value a single-quoted shell word"
+        );
+        // A same-day window prints its shortest honest form.
+        let day = SelectorArgs {
+            day: Some("2026-01-15".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        assert_eq!(selector_cli_flags(&day).unwrap(), "--day '2026-01-15'");
+        // An all-constraint selector still has its prose sentence — reused,
+        // not rebuilt, by the page.
+        assert_eq!(
+            describe_selector(&s).unwrap(),
+            "machine `m-3` · session id starts with `019bf0` · harness in {claude-code, codex} \
+             · local day(s) 2026-01-15 .. 2026-01-16 inclusive \
+             (each day = 00:00:00–23:59:59 local)"
+        );
+    }
+
+    /// The hostile-value regression W195's FIX-FIRST review demanded: a machine,
+    /// session prefix, harness name or window text that carries shell syntax
+    /// must reach the printed command as ONE quoted shell word, so pasting the
+    /// command cannot let a value's syntax run (the payloads here are inert
+    /// sentinels — if any ever executed, split a word or turned a page's filter
+    /// into live syntax, the assertions below stop passing).
+    #[test]
+    fn hostile_selector_values_print_as_one_quoted_shell_word_each() {
+        let machine = "m 3; $(pwned) `bt` 'q' \"d\"\nEnd";
+        let prefix = "019 'x;$(y)";
+        let harnesses: Option<BTreeSet<String>> = Some(
+            ["ha r;ne$(x)s".to_string(), "tu\"ck".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let selector = Selector {
+            session_id_prefix: Some(prefix.into()),
+            machine: Some(machine.into()),
+            harnesses,
+            window: Some(crate::selector::TimeWindow {
+                since_unix: Some(1),
+                until_unix: Some(2),
+                how: crate::selector::WindowHow::LocalDays,
+                since_text: Some("2026-01-15$(rm)".into()),
+                until_text: Some("2026-01-16;x".into()),
+            }),
+        };
+        // The exact string the page is allowed to print for this view: every
+        // value wrapped in single quotes, every embedded single quote spelled
+        // close-double-quote-open (`'"'"'`), so a POSIX shell reading the line
+        // reconstructs each value as one literal word.
+        assert_eq!(
+            selector_cli_flags(&selector).unwrap(),
+            "--machine 'm 3; $(pwned) `bt` '\"'\"'q'\"'\"' \"d\"\nEnd' \
+             --session '019 '\"'\"'x;$(y)' \
+             --harness 'ha r;ne$(x)s,tu\"ck' \
+             --since '2026-01-15$(rm)' --until '2026-01-16;x'",
+            "every value must arrive quoted, in the selector walk's order"
+        );
+        // And the line is safe to paste: a shell reading it yields each value
+        // back as one intact word, and holds no metacharacter outside quotes.
+        let flags = selector_cli_flags(&selector).unwrap();
+        assert_eq!(
+            shell_words(&flags),
+            vec![
+                "--machine",
+                machine,
+                "--session",
+                prefix,
+                "--harness",
+                "ha r;ne$(x)s,tu\"ck",
+                "--since",
+                "2026-01-15$(rm)",
+                "--until",
+                "2026-01-16;x",
+            ],
+            "the payloads must ride as single literal words, never as syntax"
+        );
+        assert_eq!(
+            metachars_unquoted(&flags),
+            "",
+            "no separator, substitution or redirection may live outside quotes \
+             (a hostile value's space is caught above, as a split word)"
+        );
+        // And the command still means what the page says it means: with a
+        // window the CLI resolver accepts, the quoted hostile values round-trip
+        // through the reader `chat-stasher export` itself uses — the very
+        // `SelectorArgs` path — into the same selector. Quoting changed nothing
+        // about which sessions the pasted command would select.
+        let hostile = SelectorArgs {
+            session: Some(prefix.into()),
+            machine: Some(machine.into()),
+            harness: Some(vec!["ha r;ne$(x)s".into(), "tu\"ck".into()]),
+            day: Some("2026-01-15".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap();
+        let printed = selector_cli_flags(&hostile.selector).unwrap();
+        assert_eq!(
+            parse_back(&printed).selector,
+            hostile.selector,
+            "quoted hostile values must still select the same set via the CLI's own reader: \
+             {printed}"
+        );
+    }
+
+    // ------------------------------------------------------ the conjunction
+
+    fn harnesses(list: &[&str]) -> Option<BTreeSet<String>> {
+        Some(list.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// What "this view" is: the launch filter AND the page's filter, both of
+    /// which must appear on one command line — a command naming only one of
+    /// them would quietly export more than the page shows.
+    #[test]
+    fn the_command_carries_both_filters_as_one_conjunction() {
+        let launch = Selector {
+            machine: Some("m-1".into()),
+            harnesses: harnesses(&["claude-code", "codex"]),
+            ..Default::default()
+        };
+        let query = SelectorArgs {
+            day: Some("2026-01-15".into()),
+            session: Some("019bf0".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        assert_eq!(
+            conjoined_flags(&launch, &query).unwrap(),
+            "--machine 'm-1' --session '019bf0' --harness 'claude-code,codex' --day '2026-01-15'"
+        );
+        // Harness sets intersect rather than union: the view a facet link
+        // narrows is the set both filters keep.
+        let query_harness = Selector {
+            harnesses: harnesses(&["codex", "gemini"]),
+            ..Default::default()
+        };
+        assert_eq!(
+            conjoined_flags(&launch, &query_harness).unwrap(),
+            "--machine 'm-1' --harness 'codex'"
+        );
+        // One window inside another is the inner one.
+        let launch_day = SelectorArgs {
+            since: Some("2026-01-01".into()),
+            until: Some("2026-02-01".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        let query_day = SelectorArgs {
+            day: Some("2026-01-15".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        assert_eq!(
+            conjoined_flags(&launch_day, &query_day).unwrap(),
+            "--day '2026-01-15'"
+        );
+        // A branch-filter-derived prefix narrows a launch prefix.
+        let launch_prefix = Selector {
+            session_id_prefix: Some("019bf0".into()),
+            ..Default::default()
+        };
+        let query_prefix = Selector {
+            session_id_prefix: Some("019bf0d-".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            conjoined_flags(&launch_prefix, &query_prefix).unwrap(),
+            "--session '019bf0d-'"
+        );
+    }
+
+    /// Filters that cannot hold at once are reported, never approximated: the
+    /// block prints the reason and no command, because a command that
+    /// "almost" matches would export a different set than the page shows.
+    #[test]
+    fn filters_that_cannot_both_hold_are_an_error_never_a_near_miss() {
+        let launch = Selector {
+            machine: Some("m-1".into()),
+            harnesses: harnesses(&["claude-code"]),
+            session_id_prefix: Some("019bf0".into()),
+            ..Default::default()
+        };
+        for (query, names) in [
+            (
+                Selector {
+                    machine: Some("m-2".into()),
+                    ..Default::default()
+                },
+                "different machines",
+            ),
+            (
+                Selector {
+                    harnesses: harnesses(&["codex"]),
+                    ..Default::default()
+                },
+                "disjoint harness sets",
+            ),
+            (
+                Selector {
+                    session_id_prefix: Some("0000".into()),
+                    ..Default::default()
+                },
+                "contradictory prefixes",
+            ),
+        ] {
+            let why = conjoined_flags(&launch, &query).expect_err(names);
+            assert!(
+                why.contains("not spellable"),
+                "{names} must be named as unspellable, not swallowed: {why}"
+            );
+        }
+        // Windows that do not overlap select nothing by construction — the
+        // same class an inverted `--since/--until` is refused for on the CLI.
+        let launch_day = SelectorArgs {
+            day: Some("2026-01-15".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        let other_day = SelectorArgs {
+            day: Some("2026-03-01".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        let why = conjoined_flags(&launch_day, &other_day).expect_err("disjoint windows");
+        assert!(
+            why.contains("do not overlap"),
+            "the refusal must name the disjoint windows: {why}"
+        );
+        // The deprecated unix spelling cannot mix with day spellings on one
+        // command line (`--since` conflicts with `--until-unix`), so neither
+        // can the intersection.
+        let unix = SelectorArgs {
+            since_unix: Some(100),
+            until_unix: Some(200),
+            ..Default::default()
+        }
+        .resolve()
+        .unwrap()
+        .selector;
+        let why = conjoined_flags(&launch_day, &unix).expect_err("mixed window spellings");
+        assert!(
+            why.contains("unix seconds"),
+            "the refusal must name the mixed spellings: {why}"
+        );
     }
 }

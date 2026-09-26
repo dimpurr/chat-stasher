@@ -46,6 +46,8 @@
 //! * [`sessions`] — `/sessions`, `/session` and the raw `/content` view.
 //! * [`reader`] — `/reader` and the message-block rendering.
 //! * [`search`] — `/search`, the local full-text index's one screen.
+//! * [`export`] — `/export`, the one-route attachment download whose bytes are
+//!   the session's archived lines, identical to `read`'s.
 //! * [`json`] — `/api/overview`, `/api/sessions` and `/api/search`.
 //! * [`facets`] — the platform/agent grouping table (29-UI-DESIGN §2), the
 //!   `/sessions` facet bar, and the group any harness id falls into.
@@ -66,6 +68,7 @@ use crate::selector::{
 };
 use crate::view::Response;
 
+pub(crate) mod export;
 pub(crate) mod facets;
 pub(crate) mod html;
 pub(crate) mod json;
@@ -539,6 +542,12 @@ pub fn health_of(host: Option<&HostSnapshot>, now_unix: i64) -> Health {
 /// One session's decrypted payload, as `/content` renders it.
 #[derive(Debug, Clone)]
 pub struct Content {
+    /// The session's exact archived bytes: every sealed shard decrypted and
+    /// concatenated in sequence order. `body` below is this lossily decoded
+    /// for display; the raw bytes are kept because the download route hands
+    /// them on unmodified — byte-identical to what `read`/`export` produce for
+    /// the same session — and a lossy decode is a rewrite, not a rendering.
+    pub concat: Vec<u8>,
     /// `(shard file name, sha256 hex)` in sequence order — the same lines
     /// `chat-stasher read` prints.
     pub shards: Vec<(String, String)>,
@@ -548,6 +557,31 @@ pub struct Content {
     pub bytes: usize,
     /// The concatenated JSONL, lossily decoded for display.
     pub body: String,
+}
+
+impl Content {
+    /// Assemble one payload from its **exact** bytes. The display body, the
+    /// byte count and the sha256 are derived here rather than hand-set, so a
+    /// caller (the one real fetch, and every test fixture) cannot claim a
+    /// length or a digest its own bytes reject — the download route pins its
+    /// `X-Checksum-Sha256` on this same derivation, so the header cannot drift
+    /// from the body it describes.
+    pub fn from_concat(concat: Vec<u8>, shards: Vec<(String, String)>) -> Self {
+        use sha2::{Digest, Sha256};
+        let concat_sha256 = Sha256::digest(&concat)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let bytes = concat.len();
+        let body = String::from_utf8_lossy(&concat).into_owned();
+        Self {
+            concat,
+            shards,
+            concat_sha256,
+            bytes,
+            body,
+        }
+    }
 }
 
 /// Anything the `/content` route needs to fetch payload.
@@ -751,7 +785,7 @@ pub fn split_target(target: &str) -> (&str, Query) {
     (path, params)
 }
 
-fn param<'a>(params: &'a Query, key: &str) -> Option<&'a str> {
+pub(super) fn param<'a>(params: &'a Query, key: &str) -> Option<&'a str> {
     params
         .iter()
         .find(|(k, _)| k == key)
@@ -1144,6 +1178,7 @@ pub fn handle(
         "/sessions" => Some(sessions::list_page(params, token, data)),
         "/session" => Some(sessions::one_session_page(params, token, data)),
         "/content" => Some(sessions::content_page(params, data, content)),
+        "/export" => Some(export::export_page(params, data, content)),
         "/reader" => Some(reader::reader_page(params, token, data, content)),
         // The one route that reads the text index. It is the only branch that
         // touches `index`, which is what lets the router test prove the other
@@ -1182,17 +1217,31 @@ pub(super) fn index_param<'a>(params: &Query, data: &'a UiData) -> Option<&'a Ui
     data.session_at(index)
 }
 
+/// The answer every row-indexed route (`/session`, `/content`, `/export`)
+/// gives an `i` that names no row. One function because these routes are one
+/// family: an index is a handle into the inventory, so an unresolvable one is
+/// a usage error — never a page about nothing, and never an empty session.
+pub(super) fn bad_index_response() -> Response {
+    Response::text(
+        400,
+        "Bad Request",
+        "ui: `i` must name a row of this dashboard's session list. An index that \
+         resolves to nothing is a usage error, not an empty session.\n",
+    )
+}
+
 /// Every route this server answers, in the order the 404 body names them.
 ///
 /// The one place the route table lives: `view::route` builds its 404 wording
 /// from this, and the router test proves [`handle`] answers each of them.
-pub const ROUTES: [&str; 9] = [
+pub const ROUTES: [&str; 10] = [
     "/",
     "/sessions",
     "/session",
     "/reader",
     "/content",
     "/search",
+    "/export",
     "/api/overview",
     "/api/sessions",
     "/api/search",
@@ -1698,12 +1747,10 @@ pub(crate) mod fixture {
             self.calls
                 .borrow_mut()
                 .push((machine.to_string(), session_id.to_string()));
-            Ok(Content {
-                shards: vec![("000001.jsonl".to_string(), "ab".repeat(32))],
-                concat_sha256: "cd".repeat(32),
-                bytes: 3,
-                body: "{\"a\":1}\n".to_string(),
-            })
+            Ok(Content::from_concat(
+                b"{\"a\":1}\n".to_vec(),
+                vec![("000001.jsonl".to_string(), "ab".repeat(32))],
+            ))
         }
     }
 
@@ -2151,25 +2198,29 @@ mod tests {
     fn only_the_body_routes_reach_the_payload_tier() {
         let d = fixture::data();
         let src = CountingContent::default();
-        for target in [
-            "/",
-            "/sessions",
-            "/sessions?machine=m-1",
-            "/session?i=0",
-            "/session?i=1",
-            "/api/overview",
-            "/api/sessions",
+        for (target, want) in [
+            ("/", 200),
+            ("/sessions", 200),
+            ("/sessions?machine=m-1", 200),
+            ("/session?i=0", 200),
+            ("/session?i=1", 200),
+            ("/api/overview", 200),
+            ("/api/sessions", 200),
+            // The export route refuses bad input for exactly the same price:
+            // an unresolvable `i` and an unknown `fmt` fetch nothing.
+            ("/export", 400),
+            ("/export?i=1&fmt=csv", 400),
         ] {
             let r = req(target, &d, &src);
-            assert_eq!(r.status, 200, "{target}");
+            assert_eq!(r.status, want, "{target}");
             assert!(
                 src.calls.borrow().is_empty(),
-                "{target} reached the payload tier; only /content and /reader may"
+                "{target} reached the payload tier; only /content, /reader and /export may"
             );
         }
         // …and the instrument can say yes, once per body route, for the row the
         // URL asked for.
-        for target in ["/content?i=1", "/reader?i=1"] {
+        for target in ["/content?i=1", "/reader?i=1", "/export?i=1"] {
             let r = req(target, &d, &src);
             assert_eq!(r.status, 200, "{target}");
             assert_eq!(
@@ -2233,12 +2284,7 @@ mod tests {
                 );
                 body.push_str(&"QUFB".repeat(2048));
                 body.push_str(")\"}}\n");
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "aa".repeat(32),
-                    bytes: body.len(),
-                    body,
-                })
+                Ok(Content::from_concat(body.into_bytes(), Vec::new()))
             }
         }
         let response = req("/reader?i=0", &fixture::data(), &ReaderSource);
@@ -2338,13 +2384,10 @@ mod tests {
         struct UnknownSource;
         impl ContentSource for UnknownSource {
             fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "bb".repeat(32),
-                    bytes: 32,
-                    body: "{\"messages\":[{\"role\":\"user\",\"content\":\"archived\"}]}\n"
-                        .to_string(),
-                })
+                Ok(Content::from_concat(
+                    b"{\"messages\":[{\"role\":\"user\",\"content\":\"archived\"}]}\n".to_vec(),
+                    Vec::new(),
+                ))
             }
         }
         let mut data = fixture::data();
@@ -2368,14 +2411,11 @@ mod tests {
         struct UnreadHarness;
         impl ContentSource for UnreadHarness {
             fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "ab".repeat(32),
-                    bytes: 64,
-                    body: "{\"messages\":[{\"role\":\"user\",\"content\":\"words\"}]}\n\
-                           not json either\n"
-                        .to_string(),
-                })
+                Ok(Content::from_concat(
+                    b"{\"messages\":[{\"role\":\"user\",\"content\":\"words\"}]}\nnot json either\n"
+                        .to_vec(),
+                    Vec::new(),
+                ))
             }
         }
         let mut data = fixture::data();
@@ -2415,19 +2455,15 @@ mod tests {
     struct ThreeMessages;
     impl ContentSource for ThreeMessages {
         fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
-            Ok(Content {
-                shards: Vec::new(),
-                concat_sha256: "dd".repeat(32),
-                bytes: 96,
-                body: (0..3)
-                    .map(|n| {
-                        format!(
-                            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"m{n}\"}}}}"
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            })
+            let body = (0..3)
+                .map(|n| {
+                    format!(
+                        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"m{n}\"}}}}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(Content::from_concat(body.into_bytes(), Vec::new()))
         }
     }
 
@@ -2451,12 +2487,7 @@ mod tests {
         struct EmptyBody;
         impl ContentSource for EmptyBody {
             fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "ee".repeat(32),
-                    bytes: 0,
-                    body: String::new(),
-                })
+                Ok(Content::from_concat(Vec::new(), Vec::new()))
             }
         }
         let r = req("/reader?i=0", &fixture::data(), &EmptyBody);
@@ -2473,12 +2504,10 @@ mod tests {
         struct ForeignShape;
         impl ContentSource for ForeignShape {
             fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "ff".repeat(32),
-                    bytes: 48,
-                    body: "{\"unexpected\":true}\nnot json either\n".to_string(),
-                })
+                Ok(Content::from_concat(
+                    b"{\"unexpected\":true}\nnot json either\n".to_vec(),
+                    Vec::new(),
+                ))
             }
         }
         let r = req("/reader?i=0", &fixture::data(), &ForeignShape);
@@ -2539,16 +2568,12 @@ mod tests {
         impl ContentSource for HugeMessage {
             fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
                 let filler = "a".repeat(FILLER);
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "11".repeat(32),
-                    bytes: filler.len(),
-                    body: serde_json::json!({
-                        "type": "user",
-                        "message": {"role": "user", "content": filler},
-                    })
-                    .to_string(),
+                let body = serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": filler},
                 })
+                .to_string();
+                Ok(Content::from_concat(body.into_bytes(), Vec::new()))
             }
         }
         let html = req("/reader?i=0", &fixture::data(), &HugeMessage).body;
@@ -2581,16 +2606,12 @@ mod tests {
                                [j](javascript:alert(1)) psl [p](//a.invalid/x) \
                                bs [b](/\\a.invalid/x) dbs [d](\\a.invalid/x) \
                                frag [f](#section) end";
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "22".repeat(32),
-                    bytes: content.len(),
-                    body: serde_json::json!({
-                        "type": "user",
-                        "message": {"role": "user", "content": content},
-                    })
-                    .to_string(),
+                let body = serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": content},
                 })
+                .to_string();
+                Ok(Content::from_concat(body.into_bytes(), Vec::new()))
             }
         }
         let html = req("/reader?i=0", &fixture::data(), &Links).body;
@@ -2651,14 +2672,11 @@ mod tests {
         struct NumericTime;
         impl ContentSource for NumericTime {
             fn fetch(&self, _m: &str, _s: &str) -> Result<Content, String> {
-                Ok(Content {
-                    shards: Vec::new(),
-                    concat_sha256: "33".repeat(32),
-                    bytes: 72,
-                    body: "{\"type\":\"user\",\"timestamp\":1736944496,\
-                           \"message\":{\"role\":\"user\",\"content\":\"t\"}}\n"
-                        .to_string(),
-                })
+                Ok(Content::from_concat(
+                    b"{\"type\":\"user\",\"timestamp\":1736944496,\"message\":{\"role\":\"user\",\"content\":\"t\"}}\n"
+                        .to_vec(),
+                    Vec::new(),
+                ))
             }
         }
         let html = req("/reader?i=0", &fixture::data(), &NumericTime).body;
@@ -3898,6 +3916,150 @@ mod tests {
         assert_eq!(walked, [2, 6], "{body}");
     }
 
+    // ------------------------------------------------- the R7 CLI-parity block
+
+    /// The export block on `/sessions` is the view's CLI twin, and the view is
+    /// the launch filter AND the page's filter (the same rule the launch
+    /// banner and every drill-down follow). A command naming only one of the
+    /// two would export more than the page shows — the exact quiet error this
+    /// block exists not to commit.
+    #[test]
+    fn the_export_block_spells_the_view_as_one_command_line() {
+        let plain = req("/sessions", &fixture::data(), &NoContent).body;
+        assert!(
+            plain.contains(
+                "<pre>chat-stasher export --destination &#39;dest-under-test&#39; --out ~/out</pre>"
+            ),
+            "an unfiltered view still gets the command — the whole view is a set too: {plain}"
+        );
+        let filtered = req(
+            "/sessions?machine=m-1&harness=claude-code",
+            &fixture::data(),
+            &NoContent,
+        )
+        .body;
+        assert!(
+            filtered.contains(
+                "--machine &#39;m-1&#39; --harness &#39;claude-code&#39; --out ~/out</pre>"
+            ),
+            "the page's own flags, verbatim copyable: {filtered}"
+        );
+        // A dashboard opened with `--repo` has no destination its command can
+        // name: the label is a placeholder word, and the page prints the flag
+        // the reader must fill in — never an argument nobody can type.
+        let mut d = fixture::data();
+        d.destination_label = EXPLICIT_REPO_LABEL.to_string();
+        let repo_label = req("/sessions", &d, &NoContent).body;
+        assert!(
+            repo_label.contains("--repo &lt;this dashboard&#39;s repository&gt; --out ~/out"),
+            "the command must name the flag the reader fills in: {repo_label}"
+        );
+    }
+
+    /// The launch filter rides along on the same command line, because the
+    /// rows on the page are its rows too.
+    #[test]
+    fn the_export_command_carries_the_launch_filter_with_the_page_filter() {
+        let args = crate::selector::SelectorArgs {
+            machine: Some("m-1".into()),
+            ..Default::default()
+        };
+        let launch = args.resolve().unwrap().selector;
+        let mut d = fixture::data();
+        // Rebuild the view under the launch filter the way `cmd_ui` does —
+        // the fixture keeps its whole inventory, only the view shrinks.
+        let mut r = fixture::report();
+        r.hits.retain(|h| h.machine == "m-1");
+        r.sessions_seen = r.hits.len();
+        d = UiData::from_report(&r, "dest-under-test", launch, NOW);
+        assert_eq!(d.sessions.len(), 2);
+        let html = req("/sessions?harness=claude-code", &d, &NoContent).body;
+        assert!(
+            html.contains("--machine &#39;m-1&#39; --harness &#39;claude-code&#39; --out ~/out"),
+            "launch AND page filters, every value a quoted shell word: {html}"
+        );
+        // …and a page filter that contradicts the launched one is refused
+        // with the reason, not a near-miss command.
+        let html = req("/sessions?machine=m-2", &d, &NoContent).body;
+        assert!(
+            html.contains("cannot be spelled as one"),
+            "the conflict must be named: {html}"
+        );
+        let block = html
+            .split("<h2>Export this view (CLI)</h2>")
+            .nth(1)
+            .unwrap();
+        let block = &block[..block.find("</section>").unwrap()];
+        assert!(
+            !block.contains("<pre>"),
+            "no command may be printed for an unspellable view: {block}"
+        );
+    }
+
+    /// A merged view is not one destination, and `chat-stasher export` names
+    /// exactly one: `--destination` takes a single value and the command
+    /// refuses a cross-destination merge outright ("archives are not required
+    /// to agree"). The block's own promise is that the command it prints is
+    /// ready to copy, so a merged page must print no command — the joint label
+    /// (`a,b`) is not a destination any config declares, and pasting it would
+    /// be a usage error dressed as a command that runs.
+    #[test]
+    fn a_merged_view_refuses_to_print_one_export_command() {
+        let merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        assert_eq!(merged.destinations.len(), 2);
+        let html = req("/sessions", &merged, &NoContent).body;
+        let block = html
+            .split("<h2>Export this view (CLI)</h2>")
+            .nth(1)
+            .unwrap();
+        let block = &block[..block.find("</section>").unwrap()];
+        assert!(
+            !block.contains("<pre>"),
+            "a page the one command cannot select must print no command: {block}"
+        );
+        assert!(
+            block.contains("cross-destination merge"),
+            "the refusal must say why, not merely omit the command: {block}"
+        );
+        // The destination count and the joint label are what make the refusal
+        // checkable by the reader instead of a claim they have to take on
+        // faith — and the label is printed escaped, like every other one.
+        assert!(
+            block.contains("2 destinations") && block.contains("dest-one,dest-two"),
+            "the refusal names the view it refused: {block}"
+        );
+        // The single-destination page is untouched by the refusal: the same
+        // fixture with one destination still gets its command.
+        let single = UiData::from_reports(
+            &[DestinationRead {
+                label: "dest-one".into(),
+                outcome: Ok(&fixture::report()),
+            }],
+            Selector::default(),
+            NOW,
+        );
+        let html = req("/sessions", &single, &NoContent).body;
+        assert!(
+            html.contains(
+                "<pre>chat-stasher export --destination &#39;dest-one&#39; --out ~/out</pre>"
+            ),
+            "one destination still gets its ready-to-copy command: {html}"
+        );
+    }
+
     /// The zero-JS nav is links a browser can follow: each carries the query
     /// the page was reached by (filters, sort, width), moves only the window,
     /// and the window it names is the one that comes next. Following it is
@@ -4141,6 +4303,11 @@ mod tests {
         assert!(
             html.contains("activity-index --rebuild"),
             "the note names the repair command: {html}"
+        );
+        assert!(
+            html.contains("--machine &#39;m-1&#39;"),
+            "the machine name inside the repair command is a quoted shell word — the \
+             archive, not the reader, chose those bytes: {html}"
         );
         // A fresh machine's page gets no coverage note at all.
         let fresh = req("/sessions?machine=m-2", &d, &NoContent).body;
@@ -4860,19 +5027,15 @@ mod golden {
 
     impl ContentSource for Conversation {
         fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
-            Ok(Content {
-                shards: Vec::new(),
-                concat_sha256: "9c".repeat(32),
-                bytes: 96,
-                body: (0..3)
-                    .map(|n| {
-                        format!(
-                            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"turn {n}\"}}}}"
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            })
+            let body = (0..3)
+                .map(|n| {
+                    format!(
+                        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"turn {n}\"}}}}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(Content::from_concat(body.into_bytes(), Vec::new()))
         }
     }
 
@@ -4916,6 +5079,12 @@ mod golden {
         ("session-zero", "/session?i=0", Source::Counting),
         ("session-two", "/session?i=2", Source::Counting),
         ("content-one", "/content?i=1", Source::Counting),
+        // The R7 download. `i=1` is the extension-delivered row, so the
+        // capture pins the attachment, its short-id filename, the
+        // X-Checksum-Sha256 header and the exact bytes of the fetch it rode.
+        ("export-one", "/export?i=1", Source::Counting),
+        ("export-denied", "/export?i=1", Source::Denied),
+        ("export-bad-fmt", "/export?i=1&fmt=csv", Source::Counting),
         ("reader-one", "/reader?i=1", Source::Counting),
         ("reader-window", "/reader?i=1&m=0&n=1", Source::Counting),
         ("reader-multi", "/reader?i=0", Source::Conversation),
@@ -4970,10 +5139,33 @@ mod golden {
             &NoIndex,
         )
         .unwrap_or_else(|| panic!("`{target}` must be a known route"));
-        format!(
-            "status: {} {}\ncontent-type: {}\n\n{}",
-            response.status, response.reason, response.content_type, response.body
-        )
+        let mut out = format!(
+            "status: {} {}\ncontent-type: {}\n",
+            response.status, response.reason, response.content_type
+        );
+        // The download route's two headers are part of what it says, so they
+        // are captured too — printed only when the response carries any, so
+        // the twenty-odd page captures keep the exact bytes they had before
+        // this route existed.
+        for (name, value) in &response.extra_headers {
+            out.push_str(name);
+            out.push_str(": ");
+            out.push_str(value);
+            out.push('\n');
+        }
+        out.push('\n');
+        match &response.body_bytes {
+            Some(bytes) => {
+                // A download's bytes are exact but synthetic-ASCII here; the
+                // count line is what makes an invisible byte visible to the
+                // capture's reader (0 bytes, a truncated one, a trailing
+                // byte are all a plain string comparison can miss).
+                out.push_str(&format!("body-bytes: {}\n", bytes.len()));
+                out.push_str(&String::from_utf8_lossy(bytes));
+            }
+            None => out.push_str(&response.body),
+        }
+        out
     }
 
     fn golden_path(name: &str) -> std::path::PathBuf {

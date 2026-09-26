@@ -91,9 +91,24 @@ fn write_shard(stage: &Path, machine: &str, session: &str, prompt: &str) {
 
 /// A destination repository holding `sessions`, plus its masterkey.
 fn make_repo(sandbox: &Path, name: &str, sessions: &[&str]) -> (String, String) {
+    make_repo_prompted(sandbox, name, sessions, "a synthetic prompt")
+}
+
+/// The same, with the prompt every shard is written from.
+///
+/// The prompt is a parameter because two destinations holding the *same
+/// session id* with different prompts hold two different **copies**, and a
+/// differing copy is the only thing that makes "reads the copy the row names"
+/// observable rather than indistinguishable from reading the other one.
+fn make_repo_prompted(
+    sandbox: &Path,
+    name: &str,
+    sessions: &[&str],
+    prompt: &str,
+) -> (String, String) {
     let stage = sandbox.join(format!("stage-{name}"));
     for session in sessions {
-        write_shard(&stage, "mbp-a", session, "a synthetic prompt");
+        write_shard(&stage, "mbp-a", session, prompt);
     }
     let repo = sandbox.join(format!("repo-{name}"));
     let key = sandbox.join("keys").join(format!("masterkey-{name}.json"));
@@ -147,6 +162,37 @@ fn two_destinations(sandbox: &Path) {
             dest_config(&repo_b, &key_b),
         ),
     );
+}
+
+/// The same two destinations, except `shared` is sealed from a **different**
+/// prompt in each — so the two copies of that one session id are different
+/// bytes, and a payload read can be attributed to the copy it came from.
+fn two_destinations_with_differing_copies(sandbox: &Path) {
+    let (repo_a, key_a) = make_repo_prompted(sandbox, "alpha", &[SHARED, ONLY_A], "alpha's copy");
+    let (repo_b, key_b) = make_repo_prompted(sandbox, "beta", &[SHARED, ONLY_B], "beta's copy");
+    write_config(
+        sandbox,
+        &format!(
+            "[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            dest_config(&repo_a, &key_a),
+            dest_config(&repo_b, &key_b),
+        ),
+    );
+}
+
+/// The bytes `push` sealed for one session in one destination's stage — what
+/// `read` returns for it, and therefore what `/export` must hand back.
+fn sealed_bytes(sandbox: &Path, destination: &str, session: &str) -> Vec<u8> {
+    fs::read(
+        sandbox
+            .join(format!("stage-{destination}"))
+            .join("sessions")
+            .join("mbp-a")
+            .join(session)
+            .join("000")
+            .join("000001.jsonl"),
+    )
+    .expect("the stage file the archive was sealed from")
 }
 
 // ----------------------------------------------------------------- socket
@@ -764,5 +810,102 @@ fn the_merged_search_answers_from_every_readable_index() {
     assert_eq!(
         v["matched"], 3,
         "three distinct sessions matched once each, though two copies hold them"
+    );
+}
+// ------------------------------------------------- W195: /export in a merge
+
+/// `/export` under a merged view: the download of a row is the copy **that
+/// row names**, byte for byte, and it is not the other destination's copy.
+///
+/// Both halves matter and only the second one is a test. The rule for which
+/// copy a row is read from was set for `/content` and `/reader` when the merge
+/// was built — the first destination named that holds the row — and `/export`
+/// goes through the same `ContentSource::fetch`, so what is checked here is
+/// that the new route inherits it rather than reaching for a store of its own.
+/// With identical copies that property is unfalsifiable, which is why this
+/// fixture seals `shared` from a different prompt in each destination and the
+/// two expected bodies are asserted to differ before either is compared.
+#[test]
+fn a_merged_view_exports_each_row_from_the_copy_it_names() {
+    let sb = sandbox();
+    two_destinations_with_differing_copies(sb.path());
+    let (ui, _) = Ui::start(sb.path(), &["--destination", "alpha,beta"]);
+
+    let from_alpha = sealed_bytes(sb.path(), "alpha", SHARED);
+    let from_beta = sealed_bytes(sb.path(), "beta", SHARED);
+    assert!(
+        from_alpha != from_beta,
+        "the fixture must hold two different copies, or this test cannot tell \
+         which one was served"
+    );
+    // …and the copy only beta holds is a third body, so `only-b` cannot be
+    // answered by either of alpha's files.
+    let only_b_sealed = sealed_bytes(sb.path(), "beta", ONLY_B);
+
+    let rows = ui.rows("?limit=100");
+    let index_of = |session: &str| -> String {
+        let short = chat_stasher::id::short_session_id(session);
+        rows.iter()
+            .find(|(_, id)| *id == short)
+            .map(|(i, _)| i.clone())
+            .unwrap_or_else(|| panic!("no row for {short} in {rows:?}"))
+    };
+
+    // `shared` is held by both copies and alpha is named first, so alpha's
+    // copy supplies the row — including the download of it.
+    let (status, body) = ui.get(&format!("/export?i={}&fmt=jsonl", index_of(SHARED)));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body.as_bytes(),
+        from_alpha.as_slice(),
+        "a merged row's download must be the copy the row names (alpha, first), \
+         not the other copy and not a re-encoding"
+    );
+    assert_ne!(
+        body.as_bytes(),
+        from_beta.as_slice(),
+        "the other destination's copy must not be what a download serves"
+    );
+
+    // `only-b` exists in beta alone, so the row names beta even though beta is
+    // second on the command line: the rule is "the first destination that
+    // holds it", not "the first destination named".
+    let (status, body) = ui.get(&format!("/export?i={}&fmt=jsonl", index_of(ONLY_B)));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body.as_bytes(),
+        only_b_sealed.as_slice(),
+        "a row only the second destination holds is read from the second \
+         destination, not refused for being absent from the first"
+    );
+
+    // The one thing a merged view cannot do is spell itself as one CLI
+    // command: `export --destination` takes a single value and the command has
+    // no cross-destination merge. The block says so and prints no command.
+    let (status, html) = ui.get("/sessions");
+    assert_eq!(status, 200);
+    let block = html
+        .split("<section id=export-cli>")
+        .nth(1)
+        .expect("the block exists on a merged page too")
+        .split("</section>")
+        .next()
+        .unwrap();
+    assert!(
+        !block.contains("<pre>"),
+        "a merged view must not print a command that cannot run: {block}"
+    );
+    assert!(
+        block.contains("cross-destination merge"),
+        "and it must say why, not merely omit the command: {block}"
+    );
+
+    // Per-session downloads are not what was refused: the session page still
+    // offers the link, and the link is the row's own copy.
+    let (status, html) = ui.get(&format!("/session?i={}", index_of(SHARED)));
+    assert_eq!(status, 200);
+    assert!(
+        html.contains("/export?i="),
+        "a merged session page still offers its download: {html}"
     );
 }
