@@ -377,10 +377,10 @@ fn group(
 // ------------------------------------------------------------------ rendering
 
 fn page_search(request: &Request, answer: &Answer, token: &str, data: &UiData) -> String {
-    let mut out = head(&format!(
-        "chat-stasher · search · {}",
-        data.destination_label
-    ));
+    let mut out = head(
+        &format!("chat-stasher · search · {}", data.destination_label),
+        token,
+    );
     out.push_str("<h1>Search</h1>\n<p class=sub><a href=\"/?token=");
     out.push_str(&percent_encode(token));
     out.push_str("\">← overview</a> · <a href=\"/sessions?token=");

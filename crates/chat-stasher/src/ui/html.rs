@@ -7,7 +7,7 @@
 use crate::schedule::sh_single_quote;
 use crate::selector::Selector;
 
-use super::{DestinationState, UiData, UiSession, DAY};
+use super::{percent_encode, DestinationState, UiData, UiSession, DAY};
 
 // ------------------------------------------------------------- html rendering
 
@@ -131,14 +131,38 @@ border-radius:4px;overflow-x:auto;font-size:.82rem;line-height:1.35}
 .tool{border-left:3px solid var(--link);padding-left:.7rem}
 .attachment{color:var(--muted);border-left:3px solid var(--line);padding-left:.7rem}
 nav.sub{display:flex;gap:1rem}
+/* UIB-5 (29-UI-DESIGN §8.1/§8.2): the skip link is the page's first tab stop,
+   parked off the canvas until focus brings it back — pure CSS, no script. The
+   ring is drawn by :focus-visible only, so a click that focuses for clicking
+   does not also paint one. The pages nav is a link trio carrying the access
+   keys the footer's help line names. */
+:focus-visible{outline:2px solid var(--link)}
+a.skip{position:absolute;left:-10000px}
+a.skip:focus{left:0}
+nav.top{font-size:.85rem;margin:0 0 1rem}
 "#;
 
-pub(super) fn head(title: &str) -> String {
+/// Every page's opening chrome. The skip link is the body's first tab stop
+/// (§8.1), the pages nav is the second group and carries the three universal
+/// access keys the footer's help line names, and `<main>` is the landmark the
+/// skip link jumps to — so every route gets all three from this one function.
+///
+/// `token` is required: the nav links are real links, and every link this
+/// server emits carries the per-launch token. The skip target is id=`content`
+/// rather than `main`: the message anchors claim the `#m…` namespace, and the
+/// search page's no-anchor test reads it as reserved.
+pub(super) fn head(title: &str, token: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=en><head><meta charset=utf-8>\n\
          <meta name=viewport content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n<style>{STYLE}</style></head><body>\n",
-        esc(title)
+         <title>{title_}</title>\n<style>{STYLE}</style></head><body>\n\
+         <a class=skip href=\"#content\">Skip to content</a>\n\
+         <nav class=top aria-label=\"pages\"><a href=\"/?token={t}\" accesskey=1>overview</a> · \
+         <a href=\"/sessions?token={t}\" accesskey=2>sessions</a> · \
+         <a href=\"/search?token={t}\" accesskey=f>search</a></nav>\n\
+         <main id=content>\n",
+        title_ = esc(title),
+        t = percent_encode(token),
     )
 }
 
@@ -154,7 +178,7 @@ pub(super) fn head(title: &str) -> String {
 /// no footer, because it is read as a property of the page in front of you.
 pub(super) fn footer(data: &UiData) -> String {
     format!(
-        "<footer>\n\
+        "</main>\n<footer>\n\
          <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read \
          taken before the server started (snapshots + index + tree + the activity sidecar). \
          The only conversation text it holds is each session's one-line label — at most 100 \
@@ -172,7 +196,7 @@ pub(super) fn footer(data: &UiData) -> String {
 /// on the page come from it rather than from the payload tier.
 pub(super) fn search_footer(data: &UiData) -> String {
     format!(
-        "<footer>\n\
+        "</main>\n<footer>\n\
          <p><b>Index tier.</b> This page was rendered from one archive-metadata read taken \
          before the server started plus the local full-text index. Each hit shows at most about \
          240 characters of conversation text around the match, taken from that index — not from \
@@ -184,11 +208,21 @@ pub(super) fn search_footer(data: &UiData) -> String {
     )
 }
 
-/// The two statements every page shares, whatever tier it reads.
+/// The statements every page shares, whatever tier it reads.
+///
+/// The keyboard line is §8.2's permanently-present help line — the same
+/// sentence on every page, so the access keys are documented where they are
+/// used rather than only in a manual nobody has open. The modifier is left to
+/// the browser because it is the browser that picks one.
 fn footer_tail() -> &'static str {
     "<p>Machines are named by their archive partition id, which is the key the repository \
      actually partitions on. Times are UTC. No JavaScript, no external asset, no \
      off-host link is loaded by this page.</p>\n\
+     <p><b>Keyboard.</b> Every control is a link or a plain form, so Tab reaches each in \
+     the order it is shown, and the first stop is the skip link. Shortcuts use the \
+     access-key modifier your browser assigns (Option on macOS, Alt elsewhere): \
+     <b>1</b> overview · <b>2</b> sessions · <b>f</b> search · \
+     <b>[</b> previous page · <b>]</b> next page · <b>r</b> raw shards.</p>\n\
      <p><b>This server is on 127.0.0.1, which is not a security boundary</b> — any other \
      program on this machine can connect to it. Access is gated only by the random token \
      in this page's URL. Do not share the URL. The server exits by itself when idle.</p>\n\

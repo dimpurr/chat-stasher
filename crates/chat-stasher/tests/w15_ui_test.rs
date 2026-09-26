@@ -1693,6 +1693,175 @@ fn the_html_nav_links_walk_the_same_list_the_api_does() {
     assert!(page2.contains("<b aria-current=\"page\">2</b>"), "{page2}");
 }
 
+/// UIB-5 (29-UI-DESIGN §8.1/§8.2): the keyboard package, on every HTML route.
+///
+/// Three properties, black-box over the real socket:
+///
+/// * The shared chrome lands on every page — the skip link is the body's
+///   first tab stop and points at the one `<main>`, the stylesheet carries
+///   the `:focus-visible` ring and the skip link's focus-only visibility, the
+///   pages nav carries the three universal access keys, and the footer help
+///   line names every key.
+/// * The page-local keys sit on the control they name: `[`/`]` on the list's
+///   and the reader's prev/next links, `r` on the raw-shards links, and the
+///   search form is labelled and autofocused.
+/// * Nothing interactive depends on hover or script: no `<script>`, no
+///   `javascript:` URL — every control is a link or a plain form control.
+#[test]
+fn the_keyboard_chrome_is_on_every_html_route() {
+    let sb = sandbox();
+    let (repo, key) = build_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+    let wide = row_index(&ui, "mbp-a", WIDE);
+
+    let skip = "<a class=skip href=\"#content\">Skip to content</a>";
+    let ring = ":focus-visible{outline:2px solid var(--link)}";
+    let help = "access-key modifier your browser assigns (Option on macOS, Alt elsewhere): \
+                <b>1</b> overview · <b>2</b> sessions · <b>f</b> search · \
+                <b>[</b> previous page · <b>]</b> next page · <b>r</b> raw shards";
+    let t = url_encode(&ui.token);
+    let trio = [
+        format!("<a href=\"/?token={t}\" accesskey=1>overview</a>"),
+        format!("<a href=\"/sessions?token={t}\" accesskey=2>sessions</a>"),
+        format!("<a href=\"/search?token={t}\" accesskey=f>search</a>"),
+    ];
+    let routes: Vec<String> = [
+        "/".to_string(),
+        "/sessions".to_string(),
+        format!("/session?i={wide}"),
+        format!("/reader?i={wide}"),
+        format!("/content?i={wide}"),
+        "/search".to_string(),
+    ]
+    .to_vec();
+    for target in &routes {
+        let (status, page) = ui.get(target);
+        assert_eq!(status, 200, "{target}: {page}");
+        // The skip link is the first anchor in the document — the head holds
+        // no links, so anything before this index would be a tab stop that
+        // pre-empts the skip.
+        let first_anchor = page
+            .find("<a ")
+            .unwrap_or_else(|| panic!("no link on {target}"));
+        let at = page
+            .find(skip)
+            .unwrap_or_else(|| panic!("no skip link on {target}: {page}"));
+        assert_eq!(
+            first_anchor, at,
+            "{target}: the skip link must be the first tab stop: {page}"
+        );
+        let main = page
+            .find("<main id=content>")
+            .expect("{target}: a main landmark");
+        assert!(
+            at < main,
+            "{target}: skip link must precede the main it jumps to"
+        );
+        assert_eq!(
+            page.matches("</main>").count(),
+            1,
+            "{target}: one main, closed once: {page}"
+        );
+        assert!(
+            page.find("</main>").unwrap() < page.find("<footer>").unwrap(),
+            "{target}: the footer ends the page, the main ends the content"
+        );
+        assert!(page.contains(ring), "{target}: the focus ring rule: {page}");
+        assert!(
+            page.contains("a.skip:focus{left:0}"),
+            "{target}: the skip link becomes visible on focus: {page}"
+        );
+        for tag in &trio {
+            assert!(
+                page.contains(tag.as_str()),
+                "{target}: the pages nav must carry {tag}: {page}"
+            );
+        }
+        assert!(
+            page.contains(help),
+            "{target}: every page names every key: {page}"
+        );
+        assert!(
+            page.contains("first stop is the skip link"),
+            "{target}: the help line states the tab order's first stop: {page}"
+        );
+        // Hover-only interaction is ruled out by construction as long as no
+        // script rides the page and every scheme a link may carry is one this
+        // server emits — `javascript:` in conversation text arrives escaped.
+        assert!(!page.contains("<script"), "{target}: no script: {page}");
+        assert!(!page.contains("javascript:"), "{target}: {page}");
+        assert!(!page.contains("onclick"), "{target}: {page}");
+    }
+
+    // The raw-shards key, on the two pages that offer the link.
+    let (status, page) = ui.get(&format!("/session?i={wide}"));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(&format!(
+            "<a href=\"/content?i={wide}&token={t}\" accesskey=r>"
+        )),
+        "the session page's raw link carries r: {page}"
+    );
+    let (status, page) = ui.get(&format!("/reader?i={wide}"));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(&format!(
+            "<a href=\"/content?i={wide}&token={t}\" accesskey=r>"
+        )),
+        "the reader's raw link carries r: {page}"
+    );
+
+    // The window keys, on a conversation the fixture gives two messages: the
+    // first window has only a next link, the second only a previous one, so
+    // both keys are pinned on the pages that can use them.
+    let (status, page) = ui.get(&format!("/reader?i={wide}&m=0&n=1"));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(" accesskey=]>next messages →</a>"),
+        "the next window link carries ]: {page}"
+    );
+    let (status, page) = ui.get(&format!("/reader?i={wide}&m=1&n=1"));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(" accesskey=[>← previous messages</a>"),
+        "the previous window link carries [: {page}"
+    );
+
+    // The one form on any page is labelled and autofocused (§8.2: a GET form
+    // with no JavaScript — `label for` is what a screen reader announces).
+    let (status, page) = ui.get("/search");
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("<label for=q>Search sessions</label>"),
+        "the search input is labelled: {page}"
+    );
+    assert!(
+        page.contains(" id=q name=q ") && page.contains("autofocus"),
+        "the input is the query and takes the focus on open: {page}"
+    );
+}
+
+/// The list's keyboard keys: `[`/`]` live on the paging links, so a keyboard
+/// reader can walk a long list without ever reaching for the mouse — the one
+/// mechanism §5.2 already gave the pages, now named on the help line.
+#[test]
+fn the_list_paging_links_carry_the_prev_next_accesskeys() {
+    let sb = sandbox();
+    let (repo, key) = build_page_repo(sb.path());
+    let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
+
+    let (status, page) = ui.get("/sessions?limit=4&offset=4");
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(" accesskey=\"[\">‹ previous</a>"),
+        "the previous link carries [: {page}"
+    );
+    assert!(
+        page.contains(" accesskey=\"]\">next ›</a>"),
+        "the next link carries ]: {page}"
+    );
+}
+
 /// No page of any sort can leave the launch filter: the launch filter decides
 /// the list once, before the socket is bound, and paging is a window of that
 /// decision.

@@ -52,12 +52,17 @@ pub(super) fn one_session_page(params: &Query, token: &str, data: &UiData) -> Re
     Response::html(200, "OK", page_session(row, token, data))
 }
 
-pub(super) fn content_page(params: &Query, data: &UiData, content: &dyn ContentSource) -> Response {
+pub(super) fn content_page(
+    params: &Query,
+    token: &str,
+    data: &UiData,
+    content: &dyn ContentSource,
+) -> Response {
     let Some(row) = index_param(params, data) else {
         return bad_index_response();
     };
     match content.fetch(&row.machine, &row.session_id) {
-        Ok(c) => Response::html(200, "OK", page_content(row, &c, data)),
+        Ok(c) => Response::html(200, "OK", page_content(row, token, &c, data)),
         Err(e) => Response::text(
             502,
             "Bad Gateway",
@@ -80,10 +85,10 @@ fn page_sessions(
     token: &str,
     data: &UiData,
 ) -> String {
-    let mut out = head(&format!(
-        "chat-stasher · sessions · {}",
-        data.destination_label
-    ));
+    let mut out = head(
+        &format!("chat-stasher · sessions · {}", data.destination_label),
+        token,
+    );
     out.push_str("<h1>Sessions</h1>\n<p class=sub><a href=\"/?token=");
     out.push_str(&percent_encode(token));
     out.push_str("\">← overview</a> · destination <b>");
@@ -789,7 +794,7 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
         None => "<b class=bad>unknown</b>".to_string(),
     };
     let payload_bytes = s.bytes;
-    let mut out = head(&format!("chat-stasher · session {}", s.short_id));
+    let mut out = head(&format!("chat-stasher · session {}", s.short_id), token);
     out.push_str(&format!(
         "<h1>Session <span class=mono>{sid}</span></h1>\n\
          <p class=sub><a href=\"/?token={t}\">← overview</a> · destination <b>{d}</b></p>\n",
@@ -882,7 +887,7 @@ fn page_session(s: &UiSession, token: &str, data: &UiData) -> String {
          <b>{db} data blob(s)</b> — fetched from the destination and decrypted locally. \
          Nothing is fetched until you ask.<br><br>\
          <a href=\"/reader?i={i}&token={t}\"><b>Open reader</b></a> · \
-         <a href=\"/content?i={i}&token={t}\"><b>show raw shards</b></a> · \
+         <a href=\"/content?i={i}&token={t}\" accesskey=r><b>show raw shards</b></a> · \
          <a href=\"/export?i={i}&fmt=jsonl&token={t}\"><b>download .jsonl</b></a> \
          <span class=sub>({b} once, for whichever of the three you click)</span><br> \
          The download is an attachment on this page's row: its bytes are exactly what <code>chat-stasher \
@@ -960,7 +965,7 @@ fn provenance_row_html(s: &UiSession) -> String {
 }
 
 /// The payload tier. Reached only by the explicit link on the session page.
-fn page_content(s: &UiSession, c: &Content, data: &UiData) -> String {
+fn page_content(s: &UiSession, token: &str, c: &Content, data: &UiData) -> String {
     let mut shards = String::new();
     for (name, hash) in &c.shards {
         shards.push_str(&format!(
@@ -979,7 +984,7 @@ fn page_content(s: &UiSession, c: &Content, data: &UiData) -> String {
          concatenation of these shards.</p>\n\
          <h2>Concatenated shards</h2>\n<pre>{body}</pre>\n\
          {footer}\n</body></html>\n",
-        head = head(&format!("chat-stasher · content · {}", s.short_id)),
+        head = head(&format!("chat-stasher · content · {}", s.short_id), token),
         sid = esc(&s.short_id),
         m = esc(&s.machine),
         h = esc(&s.source_label()),
