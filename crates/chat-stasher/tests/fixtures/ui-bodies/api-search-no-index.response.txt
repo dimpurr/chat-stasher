@@ -9,6 +9,7 @@ content-type: application/json; charset=utf-8
   "destination": "dest-under-test",
   "index": {
     "documents": null,
+    "per_destination": null,
     "reason": null,
     "state": "missing",
     "written_note": "the index file's mtime; the index records no build time of its own",

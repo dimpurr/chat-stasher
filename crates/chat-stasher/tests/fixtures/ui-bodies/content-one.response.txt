@@ -38,6 +38,10 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+/* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
+   variables above — the badge is a word first and a colour second. */
+.badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
+font-size:.74rem;padding:.05rem .3rem;white-space:nowrap;color:var(--fg)}
 /* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
    by platform group — labels first, colour second (the group name sits in the
    header row), and drawn only from the variables above (§8.1: no new colours). */

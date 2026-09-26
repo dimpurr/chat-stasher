@@ -44,7 +44,9 @@ use std::process::{Command, Output};
 use chat_stasher::activity::TimeSource;
 use chat_stasher::normalize::{normalize, Block, Conversation};
 use chat_stasher::search::SessionLabel;
-use chat_stasher::ui::{handle, split_target, Content, ContentSource, NoIndex, UiData, UiSession};
+use chat_stasher::ui::{
+    handle, split_target, Content, ContentSource, DestinationState, NoIndex, UiData, UiSession,
+};
 
 // --------------------------------------------------------------- fixtures
 
@@ -302,10 +304,25 @@ impl ContentSource for Body {
 fn data_for(harness: &str) -> UiData {
     UiData {
         destination_label: "w190-destination".into(),
+        // One destination, read in full: the shape every page in this file is
+        // about. The merged fields carry their single-destination values, which
+        // is what makes `destinations` here a list of one rather than an empty
+        // one — a row always came from somewhere.
+        destinations: vec![DestinationState {
+            label: "w190-destination".into(),
+            snapshots_scanned: 1,
+            snapshots_in_repo: 1,
+            sessions: 1,
+            in_view: 1,
+            unreadable: Vec::new(),
+            machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
+        }],
         snapshots_scanned: 1,
         snapshots_in_repo: 1,
         sessions_seen: 1,
         archive_sessions: 1,
+        raw_sessions: 1,
         sessions: vec![UiSession {
             index: 0,
             machine: "m-1".into(),
@@ -323,6 +340,7 @@ fn data_for(harness: &str) -> UiData {
             line_count: 1,
             archive_time_unix: 1_770_000_000,
             data_blobs: 1,
+            destinations: vec![0],
         }],
         launch: Default::default(),
         hosts: Vec::new(),

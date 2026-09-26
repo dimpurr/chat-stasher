@@ -6,7 +6,7 @@
 
 use crate::selector::Selector;
 
-use super::{UiData, DAY};
+use super::{DestinationState, UiData, UiSession, DAY};
 
 // ------------------------------------------------------------- html rendering
 
@@ -106,6 +106,10 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+/* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
+   variables above — the badge is a word first and a colour second. */
+.badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
+font-size:.74rem;padding:.05rem .3rem;white-space:nowrap;color:var(--fg)}
 /* UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns grouped and coloured
    by platform group — labels first, colour second (the group name sits in the
    header row), and drawn only from the variables above (§8.1: no new colours). */
@@ -192,17 +196,181 @@ fn footer_tail() -> &'static str {
 
 pub(super) fn completeness_banner(data: &UiData) -> String {
     if data.complete() {
-        return "<p class=ok>Read in full — every snapshot scanned was readable.</p>\n".to_string();
+        return if data.destinations.len() == 1 {
+            "<p class=ok>Read in full — every snapshot scanned was readable.</p>\n".to_string()
+        } else {
+            format!(
+                "<p class=ok>Read in full — every snapshot scanned was readable, in each of the \
+                 {} destinations ({}).</p>\n",
+                data.destinations.len(),
+                esc(&data.destination_label),
+            )
+        };
     }
+    if data.destinations.len() == 1 {
+        return format!(
+            "<div class=warn><b>INCOMPLETE READ.</b> {} part(s) of this destination could not be \
+             read, so every count below is a <i>floor</i>: sessions missing from these tables are \
+             UNKNOWN, not absent.<ul>{}</ul></div>\n",
+            data.unreadable.len(),
+            data.unreadable
+                .iter()
+                .map(|u| format!("<li class=mono>{}</li>", esc(u)))
+                .collect::<String>()
+        );
+    }
+    // Several destinations: the floor is contagious — one unreadable copy makes
+    // every count on this page a floor, because a session the merge could not
+    // see in that copy may be one the other copy does not hold either. The
+    // failing destinations are named and the healthy ones are not: a page that
+    // listed every destination under a failure banner would make a complete
+    // read look damaged by association, which is its own kind of lie.
+    let failed: Vec<&DestinationState> =
+        data.destinations.iter().filter(|d| !d.complete()).collect();
     format!(
-        "<div class=warn><b>INCOMPLETE READ.</b> {} part(s) of this destination could not be \
-         read, so every count below is a <i>floor</i>: sessions missing from these tables are \
-         UNKNOWN, not absent.<ul>{}</ul></div>\n",
-        data.unreadable.len(),
-        data.unreadable
+        "<div class=warn><b>INCOMPLETE READ.</b> {} of the {} destinations could not be read in \
+         full, so every count below is a <i>floor</i>: sessions missing from these tables are \
+         UNKNOWN, not absent. The destination(s) that could not be read:<ul>{}</ul>\
+         The other destination(s) in this view read in full; their rows are real, and the \
+         floor is what the merge could not see in the one(s) above.</div>\n",
+        failed.len(),
+        data.destinations.len(),
+        failed
             .iter()
-            .map(|u| format!("<li class=mono>{}</li>", esc(u)))
+            .map(|d| format!(
+                "<li><b>{}</b> — {} part(s) unreadable<ul>{}</ul></li>",
+                esc(&d.label),
+                d.unreadable.len(),
+                d.unreadable
+                    .iter()
+                    .map(|u| format!("<li class=mono>{}</li>", esc(u)))
+                    .collect::<String>()
+            ))
             .collect::<String>()
+    )
+}
+
+/// Which copy of this session the payload routes open (`/session`, `/content`,
+/// `/reader`), when there is more than one.
+///
+/// A merged row exists in several places and the bytes on the page came from
+/// exactly one of them. The list's destination cell says which, but these are
+/// different pages: someone following a link, a bookmark or a reload sees the
+/// payload and not the list. "Which copy" is the fact that decides whether what
+/// is on screen is the newest of them, so it is stated where the bytes are.
+///
+/// Nothing renders for a single-destination dashboard: there is one answer, it
+/// is already in the page header, and a sentence repeating it would be noise on
+/// every page that does have one.
+pub(super) fn read_from_note(s: &UiSession, data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let copies: Vec<&str> = s
+        .destinations
+        .iter()
+        .filter_map(|position| data.destination(*position))
+        .map(|d| d.label.as_str())
+        .collect();
+    let Some(owner) = copies.first() else {
+        return String::new();
+    };
+    format!(
+        "<p class=sub>read from destination <b>{owner}</b> — this session is held by {n} \
+         destination(s) ({all}), and the copies were pushed at different times, so another \
+         copy's bytes can differ. Open another one by starting a dashboard that names only it \
+         (<span class=mono>ui --destination &lt;name&gt;</span>).</p>\n",
+        owner = esc(owner),
+        n = copies.len(),
+        all = esc(&copies.join(", ")),
+    )
+}
+
+/// The per-destination block: what each copy held, and whether it read in full.
+///
+/// Rendered only when more than one destination was read. With one, every line
+/// of it would restate the page header — and a table that says nothing is how a
+/// reader learns to skip the tables that do.
+pub(super) fn destinations_block(data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let rows: String = data
+        .destinations
+        .iter()
+        .map(|d| {
+            let state = if d.complete() {
+                "read in full".to_string()
+            } else {
+                format!("{} part(s) unreadable", d.unreadable.len())
+            };
+            format!(
+                "<tr><td><b>{}</b>{}</td><td class=n>{}</td><td class=n>{}</td>\
+                 <td class=n>{}</td><td>{}</td></tr>\n",
+                esc(&d.label),
+                if d.complete() {
+                    ""
+                } else {
+                    " <span class=bad title=\"this destination could not be read in full\">!</span>"
+                },
+                d.in_view,
+                d.sessions,
+                d.snapshots_scanned,
+                esc(&state),
+            )
+        })
+        .collect();
+    format!(
+        "<div class=note><b>Destinations read.</b> {} copies, merged row by row on \
+         <span class=mono>(machine, session id)</span>: one session held by two destinations is \
+         <b>one row</b> below with a <span class=badge>×2 backup</span> badge, and its facts are \
+         read from the first destination named on the command line ({}). \
+         <span class=mono>in view</span> counts the rows each copy put into the current filter; \
+         <span class=mono>held</span> is that copy's whole total.<div class=scroll><table>\n\
+         <thead><tr><th>destination</th><th class=n>in view</th><th class=n>held</th>\
+         <th class=n>snapshots scanned</th><th>state</th></tr></thead>\n<tbody>\n{rows}\
+         </tbody></table></div></div>\n",
+        data.destinations.len(),
+        esc(&data.first_destination_label()),
+    )
+}
+
+/// The two count lines a merged view prints instead of one (§4.8): the
+/// **distinct** sessions the view holds, and the **raw** copies the
+/// destinations hold between them.
+///
+/// Both are printed whenever more than one destination was read, and neither
+/// is derived at print time from the other. Choosing one would be the bug this
+/// pair exists to prevent: "3 sessions" is wrong about redundancy and "5
+/// sessions" is wrong about conversations, and a reader who sees only one of
+/// them cannot tell which mistake they are looking at.
+///
+/// With a single destination the two counts are equal by construction, so the
+/// lines are omitted rather than printed as two identical numbers.
+///
+/// It lives here, beside [`destinations_block`], because it is a statement
+/// about the **view** and not about any one answer: it belongs on every page
+/// that can show a merged view — the overview's headline number is the
+/// distinct reading and needs the pair under it, and the list page needs it
+/// under *each* answer it can give, including the zero-match one. A caller
+/// that renders it on one branch of an if/else has made the other branch the
+/// single place a reader can meet a merged view without the two counts.
+pub(super) fn merged_counts(data: &UiData) -> String {
+    if data.destinations.len() <= 1 {
+        return String::new();
+    }
+    let raw_in_view: usize = data.destinations.iter().map(|d| d.in_view).sum();
+    let doubled = raw_in_view.saturating_sub(data.sessions.len());
+    format!(
+        "<p class=sub><b>distinct:</b> {} session(s) in view — each session counted once, \
+         however many destinations hold it.</p>\n\
+         <p class=sub><b>raw:</b> {} session row(s) across the {} destinations — a session held \
+         by more than one counts once per copy, so {doubled} row(s) here {verb} a second (or \
+         later) copy of a session already counted.</p>\n",
+        data.sessions.len(),
+        raw_in_view,
+        data.destinations.len(),
+        verb = if doubled == 1 { "is" } else { "are" },
     )
 }
 

@@ -249,6 +249,11 @@ pub(super) struct Answer {
     /// index, because a coverage computed without one would be a measurement
     /// of nothing.
     pub coverage: Option<Coverage>,
+    /// Each destination's own index state, when the server answers for more
+    /// than one. `None` on an ordinary single-destination dashboard, where
+    /// [`Self::index`] is already that one answer — so the extra line renders
+    /// only where it carries information.
+    pub index_parts: Option<Vec<(String, IndexState)>>,
     pub outcome: QueryOutcome,
 }
 
@@ -290,6 +295,7 @@ pub(super) fn solve(request: &Request, data: &UiData, index: &dyn TextIndex) -> 
     Answer {
         index: state,
         coverage,
+        index_parts: index.parts(),
         outcome,
     }
 }
@@ -489,6 +495,18 @@ fn result_body(request: &Request, answer: &Answer, token: &str, data: &UiData) -
 /// after `--destination` would put an argument on the page that nobody can
 /// type. A suggestion that cannot be run is worse than no suggestion.
 fn index_command(data: &UiData, action: &str) -> String {
+    // A merged dashboard has one index per destination, and `index build` takes
+    // exactly one destination — one index belongs to one repository. So the
+    // suggestion is one command per copy, joined rather than folded into a
+    // `--destination a,b` that the command itself would refuse (R10/§4.8).
+    if data.destinations.len() > 1 {
+        return data
+            .destinations
+            .iter()
+            .map(|d| format!("chat-stasher index {action} --destination {}", d.label))
+            .collect::<Vec<_>>()
+            .join(" · ");
+    }
     if data.destination_label == EXPLICIT_REPO_LABEL {
         format!("chat-stasher index {action} --repo <this dashboard's repository>")
     } else {
@@ -532,7 +550,7 @@ fn no_index_html(answer: &Answer, data: &UiData) -> String {
 /// whether a zero means anything, so they are printed above everything else
 /// rather than only when something is wrong.
 fn coverage_paragraph(answer: &Answer) -> String {
-    match (&answer.index, &answer.coverage) {
+    let head = match (&answer.index, &answer.coverage) {
         (IndexState::Missing, _) => "<p class=sub>index coverage: <b>none</b> — no index has been \
              built for this destination · index written: none · mode: fts (trigram)</p>\n"
             .to_string(),
@@ -577,7 +595,44 @@ fn coverage_paragraph(answer: &Answer) -> String {
         (IndexState::Ready(_), None) => "<p class=sub>index coverage: <b>unknown</b> — the index \
              state could not be summarised · mode: fts (trigram)</p>\n"
             .to_string(),
-    }
+    };
+    format!("{head}{}", index_parts_line(answer))
+}
+
+/// Which destination each index belongs to, when there is more than one.
+///
+/// Only rendered for a merged dashboard: with one destination the coverage line
+/// above *is* that destination's own state, and repeating it per copy would make
+/// the same fact look like two. With several it is the line that answers the
+/// question the merged coverage line cannot: the merged index is one object, but
+/// the thing the reader has to repair is one destination's file.
+fn index_parts_line(answer: &Answer) -> String {
+    let Some(parts) = &answer.index_parts else {
+        return String::new();
+    };
+    let items: Vec<String> = parts
+        .iter()
+        .map(|(label, state)| {
+            let words = match state {
+                IndexState::Ready(summary) => format!(
+                    "ready — {} document(s){}",
+                    summary.ids.len(),
+                    match summary.written_unix {
+                        Some(unix) => format!(", written {}", esc(&fmt_unix(unix))),
+                        None => String::new(),
+                    }
+                ),
+                IndexState::Missing => "no index built".to_string(),
+                IndexState::Unreadable(reason) => format!("unreadable ({})", esc(reason)),
+            };
+            format!("<span class=mono>{}</span> {words}", esc(label))
+        })
+        .collect();
+    format!(
+        "<p class=sub>index per destination: {} — a query here runs against every readable \
+         index, and a document held by two destinations is one result.</p>\n",
+        items.join(" · ")
+    )
 }
 
 fn answered_body(

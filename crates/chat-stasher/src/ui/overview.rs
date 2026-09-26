@@ -12,8 +12,8 @@ use crate::overview::{Granularity, HeatmapAxis, OverviewRow};
 
 use super::facets::{self, PlatformGroup};
 use super::html::{
-    completeness_banner, describe_selector, esc, fmt_age, fmt_bytes, fmt_unix, footer, head,
-    launch_banner, machines_without_index_banner,
+    completeness_banner, describe_selector, destinations_block, esc, fmt_age, fmt_bytes, fmt_unix,
+    footer, head, launch_banner, machines_without_index_banner, merged_counts,
 };
 use super::{
     health_of, percent_encode, select, Health, UiData, UiSession, NO_HARNESS, STALE_AFTER_DAYS,
@@ -35,6 +35,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     ));
     out.push_str(&launch_banner(data));
     out.push_str(&completeness_banner(data));
+    out.push_str(&destinations_block(data));
     out.push_str(&machines_without_index_banner(data));
 
     let total_bytes: u64 = in_view.iter().map(|s| s.bytes).sum();
@@ -65,6 +66,13 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
         sw = sessions_word,
         bw = bytes_word,
     ));
+    // §4.8 / R10: with more than one destination the session stat above is the
+    // **distinct** reading, and the raw one cannot be recovered from it — a
+    // reader told "3 sessions" has no way to learn that two of the rows behind
+    // it are copies. So the pair goes directly under the number it qualifies;
+    // with a single destination it is empty, because there the two readings
+    // are equal by construction.
+    out.push_str(&merged_counts(data));
     if sel.not_matched > 0 || !sel.unplaced.is_empty() {
         out.push_str(&format!(
             "<p>{} session(s) were evaluated and <b>rejected</b> by the filter in force; \
