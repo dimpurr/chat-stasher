@@ -95,6 +95,36 @@ fn chrome_state(check: &chat_stasher::doctor::NativeHostCheck) -> HostManifestSt
         .clone()
 }
 
+/// The browser a row names. Every row in [`NativeHostCheck`] comes from
+/// `Browser::ALL`, so the lookup can only fail if that stops being true.
+fn browser_of(id: &str) -> nativehost::Browser {
+    nativehost::Browser::ALL
+        .iter()
+        .copied()
+        .find(|browser| browser.id() == id)
+        .expect("every row names a browser the enum has")
+}
+
+/// What a home with nothing planted must report for one browser on this
+/// platform.
+///
+/// The expectation is taken from `Browser::has_path` — the matrix this build
+/// is compiled from — and never from the probe's output, so these tests answer
+/// from the input rather than confirm whatever the output says. A pair with a
+/// path answers `NotRegistered`: nothing is at it, and nothing is broken. A
+/// pair without one (Arc on Linux, the only such pair in the table) answers
+/// `NoDiscoveryPath`: this build has nowhere to look, and telling the user
+/// their registration is *missing* would be a claim about a browser that
+/// cannot exist on that platform — the finding EXT-1 introduced the state
+/// for in the first place.
+fn empty_home_state(browser: nativehost::Browser) -> HostManifestState {
+    if browser.has_path(nativehost::Platform::current()) {
+        HostManifestState::NotRegistered
+    } else {
+        HostManifestState::NoDiscoveryPath
+    }
+}
+
 fn config_with_stage(stage: Option<&Path>) -> Config {
     Config {
         native_host: Some(NativeHostConfig {
@@ -107,6 +137,18 @@ fn config_with_stage(stage: Option<&Path>) -> Config {
     }
 }
 
+/// An empty home reports "not registered" for every pair this build has a
+/// path for — and for a pair it has no path for on this OS it reports nothing
+/// at all, which is neither a registration nor a breakage.
+///
+/// `NoDiscoveryPath` is expected here as well as in
+/// `a_pair_outside_the_path_table_is_not_reported_as_unregistered`, because
+/// the promise this test makes is about the whole matrix: on a machine where
+/// nothing is planted, *no* row may read as broken. On macOS and Windows every
+/// pair has a path, so there this is the all-`NotRegistered` loop it always
+/// was. The first ubuntu run of the EXT-1 matrix (CI 36242008509, 2026-09-26)
+/// was red here because Arc has no Linux build and the loop demanded
+/// `NotRegistered` from a pair that is, by decision D5, nowhere to be found.
 #[test]
 fn an_unregistered_machine_says_so_without_calling_it_broken() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,7 +160,7 @@ fn an_unregistered_machine_says_so_without_calling_it_broken() {
     for entry in &check.manifests {
         assert_eq!(
             entry.state,
-            HostManifestState::NotRegistered,
+            empty_home_state(browser_of(&entry.browser)),
             "{}: {:?}",
             entry.browser,
             entry.state
@@ -290,6 +332,18 @@ fn the_three_stage_findings_stay_three_findings() {
     assert!(!absent.exists());
 }
 
+/// The JSON keeps absence and the matrix's gap apart, so a pair that was
+/// looked at and found empty is never serialised the same way as a pair this
+/// build has no path for.
+///
+/// The kind of each row must follow the pair's own place in the matrix
+/// (expected through `has_path`, not through the row's own fields), and both
+/// shapes agree on the two facts that keep them honest: neither carries a
+/// `path` — nothing was found, so there is nothing to point at — and neither
+/// counts as `registered`. On Linux the arc row is the `no_discovery_path`
+/// shape; the first ubuntu run of the EXT-1 matrix (CI 36242008509,
+/// 2026-09-26) was red here because the loop demanded `not_registered` from
+/// all ten rows.
 #[test]
 fn the_json_shape_keeps_absence_and_unknown_apart() {
     let dir = tempfile::tempdir().unwrap();
@@ -302,11 +356,36 @@ fn the_json_shape_keeps_absence_and_unknown_apart() {
     assert_eq!(json["registered"], 0);
     assert_eq!(json["stage"]["kind"], "not_configured");
     for manifest in json["manifests"].as_array().unwrap() {
-        assert_eq!(manifest["kind"], "not_registered");
+        let browser = browser_of(
+            manifest["browser"]
+                .as_str()
+                .expect("a row names its browser"),
+        );
+        assert_eq!(
+            manifest["kind"],
+            empty_home_state(browser).kind_label(),
+            "{manifest}"
+        );
         assert!(
             manifest.get("path").is_none(),
             "an unregistered browser has no path to report: {manifest}"
         );
+        assert_eq!(
+            manifest["registered"], false,
+            "neither an unregistered pair nor a pair with no path counts as registered: {manifest}"
+        );
+        match empty_home_state(browser) {
+            HostManifestState::NotRegistered => assert!(
+                manifest["manifest"].is_string(),
+                "absence must name the path that was looked at, so \"wrong path\" stays \
+                 distinguishable from \"nothing there\": {manifest}"
+            ),
+            HostManifestState::NoDiscoveryPath => assert!(
+                manifest["manifest"].is_null(),
+                "a gap in the path table has no path to name: {manifest}"
+            ),
+            other => panic!("an empty home cannot report {other:?}: {manifest}"),
+        }
     }
 }
 
@@ -321,7 +400,15 @@ fn the_json_shape_keeps_absence_and_unknown_apart() {
 ///
 /// A registration that is present under another root is not this root's
 /// registration: the answer for the root being probed is `NotRegistered`, and
-/// no count moves.
+/// no count moves. A pair with no path on this OS answers `NoDiscoveryPath`
+/// under any root — it too is an answer about the state of this build's
+/// matrix, and never a registration found somewhere else — so both states
+/// are expected, each from the pair's own place in the matrix. The root being
+/// probed is also named directly: a row that looked outside it would report
+/// another root's registration as this one's, which is the failure the
+/// decoy below is planted to catch. The first ubuntu run of the EXT-1 matrix
+/// (CI 36242008509, 2026-09-26) was red here because Arc has no Linux build
+/// and the loop demanded `NotRegistered` from all ten rows.
 #[test]
 fn the_probe_reads_only_under_the_root_it_is_given() {
     let dir = tempfile::tempdir().unwrap();
@@ -339,12 +426,21 @@ fn the_probe_reads_only_under_the_root_it_is_given() {
     for entry in &check.manifests {
         assert_eq!(
             entry.state,
-            HostManifestState::NotRegistered,
-            "{}: the probe reported a registration under a root it was not asked \
-             about ({:?})",
+            empty_home_state(browser_of(&entry.browser)),
+            "{}: the probe reported a registration under a root it was not \
+             asked about ({:?})",
             entry.browser,
             entry.state
         );
+        if let Some(manifest) = &entry.manifest {
+            assert!(
+                manifest.starts_with(&probed),
+                "{}: looked at {}, which is outside the root it was given ({})",
+                entry.browser,
+                manifest.display(),
+                probed.display()
+            );
+        }
     }
     let json = chat_stasher::doctor::native_host_json(&check);
     assert_eq!(
@@ -502,15 +598,38 @@ fn every_browser_reports_its_tier_and_whether_it_is_detected() {
             );
         }
 
-        // Nothing was planted, so nothing is registered — and each row still
-        // names the path it looked at, so a reader can tell "wrong path" from
-        // "right path, nothing there".
-        assert_eq!(entry.state, HostManifestState::NotRegistered);
-        assert!(
-            entry.manifest.is_some(),
-            "{}: a supported pair must name the path that was probed",
-            entry.browser
-        );
+        // Nothing was planted, so nothing is registered — and each row with a
+        // path still names the path it looked at, so a reader can tell "wrong
+        // path" from "right path, nothing there". A pair without one on this
+        // OS answers with the gap itself: not registered, not detected, and
+        // nothing looked at (Arc on Linux; the first ubuntu run of the EXT-1
+        // matrix, CI 36242008509, 2026-09-26, was red on exactly that row).
+        if browser.has_path(nativehost::Platform::current()) {
+            assert_eq!(
+                entry.state,
+                HostManifestState::NotRegistered,
+                "{}: nothing is planted, so nothing is registered",
+                entry.browser
+            );
+            assert!(
+                entry.manifest.is_some(),
+                "{}: a supported pair must name the path that was probed",
+                entry.browser
+            );
+        } else {
+            assert_eq!(
+                entry.state,
+                HostManifestState::NoDiscoveryPath,
+                "{}: a pair with no path on this OS is a gap in the matrix, not a \
+                 missing registration",
+                entry.browser
+            );
+            assert!(
+                entry.manifest.is_none(),
+                "{}: a pair with no discovery path has no path to name",
+                entry.browser
+            );
+        }
     }
 }
 
