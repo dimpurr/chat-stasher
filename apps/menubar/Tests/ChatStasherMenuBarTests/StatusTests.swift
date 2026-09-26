@@ -44,7 +44,7 @@ final class StatusTests: XCTestCase {
                                       sourceDetails: [SourceRow(id: "claude-code", label: "Claude Code", count: 4,
                                                                lastSavedUnix: 1, health: .stopped)])
         XCTAssertEqual(archiveStatus(snapshot: stopped, local: cleanLocal, failure: nil, now: now).sentence, "Claude Code stopped saving")
-        XCTAssertEqual(attentionSentences(stopped.summary, sources: stopped.sourceDetails), ["Claude Code stopped saving"])
+        XCTAssertTrue(attentionSentences(stopped.summary, sources: stopped.sourceDetails).isEmpty)
     }
 
     func testUnknownAndUnusedSourceNeverBecomeStopped() {
@@ -191,6 +191,22 @@ final class StatusTests: XCTestCase {
 
     func testAttentionSectionIsEmptyWhenCountsAreZero() {
         XCTAssertTrue(attentionSentences(snapshot().summary).isEmpty)
+    }
+
+    func testKnownSourcesHaveDistinctIconsAndUnknownUsesGenericIcon() {
+        let known = ["claude-code", "codex", "cursor", "windsurf", "chatgpt", "claude", "gemini", "perplexity"]
+            .map { SourceRow(id: $0, label: $0, count: 1, lastSavedUnix: nil, health: .unknown) }
+        XCTAssertEqual(Set(known.map(sourceSymbol)).count, known.count)
+        XCTAssertEqual(sourceSymbol(SourceRow(id: "unlisted", label: "Unlisted", count: 1,
+                                              lastSavedUnix: nil, health: .unknown)), "questionmark.app")
+    }
+
+    func testDestinationStatusRanksWorstResultAndKeepsDestinationName() {
+        XCTAssertGreaterThan(destinationStatusRank(.silent("Demo Mac", 9)), destinationStatusRank(.healthy))
+        XCTAssertGreaterThan(destinationStatusRank(.localFailure("Timer failed")), destinationStatusRank(.silent("Demo Mac", 9)))
+        let status = ArchiveStatus.destination("Remote archive", "Can't read the archive", .error)
+        XCTAssertEqual(status.sentence, "Remote archive: Can't read the archive")
+        XCTAssertEqual(status.severity, .error)
     }
 
     func testOlderCLIUsesLatestKnownConversationAndKeepsUnknownAsUnknown() {

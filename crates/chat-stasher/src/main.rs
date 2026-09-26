@@ -13314,6 +13314,7 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
             "next_run": next_run.value(),
             "next_run_why": next_run.note(),
         },
+        "destination_names": declared,
         "last_run": chat_stasher::runstate::run_state_json(
             &info.read,
             info.now_unix,

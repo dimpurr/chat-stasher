@@ -23,6 +23,7 @@ struct ChatStasherMenuBarApp: App {
             .accessibilityLabel("Chat Stasher: \(model.status.sentence)")
         }
         .menuBarExtraStyle(.window)
+        Settings { SettingsView(model: model) }
     }
 }
 
@@ -103,7 +104,8 @@ private struct StatusDocument: Decodable {
 }
 private struct LocalStatus: Decodable {
     let schedule: ScheduleStatus?; let lastRun: LastRunStatus?; let stage: StageStatus?
-    enum CodingKeys: String, CodingKey { case schedule, stage; case lastRun = "last_run" }
+    let destinationNames: [String]
+    enum CodingKeys: String, CodingKey { case schedule, stage; case lastRun = "last_run"; case destinationNames = "destination_names" }
 }
 private struct ScheduleStatus: Decodable { let kind: String; let installed: Bool?; let units: [String]? }
 private struct LastRunStatus: Decodable { let kind: String; let outcome: String? }
@@ -202,6 +204,7 @@ struct ArchiveSnapshot {
     var sources: [SourceRow] = []
     var sourceDetails: [SourceRow] = []
     var destinations: Int = 1
+    var destinationName: String? = nil
 }
 
 struct SourceRow: Identifiable {
@@ -225,6 +228,7 @@ struct LocalSnapshot {
     var cliVersion: String? = nil
     var cliNeedsUpdate: Bool = false
     var destinationCount: Int? = nil
+    var destinationNames: [String] = []
 }
 
 enum ArchiveStatus {
@@ -240,12 +244,14 @@ enum ArchiveStatus {
     case cliTooOld
     case offline
     case credentialsUnavailable
+    case destination(String, String, Severity)
 
-    enum Severity { case healthy, warning, error }
+    enum Severity: Equatable { case healthy, warning, error }
     var severity: Severity {
         switch self {
         case .healthy: .healthy
         case .needsAttention, .silent, .waiting, .sourceStopped, .setup, .offline: .warning
+        case .destination(_, _, let severity): severity
         case .unreadable, .localFailure, .cliMissing, .cliTooOld, .credentialsUnavailable: .error
         }
     }
@@ -263,11 +269,13 @@ enum ArchiveStatus {
         case .cliTooOld: "CLI too old: needs ≥ 0.5.0-rc.2"
         case .offline: "Offline · showing cached result"
         case .credentialsUnavailable: "Can't reach the destination: credentials aren't available to apps"
+        case .destination(let name, let sentence, _): "\(name): \(sentence)"
         }
     }
     var explanation: String? {
         switch self {
         case .unreadable(let reason), .localFailure(let reason), .setup(let reason): return reason
+        case .destination(_, let sentence, _): return sentence
         case .cliMissing: return "Install chat-stasher from the project release page, then reopen this panel."
         case .cliTooOld: return "Use the command for your install: brew upgrade chat-stasher; npm install -g chat-stasher; or rerun the install script."
         case .credentialsUnavailable: return "Add credentials to chat-stasher's app-readable configuration."
@@ -358,6 +366,7 @@ private final class ArchiveModel: ObservableObject {
     @Published var launchAtLoginError: String?
     @Published var shouldOfferLaunchAtLogin = false
     @Published var silenceThresholdOverrideDays = UserDefaults.standard.object(forKey: "silenceThresholdOverrideDays") as? Int
+    @Published var selectedDestination = UserDefaults.standard.string(forKey: "selectedDestination") ?? ""
     private var dashboardProcess: Process?
     private let updateDelegate = UpdateDelegate()
     private var updaterController: SPUStandardUpdaterController?
@@ -365,8 +374,17 @@ private final class ArchiveModel: ObservableObject {
     var status: ArchiveStatus {
         if offline, snapshot != nil { return .offline }
         guard snapshot == nil, let failure else {
-            return archiveStatus(snapshot: snapshot, local: localSnapshot, failure: failure,
-                                 silenceThresholdOverrideDays: silenceThresholdOverrideDays)
+            let status = archiveStatus(snapshot: snapshot, local: localSnapshot, failure: failure,
+                                       silenceThresholdOverrideDays: silenceThresholdOverrideDays)
+            let isArchiveStatus: Bool
+            switch status {
+            case .healthy, .needsAttention, .silent, .sourceStopped: isArchiveStatus = true
+            default: isArchiveStatus = false
+            }
+            if isArchiveStatus, let name = snapshot?.destinationName, (snapshot?.destinations ?? 1) > 1 {
+                return .destination(name, status.sentence, status.severity)
+            }
+            return status
         }
         return classifyFailure(failure)
     }
@@ -442,6 +460,12 @@ private final class ArchiveModel: ObservableObject {
             silenceThresholdOverrideDays = days
             UserDefaults.standard.set(days, forKey: "silenceThresholdOverrideDays")
         }
+    }
+
+    func selectDestination(_ name: String) {
+        selectedDestination = name
+        UserDefaults.standard.set(name, forKey: "selectedDestination")
+        refresh(force: true)
     }
 
     func openDashboard() {
@@ -521,34 +545,75 @@ private final class ArchiveModel: ObservableObject {
     }
 
     nonisolated private static func readOverview() -> OverviewResult {
+        do {
+            let local = try readStatus()
+            let environmentChoice = ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"]
+            let savedChoice = UserDefaults.standard.string(forKey: "selectedDestination")
+            let selected = environmentChoice.flatMap { $0.isEmpty ? nil : $0 } ?? savedChoice ?? ""
+            let names = selected.isEmpty ? local.destinationNames : [selected]
+            let destinations = names.isEmpty ? [String?](arrayLiteral: nil) : names.map(Optional.some)
+            var candidates: [(String?, ArchiveSnapshot, Int)] = []
+            for destination in destinations {
+                let snapshot: ArchiveSnapshot
+                do {
+                    snapshot = try readOverview(destination: destination, destinationCount: max(1, names.count))
+                } catch {
+                    let name = destination ?? "default destination"
+                    throw NSError(domain: "ChatStasherOverview", code: 3,
+                                  userInfo: [NSLocalizedDescriptionKey: "Can't read destination \(name): \(error.localizedDescription)"])
+                }
+                let status = archiveStatus(snapshot: snapshot, local: local, failure: nil)
+                candidates.append((destination, snapshot, destinationStatusRank(status)))
+            }
+            guard let chosen = candidates.max(by: { $0.2 < $1.2 }) else {
+                return .failure("Archive overview returned no destination result.")
+            }
+            var snapshot = chosen.1
+            snapshot.destinationName = chosen.0
+            let localWithDestinations = LocalSnapshot(waitingToUpload: local.waitingToUpload,
+                scheduleInstalled: local.scheduleInstalled, lastRunFailed: local.lastRunFailed, reason: local.reason,
+                cliVersion: local.cliVersion, cliNeedsUpdate: local.cliNeedsUpdate,
+                destinationCount: local.destinationCount, destinationNames: local.destinationNames)
+            return .success(snapshot, localWithDestinations)
+        } catch {
+            if error is DecodingError {
+                return .failure("CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary and status --json.")
+            }
+            return .failure("Install the command-line tool or check its configuration: \(error.localizedDescription)")
+        }
+    }
+
+    nonisolated private static func readOverview(destination: String?, destinationCount: Int) throws -> ArchiveSnapshot {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["chat-stasher", "overview", "--json", "--summary"]
-        if let destination = ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"], !destination.isEmpty {
+        if let destination {
             process.arguments?.append(contentsOf: ["--destination", destination])
         }
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
+        try process.run()
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             guard process.terminationStatus == 0 || process.terminationStatus == 1 else {
-                return .failure("Archive overview could not be read (exit code \(process.terminationStatus)).")
+                throw NSError(domain: "ChatStasherOverview", code: Int(process.terminationStatus),
+                              userInfo: [NSLocalizedDescriptionKey: "Archive overview could not be read (exit code \(process.terminationStatus))."])
             }
             guard let line = data.split(separator: 0x0A, maxSplits: 1).first else {
-                return .failure("Archive overview returned an empty response.")
+                throw NSError(domain: "ChatStasherOverview", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Archive overview returned an empty response."])
             }
             let document = try JSONDecoder().decode(SummaryDocument.self, from: Data(line))
             guard document.schemaVersion == 1, document.command == "overview", document.variant == "summary",
                   document.exitCode == process.terminationStatus else {
-                return .failure("CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary.")
+                throw NSError(domain: "ChatStasherOverview", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary."])
             }
             guard document.exitCode == 0 else {
-                return .failure(document.error ?? "Archive overview could not be read.")
+                throw NSError(domain: "ChatStasherOverview", code: document.exitCode,
+                              userInfo: [NSLocalizedDescriptionKey: document.error ?? "Archive overview could not be read."])
             }
-            let local = try readStatus()
             let now = Date()
             let machines = document.machines.map { MachineFreshness(machine: $0.display, newestSnapshotUnix: $0.newestSnapshotUnix, health: $0.health, silenceAfterDays: $0.silenceAfterDays) }
             let days = document.days.compactMap { item -> DailyCount? in
@@ -559,15 +624,9 @@ private final class ArchiveModel: ObservableObject {
             let summary = Summary(machines: document.totals.machines, harnesses: document.totals.harnesses,
                                   sessions: document.totals.sessions, unknownTimeSessions: document.totals.unknownTimeSessions,
                                   noConversationContentSessions: document.totals.noConversationContentSessions)
-            return .success(ArchiveSnapshot(summary: summary, refreshedAt: now, machines: machines,
+            return ArchiveSnapshot(summary: summary, refreshedAt: now, machines: machines,
                                             days: days, usedConversationFallback: false, sources: details, sourceDetails: details,
-                                            destinations: local.destinationCount ?? 1), local)
-        } catch {
-            if error is DecodingError {
-                return .failure("CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary and status --json.")
-            }
-            return .failure("Install the command-line tool or check its configuration: \(error.localizedDescription)")
-        }
+                                            destinations: destinationCount)
     }
 
     nonisolated private static func readStatus() throws -> LocalSnapshot {
@@ -600,13 +659,30 @@ private final class ArchiveModel: ObservableObject {
                              reason: reason ?? (waiting == nil ? "Local staged upload status is unknown." : nil),
                              cliVersion: version,
                              cliNeedsUpdate: version.map { !versionAtLeast($0, "0.5.0-rc.2") } ?? true,
-                             destinationCount: local.schedule?.units?.count)
+                             destinationCount: local.destinationNames.isEmpty
+                                ? local.schedule?.units?.count : local.destinationNames.count,
+                             destinationNames: local.destinationNames)
     }
 }
 
 private enum OverviewResult {
     case success(ArchiveSnapshot, LocalSnapshot)
     case failure(String)
+}
+
+func destinationStatusRank(_ status: ArchiveStatus) -> Int {
+    switch status {
+    case .healthy: 0
+    case .offline, .setup, .silent, .sourceStopped: 1
+    case .needsAttention, .waiting: 2
+    case .localFailure, .unreadable, .cliMissing, .cliTooOld, .credentialsUnavailable: 3
+    case .destination(_, _, let severity):
+        switch severity {
+        case .healthy: 0
+        case .warning: 1
+        case .error: 3
+        }
+    }
 }
 
 private func detailedSourceRows(_ values: [SummarySource], now: Date) -> [SourceRow] {
@@ -647,14 +723,19 @@ private func sourceGroup(_ source: SourceRow) -> String {
     webSourceNames.contains(source.id.lowercased()) ? "Web chats" : "Coding agents"
 }
 
-private func sourceSymbol(_ source: SourceRow) -> String {
+func sourceSymbol(_ source: SourceRow) -> String {
     switch source.id.lowercased() {
-    case "claude-code", "claude": "sparkles"
+    case "claude-code": "terminal"
+    case "claude": "sparkles"
     case "codex": "chevron.left.forwardslash.chevron.right"
     case "cursor": "cursorarrow"
+    case "windsurf": "wind"
     case "chatgpt": "bubble.left.and.bubble.right"
     case "gemini": "diamond"
-    default: "app"
+    case "perplexity": "magnifyingglass"
+    case "deepseek": "water.waves"
+    case "grok": "asterisk"
+    default: "questionmark.app"
     }
 }
 
@@ -709,6 +790,46 @@ func versionAtLeast(_ actual: String, _ minimum: String) -> Bool {
     }
 }
 
+private struct SettingsView: View {
+    @ObservedObject var model: ArchiveModel
+
+    var body: some View {
+        Form {
+            Section("General") {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { model.launchAtLoginEnabled },
+                    set: { model.setLaunchAtLogin($0) }
+                ))
+                if let error = model.launchAtLoginError {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("Silence threshold", selection: Binding(
+                    get: { model.silenceThresholdOverrideDays ?? 0 },
+                    set: { model.setSilenceThresholdOverride($0) }
+                )) {
+                    Text("Use each source's cadence").tag(0)
+                    ForEach(2...30, id: \.self) { days in Text("\(days) days").tag(days) }
+                }
+            }
+            if let local = model.localSnapshot, local.destinationNames.count > 1 {
+                Section("Archive destination") {
+                    Picker("Show status for", selection: Binding(
+                        get: { model.selectedDestination },
+                        set: { model.selectDestination($0) }
+                    )) {
+                        Text("All destinations · worst status").tag("")
+                        ForEach(local.destinationNames, id: \.self) { Text($0).tag($0) }
+                    }
+                    Text("The overview shows one archive at a time. All destinations checks each archive and names the one needing most attention.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+}
+
 private struct ArchivePopover: View {
     @ObservedObject var model: ArchiveModel
     @State private var hoveredDay: DailyCount?
@@ -739,18 +860,10 @@ private struct ArchivePopover: View {
             action("Open dashboard", icon: "arrow.up.right.square", shortcut: "D", action: model.openDashboard)
             action("Refresh", icon: "arrow.clockwise", shortcut: "R", action: { model.refresh(force: true) })
             if let message = model.dashboardMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Toggle("Launch at login", isOn: Binding(
-                get: { model.launchAtLoginEnabled },
-                set: { model.setLaunchAtLogin($0) }
-            )).font(.system(size: 12))
-            if let error = model.launchAtLoginError { Text(error).font(.caption).foregroundStyle(.secondary) }
-            Picker("Silence threshold", selection: Binding(
-                get: { model.silenceThresholdOverrideDays ?? 0 },
-                set: { model.setSilenceThresholdOverride($0) }
-            )) {
-                Text("Use cadence").tag(0)
-                ForEach(2...30, id: \.self) { days in Text("\(days) days").tag(days) }
-            }.pickerStyle(.menu).font(.system(size: 12))
+            Button { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) } label: {
+                Label("Settings…", systemImage: "gear")
+            }
+                .keyboardShortcut(",", modifiers: .command)
             Divider()
             Button(action: model.checkForUpdates) {
                 Label(model.updateReady ? "Update ready, restart now?" : "Check for Updates…",
@@ -837,27 +950,25 @@ private struct ArchivePopover: View {
             ForEach(["Coding agents", "Web chats"], id: \.self) { group in
                 let sources = snapshot.sourceDetails.filter { sourceGroup($0) == group }
                 if !sources.isEmpty {
-                    Text(group).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                    ForEach(sources) { source in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(group).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 7) {
+                            ForEach(sources) { source in
                         let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
                                                            now: snapshot.refreshedAt)
                         Button { model.openDashboard(harness: source.id) } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: sourceSymbol(source)).frame(width: 13)
-                                Image(systemName: sourceStatusSymbol(health))
-                                    .foregroundStyle(sourceStatusColor(health)).frame(width: 11)
-                                Text(source.label).font(.system(size: 11))
-                                Spacer(minLength: 2)
-                                Text("\(source.count.formatted()) · \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
-                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            VStack(spacing: 3) {
+                                Image(systemName: sourceSymbol(source))
+                                    .font(.system(size: 15)).frame(height: 19)
+                                Rectangle().fill(sourceStatusColor(health)).frame(height: 3)
                             }
-                            .contentShape(Rectangle())
+                            .frame(maxWidth: .infinity)
                             .help(source.lastSavedUnix.map { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) } ?? "Saved time unavailable")
                             .accessibilityLabel("\(source.label), \(health.accessibilityText), \(source.count.formatted()) conversations, saved \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
                         }
                         .buttonStyle(.plain)
-                        Rectangle().fill(sourceStatusColor(health)).frame(height: 2)
-                            .accessibilityHidden(true)
+                            }
+                        }
                     }
                     if group == "Web chats" {
                         Text("Extension status: see each browser's extension")
@@ -865,6 +976,22 @@ private struct ArchivePopover: View {
                     }
                 }
             }
+            DisclosureGroup("Show sources") {
+                ForEach(snapshot.sourceDetails) { source in
+                    let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
+                                                       now: snapshot.refreshedAt)
+                    Button { model.openDashboard(harness: source.id) } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: sourceSymbol(source)).frame(width: 15)
+                            Image(systemName: sourceStatusSymbol(health)).foregroundStyle(sourceStatusColor(health))
+                            Text(source.label).font(.system(size: 11))
+                            Spacer()
+                            Text("\(source.count.formatted()) · \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain)
+                }
+            }.font(.system(size: 11))
         }
     }
 
@@ -978,9 +1105,6 @@ func attentionSentences(_ summary: Summary, sources: [SourceRow] = []) -> [Strin
         sentences.append(summary.noConversationContentSessions == 1
             ? "1 conversation has no conversation content"
             : "\(summary.noConversationContentSessions) conversations have no conversation content")
-    }
-    for source in sources where source.regularlyUsed && source.health == .stopped {
-        sentences.append("\(source.label) stopped saving")
     }
     return sentences
 }
