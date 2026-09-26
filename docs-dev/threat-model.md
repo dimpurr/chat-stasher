@@ -479,7 +479,7 @@ between one profile's install and another's. Any install in any profile of any
 registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
-them (`crates/chat-stasher/src/nativehost.rs:253-320`, `:292-296`;
+them (`crates/chat-stasher/src/nativehost.rs:484-597`, `:473-476`;
 `crates/chat-stasher/src/main.rs:1970-1985`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.

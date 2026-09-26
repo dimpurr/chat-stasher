@@ -300,11 +300,11 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:922-997`).
+  install (`crates/chat-stasher/src/nativehost.rs:1245-1320`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:1646-1656`, `:1383`).
+  (`crates/chat-stasher/src/nativehost.rs:1969-1979`, `:1706`).
 
 **It is not yet on any app store** (see section 6 for details). Stable releases
 include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
@@ -364,27 +364,27 @@ sentence the surrounding documents have to get right:
   into the browser's own discovery directory, which is inside the browser's
   folder and beside its profile directories, not inside any one of them
   (`Google/Chrome/NativeMessagingHosts` on macOS), and every profile of that
-  browser reads the same file (`crates/chat-stasher/src/nativehost.rs:253-320`).
+  browser reads the same file (`crates/chat-stasher/src/nativehost.rs:484-597`).
   On Windows there is one JSON per browser plus a registry value that points at
-  it (`crates/chat-stasher/src/nativehost.rs:292-296`).
+  it (`crates/chat-stasher/src/nativehost.rs:473-476`).
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
   (`crates/chat-stasher/src/main.rs:1970-1985`;
-  `crates/chat-stasher/src/nativehost.rs:922-997`). So several installs deliver
+  `crates/chat-stasher/src/nativehost.rs:1245-1320`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
   (`crates/chat-stasher/src/main.rs:1912-1922`;
-  `crates/chat-stasher/src/nativehost.rs:464-466`). A browser you install later
+  `crates/chat-stasher/src/nativehost.rs:755-757`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
   removes the manifest for every browser it knows in one pass (`--browser
   chrome` limits it to the ones named, and `--stage` cannot be combined with it
   at all, exit 2), and it leaves the config, the stage, the sealed captures and
   every other vendor's manifest untouched
-  (`crates/chat-stasher/src/main.rs:1856-1862`, `:2012-2050`, `:2119-2125`).
+  (`crates/chat-stasher/src/main.rs:1856-1862`, `:2021-2059`, `:2128-2134`).
   "It is per-user" does **not** mean "it is per profile": removing the extension
   from one profile is done on that profile's own extension page, and doing it
   with `--uninstall` takes the channel away from the profiles you kept, whose
