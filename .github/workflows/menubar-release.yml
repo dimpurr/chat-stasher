@@ -1,0 +1,191 @@
+# Builds, signs and notarizes the menu bar app when a release tag is pushed.
+#
+# This is a separate workflow from release.yml on purpose. That workflow
+# publishes an exact seven-file asset set and asserts it, and a macOS app image
+# is not one of those seven — so a notarization Apple refuses marks this
+# workflow red rather than a CLI release, and the seven-file assertion stays
+# exactly seven files. This workflow uploads its one artifact as a *workflow
+# artifact*, not to the Release; attaching it to the Release is a separate
+# change that has to touch that assertion.
+#
+# The work is the same a maintainer does by hand (RELEASING.md, "The menu bar
+# app"):
+#
+#   apps/menubar/scripts/sign-and-notarize.sh --version X.Y.Z --universal
+#
+# The script reads the identity from the keychain this job imports and the
+# notary credentials from the ASC_* variables this job writes. Neither value is
+# printed by the script or by this workflow.
+#
+# Two things this workflow deliberately does not do:
+#
+#   * It does not pass --build. The app's build-number scheme is settled by the
+#     still-open "who owns app updates" decision, and a CI-only scheme would
+#     disagree with a release cut by hand on a maintainer's machine.
+#   * It does not bundle the CLI. When the app carries one, this job needs a
+#     Rust build step and the CLI needs its own signature, hardened runtime and
+#     timestamp inside the bundle.
+name: Menubar app
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A manual run must name a tag. The preconditions job reads the ref and
+  # refuses anything that is not vX.Y.Z or vX.Y.Z-rc.N, which is also what
+  # keeps a branch push away from a job that holds signing secrets.
+  workflow_dispatch:
+
+# Wide enough to read the repository and upload an artifact. It publishes
+# nothing, so it needs no write scope.
+permissions:
+  contents: read
+
+concurrency:
+  group: menubar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # A job-level `if:` is evaluated before secrets are available, so a secret
+  # cannot be tested there. The decision is made in its own job, which holds no
+  # token scope at all, and carried to the next job as an output — the same
+  # arrangement release.yml uses for its tap guard.
+  preconditions:
+    name: signing preconditions
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Decide whether this run can sign
+        id: check
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Only a release tag names a version an artifact may claim, and -dev
+          # is refused by the script for the same reason.
+          enabled=false
+          version=""
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "'${TAG}' is not a vX.Y.Z or vX.Y.Z-rc.N tag — skipping the app build."
+          elif [ -z "${CERTIFICATE:-}" ] || [ -z "${CERTIFICATE_PASSWORD:-}" ] \
+            || [ -z "${NOTARY_KEY_ID:-}" ] || [ -z "${NOTARY_ISSUER_ID:-}" ] \
+            || [ -z "${NOTARY_PRIVATE_KEY:-}" ]; then
+            echo "The signing secrets are not all set — skipping the app build."
+          else
+            enabled=true
+            version="${TAG#v}"
+          fi
+
+          {
+            echo "enabled=${enabled}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+  notarize:
+    name: build, sign and notarize the app
+    needs: preconditions
+    if: needs.preconditions.outputs.enabled == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preconditions.outputs.version }}
+      # The script reads these three together, and takes its identity from the
+      # keychain instead — no name or team id is passed on a command line.
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Import the Developer ID certificate
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # Both paths are under the runner's temp directory, and they are
+          # published to the steps that follow rather than set as job-level env
+          # because the `runner` context is not available there.
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "ASC_PRIVATE_KEY_PATH=$RUNNER_TEMP/notary-api-key.p8"
+          } >> "$GITHUB_ENV"
+
+          # A keychain of this run's own, deleted at the end of the job. The
+          # password never leaves the step.
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+
+          # Without this the private key is not usable by codesign without an
+          # interactive prompt, and a runner has nobody to answer one.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+
+          # codesign resolves an identity through the keychain search list, so
+          # the new keychain has to join it rather than replace it.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | tr -d '"')
+
+      - name: Confirm exactly one Developer ID Application identity
+        run: |
+          set -euo pipefail
+
+          # The name of the identity is the owner's, so only the count is
+          # printed. The script requires exactly one for the same reason: with
+          # two, "which certificate signed this" would be a guess.
+          count="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep -c 'Developer ID Application' || true)"
+          echo "Developer ID Application identities available: ${count}"
+          if [ "$count" -ne 1 ]; then
+            echo "error: expected exactly one Developer ID Application identity, found ${count}." >&2
+            echo "error: MACOS_DEVELOPER_ID_P12 must hold one Developer ID Application certificate and its private key." >&2
+            exit 1
+          fi
+
+      - name: Write the notary API key
+        env:
+          NOTARY_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$NOTARY_PRIVATE_KEY" > "$ASC_PRIVATE_KEY_PATH"
+
+      - name: Build, sign, notarize and staple
+        run: |
+          set -euo pipefail
+          # --universal, because a download is offered to Intel and Apple
+          # Silicon Macs alike. The script fails before it builds when the
+          # identity or the credentials are missing, and it fails after the
+          # notary submission unless the status is Accepted.
+          apps/menubar/scripts/sign-and-notarize.sh --version "$VERSION" --universal
+
+      - name: Upload the disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-stasher-app-${{ needs.preconditions.outputs.version }}
+          path: apps/menubar/build/*.dmg
+          if-no-files-found: error
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" || true

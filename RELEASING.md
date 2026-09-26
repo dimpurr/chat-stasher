@@ -310,6 +310,123 @@ deleted.
 The native host and the CLI side need no change for any of this: the channel only
 decides what the extension itself builds and serves.
 
+## The menu bar app
+
+`apps/menubar/` is the macOS menu bar shell. It is a second artifact with its own
+release chain, and it is the one this project publishes that Apple will not let
+anyone run unnotarized: a downloaded Developer ID app is checked by Gatekeeper,
+and a bundle that is signed but has no ticket is refused. Apple's requirements,
+in its own words, are that every executable is code-signed with a Developer ID
+certificate, that the app **and its command line targets** have the Hardened
+Runtime, that the signature carries a secure timestamp, and that no
+`get-task-allow` entitlement is present
+(<https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution>).
+
+The app has no version of its own. It defaults to the version in
+`crates/chat-stasher/Cargo.toml` — the app carries the CLI, so one version owner
+covers both — and `--version` overrides it. A `-dev` version is refused for the
+same reason the registry steps refuse one: a development version is not a
+release. `CFBundleShortVersionString` takes the numeric part (`0.5.0`) and the
+release label keeps the full string, so a release candidate named `0.5.0-rc.1`
+still produces `chat-stasher-0.5.0-rc.1-universal2.dmg`.
+
+### Prerequisites, both of them the owner's
+
+- **A Developer ID Application certificate** in the login keychain, issued from
+  `developer.apple.com` → Certificates, Identifiers & Profiles. Apple offers this
+  certificate type only to a paid Apple Developer Program membership, and it is a
+  different certificate from the distribution certificate an iOS app uses. No
+  name or team id is committed here: the script reads the identity from the
+  keychain, and `--identity` or `CHAT_STASHER_SIGN_IDENTITY` names one explicitly
+  when a machine has more than one.
+- **Notary credentials**, in either of the two forms `notarytool` accepts: an App
+  Store Connect API key (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY_PATH` —
+  the only form that works on a fresh CI runner, where no keychain item can
+  exist), or a keychain profile (`--keychain-profile`, default
+  `chat-stasher-notary`, created with `xcrun notarytool store-credentials`). A
+  profile is per Apple team rather than per app, so an existing one can be reused
+  by name.
+
+Check both without building anything:
+
+```sh
+apps/menubar/scripts/sign-and-notarize.sh --self-check
+```
+
+It exits 0 when the machine is ready, 1 when a prerequisite is absent, and 3 when
+one could not be determined — an unanswered question is not the same as an absent
+one, and neither is a pass.
+
+### Cutting an app release
+
+```sh
+apps/menubar/scripts/sign-and-notarize.sh --version X.Y.Z --universal
+```
+
+`--universal` builds both architectures; a public download should carry both,
+since the app is offered to Intel and Apple Silicon Macs alike. In order, the
+script:
+
+1. refuses before it builds when the identity or the credentials are missing, so
+   a two-minute build is not spent discovering a one-line fix;
+2. builds in release, assembles `build/Chat Stasher.app`, and writes
+   `CFBundleShortVersionString`/`CFBundleVersion`/`LSUIElement` into its
+   `Info.plist`;
+3. signs inside-out — every Mach-O in the bundle, then every nested bundle, then
+   the app — with the Hardened Runtime and a secure timestamp. It searches the
+   whole bundle rather than the directories `codesign` documents, because that
+   list omits `Contents/Helpers`, which is where a bundled CLI tends to live;
+4. verifies with `codesign --verify --deep --strict`, requires a Developer ID
+   authority **and** a `Timestamp=` line (its absence is what Apple reports as
+   `The signature does not include a secure timestamp`), and reads the
+   entitlements back out of the finished signature to refuse
+   `com.apple.security.get-task-allow`;
+5. builds the disk image, signs it with the same identity and timestamp, and
+   verifies it;
+6. submits it to the notary service with `--wait` and requires the `status` field
+   to be `Accepted` — not a zero exit, because `notarytool` exits 0 for a
+   submission it has processed and rejected — then staples the ticket, validates
+   it, and prints the image path, its SHA-256 and the signing authority.
+
+`--signed` stops after step 5: signed, not notarized, for testing. `--ad-hoc`
+needs no certificate at all and exists so the chain can be exercised on a machine
+that has none; what it produces can never be notarized. `build-dmg.sh` builds the
+image alone from a bundle that already exists, and `--help` on either script
+lists every flag.
+
+### What the app chain does not do
+
+**It staples the image, not the app inside it.** The notary service generates a
+ticket for the top-level file it is given and for each nested file — Apple says
+so in as many words, with a disk image containing an app bundle as the example —
+but a ticket has to be *stapled* to each file separately, and `stapler` refuses
+to attach one to a file it cannot validate. This chain therefore staples
+`chat-stasher-X.Y.Z-universal2.dmg`; the `Chat Stasher.app` inside it carries no
+stapled ticket of its own, and a copy dragged out of the image is validated by
+Gatekeeper against the notary service over the network on first launch. The
+alternative is a second notarization round — zip the app, notarize it, staple the
+app, then build the image around the stapled app and notarize and staple the
+image — which costs an extra submission and an extra artifact to keep in step.
+Whether the extracted copy needs its own ticket is settled by the clean-machine
+acceptance run, not by this document.
+
+**It does not decide who owns app updates.** An in-app updater (Sparkle, which is
+what both comparable apps in this space use) and the manual alternative (publish
+the image and let the user re-download) are different contracts with different
+prerequisites: an updater needs an appcast, a `SUFeedURL` and an EdDSA public key
+in `Info.plist`, an Ed25519 private key held outside this repository, and a
+`CFBundleVersion` that increases every release, because that is the field an
+appcast compares. Nothing in the app reads an appcast today, so no appcast is
+generated. The signing and notarization chain above is what either choice sits
+behind.
+
+The app's own workflow is separate from the CLI's, because the CLI's Release
+carries an exact seven-file asset set that `release.yml` asserts and an app image
+is not one of them. `.github/workflows/menubar-release.yml` runs on `v*` tags
+only, and only when the signing secrets are present; it builds and notarizes the
+image and uploads it as a workflow artifact. It does not attach the image to the
+Release.
+
 ## Registry credentials
 
 The registry job uses the `release` GitHub Actions environment, and each
@@ -483,6 +600,12 @@ the Release title, notes and asset names are all derived from the tag's name.
 The reason to keep using `-a` anyway is that `v0.1.0` and `v0.2.0` are annotated,
 and an annotated tag is the only artifact that records who cut a release and
 when.
+
+Every check above belongs to `release.yml`, and the artifact it covers is the CLI
+and its packages. The menu bar app is deliberately not in that asset set: it has
+its own workflow and its own image ("The menu bar app"), so that a build whose
+notarization Apple refuses does not mark a CLI release red, and so that the
+seven-file assertion above stays exactly seven files.
 
 ## Why the release workflow runs the gates itself
 
