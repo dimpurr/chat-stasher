@@ -21,7 +21,7 @@
 //! * **Uninstall removes exactly what install wrote.** Discovery directories
 //!   are shared with every other vendor on the machine — on the author's own
 //!   machine `~/Library/Application Support/Google/Chrome/NativeMessagingHosts`
-//!   holds nine other manifests — so removal is by exact file name, and the
+//!   holds other vendors' manifests — so removal is by exact file name, and the
 //!   directory itself is never removed.
 //!
 //! Scope note: the file also carries the **protocol v1 host itself** — frame
@@ -54,6 +54,71 @@
 //! * **EOF inside a frame is not a message.** If the header or the body ends
 //!   early there is nothing to answer and nothing is written; the process
 //!   exits non-zero so a caller cannot read silence as a successful delivery.
+//!
+//! # Path sources (read 2026-09-26)
+//!
+//! "An extension is not a singleton" — one user is N machines × M browsers ×
+//! K profiles (`36-EXTENSION-TOPOLOGY.md` §1). Registration is therefore a
+//! **per browser × per OS** fact, and decision **D5** of that document splits
+//! the matrix into *supported and tested* (Chrome, Chromium, Edge, Brave, Arc)
+//! and *best effort, marked unverified* (Chrome Beta / Canary, Opera, Vivaldi).
+//! Every path below carries the source it came from, because a guessed
+//! discovery path does not produce a visible error — it produces a browser that
+//! silently never finds the host:
+//!
+//! * **S1** Chrome for Developers, *Native messaging* —
+//!   <https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging>
+//!   (macOS / Linux user paths, Windows `HKCU\SOFTWARE\Google\Chrome\…`, the
+//!   32-bit-before-64-bit registry probe, and Chrome for Testing).
+//! * **S2** Chromium, `docs/user_data_dir.md` —
+//!   <https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md>
+//!   (per-channel data directories on all three OSes; and the note that Linux's
+//!   `~/.config` part can be overridden by `$CHROME_CONFIG_HOME` /
+//!   `$XDG_CONFIG_HOME` — see the gap recorded in [`default_root`]).
+//! * **S3** Chromium, `remoting/tools/register_local_nm_hosts.sh` —
+//!   <https://chromium.googlesource.com/chromium/src/+/06e52a1425e72fe847d8a33a975bc9fdbe780ee6/remoting/tools/register_local_nm_hosts.sh>
+//!   (Chromium writes into `~/.config/google-chrome{,-beta,-unstable}/NativeMessagingHosts`).
+//! * **S4** Chromium, `native_process_launcher_win.cc` —
+//!   <https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc>
+//!   (the Windows key is a **branding-level literal**, not a per-channel one).
+//! * **S5** Microsoft Learn, *Native messaging* (Edge) —
+//!   <https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging>
+//!   (macOS `Microsoft Edge {Channel_Name}`, Linux `microsoft-edge`, Windows
+//!   `SOFTWARE\Microsoft\Edge\…`, and Edge's documented fallback to Chromium's
+//!   then Chrome's key).
+//!
+//! Sources that are **not** vendor documentation are marked inline as
+//! `NO VENDOR DOC`, meaning no primary source was located. "Not found" is not
+//! "does not exist": for Arc,
+//! Brave, Opera and Vivaldi no primary source for the path was located, so the
+//! path is carried from a third-party implementation and the browser's support
+//! tier can never be better than [`Support::Unverified`] on its own evidence:
+//!
+//! * **S6** Arc, macOS `~/Library/Application Support/Arc/User Data/NativeMessagingHosts`
+//!   — <https://github.com/keepassxreboot/keepassxc-browser/issues/1793>,
+//!   <https://github.com/keepassxreboot/keepassxc-browser/issues/1955>,
+//!   <https://github.com/keepassxreboot/keepassxc-browser/issues/2171>.
+//!   Note the extra `User Data` component: Arc is the one Chromium fork here
+//!   whose manifest directory is *not* directly under its application-data root.
+//! * **S7** Opera — <https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging>,
+//!   <https://github.com/keepassxreboot/keepassxc/issues/2879>.
+//! * **S8** Brave — <https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go>.
+//!   Brave's *policy* key `Software\Policies\BraveSoftware\Brave` is a different
+//!   key and must not be confused with the manifest one.
+//! * **S9** Vivaldi — <https://github.com/vergenzt/TabFS/blob/master/install.sh>,
+//!   <https://github.com/AdguardTeam/AdguardForMac/issues/1152>.
+//!
+//! Two consequences are load-bearing and are asserted by
+//! `tests/nativehost_browser_matrix_test.rs`:
+//!
+//! * **No guessed registry key.** S4 shows Chromium's own lookup uses one
+//!   branding-level key; there is no per-channel key to copy. Chrome Beta and
+//!   Chrome Canary therefore return `None` for Windows and
+//!   `install-native-host` says *"no registry key known in this build"* rather
+//!   than writing an entry nothing reads.
+//! * **An unsupported pair is not an absent browser.** `target()` returning
+//!   `None` means *this build does not look there*, which `doctor` reports as
+//!   [`crate::doctor`]'s `NoDiscoveryPath` — never as `NotRegistered`.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -132,25 +197,77 @@ pub enum Family {
     Gecko,
 }
 
-/// Browsers this command knows a discovery path for.
+/// Support tier for one browser on one OS, from decision **D5** of
+/// `36-EXTENSION-TOPOLOGY.md` §5.
+///
+/// The tier is not decoration: it is what `doctor` D8, the setup wizard and the
+/// support matrix report, so it has to be the *evidenced* claim rather than the
+/// intended one. It is deliberately an `Option` at the call site — see
+/// [`Browser::support`] — because "unverified" and "we do not look there at
+/// all" are two different statements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Support {
+    /// D5's promised matrix: supported and tested, with a path from a vendor's
+    /// own documentation — and, on Windows, a registry key, without which the
+    /// manifest is on disk and unreachable.
+    Supported,
+    /// D5's best-effort tier (Chrome Beta / Canary, Opera, Vivaldi), or a pair
+    /// whose path has no primary vendor source (`NO VENDOR DOC`, S6–S9),
+    /// or Windows without a registry key. Registration is attempted and
+    /// reported, and never promised.
+    Unverified,
+}
+
+impl Support {
+    /// The slug reported by `doctor --json` and printed by the wizard.
+    pub fn id(self) -> &'static str {
+        match self {
+            Support::Supported => "supported",
+            Support::Unverified => "unverified",
+        }
+    }
+}
+
+/// Browsers this command knows a discovery path for, in D5's tier order.
+///
+/// The order is the tier order rather than alphabetical on purpose: `Browser::ALL`
+/// is what `doctor` D8 and `install-native-host` print, and a reader comparing
+/// three machines' output should find the promised browsers grouped, with the
+/// best-effort ones below them, rather than interleaved by spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum Browser {
+    // -- D5 "supported and tested" -----------------------------------------
     Chrome,
-    ChromeCanary,
     Chromium,
     Edge,
     Brave,
+    /// macOS only: Arc ships no Linux build, so on Linux this browser has no
+    /// discovery path at all (see [`Browser::support`], which answers `None`
+    /// there rather than pretending).
+    Arc,
+    // -- D5 "best effort, marked unverified" -------------------------------
+    ChromeBeta,
+    ChromeCanary,
+    Opera,
     Vivaldi,
+    // -- Gecko, outside D5's Chromium-family matrix ------------------------
+    /// Carried as `Supported`: its paths come from Mozilla's own documentation
+    /// (`~/.mozilla/native-messaging-hosts`, `~/Library/Application
+    /// Support/Mozilla/NativeMessagingHosts`) and its registration predates
+    /// D5. Not part of D5's Chromium matrix, and not covered by its wording.
     Firefox,
 }
 
 impl Browser {
-    pub const ALL: [Browser; 7] = [
+    pub const ALL: [Browser; 10] = [
         Browser::Chrome,
-        Browser::ChromeCanary,
         Browser::Chromium,
         Browser::Edge,
         Browser::Brave,
+        Browser::Arc,
+        Browser::ChromeBeta,
+        Browser::ChromeCanary,
+        Browser::Opera,
         Browser::Vivaldi,
         Browser::Firefox,
     ];
@@ -158,12 +275,80 @@ impl Browser {
     pub fn id(self) -> &'static str {
         match self {
             Browser::Chrome => "chrome",
-            Browser::ChromeCanary => "chrome-canary",
             Browser::Chromium => "chromium",
             Browser::Edge => "edge",
             Browser::Brave => "brave",
+            Browser::Arc => "arc",
+            Browser::ChromeBeta => "chrome-beta",
+            Browser::ChromeCanary => "chrome-canary",
+            Browser::Opera => "opera",
             Browser::Vivaldi => "vivaldi",
             Browser::Firefox => "firefox",
+        }
+    }
+
+    /// The browsers this build reports at [`Support::Supported`]: D5's
+    /// "supported and tested" list, plus Firefox.
+    ///
+    /// Firefox is not in D5's matrix — that decision is about the Chromium
+    /// family — but it is not a best-effort browser either: its two manifest
+    /// directories come from Mozilla's own documentation, its registration
+    /// predates D5, and demoting it to `unverified` would tell users of a
+    /// working browser not to trust it.
+    ///
+    /// Being in this list is necessary but not sufficient for
+    /// [`Support::Supported`]: a pair also has to have somewhere to be
+    /// registered on this OS.
+    fn in_supported_matrix(self) -> bool {
+        matches!(
+            self,
+            Browser::Chrome
+                | Browser::Chromium
+                | Browser::Edge
+                | Browser::Brave
+                | Browser::Arc
+                | Browser::Firefox
+        )
+    }
+
+    /// The support tier for this browser on `platform`, or `None` when this
+    /// build has no discovery path for the pair at all.
+    ///
+    /// `None` and `Some(Support::Unverified)` are different answers and must not
+    /// be collapsed: `None` means *the pair is outside the matrix and nothing was
+    /// looked at*, while `Unverified` means *we will try, and you should not
+    /// count on it*. On Windows the tier also depends on the registry key,
+    /// because there a manifest with no key is a file no browser reads —
+    /// reporting that as `Supported` would be the exact false promise D5's
+    /// wording exists to prevent.
+    pub fn support(self, platform: Platform) -> Option<Support> {
+        if !self.has_path(platform) {
+            return None;
+        }
+        let windows = platform == Platform::Windows;
+        if windows && registry_subkey_of(self).is_none() {
+            // Registered nowhere the browser looks. Say so.
+            return Some(Support::Unverified);
+        }
+        if !self.in_supported_matrix() {
+            return Some(Support::Unverified);
+        }
+        // Brave and Arc are on D5's supported list, but neither has a vendor
+        // document for its path (`NO VENDOR DOC`, S6/S8/S9). D5 is the
+        // owner's decision and is implemented as written; §8 of the W204 report
+        // records the divergence between that decision and the evidence.
+        Some(Support::Supported)
+    }
+
+    /// Is there a discovery path for this pair? Mirrors [`target`]'s table, and
+    /// `the_support_tier_and_the_path_table_agree` pins the two together so the
+    /// answer cannot drift from the paths actually written.
+    pub fn has_path(self, platform: Platform) -> bool {
+        match (platform, self) {
+            // Arc ships for macOS and Windows only.
+            (Platform::Linux, Browser::Arc) => false,
+            // Every other pair in the table has a path on every platform.
+            _ => true,
         }
     }
 
@@ -191,21 +376,35 @@ pub struct Target {
 }
 
 impl Target {
+    /// Is the browser's data directory here? `None` = this build has no cheap
+    /// probe on this platform, so the answer is **unknown**.
+    ///
+    /// This is a statement about the *browser*, never about the extension: a data
+    /// directory is left behind by an uninstall, shared by every profile, and
+    /// says nothing about whether the extension is loaded in any of them. It is
+    /// the tri-state the caller needs in order not to print a guess — see
+    /// `doctor`'s `detected`, which carries these three values through to the
+    /// user.
+    pub fn detected(&self) -> Option<bool> {
+        self.profile_root.as_ref().map(|root| root.is_dir())
+    }
+
     /// Has this browser left its data directory behind? `None` profile roots
-    /// answer `true`: unknown is not evidence of absence.
+    /// answer `true`: unknown is not evidence of absence, so a caller deciding
+    /// whether to write a manifest writes it.
     pub fn browser_present(&self) -> bool {
-        match &self.profile_root {
-            Some(root) => root.is_dir(),
-            None => true,
-        }
+        self.detected().unwrap_or(true)
     }
 }
 
 /// Default discovery root for a platform, derived from `home` alone.
 ///
 /// macOS: `~/Library/Application Support` — verified on the author's machine,
-/// where seven browsers' `NativeMessagingHosts` directories already exist
-/// under it. Linux: `$HOME` (each browser's relative path carries its own
+/// where **every one of the ten browsers in [`Browser::ALL`] already has its
+/// `NativeMessagingHosts` directory** under it, Arc's included and at exactly
+/// the `Arc/User Data/…` shape S6 describes. That is the one path in this table
+/// with third-party evidence only, so the filesystem is the strongest check
+/// available for it and it agrees. Linux: `$HOME` (each browser's relative path carries its own
 /// `.config/…`). Windows: `<home>\AppData\Local`, which only holds the JSON —
 /// the browser finds it through the registry.
 ///
@@ -215,6 +414,21 @@ impl Target {
 /// answer about *that* home. On Windows the *machine's* own answer can differ
 /// (a profile may redirect the `LocalAppData` known folder), but that is a fact
 /// about the machine and not about the home, so it lives in [`machine_root`].
+///
+/// # Known gap: Linux `$XDG_CONFIG_HOME` / `$CHROME_CONFIG_HOME`
+///
+/// S2 records that on Linux the `~/.config` component of every Chromium data
+/// directory can be moved by `$CHROME_CONFIG_HOME` (Chrome) or
+/// `$XDG_CONFIG_HOME` (the rest). This build does not consult either, so on a
+/// machine that sets one, both `install-native-host` and `doctor` look in
+/// `$HOME/.config/…` while the browser looks elsewhere — and the answer they give
+/// is `not registered` / `skipped` rather than unknown. That is a *wrong negative*
+/// and it is recorded here rather than fixed, because a faithful fix cannot be a
+/// branch on this function: Firefox's Linux directory is `$HOME/.mozilla`, which
+/// no `.config` variable moves, so one root cannot move for all of them and a
+/// half-move would silently relocate every Chromium manifest for exactly the
+/// users who set the variable. Tracked as a gap in the W204 report (§8); the
+/// Windows analogue of this problem *is* handled, by [`machine_root`].
 pub fn default_root(platform: Platform, home: &Path) -> PathBuf {
     match platform {
         Platform::Macos => home.join("Library").join("Application Support"),
@@ -250,6 +464,23 @@ fn machine_root_with(platform: Platform, home: &Path, local_appdata: Option<&OsS
 
 /// Resolve one browser's target under `root`, or `None` when this build has no
 /// path for that combination (rather than a guessed one).
+///
+/// # The three layouts
+///
+/// * **macOS / Linux** — `<root>/<data dir>/NativeMessagingHosts/<host>.json`.
+///   `root` is `~/Library/Application Support` and `$HOME` respectively, and the
+///   data directories are the sources cited in this file's header.
+/// * **Windows** — the manifest may live anywhere and the *registry* points at
+///   it, so it goes in our own directory, one subdirectory per browser, which
+///   keeps the registry mapping 1:1 with the file and lets uninstall reason
+///   about exactly one key and one file per browser.
+///
+/// # The `profile_rel` half is a probe, not a promise
+///
+/// `profile_rel` is what [`Target::detected`] stats. On Windows it is filled in
+/// only for the browsers whose data directory a **primary** source names (S2);
+/// for the rest it stays `None`, which means *presence unknown* — and unknown is
+/// not absence, so those browsers are written for regardless.
 pub fn target(
     platform: Platform,
     root: &Path,
@@ -257,57 +488,117 @@ pub fn target(
     host_name: &str,
 ) -> Option<Target> {
     let (profile_rel, nmh_rel): (Option<&str>, &str) = match (platform, browser) {
-        // macOS: <root> = ~/Library/Application Support
+        // ---- macOS: <root> = ~/Library/Application Support ----------------
+        // S1 for Chrome and Chromium; S2 for the Chrome channels; S5 for Edge.
         (Platform::Macos, Browser::Chrome) => (Some("Google/Chrome"), "NativeMessagingHosts"),
+        (Platform::Macos, Browser::ChromeBeta) => {
+            (Some("Google/Chrome Beta"), "NativeMessagingHosts")
+        }
         (Platform::Macos, Browser::ChromeCanary) => {
             (Some("Google/Chrome Canary"), "NativeMessagingHosts")
         }
         (Platform::Macos, Browser::Chromium) => (Some("Chromium"), "NativeMessagingHosts"),
         (Platform::Macos, Browser::Edge) => (Some("Microsoft Edge"), "NativeMessagingHosts"),
+        // S6 — Arc is the one Chromium fork whose application-data root carries
+        // an extra `User Data` component before `NativeMessagingHosts`. Dropping
+        // it would place the manifest in a directory Arc does not read, with no
+        // error anywhere: the extension would simply never find the host.
+        (Platform::Macos, Browser::Arc) => (Some("Arc/User Data"), "NativeMessagingHosts"),
+        // S8 — NO VENDOR DOC: Brave's application-data root.
         (Platform::Macos, Browser::Brave) => {
             (Some("BraveSoftware/Brave-Browser"), "NativeMessagingHosts")
         }
+        // S9 — NO VENDOR DOC.
         (Platform::Macos, Browser::Vivaldi) => (Some("Vivaldi"), "NativeMessagingHosts"),
+        // S7 — NO VENDOR DOC: Opera uses its bundle identifier here,
+        // unlike every other browser in this table.
+        (Platform::Macos, Browser::Opera) => {
+            (Some("com.operasoftware.Opera"), "NativeMessagingHosts")
+        }
         (Platform::Macos, Browser::Firefox) => (Some("Mozilla"), "NativeMessagingHosts"),
 
-        // Linux: <root> = $HOME. Note Firefox's directory is spelled in
-        // lowercase-with-hyphens here and CamelCase on macOS.
+        // ---- Linux: <root> = $HOME ---------------------------------------
+        // Note Firefox's directory is spelled in lowercase-with-hyphens here and
+        // CamelCase on macOS. The `.config` component is S1/S3 for the Chromium
+        // family and is deliberately *not* resolved through `$XDG_CONFIG_HOME`
+        // here — see the gap recorded on [`default_root`].
         (Platform::Linux, Browser::Chrome) => {
             (Some(".config/google-chrome"), "NativeMessagingHosts")
+        }
+        (Platform::Linux, Browser::ChromeBeta) => {
+            (Some(".config/google-chrome-beta"), "NativeMessagingHosts")
+        }
+        // S2/S3 name `google-chrome-canary` for Linux. It is carried as an
+        // unverified entry rather than dropped: no Linux Chrome Canary build was
+        // found to exist, so on a Linux machine this normally reports `skipped`
+        // — which *shows* the absence instead of hiding it behind a missing row.
+        (Platform::Linux, Browser::ChromeCanary) => {
+            (Some(".config/google-chrome-canary"), "NativeMessagingHosts")
         }
         (Platform::Linux, Browser::Chromium) => (Some(".config/chromium"), "NativeMessagingHosts"),
         (Platform::Linux, Browser::Edge) => {
             (Some(".config/microsoft-edge"), "NativeMessagingHosts")
         }
+        // S8 — NO VENDOR DOC.
         (Platform::Linux, Browser::Brave) => (
             Some(".config/BraveSoftware/Brave-Browser"),
             "NativeMessagingHosts",
         ),
+        // S9 — NO VENDOR DOC.
         (Platform::Linux, Browser::Vivaldi) => (Some(".config/vivaldi"), "NativeMessagingHosts"),
+        // S7 — NO VENDOR DOC.
+        (Platform::Linux, Browser::Opera) => (Some(".config/opera"), "NativeMessagingHosts"),
         (Platform::Linux, Browser::Firefox) => (Some(".mozilla"), "native-messaging-hosts"),
-        // Chrome Canary is macOS/Windows only; Linux's unstable channel has a
-        // different directory that this build has not verified.
-        (Platform::Linux, Browser::ChromeCanary) => return None,
+        // Arc ships for macOS and Windows only; there is nothing to look for.
+        (Platform::Linux, Browser::Arc) => return None,
 
-        // Windows: the JSON may live anywhere; the registry points at it.
-        // One file per browser keeps the registry mapping 1:1 with the file,
-        // so uninstall never has to reason about sharing.
-        (Platform::Windows, _) => (None, "chat-stasher/NativeMessagingHosts"),
+        // ---- Windows: registry-keyed; manifest in our own directory -------
+        // The data directories below are S2. The probe is the *parent* of
+        // `…\User Data`, not `User Data` itself: a redirected profile directory
+        // leaves the parent standing, and a probe that went one level deeper
+        // would report a browser that is right there as absent.
+        //
+        // Edge's and Firefox's Windows data directories are not named by a
+        // primary source that was located, and Firefox's lives under
+        // `%APPDATA%` while this root is `%LOCALAPPDATA%`, so they stay `None`.
+        (Platform::Windows, Browser::Chrome) => (Some("Google/Chrome"), WIN_NMH_DIR),
+        (Platform::Windows, Browser::ChromeBeta) => (Some("Google/Chrome Beta"), WIN_NMH_DIR),
+        (Platform::Windows, Browser::ChromeCanary) => (Some("Google/Chrome SxS"), WIN_NMH_DIR),
+        (Platform::Windows, Browser::Chromium) => (Some("Chromium"), WIN_NMH_DIR),
+        (Platform::Windows, _) => (None, WIN_NMH_DIR),
     };
 
-    let dir = match profile_rel {
-        // Per-browser discovery directory (macOS / Linux).
-        Some(rel) => join_rel(&join_rel(root, rel), nmh_rel),
-        // Our own directory, one subdirectory per browser (Windows).
-        None => join_rel(root, nmh_rel).join(browser.id()),
+    // Which of the two layouts decides where the file goes is a fact about the
+    // *platform*, not about whether a presence probe exists. On Windows the
+    // manifest lives in our own directory and the registry points at it, so the
+    // probe above must not be allowed to steer the path — reading it that way
+    // once put every Windows manifest under
+    // `<root>\Google\Chrome\chat-stasher\…`, where no registry value named it
+    // and no browser would ever have read it.
+    let profile_root = profile_rel.map(|rel| join_rel(root, rel));
+    let dir = if platform == Platform::Windows {
+        join_rel(root, nmh_rel).join(browser.id())
+    } else {
+        match &profile_root {
+            Some(probe) => join_rel(probe, nmh_rel),
+            // Unreachable: every macOS and Linux arm above names a data
+            // directory, and the only pair without one has returned already.
+            // Answered with `None` rather than a panic, because a panic here
+            // would be a crash on a path a future browser could reach.
+            None => return None,
+        }
     };
     Some(Target {
         browser,
-        profile_root: profile_rel.map(|rel| join_rel(root, rel)),
+        profile_root,
         manifest: dir.join(format!("{host_name}.json")),
         dir,
     })
 }
+
+/// Our own Windows manifest directory, under `%LOCALAPPDATA%`. Shared by every
+/// browser there because the registry is what points at the file.
+const WIN_NMH_DIR: &str = "chat-stasher/NativeMessagingHosts";
 
 /// Join a `/`-separated relative template onto a root, one component at a
 /// time, so the result uses the host OS separator.
@@ -548,22 +839,54 @@ impl RegistryCommand {
     }
 }
 
+/// The `HKCU` vendor subkey for a browser, or `None` when this build has not got
+/// one.
+///
+/// # Why three browsers answer `None` on Windows
+///
+/// The Windows half of the registration is a registry value pointing at the
+/// manifest, and a browser whose key we do not know is a browser that will never
+/// read the file we just wrote. A guessed key therefore produces no error at
+/// all — it produces a registration that reports success and connects to
+/// nothing, which is precisely the failure this command exists to avoid.
+///
+/// * **Chrome Beta, Chrome Canary** — S4 is positive evidence that Chromium's
+///   own lookup uses one *branding-level* key (`SOFTWARE\Google\Chrome\…`,
+///   `SOFTWARE\Chromium\…` under `CHROMIUM_BRANDING`), with no per-channel key
+///   in that file. No primary source for a `Chrome Beta` / `Chrome SxS`
+///   NativeMessagingHosts key was located, so neither is invented.
+/// * **Arc** — no primary source was located for an Arc for Windows registry key
+///   either.
+///
+/// `install-native-host` prints the honest line for these — *"no registry key
+/// known in this build — manifest written but NOT discoverable"* — and
+/// [`Browser::support`] reports them `unverified` on Windows rather than
+/// `supported`.
+pub fn registry_subkey_of(browser: Browser) -> Option<&'static str> {
+    match browser {
+        // S1 / S4.
+        Browser::Chrome => Some("Google\\Chrome"),
+        // S1 / S4 (`CHROMIUM_BRANDING`).
+        Browser::Chromium => Some("Chromium"),
+        // S5.
+        Browser::Edge => Some("Microsoft\\Edge"),
+        // S8 — NO VENDOR DOC. Brave's policy key
+        // `Software\Policies\BraveSoftware\Brave` is a different key and is not
+        // this one.
+        Browser::Brave => Some("BraveSoftware\\Brave-Browser"),
+        // S9 — NO VENDOR DOC.
+        Browser::Vivaldi => Some("Vivaldi"),
+        // S7 — NO VENDOR DOC.
+        Browser::Opera => Some("Opera Software"),
+        Browser::Firefox => Some("Mozilla"),
+        Browser::ChromeBeta | Browser::ChromeCanary | Browser::Arc => None,
+    }
+}
+
 /// `HKCU` subkey for a browser, or `None` when this build has not got one.
 pub fn registry_key(browser: Browser, host_name: &str) -> Option<String> {
-    let vendor = match browser {
-        Browser::Chrome => "Google\\Chrome",
-        Browser::Chromium => "Chromium",
-        Browser::Edge => "Microsoft\\Edge",
-        Browser::Brave => "BraveSoftware\\Brave-Browser",
-        Browser::Vivaldi => "Vivaldi",
-        Browser::Firefox => "Mozilla",
-        // Canary's Windows key is not documented in the material gathered for
-        // ADR-014; guessing it would produce a silently dead registration.
-        Browser::ChromeCanary => return None,
-    };
-    Some(format!(
-        "HKCU\\Software\\{vendor}\\NativeMessagingHosts\\{host_name}"
-    ))
+    registry_subkey_of(browser)
+        .map(|vendor| format!("HKCU\\Software\\{vendor}\\NativeMessagingHosts\\{host_name}"))
 }
 
 /// The `reg.exe` argv for registering (or unregistering) one browser.

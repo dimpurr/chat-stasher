@@ -2051,8 +2051,19 @@ fn default_data_root() -> PathBuf {
 /// not being registered is a choice, a manifest pointing at a deleted binary
 /// is a stale install, and a manifest pointing into `target/` works today and
 /// stops working the next time anybody runs `cargo clean`.
+///
+/// [`HostManifestState::NoDiscoveryPath`] exists for the same reason as the rest
+/// of this enum: *this build has no path for that browser on this OS* and
+/// *there is no manifest at the path we looked at* are different findings — one
+/// is a gap in our matrix, the other is a fact about the machine — and
+/// collapsing them would report every unsupported pair as a missing
+/// registration. The topology document's rule ("an unknown must never be
+/// recorded as empty") is the same rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostManifestState {
+    /// This build has no discovery path for this browser on this OS (for
+    /// example Arc on Linux). Nothing was looked at, so nothing is known.
+    NoDiscoveryPath,
     /// No manifest at this browser's discovery path.
     NotRegistered,
     /// A manifest is there and could not be read.
@@ -2074,6 +2085,7 @@ impl HostManifestState {
     /// Short machine-readable tag, mirrored by `native_host_json`.
     pub fn kind_label(&self) -> &'static str {
         match self {
+            HostManifestState::NoDiscoveryPath => "no_discovery_path",
             HostManifestState::NotRegistered => "not_registered",
             HostManifestState::Unreadable { .. } => "unreadable",
             HostManifestState::Invalid { .. } => "invalid",
@@ -2083,13 +2095,41 @@ impl HostManifestState {
             HostManifestState::Ok { .. } => "ok",
         }
     }
+
+    /// Was a manifest found at a path this build looked at?
+    ///
+    /// [`HostManifestState::NoDiscoveryPath`] is deliberately not one of these:
+    /// nothing was looked at, so counting it as "not registered" would move a
+    /// count on the strength of a gap in our own path table.
+    pub fn is_registered(&self) -> bool {
+        !matches!(
+            self,
+            HostManifestState::NoDiscoveryPath | HostManifestState::NotRegistered
+        )
+    }
 }
 
-/// One browser's manifest, read-only.
+/// One browser's row of the registration matrix, read-only.
+///
+/// The four facts are kept apart on purpose, because they answer four different
+/// questions and only their combination is actionable:
+///
+/// * `support` — is this browser × OS in D5's matrix at all? `None` = we do not
+///   look there.
+/// * `detected` — is the browser's *data directory* here? `None` = this build has
+///   no probe on this platform. This says **nothing** about the extension: a
+///   data directory survives an uninstall and is shared by every profile, which
+///   is why no field here is called `installed`. A browser can be `detected`
+///   with `NotRegistered` and an extension loaded in three profiles, or
+///   `detected` with a healthy registration and no extension anywhere.
+/// * `manifest` — where we looked. `None` exactly when `support` is `None`.
+/// * `state` — what was there.
 #[derive(Debug, Clone)]
 pub struct HostManifestCheck {
     pub browser: String,
-    pub manifest: PathBuf,
+    pub support: Option<crate::nativehost::Support>,
+    pub detected: Option<bool>,
+    pub manifest: Option<PathBuf>,
     pub state: HostManifestState,
 }
 
@@ -2174,65 +2214,57 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// Read one browser's host manifest, if it is there.
 fn inspect_host_manifest(browser: crate::nativehost::Browser, root: &Path) -> HostManifestCheck {
-    let manifest = match crate::nativehost::target(
-        crate::nativehost::Platform::current(),
-        root,
-        browser,
-        crate::nativehost::HOST_NAME,
-    ) {
-        Some(target) => target.manifest,
-        // No discovery path is known for this combination. Reported as not
-        // registered rather than as an error: this build simply does not look
-        // there, which is a fact about the build.
-        None => {
-            return HostManifestCheck {
-                browser: browser.id().to_string(),
-                manifest: PathBuf::new(),
-                state: HostManifestState::NotRegistered,
-            }
-        }
+    let platform = crate::nativehost::Platform::current();
+    let support = browser.support(platform);
+    let Some(target) =
+        crate::nativehost::target(platform, root, browser, crate::nativehost::HOST_NAME)
+    else {
+        // No discovery path is known for this combination, so nothing was
+        // looked at. That is a gap in this build's matrix and not a fact about
+        // the machine, and the two must not be reported as the same finding.
+        return HostManifestCheck {
+            browser: browser.id().to_string(),
+            support,
+            detected: None,
+            manifest: None,
+            state: HostManifestState::NoDiscoveryPath,
+        };
+    };
+    let detected = target.detected();
+    let manifest = target.manifest;
+
+    let row = |state: HostManifestState| HostManifestCheck {
+        browser: browser.id().to_string(),
+        support,
+        detected,
+        manifest: Some(manifest.clone()),
+        state,
     };
 
     let text = match fs::read_to_string(&manifest) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return HostManifestCheck {
-                browser: browser.id().to_string(),
-                manifest,
-                state: HostManifestState::NotRegistered,
-            }
+            return row(HostManifestState::NotRegistered)
         }
         Err(e) => {
-            return HostManifestCheck {
-                browser: browser.id().to_string(),
-                manifest,
-                state: HostManifestState::Unreadable {
-                    error: e.to_string(),
-                },
-            }
+            return row(HostManifestState::Unreadable {
+                error: e.to_string(),
+            })
         }
     };
 
     let value: serde_json::Value = match serde_json::from_str(&text) {
         Ok(value) => value,
         Err(e) => {
-            return HostManifestCheck {
-                browser: browser.id().to_string(),
-                manifest,
-                state: HostManifestState::Invalid {
-                    error: e.to_string(),
-                },
-            }
+            return row(HostManifestState::Invalid {
+                error: e.to_string(),
+            })
         }
     };
     let Some(declared) = value.get("path").and_then(|path| path.as_str()) else {
-        return HostManifestCheck {
-            browser: browser.id().to_string(),
-            manifest,
-            state: HostManifestState::Invalid {
-                error: "manifest has no string `path`".to_string(),
-            },
-        };
+        return row(HostManifestState::Invalid {
+            error: "manifest has no string `path`".to_string(),
+        });
     };
     let path = PathBuf::from(declared);
 
@@ -2245,11 +2277,7 @@ fn inspect_host_manifest(browser: crate::nativehost::Browser, root: &Path) -> Ho
     } else {
         HostManifestState::Ok { path }
     };
-    HostManifestCheck {
-        browser: browser.id().to_string(),
-        manifest,
-        state,
-    }
+    row(state)
 }
 
 /// D8 — read every browser's host manifest and the configured stage. Read-only:
@@ -2296,17 +2324,70 @@ pub fn inspect_native_host(config: &Config, root: &Path) -> NativeHostCheck {
     NativeHostCheck { manifests, stage }
 }
 
+/// Which of the three states this machine's registration is in — the one slug
+/// `doctor --json` and `setup --json` both carry, so the two surfaces cannot
+/// disagree about the same machine.
+///
+/// Three states and not a boolean, because "nothing registered" is not one
+/// finding: a machine with browsers to register for and none registered is a
+/// user action waiting to happen, while a platform this build has no path table
+/// for is a gap in *our* matrix and no amount of user action would fix it.
+/// Collapsing them would turn our own gap into the user's problem.
+pub fn native_host_step(check: &NativeHostCheck) -> &'static str {
+    let looked_at = check
+        .manifests
+        .iter()
+        .filter(|entry| entry.state != HostManifestState::NoDiscoveryPath)
+        .count();
+    if looked_at == 0 {
+        return "nothing_to_look_at";
+    }
+    if check
+        .manifests
+        .iter()
+        .any(|entry| entry.state.is_registered())
+    {
+        "registered"
+    } else {
+        "none_registered"
+    }
+}
+
 /// D8 JSON. Public so the shape can be asserted without running the whole
 /// report — `doctor::run()` reads the real home directory, which a test must
 /// not do.
+///
+/// # Three lists, because there are three answers
+///
+/// `unsupported` is the pairs this build has no path for, `detected` is the
+/// browsers whose data directory is here, and `detected_not_registered` is the
+/// intersection that a user can actually act on: *the browser is on this machine
+/// and our host is not registered with it.* None of them is derived from the
+/// others, and none is a substitute for the per-browser rows in `manifests`,
+/// which is where `support` and `detected` are reported per pair.
+///
+/// The `registered` count deliberately excludes `no_discovery_path`: a browser we
+/// do not look for cannot be counted as one we failed to find.
 pub fn native_host_json(check: &NativeHostCheck) -> serde_json::Value {
+    let ids = |predicate: &dyn Fn(&HostManifestCheck) -> bool| -> Vec<String> {
+        check
+            .manifests
+            .iter()
+            .filter(|entry| predicate(entry))
+            .map(|entry| entry.browser.clone())
+            .collect()
+    };
+
     let manifests: Vec<serde_json::Value> = check
         .manifests
         .iter()
         .map(|entry| {
             let mut value = serde_json::json!({
                 "browser": entry.browser,
-                "manifest": entry.manifest.display().to_string(),
+                "support": entry.support.map(crate::nativehost::Support::id),
+                "detected": entry.detected,
+                "manifest": entry.manifest.as_ref().map(|path| path.display().to_string()),
+                "registered": entry.state.is_registered(),
                 "kind": entry.state.kind_label(),
             });
             match &entry.state {
@@ -2319,7 +2400,7 @@ pub fn native_host_json(check: &NativeHostCheck) -> serde_json::Value {
                 | HostManifestState::Ok { path } => {
                     value["path"] = serde_json::json!(path.display().to_string());
                 }
-                HostManifestState::NotRegistered => {}
+                HostManifestState::NoDiscoveryPath | HostManifestState::NotRegistered => {}
             }
             value
         })
@@ -2340,11 +2421,25 @@ pub fn native_host_json(check: &NativeHostCheck) -> serde_json::Value {
 
     serde_json::json!({
         "checked": true,
+        "step": native_host_step(check),
         "registered": check
             .manifests
             .iter()
-            .filter(|entry| entry.state != HostManifestState::NotRegistered)
+            .filter(|entry| entry.state.is_registered())
             .count(),
+        "supported": ids(&|entry| {
+            entry.support == Some(crate::nativehost::Support::Supported)
+        }),
+        "unverified": ids(&|entry| {
+            entry.support == Some(crate::nativehost::Support::Unverified)
+        }),
+        "unsupported": ids(&|entry| {
+            entry.state == HostManifestState::NoDiscoveryPath
+        }),
+        "detected": ids(&|entry| entry.detected == Some(true)),
+        "detected_not_registered": ids(&|entry| {
+            entry.detected == Some(true) && entry.state == HostManifestState::NotRegistered
+        }),
         "manifests": manifests,
         "stage": stage,
     })
@@ -2964,6 +3059,165 @@ fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>) {
     eprintln!();
 }
 
+/// The one line that says what `detected` is and is not, printed before the
+/// rows. Shared with the setup wizard for the same reason the rows are: two
+/// surfaces describing one machine must not describe it in two vocabularies.
+fn host_header_line() -> String {
+    "  a browser's data directory being present is not the extension being \
+     installed: it outlives an uninstall and is shared by every profile of that \
+     browser, so `detected yes` with `not registered` means \"this browser is here \
+     and the host is not\""
+        .to_string()
+}
+
+/// One browser's row of the inventory: `browser  tier  detected  state`.
+///
+/// The browser column is 14 wide because `chrome-canary` is 13 characters: at
+/// 12 it overflowed by one and pushed its tier and presence out of line, which
+/// is the kind of misalignment that makes a reader trust the wrong column.
+///
+/// Public and pure so the setup wizard can render the identical row instead of
+/// phrasing the same facts a second way.
+pub fn host_row_line(entry: &HostManifestCheck) -> String {
+    let support = entry.support.map(|tier| tier.id()).unwrap_or("-");
+    let detected = match entry.detected {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    let manifest = entry
+        .manifest
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(this build has no path for this pair)".to_string());
+
+    match &entry.state {
+        HostManifestState::NoDiscoveryPath => format!(
+            "  {:<14} {:<10} {:<7} no discovery path on this platform — not looked at",
+            entry.browser, support, detected
+        ),
+        HostManifestState::NotRegistered => format!(
+            "  {:<14} {:<10} {:<7} not registered (looked at {})",
+            entry.browser, support, detected, manifest
+        ),
+        HostManifestState::Ok { path } => format!(
+            "  {:<14} {:<10} {:<7} ok — {}",
+            entry.browser,
+            support,
+            detected,
+            path.display()
+        ),
+        HostManifestState::BuildArtifact { path } => format!(
+            "  {:<14} {:<10} {:<7} ⚠ {} is a build artifact under target/ — it stops existing after `cargo clean`, and the browser then reports the host as missing",
+            entry.browser,
+            support,
+            detected,
+            path.display()
+        ),
+        HostManifestState::PathMissing { path } => format!(
+            "  {:<14} {:<10} {:<7} 🔴 {} — registered, but that path does not exist",
+            entry.browser,
+            support,
+            detected,
+            path.display()
+        ),
+        HostManifestState::PathNotExecutable { path } => format!(
+            "  {:<14} {:<10} {:<7} 🔴 {} — registered, but not executable",
+            entry.browser,
+            support,
+            detected,
+            path.display()
+        ),
+        HostManifestState::Unreadable { error } => format!(
+            "  {:<14} {:<10} {:<7} manifest {} could not be read: {error}",
+            entry.browser, support, detected, manifest
+        ),
+        HostManifestState::Invalid { error } => format!(
+            "  {:<14} {:<10} {:<7} manifest {} is not a usable host manifest: {error}",
+            entry.browser, support, detected, manifest
+        ),
+    }
+}
+
+/// The inventory plus its counts, with no `D8` header and no stage block — the
+/// part `doctor` and the setup wizard report identically.
+///
+/// Read-only by construction: it formats a [`NativeHostCheck`] that was already
+/// gathered, and touches nothing.
+pub fn native_host_lines(check: &NativeHostCheck) -> Vec<String> {
+    let mut lines = Vec::with_capacity(check.manifests.len() + 4);
+    lines.push(host_header_line());
+    for entry in &check.manifests {
+        lines.push(host_row_line(entry));
+    }
+
+    let registered = check
+        .manifests
+        .iter()
+        .filter(|entry| entry.state.is_registered())
+        .count();
+    let looked_at = check
+        .manifests
+        .iter()
+        .filter(|entry| entry.state != HostManifestState::NoDiscoveryPath)
+        .count();
+    lines.push(format!(
+        "  registered at a path this build looks at: {registered}/{looked_at}"
+    ));
+
+    let unsupported: Vec<&str> = check
+        .manifests
+        .iter()
+        .filter(|entry| entry.state == HostManifestState::NoDiscoveryPath)
+        .map(|entry| entry.browser.as_str())
+        .collect();
+    if !unsupported.is_empty() {
+        lines.push(format!(
+            "  outside this build's path table on {}: {} (no browser was looked for, so \
+             absence here proves nothing)",
+            crate::nativehost::Platform::current().id(),
+            unsupported.join(", ")
+        ));
+    }
+
+    let detected_not_registered: Vec<&str> = check
+        .manifests
+        .iter()
+        .filter(|entry| {
+            entry.state == HostManifestState::NotRegistered && entry.detected == Some(true)
+        })
+        .map(|entry| entry.browser.as_str())
+        .collect();
+    if !detected_not_registered.is_empty() {
+        lines.push(format!(
+            "  detected but not registered: {} — `chat-stasher install-native-host` \
+             registers every browser found on this machine",
+            detected_not_registered.join(", ")
+        ));
+    }
+    lines
+}
+
+/// The stage verdict, one line. Shared for the same reason as the rows.
+pub fn native_host_stage_line(check: &NativeHostCheck) -> String {
+    match &check.stage {
+        StageConfigCheck::NotConfigured => format!(
+            "  stage: no `[native_host] stage` in {} — every delivery answers nack config",
+            crate::config::config_path().display()
+        ),
+        StageConfigCheck::Present { path } => {
+            format!("  stage: {} (present)", path.display())
+        }
+        StageConfigCheck::Missing { path } => format!(
+            "  stage: 🔴 {} — configured but not on disk; every delivery answers nack stage-unavailable",
+            path.display()
+        ),
+        StageConfigCheck::NotADirectory { path } => {
+            format!("  stage: 🔴 {} — configured but is not a directory", path.display())
+        }
+    }
+}
+
 /// D8 printing. Read-only findings about the browser registration and the stage
 /// the host would write to. No count here is a fallback: a browser with no
 /// manifest says so, and "the config could not be read" is never printed as
@@ -2971,79 +3225,10 @@ fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>) {
 fn print_native_host(check: &NativeHostCheck) {
     eprintln!("D8 · Native Messaging host (protocol v1)");
     eprintln!("     read-only: doctor never writes a manifest, and never creates the stage.");
-
-    let registered = check
-        .manifests
-        .iter()
-        .filter(|entry| entry.state != HostManifestState::NotRegistered)
-        .count();
-    for entry in &check.manifests {
-        match &entry.state {
-            HostManifestState::NotRegistered => {
-                eprintln!("  {:<12} not registered", entry.browser);
-            }
-            HostManifestState::Ok { path } => {
-                eprintln!("  {:<12} ok — {}", entry.browser, path.display());
-            }
-            HostManifestState::BuildArtifact { path } => {
-                eprintln!(
-                    "  {:<12} ⚠ {} is a build artifact under target/ — it stops existing after `cargo clean`, and the browser then reports the host as missing",
-                    entry.browser,
-                    path.display()
-                );
-            }
-            HostManifestState::PathMissing { path } => {
-                eprintln!(
-                    "  {:<12} 🔴 {} — registered, but that path does not exist",
-                    entry.browser,
-                    path.display()
-                );
-            }
-            HostManifestState::PathNotExecutable { path } => {
-                eprintln!(
-                    "  {:<12} 🔴 {} — registered, but not executable",
-                    entry.browser,
-                    path.display()
-                );
-            }
-            HostManifestState::Unreadable { error } => {
-                eprintln!(
-                    "  {:<12} manifest {} could not be read: {error}",
-                    entry.browser,
-                    entry.manifest.display()
-                );
-            }
-            HostManifestState::Invalid { error } => {
-                eprintln!(
-                    "  {:<12} manifest {} is not a usable host manifest: {error}",
-                    entry.browser,
-                    entry.manifest.display()
-                );
-            }
-        }
+    for line in native_host_lines(check) {
+        eprintln!("{line}");
     }
-    eprintln!(
-        "  registered browsers: {registered}/{}",
-        check.manifests.len()
-    );
-
-    match &check.stage {
-        StageConfigCheck::NotConfigured => eprintln!(
-            "  stage: no `[native_host] stage` in {} — every delivery answers nack config",
-            crate::config::config_path().display()
-        ),
-        StageConfigCheck::Present { path } => {
-            eprintln!("  stage: {} (present)", path.display())
-        }
-        StageConfigCheck::Missing { path } => eprintln!(
-            "  stage: 🔴 {} — configured but not on disk; every delivery answers nack stage-unavailable",
-            path.display()
-        ),
-        StageConfigCheck::NotADirectory { path } => eprintln!(
-            "  stage: 🔴 {} — configured but is not a directory",
-            path.display()
-        ),
-    }
+    eprintln!("{}", native_host_stage_line(check));
 }
 
 /// D7 printing — shared by the normal path and the scan-failed early return.
