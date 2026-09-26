@@ -13,7 +13,7 @@
 # 默认模式只校验、不写这个文件。要接受一次真实变化, 显式跑:
 #   python3 scripts/check-citation-drift.py --update
 
-.gitignore:12  a182dd2acb58  lines=1
+./.gitignore:12  a182dd2acb58  lines=1
   <- docs-dev/install.md:306  :: apps/extension/.output/
 apps/extension/.gitignore:11  6ef40595ec0a  lines=1
   <- docs-dev/install.md:307  :: .output
@@ -469,7 +469,7 @@ crates/chat-stasher/src/inbox.rs:1002-1030  81d263fdddc2  lines=29
   <- docs-dev/install.md:399, docs-dev/threat-model.md:414  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:148-1143  8b20ee0aa638  lines=996
+crates/chat-stasher/src/main.rs:148-1157  a09612e4fde8  lines=1010
   <- docs-dev/install.md:849, docs-dev/privacy.md:690, docs-dev/threat-model.md:576  :: enum Command {
 crates/chat-stasher/src/main.rs:149-150  6f7da3119197  lines=2
   <- docs-dev/install.md:259  :: /// Write a commented default config if none exists (non-de…
@@ -499,51 +499,51 @@ crates/chat-stasher/src/main.rs:459-508  271206a78075  lines=50
   <- docs-dev/install.md:427  :: /// Prove the archive is intact. Three independently runnab…
 crates/chat-stasher/src/main.rs:459-497  4d73dbd30b3b  lines=39
   <- docs-dev/threat-model.md:737  :: /// Prove the archive is intact. Three independently runnab…
-crates/chat-stasher/src/main.rs:575-579  1ea5d27e0f6f  lines=5
+crates/chat-stasher/src/main.rs:583-587  1ea5d27e0f6f  lines=5
   <- docs-dev/threat-model.md:612  :: /// Exit codes distinguish the three answers, because two o…
-crates/chat-stasher/src/main.rs:611-691  40bed16bc335  lines=81
+crates/chat-stasher/src/main.rs:625-705  40bed16bc335  lines=81
   <- docs-dev/install.md:838, docs-dev/install.md:852, docs-dev/privacy.md:309, docs-dev/privacy.md:688, docs-dev/threat-model.md:143, docs-dev/threat-model.md:584  :: /// Write every session the shared selector selects to file…
-crates/chat-stasher/src/main.rs:729-779  4273707c50b1  lines=51
+crates/chat-stasher/src/main.rs:743-793  4273707c50b1  lines=51
   <- docs-dev/threat-model.md:46  :: Ingest {
-crates/chat-stasher/src/main.rs:747  cf775be2a229  lines=1
+crates/chat-stasher/src/main.rs:761  cf775be2a229  lines=1
   <- docs-dev/install.md:26  :: /// Harness sources are opened read-only. File-backed JSONL…
-crates/chat-stasher/src/main.rs:781-813  42a71db27ac9  lines=33
+crates/chat-stasher/src/main.rs:795-827  42a71db27ac9  lines=33
   <- docs-dev/threat-model.md:503  :: /// Seal one file already inside our stage into the next se…
-crates/chat-stasher/src/main.rs:860-882  f05337c1507c  lines=23
+crates/chat-stasher/src/main.rs:874-896  f05337c1507c  lines=23
   <- docs-dev/install.md:330  :: /// Register this executable as the browsers' Native Messag…
-crates/chat-stasher/src/main.rs:883-925  00c9d6ccdc4b  lines=43
+crates/chat-stasher/src/main.rs:897-939  00c9d6ccdc4b  lines=43
   <- docs-dev/install.md:62  :: InstallNativeHost {
-crates/chat-stasher/src/main.rs:4250-4263  6e297c93e74c  lines=14
+crates/chat-stasher/src/main.rs:4481-4494  6e297c93e74c  lines=14
   <- docs-dev/install.md:455  :: Err(e) => {
-crates/chat-stasher/src/main.rs:4253-4261  7606cd68232e  lines=9
+crates/chat-stasher/src/main.rs:4484-4492  7606cd68232e  lines=9
   <- docs-dev/install.md:494  :: }
-crates/chat-stasher/src/main.rs:4265-4274  a14261353a59  lines=10
+crates/chat-stasher/src/main.rs:4496-4505  a14261353a59  lines=10
   <- docs-dev/install.md:491  :: a sealed shard. They were NOT retired, so they are still in…
-crates/chat-stasher/src/main.rs:4286-4310  6d97af905715  lines=25
+crates/chat-stasher/src/main.rs:4517-4541  6d97af905715  lines=25
   <- docs-dev/install.md:459  :: /// persisted key, an unreachable backend — returns `Err`, …
-crates/chat-stasher/src/main.rs:4453-4509  d1e3f53d40dc  lines=57
+crates/chat-stasher/src/main.rs:4684-4740  d1e3f53d40dc  lines=57
   <- docs-dev/threat-model.md:534  :: let mut sources = Vec::new();
-crates/chat-stasher/src/main.rs:6100-6107  f369ca3fd940  lines=8
+crates/chat-stasher/src/main.rs:6331-6338  f369ca3fd940  lines=8
   <- docs-dev/threat-model.md:523  :: Ok(mut options) => {
-crates/chat-stasher/src/main.rs:6128-6224  9bab85dd14b4  lines=97
+crates/chat-stasher/src/main.rs:6359-6455  9bab85dd14b4  lines=97
   <- docs-dev/threat-model.md:521  :: eprintln!("option: {e}");
-crates/chat-stasher/src/main.rs:6211-6223  fcc341adabd7  lines=13
+crates/chat-stasher/src/main.rs:6442-6454  fcc341adabd7  lines=13
   <- SECURITY.md:70  :: keep_ssh_masters: bool,
-crates/chat-stasher/src/main.rs:6460-6599  30a9e386a35b  lines=140
+crates/chat-stasher/src/main.rs:6691-6830  30a9e386a35b  lines=140
   <- docs-dev/threat-model.md:581  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:6761-6993  0cd0ab027103  lines=233
+crates/chat-stasher/src/main.rs:6992-7224  0cd0ab027103  lines=233
   <- docs-dev/privacy.md:60, docs-dev/threat-model.md:596  :: fn cmd_index(action: IndexAction) -> ExitCode {
-crates/chat-stasher/src/main.rs:9196-9206  2a1dbefed1f6  lines=11
+crates/chat-stasher/src/main.rs:9457-9467  2a1dbefed1f6  lines=11
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12144-12164  1156efd1ea2d  lines=21
+crates/chat-stasher/src/main.rs:12405-12425  1156efd1ea2d  lines=21
   <- docs-dev/install.md:777  :: // `status` is not a second exception to "an unusable confi…
-crates/chat-stasher/src/main.rs:12167-12169  a9f17cb346dc  lines=3
+crates/chat-stasher/src/main.rs:12428-12430  a9f17cb346dc  lines=3
   <- docs-dev/install.md:738  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:12200-12241  7f5acb93bd19  lines=42
+crates/chat-stasher/src/main.rs:12461-12502  7f5acb93bd19  lines=42
   <- docs-dev/install.md:767  :: // B84 — and the third case, the one that reads wrong in a …
-crates/chat-stasher/src/main.rs:12469-12482  3f28f15c93b2  lines=14
+crates/chat-stasher/src/main.rs:12730-12743  3f28f15c93b2  lines=14
   <- docs-dev/install.md:733  :: /// The scan half of `status`.
-crates/chat-stasher/src/main.rs:12477-12767  aac75b5f81dc  lines=291
+crates/chat-stasher/src/main.rs:12738-13028  aac75b5f81dc  lines=291
   <- docs-dev/install.md:754  :: /// `sessions = true` restores the full per-session table —…
 crates/chat-stasher/src/nativehost.rs:75-88  b160255bd493  lines=14
   <- docs-dev/privacy.md:631, docs-dev/threat-model.md:400  :: pub const HOST_NAME: &str = "com.chat_stasher.host";

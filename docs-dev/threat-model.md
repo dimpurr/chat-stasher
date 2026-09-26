@@ -43,7 +43,7 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:933-942`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:729-779`).
+   (`crates/chat-stasher/src/main.rs:743-793`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
    (`crates/chat-stasher/src/main.rs:306-343`).
@@ -140,7 +140,7 @@ Concretely, five separate plaintext exposures:
 
 5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
    archived sessions it selected back out **decrypted**, one file per session,
-   into a directory you name (`crates/chat-stasher/src/main.rs:611-691`). Unlike
+   into a directory you name (`crates/chat-stasher/src/main.rs:625-705`). Unlike
    the stage, nothing here is sealed and nothing moves it on: the files stay
    exactly as written until you delete them, and the command keeps no record of
    where they went. Name a directory you would be willing to lose, and delete it
@@ -500,7 +500,7 @@ machine:
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:781-813`).
+  the old inode (`crates/chat-stasher/src/main.rs:795-827`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -518,9 +518,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6128-6224`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6359-6455`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6100-6107`).
+  (`crates/chat-stasher/src/main.rs:6331-6338`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -531,7 +531,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:4453-4509`).
+  as many words (`crates/chat-stasher/src/main.rs:4684-4740`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -573,15 +573,15 @@ a real limitation of the current code.
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
    `activity-index`, `machine-declare`, `machine-label`, `overview`, `index`
-   (`crates/chat-stasher/src/main.rs:148-1143`); **a command that puts sessions
+   (`crates/chat-stasher/src/main.rs:148-1157`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:402-404,6460-6599`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:402-404,6691-6830`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
-   **plaintext** (`crates/chat-stasher/src/main.rs:611-691`) — see exposure 5
+   **plaintext** (`crates/chat-stasher/src/main.rs:625-705`) — see exposure 5
    above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
@@ -593,7 +593,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:6761-6993`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:6992-7224`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
@@ -609,7 +609,7 @@ a real limitation of the current code.
    It also distinguishes "nothing matched" from "could not finish reading"
    **and** from "read it all but could not place every session in time", which
    is the same unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:575-579`).
+   (`crates/chat-stasher/src/main.rs:583-587`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
