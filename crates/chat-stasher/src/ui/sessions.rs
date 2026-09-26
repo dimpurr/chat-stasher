@@ -243,12 +243,37 @@ fn page_sessions(
 /// what the page is showing, quietly. What the block never does is count the
 /// set for the command — the match sentence above the table already names
 /// exactly what the filter selected.
+///
+/// The same refusal covers a **merged view**. `chat-stasher export` names one
+/// destination: its `--destination` is a single value, and the command refuses
+/// a cross-destination merge outright ("archives are not required to agree").
+/// A page this dashboard merged from several destinations therefore has no one
+/// command that exports what it shows, and the joint label
+/// ([`UiData::destination_label`], `a,b`) is not a destination any config
+/// declares — so printing it would be exactly the quiet near-miss this
+/// function exists not to commit. Per-session downloads are unaffected: a row
+/// names the one copy it is read from, so `/export?i=N` stays exact under a
+/// merged view.
 fn export_cli_block(resolved: &Resolved, data: &UiData) -> String {
     let mut out = String::from(
         "<section id=export-cli>\n<h2>Export this view (CLI)</h2>\n<p>The same \
                       filters this page applied, spelled as <code>chat-stasher export</code> \
                       flags, ready to copy.</p>\n",
     );
+    if data.destinations.len() > 1 {
+        out.push_str(&format!(
+            "<p>This view merges {} destinations ({}), and one \
+             <code>chat-stasher export</code> command names one destination — the command has no \
+             cross-destination merge, because two archives are not required to agree. Nothing is \
+             exported by accident: export each destination on its own, or reopen \
+             <code>chat-stasher ui</code> naming a single <code>--destination</code>. \
+             <i>Download .jsonl</i> on a session page is unaffected — a row names the one copy \
+             it is read from.</p>\n</section>\n",
+            data.destinations.len(),
+            esc(&data.destination_label),
+        ));
+        return out;
+    }
     match conjoined_flags(&data.launch, &resolved.selector) {
         Ok(flags) => {
             // A dashboard opened with `--repo` has no destination to name; its

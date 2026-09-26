@@ -3996,6 +3996,70 @@ mod tests {
         );
     }
 
+    /// A merged view is not one destination, and `chat-stasher export` names
+    /// exactly one: `--destination` takes a single value and the command
+    /// refuses a cross-destination merge outright ("archives are not required
+    /// to agree"). The block's own promise is that the command it prints is
+    /// ready to copy, so a merged page must print no command — the joint label
+    /// (`a,b`) is not a destination any config declares, and pasting it would
+    /// be a usage error dressed as a command that runs.
+    #[test]
+    fn a_merged_view_refuses_to_print_one_export_command() {
+        let merged = UiData::from_reports(
+            &[
+                DestinationRead {
+                    label: "dest-one".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+                DestinationRead {
+                    label: "dest-two".into(),
+                    outcome: Ok(&fixture::report()),
+                },
+            ],
+            Selector::default(),
+            NOW,
+        );
+        assert_eq!(merged.destinations.len(), 2);
+        let html = req("/sessions", &merged, &NoContent).body;
+        let block = html
+            .split("<h2>Export this view (CLI)</h2>")
+            .nth(1)
+            .unwrap();
+        let block = &block[..block.find("</section>").unwrap()];
+        assert!(
+            !block.contains("<pre>"),
+            "a page the one command cannot select must print no command: {block}"
+        );
+        assert!(
+            block.contains("cross-destination merge"),
+            "the refusal must say why, not merely omit the command: {block}"
+        );
+        // The destination count and the joint label are what make the refusal
+        // checkable by the reader instead of a claim they have to take on
+        // faith — and the label is printed escaped, like every other one.
+        assert!(
+            block.contains("2 destinations") && block.contains("dest-one,dest-two"),
+            "the refusal names the view it refused: {block}"
+        );
+        // The single-destination page is untouched by the refusal: the same
+        // fixture with one destination still gets its command.
+        let single = UiData::from_reports(
+            &[DestinationRead {
+                label: "dest-one".into(),
+                outcome: Ok(&fixture::report()),
+            }],
+            Selector::default(),
+            NOW,
+        );
+        let html = req("/sessions", &single, &NoContent).body;
+        assert!(
+            html.contains(
+                "<pre>chat-stasher export --destination &#39;dest-one&#39; --out ~/out</pre>"
+            ),
+            "one destination still gets its ready-to-copy command: {html}"
+        );
+    }
+
     /// The zero-JS nav is links a browser can follow: each carries the query
     /// the page was reached by (filters, sort, width), moves only the window,
     /// and the window it names is the one that comes next. Following it is
