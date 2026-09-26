@@ -256,7 +256,7 @@ fn search_json(
             "ready",
             serde_json::Value::Null,
             summary.written_unix,
-            Some(summary.documents),
+            Some(summary.ids.len()),
         ),
     };
     let coverage = answer.coverage.as_ref().map(|coverage| {

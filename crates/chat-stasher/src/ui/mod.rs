@@ -565,10 +565,20 @@ pub fn count_by_machine_id<'a>(ids: impl IntoIterator<Item = &'a str>) -> BTreeM
 /// A decoded query string: ordered `(key, value)` pairs.
 pub type Query = Vec<(String, String)>;
 
-/// Percent-decode a query/form component. `+` is *not* a space here: the
-/// links this server emits encode a space as `%20`, and treating `+` as a space
-/// would corrupt a machine partition legitimately containing one.
-fn percent_decode(s: &str) -> String {
+/// Decode one `application/x-www-form-urlencoded` component — what the query
+/// string of a request is.
+///
+/// `+` decodes to a space, because that is what a `+` means there: the search
+/// box is a plain GET form with no JavaScript, and the space a reader types in
+/// it arrives as `+`. Keeping it literal would search for a different string
+/// than the one that was typed.
+///
+/// A machine partition that legitimately contains a `+` is not lost by this:
+/// [`percent_encode`] escapes it as `%2B`, which decodes back to `+` here, so
+/// every link this server emits round-trips. Only a hand-written `+` reads as
+/// a space, which is the reading every browser and query-string parser gives
+/// it.
+fn form_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -588,7 +598,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -609,7 +619,8 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Split `/path?query` and decode the query.
+/// Split `/path?query` and decode the query, which is form-encoded — see
+/// [`form_decode`] for what that means for a `+`.
 pub fn split_target(target: &str) -> (&str, Query) {
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p, q),
@@ -620,7 +631,7 @@ pub fn split_target(target: &str) -> (&str, Query) {
         .filter(|kv| !kv.is_empty())
         .filter_map(|kv| {
             let (k, v) = kv.split_once('=')?;
-            Some((percent_decode(k), percent_decode(v)))
+            Some((form_decode(k), form_decode(v)))
         })
         .collect();
     (path, params)
@@ -1511,7 +1522,8 @@ pub(crate) mod fixture {
 
     impl StubIndex {
         /// An index that cannot be built: the coverage the page reports is
-        /// derived from `by_machine` against the dashboard's own rows.
+        /// derived from the ids the index holds against the dashboard's own
+        /// rows.
         pub fn missing() -> Self {
             Self {
                 state: IndexState::Missing,
@@ -1530,22 +1542,35 @@ pub(crate) mod fixture {
             }
         }
 
-        /// A readable index holding `documents` documents, of which
-        /// `by_machine` many are on each named machine.
-        pub fn ready(documents: usize, by_machine: &[(&str, usize)]) -> Self {
+        /// A readable index holding exactly `ids`, one document each, spelled
+        /// the way the index spells them.
+        ///
+        /// The ids are named rather than counted because that is what the
+        /// index's own summary carries: a stub that only knew how many
+        /// documents it held could not express the case a replaced session
+        /// makes — the same count over a different set of sessions.
+        pub fn ready(ids: &[&str]) -> Self {
             Self {
                 state: IndexState::Ready(crate::fts::IndexSummary {
-                    documents,
-                    by_machine: by_machine
-                        .iter()
-                        .map(|(machine, count)| (machine.to_string(), *count))
-                        .collect(),
+                    ids: ids.iter().map(|id| id.to_string()).collect(),
                     written_unix: Some(NOW),
                 }),
                 hits: Vec::new(),
                 fail_placements: false,
                 calls: Default::default(),
             }
+        }
+
+        /// A readable index holding every session of `data` that sits on
+        /// `machines` — the dashboard's own rows, which is what "a complete
+        /// index over this view" means. A machine left out stays named by the
+        /// coverage line as one the index is behind on.
+        pub fn covering(data: &UiData, machines: &[&str]) -> Self {
+            let ids: Vec<String> = archive_document_ids(data)
+                .into_iter()
+                .filter(|id| machines.contains(&machine_of_document_id(id)))
+                .collect();
+            Self::ready(&ids.iter().map(String::as_str).collect::<Vec<_>>())
         }
 
         /// The same, answering `hits` for any query long enough to run.
@@ -1833,7 +1858,7 @@ mod tests {
     #[test]
     fn only_the_search_routes_reach_the_text_index() {
         let d = fixture::data();
-        let idx = StubIndex::ready(4, &[("m-1", 2), ("m-2", 2)]);
+        let idx = StubIndex::covering(&d, &["m-1", "m-2"]);
         for target in [
             "/",
             "/sessions",
@@ -3127,11 +3152,17 @@ mod tests {
             "a b/c?d=e&f",
             "sessions/2026-01-15",
             "härte",
+            // A value containing `+` is the case the decoder's own reading of
+            // `+` as a space could break: the link must carry `%2B`, and the
+            // query string must not turn it into a space on the way back.
+            "m+1",
+            "a+b c",
         ] {
-            assert_eq!(percent_decode(&percent_encode(s)), s, "{s}");
+            assert_eq!(form_decode(&percent_encode(s)), s, "{s}");
         }
         assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(percent_encode("a+b"), "a%2Bb");
     }
 
     #[test]
@@ -3156,8 +3187,12 @@ mod tests {
             .1
             .iter()
             .all(|(k, _)| k != "token"));
-        // A `+` is not a space here: a partition may legitimately contain one.
-        assert_eq!(split_target("/?machine=a+b").1[0].1, "a+b");
+        // The query string is form-encoded, so `+` is the space a browser sends
+        // from the search box…
+        assert_eq!(split_target("/?q=hello+world").1[0].1, "hello world");
+        // …and a partition that really contains one still arrives as `+`,
+        // because every link this server prints escapes it as `%2B`.
+        assert_eq!(split_target("/?machine=a%2Bb").1[0].1, "a+b");
     }
 
     #[test]
@@ -4498,28 +4533,32 @@ mod golden {
         Unreadable,
     }
 
-    fn search_index(kind: SearchIndex) -> fixture::StubIndex {
+    fn search_index(kind: SearchIndex, data: &UiData) -> fixture::StubIndex {
         use fixture::StubHit;
         const ON_M1: &str = "m-1/claude-code.m-1.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
         const ON_M2: &str = "m-2/claude-code.m-2.019bf00d-97b6-7eb2-9bf8-eacbacc09766";
         match kind {
-            SearchIndex::Complete => fixture::StubIndex::ready(4, &[("m-1", 2), ("m-2", 2)]),
-            SearchIndex::ShortOnOneMachine => fixture::StubIndex::ready(2, &[("m-1", 2)]),
+            SearchIndex::Complete => fixture::StubIndex::covering(data, &["m-1", "m-2"]),
+            SearchIndex::ShortOnOneMachine => fixture::StubIndex::covering(data, &["m-1"]),
             SearchIndex::Missing => fixture::StubIndex::missing(),
             SearchIndex::Unreadable => {
                 fixture::StubIndex::unreadable("corrupt FTS index; use `chat-stasher index clear`")
             }
-            SearchIndex::WithHits => fixture::StubIndex::ready(4, &[("m-1", 2), ("m-2", 2)])
-                .with_hits(vec![
+            SearchIndex::WithHits => {
+                fixture::StubIndex::covering(data, &["m-1", "m-2"]).with_hits(vec![
                     StubHit::placed(ON_M1, "the \u{1}synthetic\u{2} first turn", 3),
                     StubHit::in_label(ON_M2),
-                ]),
-            SearchIndex::Escaping => fixture::StubIndex::ready(4, &[("m-1", 2), ("m-2", 2)])
-                .with_hits(vec![StubHit::placed(
-                    ON_M1,
-                    "text <script>alert(1)</script> & \"quoted\" \u{1}script\u{2} tail",
-                    0,
-                )]),
+                ])
+            }
+            SearchIndex::Escaping => {
+                fixture::StubIndex::covering(data, &["m-1", "m-2"]).with_hits(vec![
+                    StubHit::placed(
+                        ON_M1,
+                        "text <script>alert(1)</script> & \"quoted\" \u{1}script\u{2} tail",
+                        0,
+                    ),
+                ])
+            }
         }
     }
 
@@ -4530,17 +4569,11 @@ mod golden {
             std::fs::create_dir_all(golden_path("search-no-query").parent().unwrap()).unwrap();
         }
         for (name, target, kind) in SEARCH_CASES {
-            let index = search_index(*kind);
+            let data = fixture::data();
+            let index = search_index(*kind, &data);
             let (path, params) = split_target(target);
-            let response = handle(
-                path,
-                &params,
-                "golden-token",
-                &fixture::data(),
-                &NoContent,
-                &index,
-            )
-            .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+            let response = handle(path, &params, "golden-token", &data, &NoContent, &index)
+                .unwrap_or_else(|| panic!("`{target}` must be a known route"));
             let live = format!(
                 "status: {} {}\ncontent-type: {}\n\n{}",
                 response.status, response.reason, response.content_type, response.body

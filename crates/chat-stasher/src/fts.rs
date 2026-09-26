@@ -172,13 +172,21 @@ pub struct QueryTooShort {
     pub minimum: usize,
 }
 
-/// What an index holds beyond the document count `check` returns: where its
-/// text came from, and when it was last written.
+/// What an index holds beyond the document count `check` returns: which
+/// sessions its text came from, and when it was last written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSummary {
-    pub documents: usize,
-    /// Indexed documents per machine, read from the `<machine>/<session>` id.
-    pub by_machine: std::collections::BTreeMap<String, usize>,
+    /// The id — `<machine>/<session_id>` — of every document the index holds.
+    ///
+    /// The ids themselves rather than a count per machine, because a coverage
+    /// claim is about **which** sessions can be looked up: a session replaced
+    /// by another on the same machine leaves every per-machine count equal, so
+    /// counts cannot tell "this view is indexed" from "a different set of
+    /// sessions with the same size is indexed". The machine grouping is
+    /// derived from these where it is asked for
+    /// ([`crate::ui::machine_of_document_id`]), so there is one representation
+    /// of what the index holds and it cannot disagree with itself.
+    pub ids: std::collections::BTreeSet<String>,
     /// The index file's last modification time. This is a **file mtime**, not a
     /// recorded build time — the index records no build time of its own, and
     /// reporting a computed one would be inventing a fact about when the text
@@ -364,6 +372,19 @@ impl Index {
     /// Open read-only and validate the schema. Missing remains distinct from
     /// corrupt: callers can offer a build command only for the former.
     pub fn check(&self) -> Result<usize> {
+        let connection = self.open_valid()?;
+        connection
+            .query_row("SELECT count(*) FROM documents", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .context("count indexed documents")
+    }
+
+    /// The read-only connection every reader of this index starts from: a
+    /// missing file and a corrupt one stay two different instructions, and
+    /// both are refused before any question is asked of the index.
+    fn open_valid(&self) -> Result<Connection> {
         if !self.db_path.exists() {
             bail!("no local index has been built; run `chat-stasher index build` (no archive read was performed)");
         }
@@ -373,51 +394,31 @@ impl Index {
                 "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
             )?;
         validate_schema(&connection)?;
-        connection
-            .query_row("SELECT count(*) FROM documents", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| count as usize)
-            .context("count indexed documents")
+        Ok(connection)
     }
 
     /// What the index holds, and when its file was last written.
     ///
     /// Separate from [`Index::check`] because a caller that only wants the
-    /// document count should not pay for a grouping query, and because the two
+    /// document count should not pay for reading every id, and because the two
     /// answer different questions: `check` is "is this index usable", this is
-    /// "how much of the archive is in it".
+    /// "which sessions of the archive are in it".
+    ///
+    /// The count is `ids.len()` rather than a second `count(*)` read: two reads
+    /// of one table can straddle a rebuild, and a summary whose own numbers
+    /// disagree is worse than one that reports the smaller fact.
     pub fn summary(&self) -> Result<IndexSummary> {
-        let documents = self.check()?;
-        let connection =
-            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
-                "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
-            )?;
-        validate_schema(&connection)?;
-        // The id is `<machine>/<session_id>`. The CASE is not decoration:
-        // `instr` returns 0 when there is no separator, and `substr(id, 1, -1)`
-        // is *not* the whole id — SQLite reads a negative length from the end,
-        // so a separator-less id would lose its last character.
-        let mut statement = connection.prepare(
-            "SELECT CASE WHEN instr(id, '/') > 0 THEN substr(id, 1, instr(id, '/') - 1) ELSE id END, \
-                    count(*) \
-             FROM documents GROUP BY 1",
-        )?;
-        let by_machine = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
-            })?
-            .collect::<rusqlite::Result<std::collections::BTreeMap<String, usize>>>()?;
+        let connection = self.open_valid()?;
+        let mut statement = connection.prepare("SELECT id FROM documents")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()?;
         let written_unix = fs::metadata(&self.db_path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|since| since.as_secs() as i64);
-        Ok(IndexSummary {
-            documents,
-            by_machine,
-            written_unix,
-        })
+        Ok(IndexSummary { ids, written_unix })
     }
 
     /// Every document matching `query`, best rank first.
@@ -1183,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_counts_documents_per_machine_and_reports_a_file_mtime() {
+    fn summary_reports_the_ids_it_holds_and_a_file_mtime() {
         let dir = tempfile::tempdir().unwrap();
         let index = Index::at(dir.path().join("index"));
         let sources = vec![
@@ -1199,8 +1200,9 @@ mod tests {
                 id: "machine-two/session-c".into(),
                 source_sha256: "sha-c".into(),
             },
-            // No separator at all: the whole id is its own machine, which is
-            // what the CASE in `summary` is there to keep whole.
+            // No separator at all: the whole id is its own machine, and an id
+            // that is not `<machine>/<session>` must survive the summary
+            // verbatim rather than be truncated into one that looks like it.
             SourceDoc {
                 id: "separatorless".into(),
                 source_sha256: "sha-d".into(),
@@ -1210,13 +1212,15 @@ mod tests {
             .build(&sources, |id| Ok(doc(id, "synthetic body")))
             .unwrap();
         let summary = index.summary().unwrap();
-        assert_eq!(summary.documents, 4);
-        assert_eq!(summary.by_machine.get("machine-one"), Some(&2));
-        assert_eq!(summary.by_machine.get("machine-two"), Some(&1));
         assert_eq!(
-            summary.by_machine.get("separatorless"),
-            Some(&1),
-            "a separator-less id lost a character to the negative-length form"
+            summary.ids,
+            std::collections::BTreeSet::from([
+                "machine-one/session-a".to_string(),
+                "machine-one/session-b".to_string(),
+                "machine-two/session-c".to_string(),
+                "separatorless".to_string(),
+            ]),
+            "the summary is the set of ids the index holds, spelled exactly as stored"
         );
         assert!(
             summary.written_unix.is_some(),

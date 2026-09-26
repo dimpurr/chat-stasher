@@ -168,15 +168,27 @@ pub(super) struct Hit {
 }
 
 /// How much of this dashboard's view the index can answer for.
+///
+/// The question is asked of **session ids**, never of counts. A coverage made
+/// of counts cannot tell "these sessions are indexed" from "a different set of
+/// the same size is indexed": replace one session by another on the same
+/// machine and every per-machine count stays equal, while the new session was
+/// never indexed. The page would then call the index complete and print a zero
+/// as a proven absence over text nobody looked at.
+///
+/// `indexed` and `total` are counted over the same set, so
+/// `indexed + not_searchable() == total` always — the three numbers on the
+/// coverage line and the JSON body add up because they are one measurement,
+/// not three.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Coverage {
-    /// Documents in the index.
+    /// Sessions in this view the index holds a document for.
     pub indexed: usize,
     /// Sessions this view holds.
     pub total: usize,
-    /// Machines whose indexed count is short of their count in this view:
-    /// `(machine, indexed, in view)`. The machine, not a ratio, is what makes
-    /// the gap actionable — "1 machine behind" cannot be acted on.
+    /// Machines with at least one session in this view the index does not
+    /// hold, as `(machine, indexed, in view)`. The machine, not a ratio, is
+    /// what makes the gap actionable — "1 machine behind" cannot be acted on.
     pub behind: Vec<(String, usize, usize)>,
 }
 
@@ -196,22 +208,32 @@ impl Coverage {
     }
 
     fn of(summary: &crate::fts::IndexSummary, data: &UiData) -> Self {
-        let in_view = count_by_machine_id(archive_document_ids(data).iter().map(String::as_str));
+        let in_view = archive_document_ids(data);
+        // This view's sessions that the index holds a document for — the exact
+        // set, which is what `summary.ids` reports and what `complete()` is a
+        // statement about.
+        let indexed_ids = count_by_machine_id(
+            in_view
+                .iter()
+                .filter(|id| summary.ids.contains(*id))
+                .map(String::as_str),
+        );
         let mut behind: Vec<(String, usize, usize)> = Vec::new();
-        for (machine, count) in &in_view {
+        for (machine, count) in count_by_machine_id(in_view.iter().map(String::as_str)) {
             // reason: a machine the index holds no document for has indexed
             // **zero** of this view's sessions. That is the measurement the
             // coverage line is made of, not a default standing in for an
-            // unknown: `by_machine` is a complete grouping of the index's own
-            // rows, so a missing key is an absence and not a failure to read.
-            let indexed = summary.by_machine.get(machine).copied().unwrap_or(0);
-            if indexed < *count {
-                behind.push((machine.clone(), indexed, *count));
+            // unknown: `indexed_ids` counts this view's own sessions against
+            // the index's complete set of ids, so a missing machine key is an
+            // absence and not a failure to read.
+            let indexed = indexed_ids.get(&machine).copied().unwrap_or(0);
+            if indexed < count {
+                behind.push((machine, indexed, count));
             }
         }
         Self {
-            indexed: summary.documents,
-            total: in_view.values().sum(),
+            indexed: indexed_ids.values().sum(),
+            total: in_view.len(),
             behind,
         }
     }
@@ -943,7 +965,13 @@ mod tests {
 
     /// A complete index over the fixture archive: both machines, every row.
     fn complete_index() -> StubIndex {
-        StubIndex::ready(4, &[("m-1", 2), ("m-2", 2)])
+        StubIndex::covering(&fixture::data(), &["m-1", "m-2"])
+    }
+
+    /// The same archive with `m-2` left out of the index — a short coverage
+    /// the page must report rather than answer through.
+    fn index_short_on_m2() -> StubIndex {
+        StubIndex::covering(&fixture::data(), &["m-1"])
     }
 
     // ------------------------------------------------- the states of a zero
@@ -1045,7 +1073,7 @@ mod tests {
     /// names the machine that is short rather than only a total.
     #[test]
     fn an_incomplete_index_reports_unknown_and_names_the_machine() {
-        let html = page("/search?q=synthetic", &StubIndex::ready(2, &[("m-1", 2)])).body;
+        let html = page("/search?q=synthetic", &index_short_on_m2()).body;
         assert!(html.contains("UNKNOWN — not \"not there\"."), "{html}");
         assert!(html.contains("not searchable"), "{html}");
         assert!(
@@ -1056,6 +1084,76 @@ mod tests {
             !html.contains("Not in the indexed archive"),
             "an incompletely indexed view must never render as absence: {html}"
         );
+    }
+
+    /// An index answers for a **session**, not for a slot: coverage is read
+    /// from the ids the index holds, never from how many documents sit on each
+    /// machine.
+    ///
+    /// The two sets below have the same size and the same machine split, and
+    /// differ in one session. A coverage made of counts cannot tell them
+    /// apart, so it would call the second index complete — and the page would
+    /// print "not in the indexed archive" for a session that the index has
+    /// never seen, which is the one sentence on this page that claims to have
+    /// looked.
+    #[test]
+    fn coverage_is_read_from_the_session_ids_and_not_from_the_counts() {
+        // m-2's `…9766` replaced by a session this view does not hold: four
+        // documents, two machines, one of them a different session.
+        let replaced = StubIndex::ready(&[
+            ON_M1,
+            DEEPSEEK_M1,
+            HIDDEN_M2,
+            "m-2/claude-code.m-2.019bf00d-97b6-7eb2-9bf8-eacbacc09799",
+        ]);
+        let body = page_with(
+            "/api/search?q=definitely-not-in-this-archive",
+            &fixture::data(),
+            &replaced,
+        )
+        .body;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("`/api/search` is not JSON: {e}\n{body}"));
+        assert_eq!(
+            value["no_hit"].as_str(),
+            Some("coverage_incomplete"),
+            "a session the index does not hold must not be answered for: {body}"
+        );
+        assert_eq!(
+            value["coverage"]["complete"].as_bool(),
+            Some(false),
+            "{body}"
+        );
+        assert_eq!(
+            value["coverage"]["not_searchable"].as_u64(),
+            Some(1),
+            "{body}"
+        );
+        assert_eq!(value["coverage"]["indexed"].as_u64(), Some(3), "{body}");
+        // The three numbers are one measurement, and this is what makes the
+        // coverage line readable: a consumer must never have to guess whether
+        // `indexed` counts this view or the whole index.
+        assert_eq!(
+            value["coverage"]["indexed"].as_u64().unwrap()
+                + value["coverage"]["not_searchable"].as_u64().unwrap(),
+            value["coverage"]["in_view"].as_u64().unwrap(),
+            "{body}"
+        );
+        let html = page("/search?q=definitely-not-in-this-archive", &replaced).body;
+        assert!(html.contains("not searchable"), "{html}");
+        assert!(
+            !html.contains("Not in the indexed archive"),
+            "the replacement session was never searched, so nothing here proves an absence: {html}"
+        );
+        // The other direction, so that this pins the id and not merely a size:
+        // the view's own four ids are complete, and a zero then earns the
+        // absence sentence.
+        let html = page(
+            "/search?q=definitely-not-in-this-archive",
+            &complete_index(),
+        )
+        .body;
+        assert!(html.contains("Not in the indexed archive"), "{html}");
     }
 
     /// A destination read that did not finish leaves the same hole for a
@@ -1301,7 +1399,7 @@ mod tests {
             (
                 "/search?q=synthetic".to_string(),
                 fixture::data(),
-                StubIndex::ready(2, &[("m-1", 2)]),
+                index_short_on_m2(),
                 "no_hit",
                 "coverage_incomplete",
                 "not searchable",
@@ -1424,6 +1522,103 @@ mod tests {
             html.contains("autofocus"),
             "the search box must take focus without JavaScript: {html}"
         );
+    }
+
+    /// What a reader types into the search box is what gets searched for — and
+    /// with no JavaScript on this page, the only way it can arrive is as a
+    /// browser-encoded form submission, where a space is `+`.
+    ///
+    /// The target is built out of the page's own form rather than written by
+    /// hand, so a form that lost its token or dropped the filter in force fails
+    /// here as well: this is the submission, not a URL that happens to work.
+    #[test]
+    fn a_search_typed_into_the_form_is_searched_for_as_typed() {
+        let index = complete_index();
+        let html = page("/search?machine=m-2&q=synthetic", &index).body;
+        let target = browser_submission(&html, "q", "hello world");
+        assert!(
+            target.contains("q=hello+world"),
+            "the fixture must encode the space the way a browser does: {target}"
+        );
+        let (path, params) = crate::ui::split_target(&target);
+        crate::ui::handle(
+            path,
+            &params,
+            "t",
+            &fixture::data(),
+            &crate::ui::NoContent,
+            &index,
+        )
+        .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+        let calls = index.calls.borrow();
+        assert!(
+            calls.iter().any(|call| call == "query:hello world"),
+            "a space typed into the box must be searched for as a space: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call == "query:hello+world"),
+            "the browser's `+` must not reach the index as itself: {calls:?}"
+        );
+    }
+
+    /// The GET target a browser would send for the form `html` prints, with
+    /// `field` set to `value`.
+    ///
+    /// Fields are read out of the form element this test selects by its action,
+    /// in the order it prints them, and encoded as
+    /// `application/x-www-form-urlencoded` — a space as `+`, everything outside
+    /// the unreserved set percent-encoded. Attribute values are read in both
+    /// spellings the page uses (`name=token` and `name="machine"`).
+    fn browser_submission(html: &str, field: &str, value: &str) -> String {
+        let form = html
+            .split("<form ")
+            .filter_map(|rest| rest.split_once("</form>").map(|(form, _)| form))
+            .find(|form| form.contains("action=\"/search\""))
+            .unwrap_or_else(|| panic!("the page must print the search form: {html}"));
+        let action = attribute(form, "action")
+            .unwrap_or_else(|| panic!("the search form must name an action: {form}"));
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for tag in form.split('<').filter(|tag| tag.starts_with("input ")) {
+            let tag = tag.split('>').next().unwrap_or(tag);
+            let name = attribute(tag, "name")
+                .unwrap_or_else(|| panic!("every input in the form is named: {tag}"));
+            fields.push((name, attribute(tag, "value").unwrap_or_default()));
+        }
+        match fields.iter_mut().find(|(name, _)| name == field) {
+            Some(slot) => slot.1 = value.to_string(),
+            None => fields.push((field.to_string(), value.to_string())),
+        }
+        let query = fields
+            .iter()
+            .map(|(name, value)| format!("{}={}", form_encode(name), form_encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{action}?{query}")
+    }
+
+    /// The value of `name=…` in one tag, in the quoted or the bare spelling.
+    fn attribute(tag: &str, name: &str) -> Option<String> {
+        let (_, rest) = tag.split_once(&format!("{name}="))?;
+        match rest.strip_prefix('"') {
+            Some(quoted) => Some(quoted.split_once('"')?.0.to_string()),
+            None => Some(rest.split([' ', '>', '\n']).next()?.to_string()),
+        }
+    }
+
+    /// `application/x-www-form-urlencoded`, which is what a browser sends and
+    /// what this page's query string therefore is.
+    fn form_encode(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                ' ' => "+".to_string(),
+                other => other
+                    .to_string()
+                    .bytes()
+                    .map(|byte| format!("%{byte:02X}"))
+                    .collect(),
+            })
+            .collect()
     }
 
     /// A placement that could not be **read** is not a placement that could not be
