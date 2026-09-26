@@ -48,6 +48,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 import { IDBFactory } from 'fake-indexeddb';
 import { handleBackfillMessage, type TabEntry, type TabQueryRow } from '../lib/backfill/tab-port';
 import { memoryStore } from '../lib/backfill/store';
@@ -105,6 +106,7 @@ function syntheticPageFetch(url: string) {
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
+    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { runtimeListeners.push(fn); } },
   },

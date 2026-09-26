@@ -757,6 +757,15 @@ async function rememberCoordinationAvailability(unavailable: boolean): Promise<v
   }
 }
 
+async function pauseForCoordinationFailure(reason: string): Promise<void> {
+  await rememberCoordinationAvailability(true);
+  await setHostPause(browserLocalStore(), {
+    reason: HOST_UNAVAILABLE,
+    at: Date.now(),
+    detail: `backfill coordination: ${reason}`,
+  });
+}
+
 /**
  * 🔴 W113 · **The speed preset this tick runs with** (ADR-032 §3, ADR-033).
  *
@@ -799,9 +808,14 @@ async function coordinatedTick(
   const install = await getInstallIdentity();
   const claim = await coordinate({ mode: 'claim', platform, installId: install.install_id });
   if (!claim.ok) {
-    await rememberCoordinationAvailability(true);
-    console.warn('[chat-stasher] backfill coordination unavailable; using per-install pacing', claim.reason ?? 'unknown');
-    return run(http, false);
+    if (claim.olderHost) {
+      await rememberCoordinationAvailability(true);
+      console.warn('[chat-stasher] older native host does not support backfill coordination; using per-install pacing');
+      return run(http, false);
+    }
+    await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+    console.warn('[chat-stasher] backfill paused because native-host coordination failed', claim.reason ?? 'unknown');
+    return { ran: false, reason: 'host-paused', report: null };
   }
   await rememberCoordinationAvailability(false);
   if (!claim.granted) return { ran: false, reason: 'already-running', report: null };
@@ -810,6 +824,7 @@ async function coordinatedTick(
       const segment = coordinationSegmentForRequest(url);
       const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment });
       if (!token.ok) {
+        await pauseForCoordinationFailure(token.reason ?? 'unknown');
         throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
       }
       if (token.granted) break;
@@ -818,7 +833,7 @@ async function coordinatedTick(
     }
     const response = await http(url, init);
     if (response.status === 403 || response.status === 429) {
-      const retryAfterMs = parseRetryAfterMs(response.retryAfter, Date.now()) ?? 0;
+      const retryAfterMs = parseRetryAfterMs(response.retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0;
       const report = await coordinate({ mode: 'rate_limit', platform, installId: install.install_id,
         status: response.status, retryAfterMs });
       if (!report.ok) console.warn('[chat-stasher] rate-limit cooldown could not be shared', report.reason ?? 'unknown');
@@ -1977,10 +1992,12 @@ function scopeRequestSpend(answer: ScopeAnswer): ScopeRequest {
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
   target: { platform: string; origin: string; scope: string },
+  acquireScopeRequest?: () => Promise<(() => Promise<void>) | null>,
 ): Promise<{
   scope: string;
   request: ScopeRequest;
   source?: 'observed' | 'cookie' | 'organizations-endpoint';
+  coordinationBlocked?: boolean;
 }> {
   if (!backfillPlanFor(target.platform)?.scopeInPath) {
     return { scope: target.scope, request: 'none' };
@@ -2034,12 +2051,22 @@ async function resolveScopeForTick(
    * closed: returning the sentinel here issues nothing, and the leg is no worse off —
    * the engine still stops this scope by name, and the popup still says why.
    */
+  const releasePermit = acquireScopeRequest ? await acquireScopeRequest() : null;
+  if (acquireScopeRequest && releasePermit === null) {
+    return { scope: UNRESOLVED_SCOPE, request: 'none', coordinationBlocked: true };
+  }
   if (!(await markScopeRetried(store, {
     platform: target.platform, scope: UNRESOLVED_SCOPE,
   }))) {
+    await releasePermit?.();
     return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
-  const answer = await resolver(null, target.origin);
+  let answer: ScopeAnswer;
+  try {
+    answer = await resolver(null, target.origin);
+  } finally {
+    await releasePermit?.();
+  }
   const resolved = answer.resolved;
   if (!resolved.ok) {
     await recordBackfillHalt(store, {
@@ -2233,7 +2260,33 @@ async function runAlarmTickBody(): Promise<TickResult> {
     //    reason to serve nothing, not a reason to lose the whole tick.
     const target = targets[idx];
     if (!target) continue;
-    const scopeResolution = await resolveScopeForTick(store, target);
+    const scopeResolution = await resolveScopeForTick(store, target, async () => {
+      // Claude's organization fallback is a platform request too. Take the same
+      // host lease and an enumeration permit before asking the page to issue it.
+      const install = await getInstallIdentity();
+      const claim = await coordinate({ mode: 'claim', platform: target.platform, installId: install.install_id });
+      if (!claim.ok && !claim.olderHost) {
+        await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+        return null;
+      }
+      if (!claim.ok) return async () => {};
+      await rememberCoordinationAvailability(false);
+      const token = await coordinate({ mode: 'token', platform: target.platform, installId: install.install_id, segment: 'enumerate' });
+      if (!token.ok || !token.granted) {
+        await coordinate({ mode: 'release', platform: target.platform, installId: install.install_id });
+        if (!token.ok) await pauseForCoordinationFailure(token.reason ?? 'unknown');
+        return null;
+      }
+      await rememberCoordinationAvailability(false);
+      return async () => {
+        await coordinate({ mode: 'release', platform: target.platform, installId: install.install_id });
+      };
+    });
+    if (scopeResolution.coordinationBlocked) {
+      schedule.skipped.push({ platform: target.platform, reason: 'waiting-retry' });
+      last = { ran: false, reason: 'host-paused', report: null };
+      break;
+    }
     const scope = scopeResolution.scope;
     claudeScopeSource = scopeResolution.source ?? claudeScopeSource;
     /**

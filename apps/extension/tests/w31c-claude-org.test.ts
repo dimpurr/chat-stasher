@@ -41,6 +41,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 import {
   BACKFILL_FETCH_MESSAGE,
   CLAUDE_ORG_REQUEST_MESSAGE,
@@ -142,6 +143,7 @@ const alarmBook = new Map<string, unknown>();
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
+    sendNativeMessage: (_host: string, message: unknown) => Promise.resolve(syntheticCoordinationResponse(message)),
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { backgroundListeners.push(fn); } },
     async sendMessage() { return undefined; },

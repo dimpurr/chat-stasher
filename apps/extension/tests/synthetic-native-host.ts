@@ -93,6 +93,17 @@ export interface SyntheticHost {
   replaceStage(): void;
 }
 
+/** A deterministic coordination success for tests whose browser fake has no host concerns. */
+export function syntheticCoordinationResponse(message: unknown): unknown {
+  const msg = message as Record<string, unknown>;
+  if (msg.type !== 'coordination') return undefined;
+  return {
+    protocol: 1, type: 'coordination', ok: true,
+    request_id: String(msg.request_id), granted: true,
+    active_installs: 1, gentle: false, cooldown_until: 0, wait_ms: 0,
+  };
+}
+
 export async function sha256Of(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -154,7 +165,7 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
       // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if (options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard')) {
+      if (options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard' || msg.type === 'coordination')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
           kind: 'bad-request', retryable: false,
@@ -227,6 +238,13 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
           protocol: 1, type: 'hello', ok: true,
           host_version: hostVersion, machine, stage,
         };
+      }
+
+      // Backfill tests use a supported single-install host by default. Tests
+      // that need an older binary opt into `unsupported` above, which answers
+      // with the same unknown-message nack as the real host.
+      if (msg.type === 'coordination') {
+        return syntheticCoordinationResponse(msg);
       }
 
       if (msg.type !== 'deliver') throw new Error(`unexpected request type ${String(msg.type)}`);

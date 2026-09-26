@@ -25,6 +25,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const CHROME_ORIGIN: &str = "chrome-extension://gihmdkkmmmkeiagjjiimacmgkdilofhi/";
 const FIREFOX_ID: &str = "chat-stasher@team.iopho.com";
@@ -1702,6 +1704,42 @@ fn open_dashboard_without_a_configured_destination_is_refused_before_anything_st
 }
 
 // -------------------------------------------------------- EXT-3 coordination
+
+#[test]
+fn coordination_concurrent_first_claimants_have_one_winner() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let barrier = Arc::new(Barrier::new(2));
+    let responses = thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for (request_id, install_id) in [("race-a", "install-a"), ("race-b", "install-b")] {
+            let barrier = Arc::clone(&barrier);
+            let fixture = &fixture;
+            workers.push(scope.spawn(move || {
+                let input = frame(&json!({"protocol":1,"type":"coordination",
+                    "request_id":request_id,"mode":"claim","platform":"chatgpt","install_id":install_id}));
+                barrier.wait();
+                let out = fixture.chrome(&input);
+                assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+                let response = one_frame(&out.stdout);
+                assert_matches_schema(&response);
+                response
+            }));
+        }
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("claim process joins"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|reply| reply["granted"] == true)
+            .count(),
+        1,
+        "simultaneous processes cannot both own the first lease: {responses:?}"
+    );
+}
 
 #[test]
 fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
