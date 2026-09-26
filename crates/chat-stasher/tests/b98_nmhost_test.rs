@@ -255,14 +255,52 @@ fn browsers_that_are_not_installed_are_skipped_out_loud() {
 
     let output = install(&home, &root);
     let text = stdout(&output);
-    for absent in ["edge", "brave", "vivaldi", "chromium", "chrome-canary"] {
+    for absent in [
+        "edge",
+        "brave",
+        "vivaldi",
+        "chromium",
+        "chrome-canary",
+        "arc",
+        "chrome-beta",
+        "opera",
+    ] {
+        // The tier is asserted alongside the skip: a browser that is skipped is
+        // one thing, and D5's promise about it is another. `arc` is here because
+        // D5 adds it to the promised set, and `chrome-beta`/`opera` are here
+        // because adding a browser to the matrix without adding it to this list
+        // is precisely how a silently-skipped browser gets in.
+        let expected = if matches!(
+            absent,
+            "vivaldi" | "chrome-canary" | "chrome-beta" | "opera"
+        ) {
+            format!("{absent} (unverified): skipped")
+        } else {
+            format!("{absent} (supported): skipped")
+        };
         assert!(
-            text.contains(&format!("{absent}: skipped")),
-            "{absent} was silently skipped:\n{text}"
+            text.contains(&expected),
+            "{absent} was silently skipped (wanted {expected:?}):\n{text}"
+        );
+        assert!(
+            text.contains("): skipped, browser not installed (no "),
+            "a skip must name the path it probed, or the user cannot tell a \
+             missing browser from a wrong path:\n{text}"
         );
         assert!(
             !root.join("Microsoft Edge").exists(),
             "skipped browser directory was created"
+        );
+    }
+
+    // Every browser in the matrix reached the run one way or the other. Without
+    // this, a browser added to `Browser::ALL` but not to this test would be
+    // neither written nor skipped and nothing would say so.
+    for browser in chat_stasher::nativehost::Browser::ALL {
+        assert!(
+            text.contains(&format!("[install-native-host] {} (", browser.id())),
+            "{} never appeared in the install output:\n{text}",
+            browser.id()
         );
     }
 

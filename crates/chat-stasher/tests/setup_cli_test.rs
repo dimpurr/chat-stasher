@@ -1158,3 +1158,148 @@ fn a_run_that_never_reached_a_host_writes_nothing_to_known_hosts() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// EXT-1: the browser host step.
+//
+// The wizard does not register a native messaging host — ADR-039 decision 7
+// puts `install-native-host` in the user's hands — so this step is a *report*,
+// and the properties worth pinning are that it reports the same inventory
+// `doctor` does and that nothing in it can be read as "the extension is
+// installed". A data directory outlives an uninstall and is shared by every
+// profile, so the two are different facts and the JSON keeps them apart.
+// ---------------------------------------------------------------------------
+
+/// The three ways a host step can read, so a wrapper can branch on one field.
+const HOST_STEPS: [&str; 3] = ["registered", "none_registered", "nothing_to_look_at"];
+
+#[test]
+fn setup_reports_the_browser_host_inventory_doctor_reports() {
+    let sandbox = Sandbox::new(true);
+    let setup_output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
+    let setup = json_of(&setup_output);
+    assert_eq!(exit_code(&setup_output), 0, "value={setup}");
+
+    let step = setup["steps"]["native_host"]
+        .as_str()
+        .expect("the host step is named");
+    assert!(
+        HOST_STEPS.contains(&step),
+        "the host step must be one of {HOST_STEPS:?}, not {step:?}"
+    );
+
+    // The same machine, asked twice. `doctor`'s D8 and the wizard resolve the
+    // same root and read the same config, so a difference here means one of the
+    // two surfaces is describing this machine in its own words — which is how
+    // two screens end up disagreeing about one browser.
+    let doctor_output = sandbox.command(&["doctor", "--json"]);
+    let doctor = json_of(&doctor_output);
+    assert_eq!(
+        setup["native_host"], doctor["native_host"],
+        "the wizard and `doctor` must report one inventory, not two"
+    );
+    assert_eq!(step, setup["native_host"]["step"].as_str().unwrap());
+    assert_ne!(
+        step, "not_checked",
+        "this run read the config, so it looked: {setup}"
+    );
+
+    let rows = setup["native_host"]["manifests"]
+        .as_array()
+        .expect("the inventory is a list of browsers");
+    assert!(
+        !rows.is_empty(),
+        "a machine always has browsers to look for"
+    );
+
+    // Per browser: three facts, none of them "installed".
+    for row in rows {
+        assert!(
+            row.get("installed").is_none(),
+            "a browser's data directory must never be serialised as `installed`: {row}"
+        );
+        for field in [
+            "browser",
+            "support",
+            "detected",
+            "manifest",
+            "registered",
+            "kind",
+        ] {
+            assert!(row.get(field).is_some(), "{field} missing from {row}");
+        }
+        // The two states this build can be in for a pair are "we looked and
+        // there is nothing here" and "we do not look there" — and the second
+        // has no path to report. A row with neither is a row that lost its
+        // subject.
+        let no_path = row["kind"] == "no_discovery_path";
+        assert_eq!(no_path, row["manifest"].is_null(), "{row}");
+        assert_eq!(no_path, row["support"].is_null(), "{row}");
+        if no_path {
+            continue;
+        }
+        assert_eq!(row["kind"], "not_registered", "{row}");
+        assert_eq!(row["registered"], false, "{row}");
+    }
+
+    // `registered` counts rows, and `detected_not_registered` is the actionable
+    // intersection of two independent facts — never a sum of them.
+    let counted = rows.iter().filter(|row| row["registered"] == true).count();
+    assert_eq!(setup["native_host"]["registered"], counted, "{setup}");
+
+    let actionable: Vec<&str> = setup["native_host"]["detected_not_registered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    for id in &actionable {
+        let row = rows
+            .iter()
+            .find(|row| row["browser"] == *id)
+            .expect("an actionable browser is a row");
+        assert_eq!(row["detected"], true, "{row}");
+        assert_eq!(row["registered"], false, "{row}");
+    }
+
+    // Nothing was registered in this sandbox, whatever the runner's own
+    // machine happens to have: the sandbox HOME has no browser directories.
+    assert_eq!(setup["native_host"]["registered"], 0, "{setup}");
+    for id in ["chrome", "edge", "firefox"] {
+        let supported: Vec<&str> = setup["native_host"]["supported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(supported.contains(&id), "{id} is not in {supported:?}");
+    }
+}
+
+/// The host step reaches the JSON even on a run that stops early, and says it
+/// did not look rather than that it found nothing.
+///
+/// `setup_without_a_stage_names_the_parameter_and_writes_nothing` covers the
+/// exit code and the missing parameter; this pins the third answer, because a
+/// wrapper that reads `steps.native_host` must not see `none_registered` on a
+/// run that never opened a browser directory.
+#[test]
+fn a_host_step_that_was_never_asked_says_not_checked() {
+    let sandbox = Sandbox::new(false);
+    let output = sandbox.command(&["setup"]);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(value["missing_parameters"], serde_json::json!(["stage"]));
+    assert_eq!(value["steps"]["native_host"], "not_checked");
+    assert_eq!(value["native_host"]["kind"], "not_checked");
+    assert!(
+        value["native_host"].get("registered").is_none(),
+        "a run that never looked must not carry a registration count: {value}"
+    );
+    assert!(
+        value["native_host"]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("did not look")),
+        "the reason must say it did not look, not that it found nothing: {value}"
+    );
+}

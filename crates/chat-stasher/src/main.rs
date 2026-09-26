@@ -2000,10 +2000,19 @@ fn cmd_install_native_host(
     let mut registered: Vec<nativehost::Target> = Vec::new();
 
     for browser in selection {
+        // The tier travels with every line, because a browser that registered
+        // "ok" while sitting outside D5's promised matrix must not read as one
+        // that is promised. `None` is the third answer and gets its own wording:
+        // this build has no path for the pair, so nothing was looked at.
+        let tier = match browser.support(platform) {
+            Some(nativehost::Support::Supported) => "supported",
+            Some(nativehost::Support::Unverified) => "unverified",
+            None => "outside-matrix",
+        };
         let Some(target) = nativehost::target(platform, &root, browser, host_name) else {
             unsupported += 1;
             println!(
-                "{TAG} {}: no discovery path known for {} in this build — nothing written",
+                "{TAG} {} ({tier}): no discovery path known for {} in this build — nothing written",
                 browser.id(),
                 platform.id()
             );
@@ -2049,7 +2058,7 @@ fn cmd_install_native_host(
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "<unknown>".to_string());
                 println!(
-                    "{TAG} {}: skipped, browser not installed (no {}) — pass --browser {} to write anyway",
+                    "{TAG} {} ({tier}): skipped, browser not installed (no {}) — pass --browser {} to write anyway",
                     browser.id(),
                     probe,
                     browser.id()
@@ -2062,7 +2071,7 @@ fn cmd_install_native_host(
                     _ => unchanged += 1,
                 }
                 println!(
-                    "{TAG} {}: {} {}",
+                    "{TAG} {} ({tier}): {} {}",
                     browser.id(),
                     outcome.id(),
                     target.manifest.display()
@@ -2127,6 +2136,27 @@ fn cmd_install_native_host(
 
     let live = wrote + updated + unchanged;
     println!("{TAG} summary: wrote {wrote}, updated {updated}, unchanged {unchanged}, skipped {skipped}, unsupported {unsupported}, failed {failed}");
+    // The tier split, because "registered with 8 browsers" is not the same claim
+    // as "8 browsers are promised to work". D5 splits them and so does this.
+    let supported = registered
+        .iter()
+        .filter(|target| target.browser.support(platform) == Some(nativehost::Support::Supported))
+        .count();
+    if live > 0 {
+        println!(
+            "{TAG} tiers: {supported} of {} registration(s) are in D5's supported matrix; the rest are best-effort and unverified",
+            registered.len()
+        );
+    }
+    // A data directory is not an extension install, and this command has no way
+    // to see one: an unpacked extension is not enumerable from outside the
+    // browser in a way that distinguishes "loaded here" from "left in the
+    // store". Saying it once, here, is the closest this command can come to
+    // stopping the sentence "the host is registered, so the extension must be
+    // installed in every profile".
+    println!(
+        "{TAG} note: registering the host says nothing about the extension — load it once in every browser profile you chat in"
+    );
     if failed > 0 {
         return ExitCode::FAILURE;
     }
@@ -8278,6 +8308,28 @@ mod decision_surface_tests {
         }
     }
 
+    /// The one instruction a user reads before installing anything must not
+    /// imply that one extension install covers every profile they chat in.
+    ///
+    /// The wording is the requirement, not decoration: a user who chats in
+    /// Chrome Personal, Chrome Work and Arc Work and installs once in the first
+    /// captures nothing from the other two, and the tool tells them the host is
+    /// registered (`36-EXTENSION-TOPOLOGY.md` §3, ADR-039 decision 2 step 7).
+    #[test]
+    fn the_extension_instruction_names_every_profile() {
+        assert!(
+            SETUP_NEXT_STEP_EXTENSION.contains("every browser profile you chat in"),
+            "the extension step must say profile, not browser: {SETUP_NEXT_STEP_EXTENSION}"
+        );
+        assert!(SETUP_NEXT_STEP_EXTENSION.contains("install-native-host --stage"));
+        // A bare "the extension" is the sentence that produced the finding this
+        // line answers.
+        assert!(
+            !SETUP_NEXT_STEP_EXTENSION.contains("install the browser extension zip, run"),
+            "the wording that reads as one-install-total must not come back"
+        );
+    }
+
     #[test]
     fn setup_json_reports_named_missing_stage_without_prompting() {
         let report = report_with_sessions(0);
@@ -8293,6 +8345,10 @@ mod decision_surface_tests {
             None,
             None,
             &setup_remote_not_attempted(None, "no stage was given"),
+            Err(
+                "no stage was given, so the wizard stopped before the browser host step \
+                 and did not look at this machine's browser registration",
+            ),
             &["stage"],
             &[],
             &[],
@@ -8320,6 +8376,20 @@ mod decision_surface_tests {
         assert!(value["destination"].get("name").is_none());
         assert_eq!(value["unread"], serde_json::json!([]));
         assert_eq!(value["incomplete"], serde_json::json!([]));
+        // A run that stopped before the host step did not *find* nothing
+        // registered — it never looked. The step and the object both say
+        // `not_checked`, and the object carries the reason, so a wrapper cannot
+        // read this run as "no browser host is registered on this machine".
+        assert_eq!(value["steps"]["native_host"], "not_checked");
+        assert_eq!(value["native_host"]["kind"], "not_checked");
+        assert!(value["native_host"]["why"]
+            .as_str()
+            .is_some_and(|text| text.contains("did not look")));
+        assert!(
+            value["native_host"].get("registered").is_none(),
+            "a run that never looked must not carry a registration count: {}",
+            value["native_host"]
+        );
     }
 
     /// The declaration is a sentence the user has to mean. Anything shorter,
@@ -9929,6 +9999,10 @@ fn cmd_setup(
                                 .to_string(),
                         },
                     },
+                    Err(
+                        "no stage was given, so the wizard stopped before the browser host step \
+                         and did not look at this machine's browser registration"
+                    ),
                     &missing,
                     &[],
                     &[],
@@ -10246,12 +10320,21 @@ fn cmd_setup(
             exit_code = setup_exit_code(&missing, &incomplete, &remote_gaps.unread);
         }
     }
+    // ADR-039 decision 2, step 7 — the browser host. Read-only, and inspected
+    // through `doctor`'s function so the wizard and `doctor` cannot describe one
+    // machine two ways. `config` was read above, so the answer is a real one.
+    let host_check = chat_stasher::doctor::inspect_native_host(
+        &config,
+        &nativehost::machine_root(nativehost::Platform::current(), &config::home_dir()),
+    );
+
     if interactive {
         print_setup_summary(
             schedule_status,
             &next_run,
             install_schedule,
             uninstall_schedule,
+            &host_check,
         );
         // The lines below are the human form of `missing_parameters`, the
         // `incomplete` list and the `unread` list. ADR-039 decision 5: an
@@ -10295,6 +10378,7 @@ fn cmd_setup(
             Some(&local),
             Some(&chain),
             &remote_report,
+            Ok(&host_check),
             &missing,
             &incomplete,
             &remote_gaps.unread,
@@ -12386,6 +12470,7 @@ fn print_setup_summary(
     next_run: &schedule::NextRun,
     install_schedule: bool,
     uninstall_schedule: bool,
+    host: &chat_stasher::doctor::NativeHostCheck,
 ) {
     println!("setup: summary");
     println!("setup: local archive: see observed status above");
@@ -12395,8 +12480,57 @@ fn print_setup_summary(
     if !install_schedule && !uninstall_schedule {
         println!("setup: scheduler was skipped; run `chat-stasher setup --install-schedule` to install it");
     }
-    println!("setup: next steps: install the browser extension zip, run `chat-stasher install-native-host --stage <stage>`, then reload open platform tabs");
-    println!("setup: next steps: open `chat-stasher ui --repo <repo>` to browse the archive");
+
+    // The host step is a **report**, not an attempted step, and it is rendered
+    // by `doctor`'s own function rather than paraphrased: ADR-039 decision 6 says
+    // counts come from `doctor`'s output, and decision 7 puts loading the
+    // extension and running `install-native-host` in the user's hands. So this
+    // block adds no work to the exit code and no entry to `incomplete` — nothing
+    // was attempted, and naming a read-only report as an unfinished step would
+    // be the wizard reporting its own narration as a failure.
+    println!("setup: browser host: {}", setup_host_step_line(host));
+    for line in chat_stasher::doctor::native_host_lines(host) {
+        println!("setup: {line}");
+    }
+    println!("setup: {}", SETUP_NEXT_STEP_EXTENSION);
+    println!("setup: {}", SETUP_NEXT_STEP_UI);
+}
+
+/// ADR-039 decision 2 step 7, as one sentence each.
+///
+/// Constants because they are the requirements rather than the phrasing: the
+/// topology document §3 says installation guidance must read *every browser
+/// profile you chat in*, which is the whole reason this line exists. A user who
+/// reads "install the extension" installs it once in the browser they happen to
+/// have open, and every other profile they chat in silently captures nothing.
+/// `the_extension_instruction_names_every_profile` pins that.
+const SETUP_NEXT_STEP_EXTENSION: &str = "next steps: install the browser extension zip in every browser profile you chat in, run `chat-stasher install-native-host --stage <stage>`, then reload open platform tabs";
+const SETUP_NEXT_STEP_UI: &str =
+    "next steps: open `chat-stasher ui --repo <repo>` to browse the archive";
+
+/// The wizard's one-line verdict on the host step. Three answers, because "not
+/// registered" and "no browser was looked for" lead to different next actions —
+/// the first is a command the user can run, the second is our path table.
+fn setup_host_step_line(host: &chat_stasher::doctor::NativeHostCheck) -> String {
+    match chat_stasher::doctor::native_host_step(host) {
+        "registered" => {
+            "registered with at least one browser; the extension itself is a separate, \
+             per-profile step"
+                .to_string()
+        }
+        "none_registered" => {
+            "nothing is registered yet — this wizard does not register the host; run \
+             `chat-stasher install-native-host --stage <stage>`"
+                .to_string()
+        }
+        // Not "none registered": nothing was looked at, so absence here proves
+        // nothing and must not be dressed up as a finding about the machine.
+        _ => format!(
+            "this build has no browser discovery path on {} — nothing was looked for, so \
+             there is nothing to report about the host",
+            nativehost::Platform::current().id()
+        ),
+    }
 }
 
 /// The `destination` object of `setup --json`.
@@ -12605,6 +12739,7 @@ fn setup_json_payload(
     local: Option<&SetupLocalSaveReport>,
     chain: Option<&SetupChain>,
     remote: &SetupRemoteReport,
+    host: Result<&chat_stasher::doctor::NativeHostCheck, &'static str>,
     missing: &[&'static str],
     incomplete: &[&'static str],
     unread: &[&'static str],
@@ -12612,6 +12747,21 @@ fn setup_json_payload(
 ) -> String {
     let save = local.map(|local| &local.save);
     let declared = !missing.contains(&"masterkey_saved_elsewhere");
+    // `Err` is a run that never looked — either it could not read the config or
+    // it stopped before the host step — and it carries its own reason. The
+    // object is tagged and never `null`, in the same idiom as `chain` and `runs`
+    // below: `null` would read as "nothing is registered", which is a claim
+    // about the machine that no run here established.
+    let (host_step, host_json) = match host {
+        Ok(check) => (
+            chat_stasher::doctor::native_host_step(check),
+            chat_stasher::doctor::native_host_json(check),
+        ),
+        Err(why) => (
+            "not_checked",
+            serde_json::json!({"kind": "not_checked", "why": why}),
+        ),
+    };
     let chain = match chain {
         Some(chain) => chain.to_json(),
         // No stage means no pass ran. An explicit tagged object, never `null`:
@@ -12659,6 +12809,7 @@ fn setup_json_payload(
             },
             "destination": remote.outcome(),
             "schedule": schedule_status,
+            "native_host": host_step,
         },
         // The same three lists the exit code is decided from, so a wrapper that
         // reads them and a wrapper that reads `exit_code` are looking at one
@@ -12666,6 +12817,7 @@ fn setup_json_payload(
         "incomplete": incomplete,
         "unread": unread,
         "destination": setup_remote_json(remote),
+        "native_host": host_json,
         "chain": chain,
         "runs": runs,
         "masterkey": match (save, local) {
