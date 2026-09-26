@@ -52,6 +52,7 @@ import {
   summarizeOutbox,
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
+  POPUP_SAVE_INSTALL_LABEL_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
   type PopupModel,
@@ -73,6 +74,7 @@ import { liveCaptureOf } from '../../lib/live-capture';
 import { currentReleaseChannel, isPlatformActiveInChannel } from '../../lib/contract';
 import { exportNoHistory, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
+import { attachInstallIdentityToConsole } from '../../lib/install-identity';
 
 /**
  * Ask background for the runtime facts. When the answer does not come (the SW
@@ -223,6 +225,7 @@ async function collect(): Promise<PopupModel> {
     // 🔴 C33 · The two preconditions of the "start backfilling this platform"
     //    button, both of them **facts**, not inferences.
     liveTarget: runtime.liveTarget ?? null,
+    install: runtime.install,
     targetCount: targets.length,
     nativeHost,
     outbox,
@@ -479,11 +482,46 @@ async function refresh(): Promise<void> {
   const model = await collect();
   lastModel = previous === undefined ? model : { ...model, summary: previous };
   paint(renderPopup(lastModel));
+  paintInstallIdentity(lastModel.install);
   // 🔴 ADR-032 · The coverage card is refreshed with every repaint, because the two things that change
   //    what it says — the switch and the stored progress — are both things the user can change from this
   //    popup. It is deliberately *not* fetched on a timer: the popup is opened, read and closed, and a
   //    card that aged while nobody was looking would be the one thing it must not be.
   void refreshCoverageCard();
+}
+
+function paintInstallIdentity(install: BackfillRuntimeStatus['install']): void {
+  const label = document.getElementById('install-label');
+  const row = document.getElementById('install-name-row') as HTMLDivElement | null;
+  const input = document.getElementById('install-profile-label') as HTMLInputElement | null;
+  const save = document.getElementById('save-install-profile-label') as HTMLButtonElement | null;
+  if (!label || !row || !input || !save) return;
+  if (!install) {
+    label.textContent = t('popup.install.unknown');
+    row.hidden = true;
+    return;
+  }
+  attachInstallIdentityToConsole(install);
+  const profile = install.profile_label ?? '';
+  label.textContent = t('popup.install.thisBrowser', {
+    browser: install.browser,
+    profile: profile || t('popup.install.unnamed'),
+  });
+  input.value = profile;
+  input.placeholder = t('popup.install.profilePlaceholder');
+  input.setAttribute('aria-label', t('popup.install.profilePlaceholder'));
+  save.textContent = t('popup.install.save');
+  row.hidden = Boolean(profile);
+}
+
+async function saveInstallProfileLabel(): Promise<void> {
+  const input = document.getElementById('install-profile-label') as HTMLInputElement | null;
+  if (!input) return;
+  const reply = await browser.runtime.sendMessage({
+    type: POPUP_SAVE_INSTALL_LABEL_MESSAGE,
+    profile_label: input.value,
+  });
+  if (reply?.ok) await refresh();
 }
 
 /**
@@ -714,6 +752,12 @@ document.getElementById('open-dashboard')?.addEventListener('click', () => {
   void onOpenDashboard().catch((err) => {
     console.warn('[chat-stasher] popup open-dashboard failed', (err as Error).message);
     setDashboardNote(t('popup.dashboard.failed', { detail: (err as Error).message }));
+  });
+});
+
+document.getElementById('save-install-profile-label')?.addEventListener('click', () => {
+  void saveInstallProfileLabel().catch((err) => {
+    console.warn('[chat-stasher] install label save failed', (err as Error).message);
   });
 });
 

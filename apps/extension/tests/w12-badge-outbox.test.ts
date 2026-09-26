@@ -54,6 +54,7 @@ function toolbar(): { shown: ToolbarState; action: Record<string, unknown> } {
 let host: SyntheticHost;
 
 function stubBrowser(action: Record<string, unknown>): void {
+  const localValues: Record<string, unknown> = {};
   const api = withI18n({
     runtime: {
       id: 'mock-extension-id',
@@ -62,6 +63,16 @@ function stubBrowser(action: Record<string, unknown>): void {
       sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
     },
     action,
+    storage: {
+      local: {
+        async get(query: Record<string, unknown> | null) {
+          if (query === null) return { ...localValues };
+          return Object.fromEntries(Object.entries(query).map(([key, fallback]) => [key, key in localValues ? localValues[key] : fallback]));
+        },
+        async set(values: Record<string, unknown>) { Object.assign(localValues, values); },
+        async remove(keys: string[]) { for (const key of keys) delete localValues[key]; },
+      },
+    },
   });
   vi.stubGlobal('browser', api);
   vi.stubGlobal('chrome', api);

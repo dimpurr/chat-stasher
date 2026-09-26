@@ -105,6 +105,12 @@ badge:
 # Popup
 # ---------------------------------------------------------------------------
 popup:
+  install:
+    unknown: This browser identity could not be read.
+    thisBrowser: "This browser: {browser} · {profile}"
+    unnamed: Name this profile
+    profilePlaceholder: Name this browser profile
+    save: Save name
   # How `popupText` renders a button in the flattened text, so a test can see
   # whether the button appeared at all.
   buttonTag: "[Button] {label}"
@@ -788,6 +794,8 @@ failure:
 #   · "we do not know" is said, and never as a zero, a dash, or an empty box.
 # ---------------------------------------------------------------------------
 coverage:
+  thisBrowser: "This browser: {browser} · {profile}"
+  installUnknown: This browser identity could not be read.
   title: Backfill coverage
   # W149 · One line under the title; the long read-only note moved behind the
   # `about` disclosure. The two facts stay separated on purpose: what the

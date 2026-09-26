@@ -13,6 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { parseMessagesFile, type ParsedMessage } from '@wxt-dev/i18n/build';
 import { CATALOGS, TEST_LOCALES, type TestLocale } from './i18n-harness';
 
@@ -96,5 +97,31 @@ describe('i18n catalog · en.yml and zh_CN.yml stay aligned', () => {
         expect(entry.message.trim().length, `${locale}: ${key} is empty`).toBeGreaterThan(0);
       }
     }
+  });
+
+  it('every literal t() key in the shipped source exists in the catalog', async () => {
+    // W205 found a shipped `t('install.…')` whose keys only existed under
+    // `popup.install.*`: `t()` falls back to `browser.i18n`, which answers
+    // nothing for a missing message, so the label rendered empty and no test
+    // noticed — entrypoints are not otherwise imported by the suite. This
+    // scans the shipped entrypoints/ and lib/ for literal `t('key')` calls
+    // and refuses any key the catalog does not define. Computed keys (none
+    // exist today: dynamic `t('prefix' + x)` calls would need a per-case
+    // exemption) are not matched by the literal pattern at all.
+    const en = new Set(keysOf(await parseMessagesFile(file('en'))));
+    const tsFiles = (dir: string): string[] => readdirSync(dir).sort().flatMap((name) => {
+      const path = `${dir}/${name}`;
+      if (statSync(path).isDirectory()) return tsFiles(path);
+      return path.endsWith('.ts') ? [path] : [];
+    });
+    const missing: string[] = [];
+    for (const root of ['entrypoints', 'lib']) {
+      for (const source of tsFiles(fileURLToPath(new URL(`../${root}`, import.meta.url)))) {
+        for (const match of readFileSync(source, 'utf8').matchAll(/\bt\(\s*(["'])([^"'\n]+)\1/g)) {
+          if (!en.has(match[2]!)) missing.push(`${source}: t('${match[2]}')`);
+        }
+      }
+    }
+    expect(missing, 't() called with keys no catalog defines').toEqual([]);
   });
 });

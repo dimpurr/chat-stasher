@@ -22,12 +22,14 @@ import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host
 const runtimeListeners: Array<{
   fn: (msg: any, sender: any, sendResponse: (r: any) => void) => any;
 }> = [];
+const localValues: Record<string, unknown> = {};
 
 let host: SyntheticHost;
 
 /** Each test simulates a fresh extension: clear all registered listeners/records. */
 function resetMocks() {
   runtimeListeners.length = 0;
+  for (const key of Object.keys(localValues)) delete localValues[key];
   vi.unstubAllGlobals();
 }
 
@@ -82,6 +84,16 @@ const fakeBrowser: any = {
     async setBadgeText() {},
     async setBadgeBackgroundColor() {},
     async setTitle() {},
+  },
+  storage: {
+    local: {
+      async get(query: Record<string, unknown> | null) {
+        if (query === null) return { ...localValues };
+        return Object.fromEntries(Object.entries(query).map(([key, fallback]) => [key, key in localValues ? localValues[key] : fallback]));
+      },
+      async set(values: Record<string, unknown>) { Object.assign(localValues, values); },
+      async remove(keys: string[]) { for (const key of keys) delete localValues[key]; },
+    },
   },
 };
 

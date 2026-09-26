@@ -19,6 +19,7 @@ import {
   planHoldsAccountLease,
   suspensionFor,
 } from '../lib/backfill/account-lease';
+import { attachInstallIdentityToConsole, getInstallIdentity, setProfileLabel } from '../lib/install-identity';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore, type BackfillStore } from '../lib/backfill/store';
 import {
@@ -111,6 +112,8 @@ import {
 import {
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
+  POPUP_INSTALL_LABEL_MESSAGE,
+  POPUP_SAVE_INSTALL_LABEL_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
 } from '../lib/popup-view';
@@ -178,8 +181,11 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
   } catch { /* not JSON */ }
   const sessionId = resolveSessionId(captured) ?? 'unknown';
   const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
+  const install = await getInstallIdentity();
   return {
     schema: SCHEMA,
+    ...install,
+    profile_label: install.profile_label ?? 'Unnamed profile',
     platform: platform?.id ?? 'deepseek',
     sessionId,
     // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` guard keeps a
@@ -2647,7 +2653,7 @@ export function backgroundSetupSettled(): Promise<void> {
 //    main is unsupported. The async setup runs detached at the end.
 export default defineBackground(() => {
   browser.runtime.onMessage.addListener(
-    (message: { type?: string; payload?: CapturedFetch }, sender, sendResponse) => {
+    (message: { type?: string; payload?: CapturedFetch; profile_label?: string }, sender, sendResponse) => {
       // C18: the popup asks, when it opens, "is the fetch channel connected".
       // Since C19 that answer requires pinging a tab on the spot ⇒ it is async,
       // and it still returns true.
@@ -2656,10 +2662,26 @@ export default defineBackground(() => {
       //    the facts it was handed (it has not one line of probing code of its own).
       if (message?.type === POPUP_STATUS_MESSAGE) {
         popupHostStatus()
-          .then(sendResponse)
+          .then(async (status) => {
+            const install = await getInstallIdentity();
+            attachInstallIdentityToConsole(install);
+            sendResponse({ ...status, install });
+          })
           // If it cannot be answered, answer in the most conservative direction;
           // never let the popup show it as "running".
           .catch(() => sendResponse({ transportWired: false, lastTickReason: null, nativeHost: null }));
+        return true;
+      }
+      if (message?.type === POPUP_INSTALL_LABEL_MESSAGE) {
+        getInstallIdentity().then((install) => sendResponse({ install })).catch(() => sendResponse({ install: null }));
+        return true;
+      }
+      if (message?.type === POPUP_SAVE_INSTALL_LABEL_MESSAGE && typeof message.profile_label === 'string') {
+        setProfileLabel(message.profile_label).then((install) => {
+          attachInstallIdentityToConsole(install);
+          sendResponse({ ok: true, install });
+        })
+          .catch(() => sendResponse({ ok: false }));
         return true;
       }
       // C19: a content script checking in. The browser fills the tab id in on
@@ -2915,6 +2937,11 @@ export default defineBackground(() => {
   });
 
   backgroundSetup = (async () => {
+    try {
+      attachInstallIdentityToConsole(await getInstallIdentity());
+    } catch (err) {
+      console.warn('[chat-stasher] install identity could not be loaded', (err as Error).message);
+    }
     // 🔴 Load the language the user chose before anything paints text. The badge
     //    tooltip is set from this worker, so the overlay has to be initialised here
     //    too — otherwise the tooltip would stay in the browser's language while the

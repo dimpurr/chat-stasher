@@ -1122,6 +1122,12 @@ pub enum NackKind {
     TooLarge,
     Integrity,
     InvalidBundle,
+    /// D4 (topology doc 36): the payload's install identity conflicts with the
+    /// provenance already sealed in this machine's stage. Item-scope: the fix
+    /// (regenerating the identity) lives in the *browser profile*, not in the
+    /// host, so waiting for the host to change state can never deliver these
+    /// bytes — the extension has to see the refusal and stop retrying.
+    InstallConflict,
     Config,
     StageUnavailable,
     Io,
@@ -1136,6 +1142,7 @@ impl NackKind {
             NackKind::TooLarge => "too-large",
             NackKind::Integrity => "integrity",
             NackKind::InvalidBundle => "invalid-bundle",
+            NackKind::InstallConflict => "install-conflict",
             NackKind::Config => "config",
             NackKind::StageUnavailable => "stage-unavailable",
             NackKind::Io => "io",
@@ -1152,6 +1159,7 @@ impl NackKind {
             | NackKind::BadRequest
             | NackKind::TooLarge
             | NackKind::InvalidBundle
+            | NackKind::InstallConflict
             | NackKind::Config => false,
         }
     }
@@ -1545,6 +1553,11 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         Err(inbox::SealError::Lock(e)) => {
             nack(request_id, NackKind::StageUnavailable, format!("{e:#}"))
         }
+        Err(inbox::SealError::IdentityCollision) => nack(
+            request_id,
+            NackKind::InstallConflict,
+            "this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile",
+        ),
         Err(inbox::SealError::Other(e)) => nack(request_id, NackKind::Io, format!("{e:#}")),
     }
 }

@@ -362,6 +362,7 @@
             "too-large",
             "integrity",
             "invalid-bundle",
+            "install-conflict",
             "config",
             "stage-unavailable",
             "io"

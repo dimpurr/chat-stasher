@@ -105,6 +105,8 @@ import * as ui from './ui-strings';
  * download / badge / engine behind it) into the popup's bundle.
  */
 export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
+export const POPUP_INSTALL_LABEL_MESSAGE = 'cs-install-label';
+export const POPUP_SAVE_INSTALL_LABEL_MESSAGE = 'cs-save-install-label';
 
 /**
  * 🔴 C33 · Popup → background: "backfill THIS platform, I am saying so".
@@ -162,6 +164,7 @@ export interface BackfillRuntimeStatus {
    * way the button must not be shown.
    */
   liveTarget?: { platform: string; origin: string } | null;
+  install?: { install_id: string; browser: string; profile_label: string | null };
   /**
    * 🔴 W2 · The conclusion of the most recent `hello` (§6.1), written to storage
    * by background after it asks. It is **a record of one question and answer**,
@@ -220,6 +223,7 @@ export interface PopupModel {
    * nothing).
    */
   liveTarget?: { platform: string; origin: string } | null;
+  install?: { install_id: string; browser: string; profile_label: string | null };
   /**
    * 🔴 C33 · How many backfill targets are already in the registry.
    * Omitted ⇒ treat as 0? **No**: omitted is treated as "unknown", which is
@@ -373,9 +377,10 @@ export interface PopupOutbox {
 export const MAX_REJECTED_SAMPLES = 5;
 
 /**
- * 🔴 Pure: outbox entries → the few numbers the popup displays.
- * The render layer never walks the entries, and the payload never comes along:
- * the wording needs counts and kinds only.
+ * 🔴 Pure: outbox entries → the few numbers and refusal words the popup
+ * displays. The render layer never walks the entries, and the payload never
+ * comes along: the wording needs counts, kinds and the rejecting nack's own
+ * detail sentence — never conversation bytes.
  */
 export function summarizeOutbox(
   entries: readonly OutboxEntry[],
@@ -399,8 +404,11 @@ export function summarizeOutbox(
       .sort((a, b) => (b.count - a.count) || a.kind.localeCompare(b.kind)),
     rejectedSamples: rejected.slice(0, MAX_REJECTED_SAMPLES).map((entry) => ({
       kind: entry.rejectKind ?? ui.OUTBOX_KIND_UNKNOWN,
-      // Summary: keep the reason code itself. 🔴 Never the payload / URL / conversation body.
-      detail: (entry.lastError ?? ui.OUTBOX_DETAIL_MISSING).slice(0, 200),
+      // W205c · the rejecting nack's own sentence first — for an
+      // install-conflict it is the only place the fix is written down — with
+      // the pre-W205c `reason:kind` code as the fallback for entries rejected
+      // before the detail was kept. 🔴 Never the payload / URL / conversation body.
+      detail: (entry.rejectDetail ?? entry.lastError ?? ui.OUTBOX_DETAIL_MISSING).slice(0, 200),
     })),
   };
 }
