@@ -36,7 +36,7 @@ import { expect } from '@playwright/test';
 // The cap comes from the product, not a second copy here: a spec that spelled
 // 256 MiB out again would keep passing after the real cap changed.
 import { OUTBOX_CAPACITY_BYTES } from '../lib/outbox';
-import { seedOutbox, writeStorage, test, type Extension, type OutboxEntry } from './harness';
+import { readStorage, seedOutbox, writeStorage, test, type Extension, type OutboxEntry } from './harness';
 
 /** The one line the extension may offer a user who has no CLI. */
 const INSTALLER = 'curl -fsSL https://chatstasher.com/install.sh | sh';
@@ -217,6 +217,39 @@ test('delivered N: the record background writes when the backlog drains is shown
   const line = (await popup.textContent('#delivered')) ?? '';
   expect(line).toContain('5');
   expect(line).toContain('archive');
+
+  await popup.close();
+});
+
+test('🔴 "Export now" really exports — it is the one escape hatch that must work with no helper', async ({ ext }) => {
+  // The card exists to rescue a user who cannot deliver. If its export button were
+  // decorative, this state would have no way out at all, so the click is driven
+  // rather than the label asserted.
+  await seedOutbox(ext, [capture(1024, 1), capture(2048, 2)]);
+  const popup = await openPopup(ext);
+  await expect.poll(() => visible(popup, 'first-run')).toBe(true);
+
+  await popup.click('#first-run-export');
+
+  // The export books itself in storage (lib/outbox.ts's `recordExport`), and the
+  // record is what the popup's own "last export" line renders from — so a written
+  // record plus a repainted line is the export having happened, with both entries.
+  await expect.poll(async () => {
+    const stored = await readStorage(ext, null);
+    return (stored['cs_outbox_last_export_v1'] as { entries?: number } | undefined)?.entries ?? 0;
+  }).toBe(2);
+  await expect.poll(async () => (await popup.textContent('#last-export')) ?? '').toContain('2');
+
+  // Nothing is delivered by exporting: the captures stay queued until a host acks
+  // them (spec §10), and this profile has no host.
+  const stored = await readStorage(ext, null);
+  const rec = stored['cs_outbox_last_export_v1'] as { filename?: string; bytes?: number };
+  expect(rec.filename).toBeTruthy();
+  // The file is JSONL: one line per entry, so the byte count is the payload bytes
+  // **plus one newline each** — `bytes += entry.bytes + 1` (lib/outbox.ts:606).
+  // 1024 + 2048 payload, + 2 newlines = 3074. Asserted exactly, because a count
+  // that merely exceeded the payload would also pass if an entry were written twice.
+  expect(rec.bytes).toBe(1024 + 2048 + 2);
 
   await popup.close();
 });
