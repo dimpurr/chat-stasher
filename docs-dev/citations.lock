@@ -35,31 +35,31 @@ apps/extension/entrypoints/background.ts:650-657  185eedd6b024  lines=8
   <- docs-dev/install.md:406  :: export async function hostStatusForPopup(): Promise<HostSta…
 apps/extension/entrypoints/background.ts:729-738  5e19fdb94397  lines=10
   <- docs-dev/privacy.md:349  :: const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_u…
-apps/extension/entrypoints/background.ts:958-961  03da1b2d652f  lines=4
+apps/extension/entrypoints/background.ts:981-984  03da1b2d652f  lines=4
   <- docs-dev/install.md:121  :: * 🔴 transportWired is not a static flag but the result of *…
-apps/extension/entrypoints/background.ts:1038-1067  103ba6182213  lines=30
+apps/extension/entrypoints/background.ts:1061-1090  103ba6182213  lines=30
   <- docs-dev/privacy.md:456  :: * 🔴 W49 · **Store one organization per scoped-platform row,…
-apps/extension/entrypoints/background.ts:1118-1177  48afac415c2f  lines=60
+apps/extension/entrypoints/background.ts:1141-1200  48afac415c2f  lines=60
   <- docs-dev/threat-model.md:362  :: export async function applyAccountObservation(
-apps/extension/entrypoints/background.ts:1229-1241  2f5f79a89fcd  lines=13
+apps/extension/entrypoints/background.ts:1252-1264  2f5f79a89fcd  lines=13
   <- docs-dev/threat-model.md:362  :: async function applyAccountObservationForCapture(
-apps/extension/entrypoints/background.ts:1422-1482  98f08dc581d5  lines=61
+apps/extension/entrypoints/background.ts:1445-1505  98f08dc581d5  lines=61
   <- docs-dev/privacy.md:401, docs-dev/privacy.md:428, docs-dev/threat-model.md:691  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:1688-1722  6c2ac8efb66e  lines=35
+apps/extension/entrypoints/background.ts:1711-1751  7248a1f86667  lines=41
   <- docs-dev/privacy.md:401  :: export async function registerBackfillTargetHere(): Promise<
-apps/extension/entrypoints/background.ts:1730-1774  9537eb587b77  lines=45
+apps/extension/entrypoints/background.ts:1759-1803  9537eb587b77  lines=45
   <- docs-dev/privacy.md:388  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1773  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1802  6539997ed831  lines=1
   <- docs-dev/privacy.md:390  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:1994-2092  ba72bd6324a8  lines=99
+apps/extension/entrypoints/background.ts:2023-2121  4584a5994333  lines=99
   <- docs-dev/install.md:1020  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:1994-2093  660a4aa51e5f  lines=100
+apps/extension/entrypoints/background.ts:2023-2122  84681c478fe8  lines=100
   <- docs-dev/privacy.md:444, docs-dev/privacy.md:460  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2604-2675  bce6712b8ca2  lines=72
+apps/extension/entrypoints/background.ts:2616-2687  bce6712b8ca2  lines=72
   <- docs-dev/privacy.md:353  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:2924-2937  fe473cb85a10  lines=14
+apps/extension/entrypoints/background.ts:2936-2949  fe473cb85a10  lines=14
   <- docs-dev/privacy.md:354  :: if (message?.type === HOOK_STATUS_MESSAGE && !isHookStatusM…
-apps/extension/entrypoints/background.ts:2965-2984  98dbbe3c6aef  lines=20
+apps/extension/entrypoints/background.ts:2977-2996  98dbbe3c6aef  lines=20
   <- docs-dev/privacy.md:354  :: */
 apps/extension/entrypoints/dw-bridge.content.ts:450-456  ff11500827ff  lines=7
   <- docs-dev/privacy.md:128  :: function readKimiAccessToken(): string | null {
@@ -99,11 +99,11 @@ apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs-dev/privacy.md:405  :: * ## Why this module exists at all
 apps/extension/lib/backfill/claude-org.ts:110-136  13f59996d45c  lines=27
   <- docs-dev/privacy.md:455  :: /**
-apps/extension/lib/backfill/claude-org.ts:211-265  042cd322b76d  lines=55
+apps/extension/lib/backfill/claude-org.ts:217-271  042cd322b76d  lines=55
   <- docs-dev/privacy.md:427, docs-dev/threat-model.md:305, docs-dev/threat-model.md:678  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
-apps/extension/lib/backfill/claude-page.ts:70-150  940dbc1dddfa  lines=81
+apps/extension/lib/backfill/claude-page.ts:70-153  b12e7f9d8360  lines=84
   <- docs-dev/install.md:1013, docs-dev/privacy.md:417, docs-dev/threat-model.md:690  :: export function createClaudePageScope(deps: ClaudePageScope…
-apps/extension/lib/backfill/claude-page.ts:96-109  6193c10fc2af  lines=14
+apps/extension/lib/backfill/claude-page.ts:96-111  c28275aebcd1  lines=16
   <- docs-dev/privacy.md:412  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs-dev/privacy.md:347  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
@@ -223,7 +223,7 @@ apps/extension/lib/backfill/tab-port.ts:422-461  593876bf3c4e  lines=40
   <- docs-dev/threat-model.md:62  :: export function checkBackfillRequest(
 apps/extension/lib/backfill/tab-port.ts:464-484  3a127cc35dfc  lines=21
   <- docs-dev/threat-model.md:305  :: *    has two more segments, so the two cannot collide by co…
-apps/extension/lib/backfill/tab-port.ts:1141-1158  18db841e280b  lines=18
+apps/extension/lib/backfill/tab-port.ts:1145-1162  18db841e280b  lines=18
   <- docs-dev/privacy.md:418  :: export async function askTabForClaudeOrg(
 apps/extension/lib/backfill/types.ts:1696-1706  dd63b47f4f10  lines=11
   <- docs-dev/privacy.md:347  :: accountLease?: AccountLease;
