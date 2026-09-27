@@ -32,11 +32,12 @@ that document is the honest one.
   [section 5](#5-where-the-extension-runs) for the exact origins.
 - **Running on a site is not the same as backing up your history there.** The
   optional backfill feature implements recovering past conversation text on
-  **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi** and **Claude** — on none of the
-  six has a complete backfill been observed in a real browser, and for DeepSeek,
-  Gemini, Grok, Kimi and Claude we have **not verified** whether a long conversation comes
-  back complete (Gemini is the one of those that pages; the others do not, and say so).
-  Grok and Claude are the least verified of the six: their routes come from reading
+  **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Perplexity** and **Claude** — on
+  none of the seven has a complete backfill been observed in a real browser, and
+  for DeepSeek, Gemini, Grok, Kimi, Perplexity and Claude we have **not verified**
+  whether a long conversation comes back complete (Gemini is the one of those
+  that pages; the others do not, and say so).
+  Grok and Claude are the least verified of the seven: their routes come from reading
   public open-source implementations rather than from a logged-in session,
   and one Grok conversation costs two requests. Kimi's routes *were* measured in a
   logged-in session, and its requests carry your page's own login token, read
