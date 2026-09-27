@@ -35,32 +35,32 @@ apps/extension/entrypoints/background.ts:650-657  185eedd6b024  lines=8
   <- docs-dev/install.md:406  :: export async function hostStatusForPopup(): Promise<HostSta…
 apps/extension/entrypoints/background.ts:729-738  5e19fdb94397  lines=10
   <- docs-dev/privacy.md:349  :: const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_u…
-apps/extension/entrypoints/background.ts:981-984  03da1b2d652f  lines=4
+apps/extension/entrypoints/background.ts:1011-1014  03da1b2d652f  lines=4
   <- docs-dev/install.md:121  :: * 🔴 transportWired is not a static flag but the result of *…
-apps/extension/entrypoints/background.ts:1061-1090  103ba6182213  lines=30
+apps/extension/entrypoints/background.ts:1091-1120  103ba6182213  lines=30
   <- docs-dev/privacy.md:456  :: * 🔴 W49 · **Store one organization per scoped-platform row,…
-apps/extension/entrypoints/background.ts:1141-1200  48afac415c2f  lines=60
+apps/extension/entrypoints/background.ts:1171-1230  48afac415c2f  lines=60
   <- docs-dev/threat-model.md:362  :: export async function applyAccountObservation(
-apps/extension/entrypoints/background.ts:1252-1264  2f5f79a89fcd  lines=13
+apps/extension/entrypoints/background.ts:1282-1294  2f5f79a89fcd  lines=13
   <- docs-dev/threat-model.md:362  :: async function applyAccountObservationForCapture(
-apps/extension/entrypoints/background.ts:1445-1505  98f08dc581d5  lines=61
+apps/extension/entrypoints/background.ts:1475-1535  98f08dc581d5  lines=61
   <- docs-dev/privacy.md:401, docs-dev/privacy.md:428, docs-dev/threat-model.md:691  :: export async function scopeRetryDue(
-apps/extension/entrypoints/background.ts:1711-1751  7248a1f86667  lines=41
+apps/extension/entrypoints/background.ts:1741-1781  d64e4132f974  lines=41
   <- docs-dev/privacy.md:401  :: export async function registerBackfillTargetHere(): Promise<
-apps/extension/entrypoints/background.ts:1759-1803  9537eb587b77  lines=45
+apps/extension/entrypoints/background.ts:1789-1833  9537eb587b77  lines=45
   <- docs-dev/privacy.md:388  :: export function backfillTargetFor(
-apps/extension/entrypoints/background.ts:1802  6539997ed831  lines=1
+apps/extension/entrypoints/background.ts:1832  6539997ed831  lines=1
   <- docs-dev/privacy.md:390  :: return { platform: row.id, origin, scope: identity.value ||…
-apps/extension/entrypoints/background.ts:2023-2121  4584a5994333  lines=99
+apps/extension/entrypoints/background.ts:2053-2153  f16c49ffedc2  lines=101
   <- docs-dev/install.md:1020  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2023-2122  84681c478fe8  lines=100
+apps/extension/entrypoints/background.ts:2053-2156  d8ca5fa4825b  lines=104
   <- docs-dev/privacy.md:444, docs-dev/privacy.md:460  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2616-2687  bce6712b8ca2  lines=72
+apps/extension/entrypoints/background.ts:2648-2719  bce6712b8ca2  lines=72
   <- docs-dev/privacy.md:353  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:2936-2949  fe473cb85a10  lines=14
+apps/extension/entrypoints/background.ts:2968-2981  fe473cb85a10  lines=14
   <- docs-dev/privacy.md:354  :: if (message?.type === HOOK_STATUS_MESSAGE && !isHookStatusM…
-apps/extension/entrypoints/background.ts:2977-2996  98dbbe3c6aef  lines=20
-  <- docs-dev/privacy.md:354  :: */
+apps/extension/entrypoints/background.ts:3011-3030  9073b567ae4b  lines=20
+  <- docs-dev/privacy.md:354  :: if (!platform) {
 apps/extension/entrypoints/dw-bridge.content.ts:450-456  ff11500827ff  lines=7
   <- docs-dev/privacy.md:128  :: function readKimiAccessToken(): string | null {
 apps/extension/entrypoints/dw-bridge.content.ts:613-639  c4f63f6e72e7  lines=27

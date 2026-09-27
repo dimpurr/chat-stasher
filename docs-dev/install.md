@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:981-984`). That page does not have to
+`apps/extension/entrypoints/background.ts:1011-1014`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -1017,7 +1017,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2023-2121`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2053-2153`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4630-4661`) is covered.

@@ -1353,7 +1353,7 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
                     .unwrap_or(0) // reason: missing Retry-After still applies the 60s machine cooldown floor.
                     .min(30 * 24 * 60 * 60 * 1000) as i64;
                 new_cooldown = now + header.max(60_000);
-                conn.execute("UPDATE ext_platform SET cooldown_until=MAX(cooldown_until,?3),owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,new_cooldown])?;
+                conn.execute("UPDATE ext_platform SET cooldown_until=MAX(cooldown_until,?3) WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,new_cooldown])?;
                 wait = header.max(60_000);
             }
             _ => {

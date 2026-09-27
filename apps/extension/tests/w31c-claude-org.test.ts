@@ -88,6 +88,7 @@ const sentOnBehalf: string[] = [];
 /** What the platform answers. A path with no route is a failure the test did not expect. */
 type Route = (u: URL) => { status: number; text: string; retryAfter?: string };
 let routes: Record<string, Route> = {};
+let pageFetchGate: Promise<void> | null = null;
 
 function jsonRoute(body: () => string, status = 200): Route {
   return () => ({ status, text: body() });
@@ -100,6 +101,7 @@ function jsonRoute(body: () => string, status = 200): Route {
  */
 const pageFetch = async (url: string) => {
   pageCalls.push(url);
+  if (pageFetchGate) await pageFetchGate;
   const u = new URL(url);
   const route = routes[u.pathname];
   if (!route) throw new Error(`the page was asked for an unexpected path: ${u.pathname}`);
@@ -144,6 +146,7 @@ let coordinationMessages: Array<Record<string, unknown>> = [];
 let failRateLimitCoordination = false;
 let denyClaudeLease = false;
 let denyClaudeToken = false;
+let oldCoordinationHost = false;
 
 const fakeBrowser: any = {
   runtime: {
@@ -151,6 +154,10 @@ const fakeBrowser: any = {
     sendNativeMessage: (_host: string, message: unknown) => {
       const msg = message as Record<string, unknown>;
       if (msg.type === 'coordination') coordinationMessages.push(msg);
+      if (oldCoordinationHost && msg.type === 'coordination') {
+        return Promise.resolve({ protocol: 1, type: 'nack', request_id: null,
+          kind: 'bad-request', retryable: false, detail: 'unknown message type "coordination"' });
+      }
       if ((denyClaudeLease || (denyClaudeToken && msg.mode === 'token'))
         && msg.type === 'coordination' && msg.platform === 'claude'
         && (msg.mode === 'claim' || msg.mode === 'token')) {
@@ -331,11 +338,13 @@ beforeEach(async () => {
   sentOnBehalf.length = 0;
   alarmBook.clear();
   routes = {};
+  pageFetchGate = null;
   currentTab = null;
   coordinationMessages = [];
   failRateLimitCoordination = false;
   denyClaudeLease = false;
   denyClaudeToken = false;
+  oldCoordinationHost = false;
   runtimeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
@@ -1092,6 +1101,118 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     expect(after.haltRetried, 'a written refusal is the verdict on the attempt it replaced').toBeUndefined();
     expect(after.halted.build).toBe(build);
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+  });
+});
+
+describe('W212f · every discovery entry point uses the lease gateway', () => {
+  it('refuses a resolved alarm list before any request when the host has no arbiter', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 });
+    oldCoordinationHost = true;
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it('refuses a live capture tick before any request when the host has no arbiter', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    oldCoordinationHost = true;
+    const captured = {
+      url: `${DETAIL_URL}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET', status: 200,
+      text: JSON.stringify({ uuid: ID, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`, capturedAt: Date.now(),
+    };
+
+    await dispatchFromTab({ type: 'chat-captured', payload: captured }, 7);
+    await mod.backfillTickSettled();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it.each(['popup', 'alarm', 'retry', 'resume'] as const)(
+    '%s sends no platform request when the host has no arbiter', async (entry) => {
+      const mod = await bootBackground();
+      await enableBackfill();
+      await tabHello(7);
+      routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+      const { browserLocalStore } = await import('../lib/backfill/store');
+      const { rememberTarget } = await import('../lib/backfill/alarm');
+      const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+      if (entry !== 'popup') {
+        await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+      }
+      if (entry === 'retry') {
+        routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+        await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+        const { openLedger } = await import('../lib/backfill/ledger');
+        const localStore = browserLocalStore();
+        if (!localStore) throw new Error('synthetic store missing');
+        const prior = await openLedger(localStore, 'claude', 'default');
+        if (!prior.ok || prior.state.halted?.retryAt === undefined) throw new Error('retry fixture missing');
+        runtimeNow = prior.state.halted.retryAt;
+        routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+        pageCalls.length = 0;
+        sentOnBehalf.length = 0;
+        coordinationMessages = [];
+      }
+      if (entry === 'resume') {
+        const { setHostPause } = await import('../lib/host-status');
+        await setHostPause(browserLocalStore(), { reason: 'host-unavailable', at: 1 });
+      }
+      oldCoordinationHost = true;
+      if (entry === 'popup') await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+      else await mod.runAlarmTick();
+
+      expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+      expect(pageCalls).toEqual([]);
+      expect(sentOnBehalf).toEqual([]);
+      expect(store.cs_ext_coordination_unavailable_v1).toBe(true);
+    },
+  );
+
+  it('keeps one host lease until both overlapping popup callers finish', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    let unblock!: () => void;
+    pageFetchGate = new Promise<void>((resolve) => { unblock = resolve; });
+    const first = dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    await vi.waitFor(() => expect(pageCalls).toHaveLength(1));
+    const second = dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    await vi.waitFor(() => expect(coordinationMessages.filter((m) => m.mode === 'token').length).toBeGreaterThanOrEqual(2));
+    expect(coordinationMessages.filter((m) => m.mode === 'claim')).toHaveLength(1);
+    expect(coordinationMessages.filter((m) => m.mode === 'release')).toHaveLength(0);
+    unblock();
+    await Promise.all([first, second]);
+    expect(coordinationMessages.filter((m) => m.mode === 'release')).toHaveLength(1);
+  });
+
+  it('reports alarm discovery cooldown before releasing its lease', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+    await mod.runAlarmTick();
+    expect(coordinationMessages.map((m) => m.mode)).toEqual(['claim', 'token', 'rate_limit', 'release']);
   });
 });
 

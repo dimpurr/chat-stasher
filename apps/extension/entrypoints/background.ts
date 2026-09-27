@@ -746,42 +746,101 @@ async function pauseForCoordinationFailure(reason: string): Promise<void> {
   });
 }
 
-/** Hold the same machine-wide lease and enumeration token used by alarm discovery. */
-async function acquireClaudeOrganizationPermit(): Promise<(() => Promise<void>) | null> {
-  const platform = 'claude';
-  const install = await getInstallIdentity();
-  const claim = await coordinate({ mode: 'claim', platform, installId: install.install_id });
-  if (!claim.ok) {
-    await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+type BackfillLease = {
+  request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T>;
+  rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean>;
+  release(): Promise<void>;
+  gentle: boolean;
+};
+type SharedBackfillLease = { holders: number; ready: Promise<BackfillLease | null>; releasing?: Promise<void> };
+const backfillLeases = new Map<string, SharedBackfillLease>();
+
+/** The sole gateway for requests made by live, alarm, retry, resume and popup discovery. */
+async function acquireBackfillLease(platform: string): Promise<BackfillLease | null> {
+  const previous = backfillLeases.get(platform);
+  if (previous?.releasing) {
+    await previous.releasing;
+    return acquireBackfillLease(platform);
+  }
+  if (previous) {
+    previous.holders += 1;
+    const lease = await previous.ready;
+    return lease ? { ...lease, release: releaseOnce(previous, lease.release) } : null;
+  }
+  const shared: SharedBackfillLease = { holders: 1, ready: Promise.resolve(null) };
+  backfillLeases.set(platform, shared);
+  shared.ready = (async (): Promise<BackfillLease | null> => {
+    const install = await getInstallIdentity();
+    const installId = install.install_id;
+    const claim = await coordinate({ mode: 'claim', platform, installId });
+    if (!claim.ok) {
+      await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+      return null;
+    }
+    await rememberCoordinationAvailability(false);
+    if (!claim.granted) return null;
+    let held = true;
+    return {
+      gentle: claim.gentle,
+      async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
+        if (!held) throw new Error('backfill lease is not held');
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const token = await coordinate({ mode: 'token', platform, installId, segment });
+          if (!token.ok) {
+            await pauseForCoordinationFailure(token.reason ?? 'unknown');
+            throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
+          }
+          if (token.granted) return send();
+          if (attempt === 2 || token.waitMs <= 0 || token.waitMs > 60_000) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.max(250, token.waitMs)));
+        }
+        throw new Error('machine-wide backfill request budget is waiting');
+      },
+      async rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean> {
+        if (!held) return false;
+        const report = await coordinate({ mode: 'rate_limit', platform, installId, status,
+          retryAfterMs: parseRetryAfterMs(retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0 });
+        if (report.ok) return true;
+        await pauseForCoordinationFailure(report.reason ?? 'rate-limit report failed');
+        return false;
+      },
+      async release(): Promise<void> {
+        if (!held) return;
+        held = false;
+        await coordinate({ mode: 'release', platform, installId });
+      },
+    };
+  })();
+  const lease = await shared.ready;
+  if (!lease) {
+    if (backfillLeases.get(platform) === shared) backfillLeases.delete(platform);
     return null;
   }
-  await rememberCoordinationAvailability(false);
-  if (!claim.granted) return null;
-  const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment: 'enumerate' });
-  if (!token.ok || !token.granted) {
-    await coordinate({ mode: 'release', platform, installId: install.install_id });
-    if (!token.ok) await pauseForCoordinationFailure(token.reason ?? 'unknown');
-    return null;
-  }
-  await rememberCoordinationAvailability(false);
+  return { ...lease, release: releaseOnce(shared, lease.release) };
+}
+
+function releaseOnce(shared: SharedBackfillLease, hostRelease: () => Promise<void>): () => Promise<void> {
+  let released = false;
   return async () => {
-    await coordinate({ mode: 'release', platform, installId: install.install_id });
+    if (released) return;
+    released = true;
+    shared.holders -= 1;
+    if (shared.holders === 0) {
+      shared.releasing = hostRelease().finally(() => {
+        for (const [platform, current] of backfillLeases) {
+          if (current === shared) backfillLeases.delete(platform);
+        }
+      });
+      await shared.releasing;
+    }
   };
 }
 
-/** Share Claude organization-discovery refusals with every install on this machine. */
-async function reportClaudeOrganizationRateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean> {
-  const install = await getInstallIdentity();
-  const report = await coordinate({
-    mode: 'rate_limit',
-    platform: 'claude',
-    installId: install.install_id,
-    status,
-    retryAfterMs: parseRetryAfterMs(retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0,
-  });
-  if (report.ok) return true;
-  await pauseForCoordinationFailure(report.reason ?? 'Claude rate-limit report failed');
-  console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared', report.reason ?? 'unknown');
+/** Share Claude organization-discovery refusals before the last holder releases. */
+async function reportClaudeOrganizationRateLimit(lease: BackfillLease, status: 403 | 429, retryAfter?: string): Promise<boolean> {
+  const shared = await lease.rateLimit(status, retryAfter);
+  if (shared) return true;
+  console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared');
   return false;
 }
 
@@ -811,61 +870,32 @@ async function presetTickOptions(
   return { pace: plan.pace, maxDetails: plan.tickDetails };
 }
 
-/** Run through the native host arbiter when it supports EXT-3; older hosts keep
- * today's local behavior and surface the missing coordination in diagnostics. */
+/** Run only while the gateway holds this install's machine-wide platform lease. */
 async function coordinatedTick(
   platform: string,
   http: HttpPort | undefined,
   run: (http: HttpPort | undefined, gentle: boolean) => Promise<TickResult>,
 ): Promise<TickResult> {
   if (!http) {
-    // No request can be made on this tick, so the prior host-coordination result
-    // is not a current constraint on this install's backfill behavior.
-    await rememberCoordinationAvailability(false);
+    // No request can be made. Preserve any previous old-host warning until a
+    // successful claim proves that backfill is available again.
     return run(undefined, false);
   }
-  const install = await getInstallIdentity();
-  const claim = await coordinate({ mode: 'claim', platform, installId: install.install_id });
-  if (!claim.ok) {
-    if (claim.olderHost) {
-      await rememberCoordinationAvailability(true);
-      console.warn('[chat-stasher] older native host does not support backfill coordination; using per-install pacing');
-      return run(http, false);
-    }
-    await pauseForCoordinationFailure(claim.reason ?? 'unknown');
-    console.warn('[chat-stasher] backfill paused because native-host coordination failed', claim.reason ?? 'unknown');
-    return { ran: false, reason: 'host-paused', report: null };
-  }
-  await rememberCoordinationAvailability(false);
-  if (!claim.granted) return { ran: false, reason: 'already-running', report: null };
+  const lease = await acquireBackfillLease(platform);
+  if (!lease) return { ran: false, reason: 'host-paused', report: null };
   const coordinatedHttp: HttpPort = async (url, init) => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const segment = coordinationSegmentForRequest(platform, url);
-      const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment });
-      if (!token.ok) {
-        await pauseForCoordinationFailure(token.reason ?? 'unknown');
-        throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
-      }
-      if (token.granted) break;
-      if (attempt === 2 || token.waitMs > 60_000) throw new Error('machine-wide backfill request budget is waiting');
-      await new Promise((resolve) => setTimeout(resolve, Math.max(250, token.waitMs)));
-    }
-    const response = await http(url, init);
+    const segment = coordinationSegmentForRequest(platform, url);
+    const response = await lease.request(segment, () => http(url, init));
     if (response.status === 403 || response.status === 429) {
-      const retryAfterMs = parseRetryAfterMs(response.retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0;
-      const report = await coordinate({ mode: 'rate_limit', platform, installId: install.install_id,
-        status: response.status, retryAfterMs });
-      if (!report.ok) {
-        await pauseForCoordinationFailure(report.reason ?? 'rate-limit report failed');
-        throw new Error(`machine-wide rate-limit coordination unavailable: ${report.reason ?? 'unknown'}`);
-      }
+      if (!(await lease.rateLimit(response.status, response.retryAfter)))
+        throw new Error('machine-wide rate-limit coordination unavailable');
     }
     return response;
   };
   try {
-    return await run(coordinatedHttp, claim.gentle);
+    return await run(coordinatedHttp, lease.gentle);
   } finally {
-    await coordinate({ mode: 'release', platform, installId: install.install_id });
+    await lease.release();
   }
 }
 
@@ -1725,12 +1755,12 @@ export async function registerBackfillTargetHere(): Promise<
   let scope = UNRESOLVED_SCOPE;
   const resolver = scopeResolverFor(platform);
   if (resolver) {
-    const releasePermit = await acquireClaudeOrganizationPermit();
-    if (releasePermit === null) return { ok: false, reason: 'coordination-unavailable' };
+    const lease = await acquireBackfillLease(platform);
+    if (lease === null) return { ok: false, reason: 'coordination-unavailable' };
     try {
-      const resolved = (await resolver(live.tabId, origin)).resolved;
+      const resolved = (await lease.request('enumerate', () => resolver(live.tabId, origin))).resolved;
       if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
-        await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus, resolved.retryAfter);
+        await reportClaudeOrganizationRateLimit(lease, resolved.rateLimitStatus, resolved.retryAfter);
       }
       if (resolved.ok) {
         scope = resolved.org;
@@ -1742,7 +1772,7 @@ export async function registerBackfillTargetHere(): Promise<
         return { ok: false, reason: resolved.halt };
       }
     } finally {
-      await releasePermit();
+      await lease.release();
     }
   }
   const target = { platform, origin, scope };
@@ -2023,7 +2053,7 @@ function scopeRequestSpend(answer: ScopeAnswer): ScopeRequest {
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
   target: { platform: string; origin: string; scope: string },
-  acquireScopeRequest?: () => Promise<(() => Promise<void>) | null>,
+  acquireScopeRequest: () => Promise<BackfillLease | null>,
 ): Promise<{
   scope: string;
   request: ScopeRequest;
@@ -2082,27 +2112,29 @@ async function resolveScopeForTick(
    * closed: returning the sentinel here issues nothing, and the leg is no worse off —
    * the engine still stops this scope by name, and the popup still says why.
    */
-  const releasePermit = acquireScopeRequest ? await acquireScopeRequest() : null;
-  if (acquireScopeRequest && releasePermit === null) {
+  const lease = await acquireScopeRequest();
+  if (lease === null) {
     return { scope: UNRESOLVED_SCOPE, request: 'none', coordinationBlocked: true };
   }
   if (!(await markScopeRetried(store, {
     platform: target.platform, scope: UNRESOLVED_SCOPE,
   }))) {
-    await releasePermit?.();
+    await lease.release();
     return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
   let answer: ScopeAnswer;
+  let rateLimitShared = true;
   try {
-    answer = await resolver(null, target.origin);
+    answer = await lease.request('enumerate', () => resolver(null, target.origin));
+    const resolved = answer.resolved;
+    if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
+      rateLimitShared = await reportClaudeOrganizationRateLimit(lease, resolved.rateLimitStatus, resolved.retryAfter);
+    }
   } finally {
-    await releasePermit?.();
+    await lease.release();
   }
   const resolved = answer.resolved;
   if (!resolved.ok) {
-    const rateLimitShared = resolved.rateLimitStatus === undefined
-      ? true
-      : await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus, resolved.retryAfter);
     await recordBackfillHalt(store, {
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
@@ -2300,7 +2332,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     const scopeResolution = await resolveScopeForTick(store, target, async () => {
       // Claude's organization fallback is a platform request too. Take the same
       // host lease and an enumeration permit before asking the page to issue it.
-      return acquireClaudeOrganizationPermit();
+      return acquireBackfillLease(target.platform);
     });
     if (scopeResolution.coordinationBlocked) {
       schedule.skipped.push({ platform: target.platform, reason: 'waiting-retry' });

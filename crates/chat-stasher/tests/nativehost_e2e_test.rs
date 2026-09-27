@@ -1793,6 +1793,44 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
 }
 
 #[test]
+fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let send = |request_id: &str, mode: &str, install_id: &str| {
+        let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+            "request_id":request_id,"mode":mode,"platform":"claude","install_id":install_id})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        one_frame(&out.stdout)
+    };
+    assert_eq!(send("claim", "claim", "install-a")["granted"], true);
+    let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"limited","mode":"rate_limit","platform":"claude","install_id":"install-a",
+        "status":429,"retry_after_ms":120_000})));
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+    let db = fixture
+        .home
+        .join("data/chat-stasher/state/extension-coordination.sqlite3");
+    let conn = rusqlite::Connection::open(db).expect("coordination database exists");
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("platform row exists");
+    assert_eq!(owner.as_deref(), Some("install-a"));
+    assert_eq!(send("release", "release", "install-a")["granted"], true);
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("platform row exists after release");
+    assert_eq!(owner, None);
+}
+
+#[test]
 fn open_dashboard_naming_an_undeclared_destination_lists_what_is_declared() {
     let fixture = Fixture::new();
     fixture.configure_dashboard("elsewhere");
