@@ -276,6 +276,23 @@ impl Fixture {
         ));
     }
 
+    /// Configure the real host with an isolated synthetic archive masterkey.
+    fn configure_stage_with_masterkey(&self) {
+        let key_file = self.home.join("masterkey.json");
+        let masterkey = rustic_core::repofile::MasterKey::new();
+        fs::write(
+            &key_file,
+            chat_stasher::store::serialize_key(&masterkey).expect("serialize synthetic key"),
+        )
+        .expect("write synthetic masterkey");
+        self.write_config(&format!(
+            "rustic_key_file = {}\n[native_host]\nstage = {}\n",
+            serde_json::to_string(&key_file.to_string_lossy()).expect("key path as TOML string"),
+            serde_json::to_string(&self.stage.to_string_lossy())
+                .expect("stage path as TOML string")
+        ));
+    }
+
     /// Run the binary with an exact argv, isolated from every real directory.
     fn run(&self, args: &[&str], stdin: &[u8]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
@@ -400,6 +417,17 @@ fn deliver_request(request_id: &str, name: &str, payload: &str) -> Value {
         "payload": payload,
         "sha256": sha256_hex(payload.as_bytes()),
     })
+}
+
+fn deliver_request_with_account_id(
+    request_id: &str,
+    name: &str,
+    payload: &str,
+    account_id: &str,
+) -> Value {
+    let mut request = deliver_request(request_id, name, payload);
+    request["account_id"] = json!(account_id);
+    request
 }
 
 /// One delivered conversation, from the request to the ack.
@@ -1811,7 +1839,7 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
         .join("data/chat-stasher/state/extension-coordination.sqlite3");
     let conn = rusqlite::Connection::open(db).expect("coordination database exists");
     conn.execute(
-        "UPDATE ext_platform SET lease_until=0 WHERE platform='chatgpt'",
+        "UPDATE ext_platform_v2 SET lease_until=0 WHERE platform='chatgpt' AND account_key=''",
         [],
     )
     .expect("expire lease");
@@ -1859,7 +1887,7 @@ fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
     let conn = rusqlite::Connection::open(db).expect("coordination database exists");
     let owner: Option<String> = conn
         .query_row(
-            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            "SELECT owner FROM ext_platform_v2 WHERE platform='claude' AND account_key=''",
             [],
             |row| row.get(0),
         )
@@ -1868,12 +1896,104 @@ fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
     assert_eq!(send("release", "release", "install-a")["granted"], true);
     let owner: Option<String> = conn
         .query_row(
-            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            "SELECT owner FROM ext_platform_v2 WHERE platform='claude' AND account_key=''",
             [],
             |row| row.get(0),
         )
         .expect("platform row exists after release");
     assert_eq!(owner, None);
+}
+
+#[test]
+fn account_id_messages_resolve_masterkey_scope_for_coordination_and_delivery() {
+    let fixture = Fixture::new();
+    fixture.configure_stage_with_masterkey();
+    let account_a = "synthetic-account-a";
+    let account_b = "synthetic-account-b";
+    let ask = |request_id: &str, mode: &str, install_id: &str, account_id: &str| {
+        let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+            "request_id":request_id,"mode":mode,"platform":"deepseek","install_id":install_id,
+            "account_id":account_id,"status":429,"segment":"detail"})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        let response = one_frame(&out.stdout);
+        assert_matches_schema(&response);
+        response
+    };
+
+    assert_eq!(
+        ask("claim-a1", "claim", "install-a1", account_a)["granted"],
+        true
+    );
+    let same_account = ask("claim-a2", "claim", "install-a2", account_a);
+    assert_eq!(same_account["granted"], false);
+    assert_eq!(same_account["active_installs"], 2);
+    assert_eq!(
+        ask("claim-b1", "claim", "install-b1", account_b)["granted"],
+        true
+    );
+
+    let rate_limit = ask("limit-a", "rate_limit", "install-a1", account_a);
+    assert_eq!(rate_limit["wait_ms"], 60_000);
+    assert_eq!(
+        ask("token-a", "token", "install-a1", account_a)["granted"],
+        false
+    );
+    assert_eq!(
+        ask("token-b", "token", "install-b1", account_b)["granted"],
+        true
+    );
+
+    let db = fixture
+        .home
+        .join("data/chat-stasher/state/extension-coordination.sqlite3");
+    let conn = rusqlite::Connection::open(&db).expect("coordination database exists");
+    let keys = conn
+        .prepare("SELECT DISTINCT account_key FROM ext_platform_v2 WHERE platform='deepseek'")
+        .expect("prepare account scopes")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query account scopes")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read account scopes");
+    assert_eq!(keys.len(), 2, "only the two account scopes are stored");
+    assert!(keys
+        .iter()
+        .all(|key| { key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()) }));
+    assert_ne!(keys[0], keys[1]);
+    drop(conn);
+    let database_bytes = fs::read(&db).expect("read isolated coordination database");
+    assert!(!database_bytes
+        .windows(account_a.len())
+        .any(|window| window == account_a.as_bytes()));
+    assert!(!database_bytes
+        .windows(account_b.len())
+        .any(|window| window == account_b.as_bytes()));
+
+    let payload = bundle("sess-account-key", "synthetic delivery body");
+    let delivery = fixture.chrome(&frame(&deliver_request_with_account_id(
+        "deliver-account-key",
+        "deepseek-sess-account-key.json",
+        &payload,
+        account_a,
+    )));
+    assert_eq!(exit_code(&delivery), 0, "stderr: {}", stderr_of(&delivery));
+    let ack = one_frame(&delivery.stdout);
+    assert_matches_schema(&ack);
+    assert_eq!(ack["status"], "stored");
+    let machine = first_machine(&fixture);
+    let record = fixture.shard_records(&machine, "deepseek.sess-account-key");
+    assert_eq!(record.len(), 1);
+    let sealed_key = record[0]["account_key"]
+        .as_str()
+        .expect("sealed account key");
+    assert_eq!(sealed_key.len(), 64);
+    assert!(keys.contains(&sealed_key.to_string()));
+    let serialized_record = serde_json::to_vec(&record[0]).expect("serialize sealed record");
+    assert!(!serialized_record
+        .windows(account_a.len())
+        .any(|window| window == account_a.as_bytes()));
+    assert!(!serialized_record
+        .windows(account_b.len())
+        .any(|window| window == account_b.as_bytes()));
 }
 
 #[test]

@@ -104,6 +104,14 @@ async function independentSha256(text: string): Promise<string> {
 // 1 · The request itself
 // ===========================================================================
 describe('W2 · the request deliver sends', () => {
+  it('sends the temporary account id beside the unchanged payload for host-side derivation', async () => {
+    responder = (message) => ({ via: 'callback', response: ackFor(message) });
+    const result = await deliver(NAME, PAYLOAD, null, 'synthetic-account');
+    expect(result.delivered).toBe(true);
+    expect(sent[0]).toMatchObject({ payload: PAYLOAD, account_id: 'synthetic-account' });
+    expect(sent[0]).not.toHaveProperty('masterkey');
+  });
+
   it('conforms to §6.2 byte for byte — protocol/type/request_id/name/payload/sha256 — and the sha256 is the SHA-256 of the payload UTF-8 bytes', async () => {
     responder = (message) => ({ via: 'callback', response: ackFor(message) });
 

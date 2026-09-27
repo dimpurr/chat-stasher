@@ -869,6 +869,7 @@ export async function coordinate(input: {
   segment?: 'enumerate' | 'detail';
   status?: 403 | 429;
   retryAfterMs?: number;
+  accountId?: string;
 }): Promise<CoordinationResult> {
   const requestId = newRequestId();
   if (!requestId) return { ok: false, granted: false, activeInstalls: 0, gentle: false, cooldownUntil: 0, waitMs: 0, reason: 'crypto-unavailable' };
@@ -878,6 +879,7 @@ export async function coordinate(input: {
     ...(input.segment ? { segment: input.segment } : {}),
     ...(input.status ? { status: input.status } : {}),
     ...(input.retryAfterMs === undefined ? {} : { retry_after_ms: input.retryAfterMs }),
+    ...(input.accountId ? { account_id: input.accountId } : {}),
   }, COORDINATION_TIMEOUT_MS);
   const classified = classify(outcome, (value) => {
     if (value.protocol !== PROTOCOL || value.type !== 'coordination' || value.ok !== true
@@ -977,6 +979,7 @@ export async function deliver(
   name: string,
   payload: string,
   fingerprint: string | null = null,
+  accountId?: string,
 ): Promise<DeliverResult> {
   const sha256 = await sha256Hex(payload);
   const requestId = newRequestId();
@@ -1002,6 +1005,7 @@ export async function deliver(
       payload,
       sha256,
       ...(fingerprint === null ? {} : { fingerprint }),
+      ...(accountId ? { account_id: accountId } : {}),
     },
     REQUEST_TIMEOUT_MS,
   );

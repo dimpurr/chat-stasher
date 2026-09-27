@@ -125,7 +125,8 @@ Request:
  "name": "<platform>-<path-safe session id>.json",
  "payload": "<the bundle, serialised with JSON.stringify>",
  "sha256": "<64 lowercase hex chars: SHA-256 of the UTF-8 bytes of payload>",
- "fingerprint": "<optional; 64 lowercase hex chars>"}
+ "fingerprint": "<optional; 64 lowercase hex chars>",
+ "account_id": "<optional transient platform account id>"}
 ```
 
 - `payload` is a **string**, byte-for-byte what a bundle file would contain.
@@ -136,6 +137,10 @@ Request:
   `fingerprint`, and it is what §6.6 answers from. It is absent for a payload the
   extension has no capture-body derivation for, and an older extension never sends
   it at all — both are ordinary, and neither is an error.
+- `account_id` is optional and is not part of `payload` or its hash. The host
+  uses it only to derive a masterkey-scoped account key, never returns or
+  persists the raw id, and stores the derived key as sealed shard metadata.
+  Older extensions and captures without a visible account id omit it.
 - `name` must match `^[a-z0-9]+-[^/\\]+\.json$`. It is recorded as the shard's
   `source_file` and is the fallback id source, as a file name is for `ingest`.
 - The host recomputes SHA-256 over the UTF-8 bytes of `payload`. A mismatch is
@@ -386,13 +391,24 @@ negotiation is involved, and none is needed: every outcome other than
 
 ### 6.7 `coordination` — machine-wide backfill arbitration (EXT-3)
 
-Requests carry `request_id`, `mode`, `platform`, and `install_id`. `mode` is
+Requests carry `request_id`, `mode`, `platform`, and `install_id`, and may carry
+`account_id` when the extension has an account-scoped id. `mode` is
 `claim`, `token`, `release`, or `rate_limit`. `token` also carries `segment`
 (`enumerate` or `detail`); `rate_limit` carries `status` (403 or 429) and
 optional `retry_after_ms`.
 
+The host derives an account key as HMAC-SHA256 using a salt derived from the
+configured archive masterkey and a versioned, platform-separated message. The
+raw `account_id` is transient native messaging input and is not returned or
+persisted. When derivation succeeds, leases, request budgets, and cooldowns are
+scoped to machine, platform, and account key; otherwise they retain the prior
+machine-and-platform scope. The extension never receives the masterkey or the
+derived key. A live `deliver` may carry the same transient `account_id`; the
+host records the derived key in sealed shard metadata, which is part of the
+encrypted archive.
+
 The host persists arbitration in its local state database, scoped to this
-machine and platform. A successful claim grants one install a 120-second lease;
+machine and platform/account key. A successful claim grants one install a 120-second lease;
 each token refreshes it. Expired leases can be claimed by another install.
 Install presence is measured from claims and requests in the preceding 24
 hours. More than one observed install returns `gentle: true`. Detail tokens are
@@ -406,7 +422,9 @@ sets a platform cooldown of at least 60 seconds and at least the supplied
 An older host answers `bad-request` for the unknown `coordination` type. The
 extension reports coordination unavailable and pauses backfill until the host
 is updated. Live capture continues. This protocol addition does not compare
-account fingerprints and cannot coordinate separate machines.
+per-install account fingerprints. Separate machines still do not share an
+arbiter database; the comparable key is available in the encrypted archive for
+cross-install identity.
 
 ## 7. Idempotency
 

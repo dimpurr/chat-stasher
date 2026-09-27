@@ -78,9 +78,9 @@ describe('EXT-3 native-host coordination', () => {
   it('validates a matching arbiter response and sends install-scoped fields', async () => {
     response = { protocol: PROTOCOL, type: 'coordination', ok: true, request_id: 'echo',
       granted: true, active_installs: 2, gentle: true, cooldown_until: 0, wait_ms: 0 };
-    expect(await coordinate({ mode: 'claim', platform: 'chatgpt', installId: 'synthetic-install' }))
+    expect(await coordinate({ mode: 'claim', platform: 'chatgpt', installId: 'synthetic-install', accountId: 'synthetic-account' }))
       .toMatchObject({ ok: true, granted: true, activeInstalls: 2, gentle: true });
-    expect(requests[0]).toMatchObject({ type: 'coordination', mode: 'claim', platform: 'chatgpt', install_id: 'synthetic-install' });
+    expect(requests[0]).toMatchObject({ type: 'coordination', mode: 'claim', platform: 'chatgpt', install_id: 'synthetic-install', account_id: 'synthetic-account' });
   });
 
   it('reports coordination unavailable when an old host rejects the new message', async () => {

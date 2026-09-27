@@ -11,7 +11,12 @@ import {
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
-import { accountFingerprintFor } from '../lib/account-fingerprint';
+import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
+import {
+  acquireSharedLease,
+  backfillLeaseKey,
+  type SharedLeaseState,
+} from '../lib/backfill/shared-lease';
 import {
   accountLeaseForScope,
   agreesWithLease,
@@ -345,7 +350,7 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox first, and only
   //    then attempt any delivery. If the SW is killed between these two lines,
   //    the conversation is still waiting on disk and the next drain sends it.
-  const queued: EnqueueResult = await enqueue(name, payload);
+  const queued: EnqueueResult = await enqueue(name, payload, {}, prepared.accountId);
   if (!queued.accepted || !queued.sha256) {
     // Cannot get it into the outbox ⇒ do not deliver. Something delivered that
     // the outbox does not know about is precisely what write-ahead exists to
@@ -460,6 +465,7 @@ export type PreparedPayload =
     bytes: number;
     sessionId: string;
     platform: string;
+    accountId?: string;
   }
   | { ok: false; reason: string };
 
@@ -475,6 +481,8 @@ async function preparePayload(
   }
 
   const bundle = await buildBundle(captured, store);
+  const accountReading = accountIdFromCapture(captured, bundle.sessionId);
+  const accountId = accountReading.kind === 'id' ? accountReading.id : undefined;
   // 🔴 C21 · Naming is an **identity mapping**, not "replace unsafe characters":
   //    sanitizePathSegment is many-to-one ('a b' and 'a/b' collide), and the old
   //    download path overwrote ⇒ two different conversations could erase each
@@ -499,6 +507,7 @@ async function preparePayload(
     bytes: new TextEncoder().encode(payload).byteLength,
     sessionId: bundle.sessionId,
     platform: bundle.platform,
+    ...(accountId ? { accountId } : {}),
   };
 }
 
@@ -636,6 +645,7 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
     prepared.name,
     prepared.payload,
     await deliveryFingerprint(prepared.payload),
+    prepared.accountId,
   );
   if (result.delivered) {
     // 🔴 W50 · The record point on this leg is **this leg's own ack**. The live leg's
@@ -882,27 +892,18 @@ type BackfillLease = {
   release(): Promise<void>;
   gentle: boolean;
 };
-type SharedBackfillLease = { holders: number; ready: Promise<BackfillLease | null>; releasing?: Promise<void> };
-const backfillLeases = new Map<string, SharedBackfillLease>();
+const backfillLeases = new Map<string, SharedLeaseState<BackfillLease>>();
 
 /** The sole gateway for requests made by live, alarm, retry, resume and popup discovery. */
-async function acquireBackfillLease(platform: string): Promise<BackfillLease | null> {
-  const previous = backfillLeases.get(platform);
-  if (previous?.releasing) {
-    await previous.releasing;
-    return acquireBackfillLease(platform);
-  }
-  if (previous) {
-    previous.holders += 1;
-    const lease = await previous.ready;
-    return lease ? { ...lease, release: releaseOnce(previous, lease.release) } : null;
-  }
-  const shared: SharedBackfillLease = { holders: 1, ready: Promise.resolve(null) };
-  backfillLeases.set(platform, shared);
-  shared.ready = (async (): Promise<BackfillLease | null> => {
+async function acquireBackfillLease(platform: string, accountId?: string): Promise<BackfillLease | null> {
+  const comparableAccountId = accountId && accountId !== 'default' && accountId !== UNRESOLVED_SCOPE
+    ? accountId
+    : undefined;
+  const leaseKey = backfillLeaseKey(platform, comparableAccountId);
+  return acquireSharedLease(backfillLeases, leaseKey, async (): Promise<BackfillLease | null> => {
     const install = await getInstallIdentity();
     const installId = install.install_id;
-    const claim = await coordinate({ mode: 'claim', platform, installId });
+    const claim = await coordinate({ mode: 'claim', platform, installId, accountId: comparableAccountId });
     if (!claim.ok) {
       await pauseForCoordinationFailure(claim.reason ?? 'unknown');
       return null;
@@ -915,7 +916,7 @@ async function acquireBackfillLease(platform: string): Promise<BackfillLease | n
       async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
         if (!held) throw new Error('backfill lease is not held');
         for (let attempt = 0; attempt < 3; attempt += 1) {
-          const token = await coordinate({ mode: 'token', platform, installId, segment });
+          const token = await coordinate({ mode: 'token', platform, installId, segment, accountId: comparableAccountId });
           if (!token.ok) {
             await pauseForCoordinationFailure(token.reason ?? 'unknown');
             throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
@@ -929,6 +930,7 @@ async function acquireBackfillLease(platform: string): Promise<BackfillLease | n
       async rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean> {
         if (!held) return false;
         const report = await coordinate({ mode: 'rate_limit', platform, installId, status,
+          accountId: comparableAccountId,
           retryAfterMs: parseRetryAfterMs(retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0 });
         if (report.ok) return true;
         await pauseForCoordinationFailure(report.reason ?? 'rate-limit report failed');
@@ -937,33 +939,10 @@ async function acquireBackfillLease(platform: string): Promise<BackfillLease | n
       async release(): Promise<void> {
         if (!held) return;
         held = false;
-        await coordinate({ mode: 'release', platform, installId });
+        await coordinate({ mode: 'release', platform, installId, accountId: comparableAccountId });
       },
     };
-  })();
-  const lease = await shared.ready;
-  if (!lease) {
-    if (backfillLeases.get(platform) === shared) backfillLeases.delete(platform);
-    return null;
-  }
-  return { ...lease, release: releaseOnce(shared, lease.release) };
-}
-
-function releaseOnce(shared: SharedBackfillLease, hostRelease: () => Promise<void>): () => Promise<void> {
-  let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    shared.holders -= 1;
-    if (shared.holders === 0) {
-      shared.releasing = hostRelease().finally(() => {
-        for (const [platform, current] of backfillLeases) {
-          if (current === shared) backfillLeases.delete(platform);
-        }
-      });
-      await shared.releasing;
-    }
-  };
+  });
 }
 
 /** Share Claude organization-discovery refusals before the last holder releases. */
@@ -1003,6 +982,7 @@ async function presetTickOptions(
 /** Run only while the gateway holds this install's machine-wide platform lease. */
 async function coordinatedTick(
   platform: string,
+  accountId: string | undefined,
   http: HttpPort | undefined,
   run: (http: HttpPort | undefined, gentle: boolean) => Promise<TickResult>,
 ): Promise<TickResult> {
@@ -1011,7 +991,7 @@ async function coordinatedTick(
     // successful claim proves that backfill is available again.
     return run(undefined, false);
   }
-  const lease = await acquireBackfillLease(platform);
+  const lease = await acquireBackfillLease(platform, accountId);
   if (!lease) return { ran: false, reason: 'host-paused', report: null };
   const coordinatedHttp: HttpPort = async (url, init) => {
     const segment = coordinationSegmentForRequest(platform, url);
@@ -2000,7 +1980,7 @@ export async function kickBackfill(
    */
   await applyAccountObservationForCapture(store, target.platform, captured);
   const http = await resolveHttpPort(target.origin, senderTabId);
-  const result = await coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
+  const result = await coordinatedTick(target.platform, target.scope, http, async (coordinated, gentle) => tickBackfill({
     ...target,
     store,
     http: coordinated,
@@ -2475,7 +2455,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     const scopeResolution = await resolveScopeForTick(store, target, async () => {
       // Claude's organization fallback is a platform request too. Take the same
       // host lease and an enumeration permit before asking the page to issue it.
-      return acquireBackfillLease(target.platform);
+      return acquireBackfillLease(target.platform, target.scope);
     });
     if (scopeResolution.coordinationBlocked) {
       schedule.skipped.push({ platform: target.platform, reason: 'waiting-retry' });
@@ -2529,7 +2509,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     };
     // `async` since W113: the preset is read per tick, and a body-less arrow cannot await.
     const tickOne = async (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
-      coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
+      coordinatedTick(target.platform, target.scope, http, async (coordinated, gentle) => tickBackfill({
         platform: target.platform,
         origin: target.origin,
         scope,
