@@ -1305,8 +1305,8 @@ pub fn handle(
                     }
                 },
                 None => Response::text(
-                    404,
-                    "Not Found",
+                    409,
+                    "Conflict",
                     "No verified local profile matches this install.\n",
                 ),
             })
