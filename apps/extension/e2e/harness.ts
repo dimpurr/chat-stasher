@@ -20,11 +20,13 @@
  */
 
 import { chromium, test as base } from '@playwright/test';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { endianness, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isSweepNotConcluded, type TabSweepTrace } from '../lib/backfill/alarm';
 import type { BrowserContext, Worker } from '@playwright/test';
 
 /** The unpacked build `pnpm e2e` produces (`wxt build -b chrome`). */
@@ -76,7 +78,7 @@ export interface Extension {
  * extension is exercised in a real headless browser, not with the capture path
  * faked out.
  */
-export async function launchExtension(): Promise<Extension> {
+export async function launchExtension(options: { host?: NativeHost } = {}): Promise<Extension> {
   const userDataDir = mkdtempSync(join(tmpdir(), 'chat-stasher-e2e-'));
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: true,
@@ -97,7 +99,13 @@ export async function launchExtension(): Promise<Extension> {
     );
   }
   const extension = { context, extensionId: new URL(worker.url()).host, worker, userDataDir };
-  await installSyntheticCoordinator(extension);
+  // 🔴 Exactly one of the two, and never both: a spec either drives the real
+  //    host binary or it does not. Installing the synthetic coordinator on top
+  //    of a real host would answer coordination from a stub while delivery went
+  //    to the binary — a mix no deployment has, and one whose failures would be
+  //    attributed to the product.
+  if (options.host) await installNativeHostBridge(extension, options.host);
+  else await installSyntheticCoordinator(extension);
   return extension;
 }
 
@@ -229,8 +237,17 @@ export async function installFakePlatforms(
 ): Promise<RouteLog> {
   const log: RouteLog = { pageLoads: [], apiResponses: [], unexpected: [], escaped: [] };
 
-  await context.route('**/*', (route) => {
-    log.escaped.push(route.request().url());
+  await context.route('**/*', async (route) => {
+    const url = route.request().url();
+    // 🔴 The harness's own native-host bridge, and the one request that must not
+    //    be counted as "escaped". A spec's catch-all is registered *after* the
+    //    bridge's own route and therefore runs first (Playwright runs matching
+    //    handlers in the reverse of their registration order), so this falls
+    //    through to it rather than aborting the extension's own delivery. The
+    //    pattern is narrow on purpose: everything else really is aborted and
+    //    recorded, which is what makes `escaped` a measurement.
+    if (url.startsWith(`${BRIDGE_ORIGIN}/`)) return route.fallback();
+    log.escaped.push(url);
     return route.abort();
   });
 
@@ -605,6 +622,96 @@ export async function seedOutbox(extension: Extension, rows: OutboxEntry[]): Pro
   if (!worker) throw new Error('outbox seed: no service worker is running, so nothing was seeded');
   await worker.evaluate(WRITE_OUTBOX, rows as unknown[]);
 }
+/**
+ * Poll `storage.local` until **a concluded tick record written at or after
+ * `since`** exists, and return that snapshot.
+ *
+ * 🔴 W70 · A truthy `cs_backfill_lasttick_v1` is not the completion signal.
+ *    Since W62 the tick publishes a **provisional** record before its tab
+ *    registry recovery sweep (`{tabSweep: {sweeping: true}}`, `SWEEP_NOT_CONCLUDED`
+ *    in `lib/backfill/alarm.ts`) and replaces it with the verdict when the sweep
+ *    concludes. Returning on the key alone read the tick *while it was still
+ *    running* — a state the code is not required to be finished in — and the
+ *    no-tab case's assertions happen to hold for the provisional record too, so
+ *    it passed without proving what it claims. The predicate below is the
+ *    product's own (`isSweepNotConcluded`), not a second spelling of the shape.
+ *
+ * 🔴 W67(b) · And the record is not necessarily **this** tick's: one written by
+ *    an earlier wake is already concluded, so the first condition alone would
+ *    return it. `since` rejects every record older than the caller's own fire —
+ *    pass the instant just before firing the alarm.
+ *
+ * Returning the last reading on timeout (rather than throwing) is deliberate,
+ * the same rule the other waiters follow: the caller decides what the snapshot
+ * means, and the body's assertions are what fail on a missing or provisional
+ * record.
+ */
+export async function waitForTickRecord(
+  ext: Extension,
+  options: { since?: number; timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const { since = 0, timeoutMs = 20_000 } = options;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const all = await readStorage(ext, null);
+    const record = all['cs_backfill_lasttick_v1'];
+    if (record && typeof record === 'object') {
+      const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
+      if (
+        typeof fields.at === 'number'
+        && fields.at > since
+        && !isSweepNotConcluded(fields.tabSweep)
+      ) {
+        return all;
+      }
+    }
+    if (Date.now() >= deadline) return all;
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+  }
+}
+
+/**
+ * Fire `cs-backfill-tick` until a tick actually runs (i.e. the trace is not the
+ * single-flight refusal), and return that snapshot.
+ *
+ * 🔴 W67(a) · The fired alarm can lose to the capture kick's own tick. Loading
+ *    the fixture page makes the page fetch; the capture leg stores it and then
+ *    kicks the backfill leg fire-and-forget (`entrypoints/background.ts:2365-2373`),
+ *    and that kick holds the single-flight lock (`lib/backfill/schedule.ts:303-304`).
+ *    An alarm fired inside that window is refused with `already-running` — the
+ *    product is right to serialise the two, and the trace says so — but the case
+ *    under test is the tick that actually runs, so it must not be read as a
+ *    failure. Measured on main: 7 of 100 repeats of test 2 failed at
+ *    `expect(tick.ran)`. Only one failure specimen was captured with its record
+ *    (a separate instrumented run), and it read
+ *    `{ran:false, reason:'already-running', stopped:'already-running', halted:'state-unreadable'}`.
+ *    Re-firing synchronises on that published outcome rather than sleeping a
+ *    guessed interval; every assertion on the record is unchanged.
+ */
+export async function fireAlarmUntilRuns(
+  ext: Extension,
+  name: string,
+  timeoutMs = 20_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const since = Date.now();
+    await fireAlarm(ext, name);
+    const all = await waitForTickRecord(ext, {
+      since,
+      timeoutMs: Math.max(1, deadline - Date.now()),
+    });
+    const record = all['cs_backfill_lasttick_v1'];
+    const reason = record && typeof record === 'object'
+      ? (record as { reason?: unknown }).reason
+      : undefined;
+    if (reason !== 'already-running') return all;
+    if (Date.now() >= deadline) return all;
+    // The capture kick releases the single-flight lock when it finishes; a tick
+    // that runs then is the one this case is about.
+    await new Promise((resolve) => { setTimeout(resolve, 150); });
+  }
+}
 
 /**
  * Poll the outbox until `settled` accepts what it sees, and return that reading.
@@ -627,6 +734,330 @@ export async function waitForOutbox(
     last = await readOutbox(extension);
   }
   return last;
+}
+
+// ---------------------------------------------------------------------------
+// The real native host
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 **Why this file starts the host itself.**
+ *
+ * The browser will not. Chromium resolves its native-messaging manifest
+ * directory from the *OS* home, not from `$HOME`: measured on macOS 2026-09-27,
+ * a probe extension holding the `nativeMessaging` permission, launched under a
+ * rewritten `HOME`/`XDG_CONFIG_HOME` with manifests planted in three candidate
+ * directories (`…/Google/ChromeForTesting/NativeMessagingHosts`, `…/Google/Chrome/…`,
+ * `…/Chromium/…`), answered `Specified native messaging host not found.` — the
+ * probe is kept at `nm/w217-probe/probe.mjs`. Reaching the *real* directory
+ * would mean writing into the machine's own browser configuration, which is
+ * neither hermetic nor the same path on Linux, and a suite that only works on
+ * one platform is not one this repository accepts (CLAUDE.md, "one-sided cfg").
+ *
+ * So the harness starts `chat-stasher native-host` itself and carries the bytes
+ * to it. What is faked is the *carrier*; what is real is everything a spec here
+ * asserts on:
+ *
+ *  · the **frames** — 4-byte native-endian length prefix + JSON body, which is
+ *    the wire format `read_request_frame`/`encode_response_frame` implement and
+ *    the one Chromium's own native messaging uses;
+ *  · the **process model** — one request per process, which is what one-shot
+ *    `sendNativeMessage` does (`serve_one` on real stdin/stdout);
+ *  · the **answering code** — `respond()` in `crates/chat-stasher/src/nativehost.rs`,
+ *    including the EXT-3 arbiter and `inbox::seal_payload`;
+ *  · the **state** — one config, one stage and one `extension-coordination.sqlite3`
+ *    per host instance, shared by every profile pointed at it, exactly as one
+ *    machine's host is shared by its browsers.
+ *
+ * The isolation is the whole temp root: `HOME`, `XDG_CONFIG_HOME` and
+ * `XDG_DATA_HOME` all point inside it, so `config_path()`, `default_state_dir()`
+ * and `default_data_root()` resolve there on every platform (each reads its
+ * `XDG_*` variable first — this is not a platform-dependent directory
+ * convention). Nothing under the real home is read or written.
+ */
+export class NativeHost {
+  /** The throwaway root: home, config, state and stage all live under it. */
+  readonly root: string;
+  readonly stage: string;
+  /** The archive partition every shard from this host lands under. */
+  readonly machine: string;
+  /**
+   * Every message a profile asked this host, in order.
+   *
+   * Kept because "the host was never asked" and "the host was asked and said no"
+   * are different facts, and because a `deliver`'s own bytes are the only
+   * honest input to a re-delivery or a concurrency case. Nothing here is ever
+   * printed: payloads carry conversation text, and these specs print counts,
+   * ids and digests only.
+   */
+  readonly forwarded: Array<Record<string, unknown>> = [];
+  /**
+   * What the host answered, **one entry per forwarded message and in the same
+   * order** — a request that could not be put to the host at all is recorded here
+   * too, as `{type: 'bridge-error'}`. Kept because a refused delivery and a
+   * delivery that never happened produce the same empty stage, and only this
+   * tells them apart: `status: 'duplicate'`, a `nack` with its `kind`, or nothing
+   * at all. Index-aligned rather than append-on-success, so a reader can put the
+   * two lists side by side without counting.
+   */
+  readonly answered: Array<Record<string, unknown>> = [];
+  private readonly env: NodeJS.ProcessEnv;
+
+  constructor(root: string, stage: string, machine: string, env: NodeJS.ProcessEnv) {
+    this.root = root;
+    this.stage = stage;
+    this.machine = machine;
+    this.env = env;
+  }
+
+  /** The binary this host runs. Throws rather than skipping when it is not built. */
+  static binary(): string {
+    const override = process.env.CS_E2E_BINARY;
+    if (override) return override;
+    return fileURLToPath(new URL('../../../target/debug/chat-stasher', import.meta.url));
+  }
+
+  /** One request in, one response out — the same turn `serve_one` performs. */
+  async ask(message: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const binary = NativeHost.binary();
+    const stdout = await new Promise<Buffer>((resolve, reject) => {
+      const child = spawn(binary, ['native-host'], { env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
+      child.stderr.on('data', (chunk: Buffer) => err.push(chunk));
+      child.on('error', (error) => reject(new Error(`native host could not start (${binary}): ${error.message}`)));
+      child.on('close', (code) => {
+        if (code !== 0) {
+          // The host's own stderr is the diagnosis; without it a spawn failure,
+          // a refused config and a panic all read as "no response".
+          reject(new Error(
+            `native host exited ${code} for ${String(message.type)}: `
+            + `${Buffer.concat(err).toString('utf8').trim().slice(0, 800)}`,
+          ));
+          return;
+        }
+        resolve(Buffer.concat(out));
+      });
+      child.stdin.on('error', () => undefined);
+      child.stdin.end(encodeFrame(message));
+    });
+    return decodeFrame(stdout, String(message.type));
+  }
+
+  /**
+   * Answer one `sendNativeMessage` from a profile: record it, then put it to the
+   * real binary. A rejection here reaches the extension as a `send-failed`
+   * outcome — never as a plausible empty answer.
+   */
+  async forward(host: string, message: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.forwarded.push({ host, ...message });
+    let reply: Record<string, unknown>;
+    try {
+      reply = await this.ask(message);
+    } catch (error) {
+      this.answered.push({ type: 'bridge-error', detail: (error as Error).message });
+      throw error;
+    }
+    this.answered.push(reply);
+    return reply;
+  }
+
+  /**
+   * The `deliver` messages this host was asked to archive, in order, as the
+   * extension sent them.
+   *
+   * The native-messaging host name is the harness's own bookkeeping and is
+   * stripped, so a case can put one of these straight back to a host —
+   * re-delivering the same bytes, or racing two of them — without carrying a
+   * field the protocol does not have.
+   */
+  delivered(): Array<Record<string, unknown>> {
+    return this.forwarded
+      .filter((message) => message.type === 'deliver')
+      .map(({ host: _host, ...message }) => message);
+  }
+
+  close(): void {
+    rmSync(this.root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Start a host over a fresh temp root.
+ *
+ * The config carries an explicit `machine`, and that is required rather than
+ * tidy: `resolve_machine` refuses to mint an identity for a host, because a
+ * browser-spawned host does not see a shell's environment and a second identity
+ * would silently split the archive. A test that left it out would exercise the
+ * refusal instead of the delivery.
+ *
+ * The binary is *not* built here. `pnpm e2e:multi` builds it first and says so;
+ * a missing binary throws with the command, because "the host was not there" is
+ * the one outcome these specs must never read as "nothing happened".
+ */
+export function startNativeHost(options: { machine?: string } = {}): NativeHost {
+  const binary = NativeHost.binary();
+  if (!existsSync(binary)) {
+    throw new Error(
+      `the native host binary is missing at ${binary}; these specs drive the real`
+      + ' host (`crates/chat-stasher`), so build it first:'
+      + ' `cargo build -p chat-stasher --bin chat-stasher` (or run `pnpm e2e:multi`,'
+      + ' which does it for you)',
+    );
+  }
+  const root = mkdtempSync(join(tmpdir(), 'chat-stasher-host-'));
+  const home = join(root, 'home');
+  const configDir = join(home, '.config', 'chat-stasher');
+  const dataDir = join(home, '.local', 'share');
+  const stage = join(root, 'stage');
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(stage, { recursive: true });
+
+  const machine = options.machine ?? 'w217-e2e';
+  writeFileSync(
+    join(configDir, 'config.toml'),
+    `machine = ${JSON.stringify(machine)}\n\n[native_host]\nstage = ${JSON.stringify(stage)}\n`,
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_DATA_HOME: dataDir,
+  };
+  return new NativeHost(root, stage, machine, env);
+}
+
+/** The crate's own request cap (`MAX_REQUEST_BYTES`); the frame never exceeds it. */
+const NATIVE_ENDIAN = endianness() === 'LE' ? 'LE' : 'BE';
+
+/**
+ * One native-messaging frame: `u32` length prefix in **native** byte order, then
+ * the JSON body — `read_request_frame` reads the prefix with
+ * `u32::from_ne_bytes`, so a fixed-order prefix would be read as a huge length
+ * on a big-endian host and refused as `too-large`.
+ */
+function encodeFrame(value: unknown): Buffer {
+  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  const header = Buffer.alloc(4);
+  if (NATIVE_ENDIAN === 'LE') header.writeUInt32LE(body.length, 0);
+  else header.writeUInt32BE(body.length, 0);
+  return Buffer.concat([header, body]);
+}
+
+function decodeFrame(bytes: Buffer, label: string): Record<string, unknown> {
+  if (bytes.length < 4) {
+    throw new Error(`${label}: the host wrote ${bytes.length} bytes, not even a length prefix`);
+  }
+  const declared = NATIVE_ENDIAN === 'LE' ? bytes.readUInt32LE(0) : bytes.readUInt32BE(0);
+  if (bytes.length < 4 + declared) {
+    throw new Error(
+      `${label}: the host declared ${declared} bytes but wrote ${bytes.length - 4}`,
+    );
+  }
+  const parsed = JSON.parse(bytes.subarray(4, 4 + declared).toString('utf8')) as Record<string, unknown>;
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Carrying `sendNativeMessage` to that host
+// ---------------------------------------------------------------------------
+
+/**
+ * The origin the worker's stub posts to.
+ *
+ * `.invalid` is reserved by RFC 2606 and can never resolve, so if interception
+ * ever stopped working the request would still reach nothing — the same property
+ * the platform fixtures have.
+ */
+export const BRIDGE_ORIGIN = 'https://cs-native-bridge.invalid';
+
+/**
+ * Runs **inside the service worker**. Self-contained by necessity: Playwright
+ * serialises the function source, so it may not close over anything.
+ *
+ * Both halves of what `sendOnce` accepts are honoured: the stub always returns a
+ * promise and never calls the callback, so a failure rejects instead of being
+ * delivered as an empty response — `native-host.ts` reads the promise form and
+ * reports its message verbatim as `send-failed`, where a fabricated `undefined`
+ * would have read as "no response and no runtime.lastError".
+ */
+const INSTALL_BRIDGE = async (origin: string): Promise<string> => {
+  const globals = globalThis as unknown as { browser?: any; chrome?: any };
+  const runtime = globals.browser?.runtime?.id ? globals.browser.runtime : globals.chrome?.runtime;
+  if (!runtime || typeof runtime.sendNativeMessage !== 'function') return 'no-runtime-api';
+  if (runtime.__chatStasherHostBridge) return 'already-installed';
+  runtime.sendNativeMessage = (host: string, message: unknown) => (async () => {
+    const response = await fetch(`${origin}/native`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ host, message }),
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`native bridge answered HTTP ${response.status}`);
+    const envelope = await response.json() as { reply?: unknown; error?: string };
+    if (typeof envelope.error === 'string') throw new Error(envelope.error);
+    return envelope.reply;
+  })();
+  runtime.__chatStasherHostBridge = true;
+  return 'installed';
+};
+
+/**
+ * Point one profile's `sendNativeMessage` at `host`.
+ *
+ * Every message type goes through — `hello`, `deliver`, `has`, `coordination`,
+ * `summary` — so a spec cannot accidentally get a stubbed arbiter beside a real
+ * stage. This route is registered *first*, which by Playwright's
+ * reverse-registration rule makes it the **last** handler to run, so it is
+ * reached only by a spec's catch-all falling back for [`BRIDGE_ORIGIN`].
+ * `installFakePlatforms` does exactly that; a spec that registers its own
+ * `'**\/*'` catch-all must do the same, or every delivery in it fails as
+ * `send-failed` (loudly, at least — the extension's own error, not a silent
+ * empty stage).
+ */
+async function installNativeHostBridge(extension: Extension, host: NativeHost): Promise<void> {
+  await extension.context.route(`${BRIDGE_ORIGIN}/**`, async (route) => {
+    const body = route.request().postData() ?? '';
+    let forwarded: { host: string; message: Record<string, unknown> } | null = null;
+    try {
+      forwarded = JSON.parse(body) as { host: string; message: Record<string, unknown> };
+    } catch {
+      forwarded = null;
+    }
+    if (!forwarded || typeof forwarded.message !== 'object' || forwarded.message === null) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: { 'access-control-allow-origin': '*' },
+        body: JSON.stringify({ error: 'the bridge was sent no message' }),
+      });
+      return;
+    }
+    let reply: Record<string, unknown> | null = null;
+    let error: string | null = null;
+    try {
+      reply = await host.forward(forwarded.host, forwarded.message);
+    } catch (e) {
+      error = (e as Error).message;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      // The worker's fetch is cross-origin (its own origin is
+      // `chrome-extension://<id>`) and nothing grants this host permission, so
+      // the browser applies CORS to the fulfilled response too.
+      headers: { 'access-control-allow-origin': '*' },
+      body: JSON.stringify(error === null ? { reply } : { error }),
+    });
+  });
+
+  const installed = await extension.worker.evaluate(INSTALL_BRIDGE, BRIDGE_ORIGIN);
+  if (installed !== 'installed' && installed !== 'already-installed') {
+    throw new Error(`the native host bridge was not installed: ${installed}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

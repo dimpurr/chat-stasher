@@ -36,6 +36,7 @@ import { expect, type Page } from '@playwright/test';
 import { isSweepNotConcluded, type TabSweepTrace } from '../lib/backfill/alarm';
 import {
   fireAlarm,
+  fireAlarmUntilRuns,
   fixture,
   listDatabases,
   readDebtRows,
@@ -43,6 +44,7 @@ import {
   test,
   waitForAlarm,
   waitForOutbox,
+  waitForTickRecord,
   writeStorage,
   BACKFILL_DB_NAME,
   type Extension,
@@ -153,54 +155,6 @@ async function serveChatgpt(ext: Extension): Promise<{ api: string[]; list: stri
 const TICK_ALARM = 'cs-backfill-tick';
 
 /**
- * Poll `storage.local` until **a concluded tick record written at or after
- * `since`** exists, and return that snapshot.
- *
- * 🔴 W70 · A truthy `cs_backfill_lasttick_v1` is not the completion signal.
- *    Since W62 the tick publishes a **provisional** record before its tab
- *    registry recovery sweep (`{tabSweep: {sweeping: true}}`, `SWEEP_NOT_CONCLUDED`
- *    in `lib/backfill/alarm.ts`) and replaces it with the verdict when the sweep
- *    concludes. Returning on the key alone read the tick *while it was still
- *    running* — a state the code is not required to be finished in — and the
- *    no-tab case's assertions happen to hold for the provisional record too, so
- *    it passed without proving what it claims. The predicate below is the
- *    product's own (`isSweepNotConcluded`), not a second spelling of the shape.
- *
- * 🔴 W67(b) · And the record is not necessarily **this** tick's: one written by
- *    an earlier wake is already concluded, so the first condition alone would
- *    return it. `since` rejects every record older than the caller's own fire —
- *    pass the instant just before firing the alarm.
- *
- * Returning the last reading on timeout (rather than throwing) is deliberate,
- * the same rule the other waiters follow: the caller decides what the snapshot
- * means, and the body's assertions are what fail on a missing or provisional
- * record.
- */
-async function waitForTickRecord(
-  ext: Extension,
-  options: { since?: number; timeoutMs?: number } = {},
-): Promise<Record<string, unknown>> {
-  const { since = 0, timeoutMs = 20_000 } = options;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const all = await readStorage(ext, null);
-    const record = all['cs_backfill_lasttick_v1'];
-    if (record && typeof record === 'object') {
-      const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
-      if (
-        typeof fields.at === 'number'
-        && fields.at > since
-        && !isSweepNotConcluded(fields.tabSweep)
-      ) {
-        return all;
-      }
-    }
-    if (Date.now() >= deadline) return all;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
-/**
  * Poll `storage.local` until the migration has reached its **terminal layout**:
  * the v2 header exists **and** the pre-W18 key has been removed.
  *
@@ -221,50 +175,7 @@ async function waitForMigratedLayout(ext: Extension, timeoutMs = 20_000): Promis
     const header = all[HEADER_KEY];
     if (header && typeof header === 'object' && !(LEGACY_KEY in all)) return all;
     if (Date.now() >= deadline) return all;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
-/**
- * Fire `cs-backfill-tick` until a tick actually runs (i.e. the trace is not the
- * single-flight refusal), and return that snapshot.
- *
- * 🔴 W67(a) · The fired alarm can lose to the capture kick's own tick. Loading
- *    the fixture page makes the page fetch; the capture leg stores it and then
- *    kicks the backfill leg fire-and-forget (`entrypoints/background.ts:2365-2373`),
- *    and that kick holds the single-flight lock (`lib/backfill/schedule.ts:303-304`).
- *    An alarm fired inside that window is refused with `already-running` — the
- *    product is right to serialise the two, and the trace says so — but the case
- *    under test is the tick that actually runs, so it must not be read as a
- *    failure. Measured on main: 7 of 100 repeats of test 2 failed at
- *    `expect(tick.ran)`. Only one failure specimen was captured with its record
- *    (a separate instrumented run), and it read
- *    `{ran:false, reason:'already-running', stopped:'already-running', halted:'state-unreadable'}`.
- *    Re-firing synchronises on that published outcome rather than sleeping a
- *    guessed interval; every assertion on the record is unchanged.
- */
-async function fireAlarmUntilRuns(
-  ext: Extension,
-  name: string,
-  timeoutMs = 20_000,
-): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const since = Date.now();
-    await fireAlarm(ext, name);
-    const all = await waitForTickRecord(ext, {
-      since,
-      timeoutMs: Math.max(1, deadline - Date.now()),
-    });
-    const record = all['cs_backfill_lasttick_v1'];
-    const reason = record && typeof record === 'object'
-      ? (record as { reason?: unknown }).reason
-      : undefined;
-    if (reason !== 'already-running') return all;
-    if (Date.now() >= deadline) return all;
-    // The capture kick releases the single-flight lock when it finishes; a tick
-    // that runs then is the one this case is about.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
   }
 }
 

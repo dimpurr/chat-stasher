@@ -322,7 +322,7 @@ pnpm build            # Chrome/Edge and other Chromium-based browsers
 pnpm build:firefox    # Firefox
 ```
 
-(The script names come from `apps/extension/package.json:8-19`. You need Node
+(The script names come from `apps/extension/package.json:8-20`. You need Node
 and pnpm; **the exact minimum versions are not declared in the repository —
 unverified**.)
 
@@ -1042,7 +1042,7 @@ confirmed in the code, not a temporary disclaimer.
   repository has no store listing material and no store extension ID;
   `package.json` is marked `"private": true` (`apps/extension/package.json:4`),
   and the build scripts produce a local directory and a zip
-  (`apps/extension/package.json:8-19`). See section 3 for how to install.
+  (`apps/extension/package.json:8-20`). See section 3 for how to install.
 
 - **A captured conversation is plaintext until the host acknowledges it.** A
   live capture is written into the extension's own IndexedDB outbox before any

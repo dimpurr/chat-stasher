@@ -600,5 +600,78 @@ jobs:
       # `pnpm e2e` builds the unpacked extension (`wxt build`) and only then
       # runs the Playwright config in e2e/. A green run here means the capture
       # path worked in a browser, end to end, from a real page load.
+      #
+      # 🔴 `multi-install.spec.ts` is not in this config (`testIgnore`). It drives
+      #    the real `chat-stasher` native host, so it needs a cargo build, and
+      #    that build is the whole reason it has its own job below.
       - name: Capture path end to end
         run: pnpm e2e
+
+  # ---------------------------------------------------------------------------
+  # EXT-9 · The same capture path with **two** profiles and one real host.
+  #
+  # Why this is a job of its own, on its own tiers. Its specs drive the real
+  # `chat-stasher` binary as the native host — two persistent Chromium profiles,
+  # one host, the machine-wide backfill arbiter, the stage write lock and the
+  # archive's provenance — so this job pays for a Rust build on top of the
+  # browser download the `e2e` job already pays for. A push to main is answered
+  # by the ubuntu cell of the `rust` matrix and by `e2e`; putting a second build
+  # plus two more browsers on that tier would multiply the cost of every push to
+  # re-check something a main-branch push cannot regress on its own. A tag, the
+  # daily schedule and a manual dispatch all run it.
+  #
+  # ⚠️ Not green-by-suppression: nothing is skipped on the tiers it does serve,
+  # no assertion is relaxed by the split, and the suite it moved out of is
+  # genuinely unchanged — `pnpm e2e` runs the same specs it ran before, and
+  # `pnpm e2e:multi` is the only place the multi-install cases live.
+  e2e-multi-install:
+    name: extension e2e · multi-install (ubuntu-latest, real Chromium + real native host)
+    # The same three triggers `arm64-smoke` uses: a tag, the daily schedule, or a
+    # manual dispatch. A push to main is answered by the `e2e` job above.
+    if: github.ref_type == 'tag' || github.event_name != 'push'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/extension
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # The same two pins as the `extension` job, and for the same reason:
+      # apps/extension/package.json declares neither `engines` nor
+      # `packageManager`, so there is no version to inherit.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 23.10.0
+          cache: pnpm
+          cache-dependency-path: apps/extension/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The host binary the specs drive. `pnpm e2e:multi` builds it too — this
+      # step exists so the *toolchain* is set up the same way as in `rust`, and
+      # so a build failure is reported as a build failure rather than as four
+      # timed-out specs.
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the native host
+        working-directory: .
+        run: cargo build -p chat-stasher --bin chat-stasher
+
+      # Two profiles per case, one host, and every case asserts that no request
+      # escaped the intercepted origins.
+      - name: Multi-install end to end
+        run: pnpm e2e:multi
