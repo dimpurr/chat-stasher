@@ -203,7 +203,22 @@ pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
             install.get("machine").and_then(serde_json::Value::as_str),
         ) {
             (Some(local), Some(machine_id)) if local == machine_id => {
-                out.push_str("<p>This install is on this machine. Switch to the named browser profile to open it.</p>");
+                let install_id = install
+                    .get("install_id")
+                    .and_then(serde_json::Value::as_str);
+                if let Some(id) =
+                    install_id.filter(|id| data.extension_open_targets.contains_key(*id))
+                {
+                    out.push_str(&format!(
+                        "<p><a href=\"/open-extension?install={}&amp;token={}\">Open in {} · {}</a></p>",
+                        super::percent_encode(id),
+                        super::percent_encode(token),
+                        esc(browser),
+                        esc(profile),
+                    ));
+                } else {
+                    out.push_str("<p>This install is on this machine. An exact browser profile match is unavailable; open it from the named browser profile.</p>");
+                }
             }
             (Some(_), Some(_)) => {
                 out.push_str(&format!(

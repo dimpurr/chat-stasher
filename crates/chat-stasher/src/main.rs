@@ -4600,6 +4600,10 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         .iter()
         .flat_map(|part| part.extension_installs.iter().cloned())
         .collect();
+    data.extension_open_targets = chat_stasher::ui::extension_profile::discover(
+        &data.extension_installs,
+        data.local_machine_id.as_deref(),
+    );
     let in_view = chat_stasher::ui::select(&data.sessions, &data.launch);
     let listed = in_view.matched.len() + in_view.unplaced.len();
     let token = match chat_stasher::view::new_token() {

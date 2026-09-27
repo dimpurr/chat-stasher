@@ -6,6 +6,7 @@ import SwiftUI
 
 @main
 struct ChatStasherMenuBarApp: App {
+    @NSApplicationDelegateAdaptor(DemoWindowDelegate.self) private var demoWindowDelegate
     @StateObject private var model = ArchiveModel()
 
     var body: some Scene {
@@ -24,6 +25,33 @@ struct ChatStasherMenuBarApp: App {
         }
         .menuBarExtraStyle(.window)
         Settings { SettingsView(model: model) }
+    }
+}
+
+/// A screenshot-only window that hosts the same synthetic popover view. The
+/// ordinary menu-bar app never creates this window.
+@MainActor
+private final class DemoWindowDelegate: NSObject, NSApplicationDelegate {
+    private var window: NSWindow?
+    private var model: ArchiveModel?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ProcessInfo.processInfo.arguments.contains("--demo-window") else { return }
+        let model = ArchiveModel()
+        self.model = model
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 740),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.backgroundColor = .windowBackgroundColor
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ArchivePopover(model: model))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
     }
 }
 

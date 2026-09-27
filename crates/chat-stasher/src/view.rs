@@ -310,7 +310,9 @@ pub fn host_is_local(hosts: &[String], port: u16) -> bool {
     name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
 }
 
-/// Route one request. Pure: no socket, no repository, no clock.
+/// Route one request without touching the socket, repository, or clock. The
+/// explicitly token-protected `/open-extension` route can launch one verified
+/// local browser profile; every other route is a rendered response.
 ///
 /// Order matters. Method is checked before the token so that a `POST` is
 /// rejected as a method error even when it carries a valid token; `Host` is
