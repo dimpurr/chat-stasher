@@ -101,9 +101,37 @@ describe('W2-POPUP · the delivery channel', () => {
     expect(line).not.toContain('NOT connected');
   });
 
-  it('never connected and no stage on record ⇒ the fix command carries the placeholder rather than an invented path', () => {
+  // 🔴 EXT-12 · **This pair of tests replaces one whose premise the spec reverses.**
+  //
+  // The test that used to stand here asserted that "never connected and no stage on
+  // record" yields `chat-stasher install-native-host --stage <path-to-your-stage-dir>`.
+  // That is exactly the instruction topology principle 8 forbids: a user who has
+  // never had a helper is told to run a `chat-stasher …` command, which assumes the
+  // CLI that is missing in the first place. The assertion is not weakened — it is
+  // split, and both halves are stronger than the one it replaced: the "never invent a
+  // path" property is kept below under the premise where it still holds (a CLI that
+  // exists but never reported a usable stage), and the new sentence is asserted to
+  // carry the installer *and* to be free of any `chat-stasher …` command.
+  it('🔴 never connected and no stage on record ⇒ the one-line installer, never a `chat-stasher …` command', () => {
     const line = channelLine(model({ nativeHost: { at: AT, ok: false, reason: 'timeout' } }));
+    console.log('[W2-POPUP] never connected:', line);
+    expect(line).toContain(ui.installerCommand());
+    // The whole point: the first step may not assume a CLI that nothing has ever
+    // shown to exist on this machine.
+    expect(line).not.toContain('install-native-host');
+    expect(line).not.toContain('chat-stasher install');
+  });
+
+  it('🔴 CLI known but it never reported a usable stage ⇒ the placeholder, not an invented path', () => {
+    // `lastKnownStage: ''` is a host that answered but reported no stage path: the
+    // CLI is proven to exist (so the `chat-stasher …` command is allowed), and there
+    // is still no real path to put in it.
+    const line = channelLine(model({
+      nativeHost: { at: AT, ok: false, reason: 'config', lastKnownStage: '' },
+    }));
+    console.log('[W2-POPUP] CLI known, no usable stage:', line);
     expect(line).toContain('chat-stasher install-native-host --stage <path-to-your-stage-dir>');
+    expect(line).not.toContain(ui.installerCommand());
   });
 });
 
@@ -112,7 +140,7 @@ describe('W2-POPUP · the delivery channel', () => {
 // ===========================================================================
 describe('W2-POPUP · the outbox', () => {
   it('empty and not full ⇒ the line does not appear (then "nothing is waiting" is the whole truth)', () => {
-    expect(outboxLine(model({ outbox: { pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] } }))).toBeNull();
+    expect(outboxLine(model({ outbox: { pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [] } }))).toBeNull();
     expect(outboxLine(model())).toBeNull();
   });
 
@@ -120,7 +148,7 @@ describe('W2-POPUP · the outbox', () => {
     const line = outboxLine(model({
       outbox: {
         pending: 3, rejected: 0, bytes: 1024 * 1024, capacityBytes: OUTBOX_CAPACITY_BYTES,
-        full: false, rejectedKinds: [], rejectedSamples: [],
+        full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [],
       },
     }))!;
     console.log('[W2-POPUP] 3 waiting:', line);
@@ -133,7 +161,7 @@ describe('W2-POPUP · the outbox', () => {
   it('🔴 something rejected ⇒ a per-kind count plus a per-entry detail summary', () => {
     const line = outboxLine(model({
       outbox: {
-        pending: 1, rejected: 2, bytes: 10, capacityBytes: 100, full: false,
+        pending: 1, rejected: 2, bytes: 10, capacityBytes: 100, full: false, nearFull: false,
         rejectedKinds: [{ kind: 'invalid-bundle', count: 2 }],
         rejectedSamples: [
           { kind: 'invalid-bundle', detail: 'nack:invalid-bundle' },
@@ -151,7 +179,7 @@ describe('W2-POPUP · the outbox', () => {
   it('🔴 full ⇒ it says outright that new ones are refused, and that nothing already queued was deleted', () => {
     const line = outboxLine(model({
       outbox: {
-        pending: 5, rejected: 0, bytes: 100, capacityBytes: 100, full: true,
+        pending: 5, rejected: 0, bytes: 100, capacityBytes: 100, full: true, nearFull: true,
         rejectedKinds: [], rejectedSamples: [],
       },
     }))!;
@@ -261,18 +289,18 @@ describe('W2-POPUP · the backfill pause', () => {
 describe('W2-POPUP · export', () => {
   it('something undelivered ⇒ the button appears; everything delivered ⇒ it does not', () => {
     const withPending = renderPopup(model({
-      outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
+      outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [] },
     }));
     expect(withPending.exportFile.visible).toBe(true);
     expect(withPending.exportFile.label).toBe(ui.exportButtonLabel());
 
     const withRejected = renderPopup(model({
-      outbox: { pending: 0, rejected: 1, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [{ kind: 'config', count: 1 }], rejectedSamples: [] },
+      outbox: { pending: 0, rejected: 1, bytes: 1, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [{ kind: 'config', count: 1 }], rejectedSamples: [] },
     }));
     expect(withRejected.exportFile.visible).toBe(true);
 
     const empty = renderPopup(model({
-      outbox: { pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
+      outbox: { pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [] },
     }));
     expect(empty.exportFile.visible).toBe(false);
   });
@@ -292,7 +320,7 @@ describe('W2-POPUP · export', () => {
 
   it('the button is visible in the flattened text (otherwise "did it appear" cannot be asserted)', () => {
     const out = popupText(renderPopup(model({
-      outbox: { pending: 2, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
+      outbox: { pending: 2, rejected: 0, bytes: 1, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [] },
     })));
     expect(out).toContain(`[Button] ${ui.exportButtonLabel()}`);
     expect(out).toContain('2 waiting');
@@ -309,7 +337,7 @@ describe('W2-POPUP · the new wording must not step on C18\'s older red lines', 
       hostPause: { reason: 'host-unavailable', at: AT },
       nativeHost: { at: AT, ok: false, reason: 'timeout', lastKnownStage: '/s' },
       outbox: {
-        pending: 9, rejected: 3, bytes: 12345678, capacityBytes: OUTBOX_CAPACITY_BYTES, full: true,
+        pending: 9, rejected: 3, bytes: 12345678, capacityBytes: OUTBOX_CAPACITY_BYTES, full: true, nearFull: true,
         rejectedKinds: [{ kind: 'config', count: 3 }],
         rejectedSamples: [{ kind: 'config', detail: 'nack:config' }],
       },
@@ -325,7 +353,7 @@ describe('W2-POPUP · the new wording must not step on C18\'s older red lines', 
   it('🔴 no time promise appears in the new wording (we have no rate model)', () => {
     const m = model({
       nativeHost: { at: AT, ok: false, reason: 'timeout' },
-      outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, rejectedKinds: [], rejectedSamples: [] },
+      outbox: { pending: 1, rejected: 0, bytes: 1, capacityBytes: 100, full: false, nearFull: false, rejectedKinds: [], rejectedSamples: [] },
     });
     const lines = [channelLine(m), outboxLine(m), exportLine(m)].filter((l): l is string => l !== null);
     expect(lines).toHaveLength(3);

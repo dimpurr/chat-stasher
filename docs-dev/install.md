@@ -67,7 +67,7 @@ whose `request_id` and `sha256` equal the ones the extension sent**
 (`apps/extension/lib/native-host.ts:992-1001`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
-(`apps/extension/lib/outbox.ts:388-403`). There is no "probably delivered".
+(`apps/extension/lib/outbox.ts:434-449`). There is no "probably delivered".
 
 If you would rather not register the host at all, the extension can instead
 export everything it has not delivered as one file, which you feed to the CLI by
@@ -117,8 +117,8 @@ using the login you already have — rather than by the extension itself. With n
 page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
-(`apps/extension/lib/backfill/schedule.ts:212`;
-`apps/extension/entrypoints/background.ts:1031-1033`). That page does not have to
+(`apps/extension/lib/backfill/schedule.ts:237`;
+`apps/extension/entrypoints/background.ts:1139-1141`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -180,7 +180,7 @@ backfill has been observed in a real browser, so read the row as *implemented,
 not verified*.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:950-963`).
+(`apps/extension/lib/popup-view.ts:1157-1170`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -402,15 +402,20 @@ the *"Manage your downloads"* warning is gone
 Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
-(`apps/extension/lib/ui-strings.ts:80-100`;
-`apps/extension/entrypoints/background.ts:670-677`).
+(`apps/extension/lib/ui-strings.ts:101-126`;
+`apps/extension/entrypoints/background.ts:678-694`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
-own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
-about, and the fix command with that path already filled in
-(`apps/extension/lib/ui-strings.ts:34-36`, `:89-100`). Nothing is delivered
-while this is the case: captures wait in the extension's outbox instead, and the
-toolbar badge shows how many (`apps/extension/lib/badge.ts:46-73`).
+own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
+depending on whether a `hello` has **ever** succeeded on this machine — the only
+evidence the extension can have that a CLI is installed here at all. Has one, and
+it prints the stage that `hello` reported with the `chat-stasher
+install-native-host --stage …` command already filled in with that path; never has
+one, and it prints the one-line installer instead, because telling a user to run a
+`chat-stasher …` command assumes the very thing that is missing
+(`apps/extension/lib/ui-strings.ts:54-60`, `:110-133`). Nothing is delivered while
+this is the case: captures wait in the extension's outbox instead, and the toolbar
+badge shows how many (`apps/extension/lib/badge.ts:46-73`).
 
 ### 3.3 If you never register the host: the export file
 
@@ -421,7 +426,7 @@ into your download directory — the short install id names the browser profile
 that produced it and the nonce makes the name unique per export, so two
 profiles exporting in the same second cannot write the same file — one line
 per undelivered capture, each line being exactly the payload that would
-have been sent to the host (`apps/extension/lib/outbox.ts:487-568`).
+have been sent to the host (`apps/extension/lib/outbox.ts:533-614`).
 
 Feed that directory to the CLI:
 
@@ -440,7 +445,7 @@ volatile field) seals that fingerprint onto the shard, so the CLI's `has`
 answers for imported content exactly as it does for a live delivery; a line
 from an older export seals with none and its conversation is recognised by
 exact bytes only. Exporting does not remove anything from the
-outbox (`apps/extension/lib/outbox.ts:535-546`).
+outbox (`apps/extension/lib/outbox.ts:581-592`).
 
 ---
 
@@ -950,7 +955,7 @@ confirmed in the code, not a temporary disclaimer.
   (`apps/extension/lib/backfill/speed.ts:65`, `:92-136`;
   `apps/extension/lib/backfill/pace.ts:158-159`); *standard* draws 300–400 and
   fetches two (`apps/extension/lib/backfill/pace.ts:154-155`;
-  `apps/extension/lib/backfill/schedule.ts:72`); *faster* draws 600–800 and
+  `apps/extension/lib/backfill/schedule.ts:73`); *faster* draws 600–800 and
   fetches four. The gap between two requests is the same at all three: at least
   20 seconds plus a random 0–25 seconds between two bodies
   (`apps/extension/lib/backfill/pace.ts:121-132`), 2 plus 0–4 seconds between two
@@ -975,7 +980,7 @@ confirmed in the code, not a temporary disclaimer.
   the section above as *per install* every time it states a rate.
 
 - **Backfill is off by default.** The default is off
-  (`apps/extension/lib/backfill/schedule.ts:50`), and the source states the
+  (`apps/extension/lib/backfill/schedule.ts:51`), and the source states the
   reason for enabling it clearly: backfill uses your logged-in session to walk
   your whole account and fetch hundreds or thousands of conversations, so there
   must first be an explicit turn-on.
@@ -1025,7 +1030,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2073-2173`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2181-2281`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4630-4661`) is covered.
@@ -1039,7 +1044,7 @@ confirmed in the code, not a temporary disclaimer.
 - **A captured conversation is plaintext until the host acknowledges it.** A
   live capture is written into the extension's own IndexedDB outbox before any
   delivery is attempted and deleted only on a matching `ack`
-  (`apps/extension/lib/outbox.ts:318-386`, `:388-403`); the popup's export file
+  (`apps/extension/lib/outbox.ts:363-432`, `:434-449`); the popup's export file
   contains the same bodies. Other programs running as you can read all of it.
   (The "Security and privacy" section of `README.md` says the same.)
 

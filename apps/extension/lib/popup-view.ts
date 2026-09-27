@@ -95,7 +95,7 @@ import {
   type ReleaseChannel,
 } from './contract';
 import type { LastExport, OutboxEntry } from './outbox';
-import { OUTBOX_CAPACITY_BYTES } from './outbox';
+import { OUTBOX_CAPACITY_BYTES, OUTBOX_NEAR_FULL_FRACTION } from './outbox';
 import * as ui from './ui-strings';
 
 /**
@@ -253,6 +253,14 @@ export interface PopupModel {
   /** 🔴 W2 · The most recent export (read from storage.local); null = never exported. */
   lastExport?: LastExport | null;
   /**
+   * 🔴 EXT-12 · What background recorded the first time the host came up and the
+   * outbox was drained automatically — the "delivered N" notice. Omitted ⇒ not
+   * looked; null ⇒ nothing recorded yet. `at` keeps a stale delivery from
+   * reading as if it just happened: the sentence names the moment the helper
+   * connected, so `deliveredView` renders it rather than dropping it.
+   */
+  delivered?: { at: number; count: number } | null;
+  /**
    * 🔴 W13 · The moment the wording is computed for (`Date.now()` ms), so that
    * "about M minutes" in a transient-retry line is a number that can be asserted.
    * Omitted ⇒ the real clock — the same optional-field pattern as the fields above,
@@ -373,6 +381,8 @@ export interface PopupOutbox {
   bytes: number;
   capacityBytes: number;
   full: boolean;
+  /** 🔴 EXT-12 · At or above 80% of capacity (the backfill pause line). */
+  nearFull: boolean;
   rejectedKinds: Array<{ kind: string; count: number }>;
   rejectedSamples: Array<{ kind: string; detail: string }>;
 }
@@ -403,6 +413,7 @@ export function summarizeOutbox(
     bytes,
     capacityBytes,
     full: bytes >= capacityBytes,
+    nearFull: bytes >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION,
     rejectedKinds: [...counts.entries()]
       .map(([kind, count]) => ({ kind, count }))
       .sort((a, b) => (b.count - a.count) || a.kind.localeCompare(b.kind)),
@@ -487,6 +498,40 @@ export interface PopupView {
   /** Supplementary notes, possibly empty. */
   notes: string[];
   toggle: { label: string; checked: boolean; disabled: boolean };
+  /**
+   * 🔴 EXT-12 · The persistent "Only in this browser — not a backup yet" notice.
+   * Present (non-null) exactly when the outbox holds undelivered captures and
+   * the host is not answering — captures exist only inside this browser.
+   */
+  onlyInBrowser: { title: string; reason: string } | null;
+  /**
+   * 🔴 EXT-12 · The onboarding card, present when the extension has never
+   * connected (`neverConnected`) and there is content waiting: what this is, why
+   * a local helper, the one-line installer, and Export now. The `command` is the
+   * exact text the copy button copies.
+   */
+  firstRun: {
+    active: boolean;
+    title: string;
+    body: string;
+    whyHelper: string;
+    whatNow: string;
+    installLabel: string;
+    command: string;
+    copy: string;
+    copied: string;
+    exportNow: string;
+  } | null;
+  /** 🔴 EXT-12 · The outbox usage bar (bytes vs capacity). `null` when the outbox is not readable. */
+  outboxBar: {
+    pct: number;
+    nearFull: boolean;
+    full: boolean;
+    caption: string;
+    stateLine: string | null;
+  } | null;
+  /** 🔴 EXT-12 · "Delivered N captures to the archive when the host connected." null when not shown. */
+  delivered: string | null;
   /** 🔴 C20 · The "got it / clear the failure list" button. Hidden when there are no failures. */
   clearFailures: { label: string; visible: boolean };
   /**
@@ -582,6 +627,140 @@ export function pauseLine(model: PopupModel): string | null {
   return ui.backfillPaused(pause.at, pause.reason, pause.detail);
 }
 
+// ---------------------------------------------------------------------------
+// 🔴 EXT-12 · Extension-only (no CLI / host known on this machine)
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 EXT-12 · **Is the CLI known to exist on this machine?**
+ *
+ * This is the only licence the popup ever has to print a `chat-stasher …`
+ * command. It is a question about **positive evidence**, because the helper's
+ * absence can never be proven: `hello`'s failure reasons are `no-runtime-api`,
+ * `timeout`, `send-failed`, `malformed-response` and `nack`
+ * (lib/native-host.ts), and none of them distinguishes "no helper is installed"
+ * from "a helper is installed and did not answer". What *is* provable is the
+ * other direction — a `hello` that succeeded proves a host exists, and the host
+ * is installed by the CLI:
+ *
+ *   · `ok` right now ⇒ it answered just now ⇒ the CLI exists.
+ *   · `lastKnownStage != null` ⇒ it answered at some point (host-status.ts:102
+ *     writes it on success, :94/:111 carry it across failures) ⇒ the CLI exists.
+ *
+ * Anything else — including no record at all, which is "we have not looked", not
+ * "there is nothing there" — is **not** evidence, so no `chat-stasher …` command
+ * may be shown. The one-line installer is shown instead, which is the correct
+ * first step for a user who may have no CLI (topology principle 8).
+ */
+export function cliKnown(model: PopupModel): boolean {
+  const host = model.nativeHost;
+  if (host === undefined || host === null) return false;
+  if (host.ok) return true;
+  return host.lastKnownStage != null;
+}
+
+/**
+ * 🔴 EXT-12 · Has the host **never** answered a `hello` on this machine?
+ *
+ * The whole "extension-only" distinction hangs on this one predicate: "never
+ * connected" (onboarding — the helper was never installed as far as anything
+ * here can tell) is a different state from "was connected, now broken" (an
+ * alarm). It is exactly the negation of `cliKnown` above, deliberately: the two
+ * must never disagree, and the evidence for both is the same single fact.
+ *
+ * A model with no host record reads as never-connected. That is the honest
+ * direction here rather than a default: the popup probes on every open, so "no
+ * record" means the probe has not landed (or could not run), and when the popup
+ * does not know, it must not assume a CLI the user may not have — it shows the
+ * installer, which is a step that is correct either way.
+ */
+export function neverConnected(model: PopupModel): boolean {
+  return !cliKnown(model);
+}
+
+/**
+ * 🔴 EXT-12 · Are there captures that live **only in this browser**?
+ *
+ * True when the outbox holds undelivered captures AND the host is not answering
+ * right now — i.e. they cannot be handed to the archive, so "not a backup yet"
+ * is the honest sentence. An unreadable outbox (IndexedDB absent) is unknown,
+ * not "empty", so it does not trigger the notice.
+ */
+export function extensionOnlyActive(model: PopupModel): boolean {
+  const box = model.outbox;
+  if (box === undefined || box === null) return false;
+  const hasUndelivered = box.pending > 0 || box.rejected > 0;
+  if (!hasUndelivered) return false;
+  const host = model.nativeHost;
+  return host === undefined || host === null || !host.ok;
+}
+
+/** 🔴 EXT-12 · The persistent "Only in this browser — not a backup yet" notice, or null. */
+export function onlyInBrowserView(model: PopupModel): PopupView['onlyInBrowser'] {
+  if (!extensionOnlyActive(model)) return null;
+  return {
+    title: ui.onlyInBrowserTitle(),
+    reason: ui.onlyInBrowserReason(neverConnected(model)),
+  };
+}
+
+/**
+ * 🔴 EXT-12 · The onboarding card. Present when the extension has never connected
+ * and there is content waiting to be saved: it is the first thing a user in this
+ * state needs — what this is, why a local helper, how to install it in one line,
+ * and the export escape hatch. `command` is the exact text the copy button copies.
+ */
+export function firstRunView(model: PopupModel): PopupView['firstRun'] {
+  if (!neverConnected(model) || !extensionOnlyActive(model)) return null;
+  return {
+    active: true,
+    title: ui.firstRunTitle(),
+    body: ui.firstRunBody(),
+    whyHelper: ui.firstRunWhyHelper(),
+    whatNow: ui.firstRunWhatNow(),
+    installLabel: ui.firstRunInstallLabel(),
+    command: ui.installerCommand(),
+    copy: ui.copyLabel(),
+    copied: ui.copiedLabel(),
+    exportNow: ui.exportNowLabel(),
+  };
+}
+
+/** 🔴 EXT-12 · The outbox usage bar, or null when the outbox is unreadable/unknown. */
+export function outboxBarView(model: PopupModel): PopupView['outboxBar'] {
+  const box = model.outbox;
+  if (box === undefined || box === null) return null;
+  const hasAnything = box.pending > 0 || box.rejected > 0 || box.full || box.nearFull;
+  if (!hasAnything) return null;
+  const pct = box.capacityBytes > 0
+    ? Math.max(0, Math.min(100, Math.round((box.bytes / box.capacityBytes) * 100)))
+    : 0;
+  const stateLine = box.full
+    ? ui.outboxBarFull()
+    : (box.nearFull ? ui.outboxBarNearFull() : null);
+  return {
+    pct,
+    nearFull: box.nearFull && !box.full,
+    full: box.full,
+    caption: ui.outboxBarLine(box.bytes, box.capacityBytes),
+    stateLine,
+  };
+}
+
+/**
+ * 🔴 EXT-12 · "Delivered N…", or null when nothing is on record.
+ *
+ * 🔴 `at` is rendered, not just carried: the record is written once and never
+ *    cleared, so a drain from months ago would otherwise read exactly like one
+ *    that just happened. The sentence says *when* the helper connected, which is
+ *    what makes a stale delivery honest rather than stale.
+ */
+export function deliveredView(model: PopupModel): PopupView['delivered'] {
+  const rec = model.delivered;
+  if (!rec || rec.count <= 0) return null;
+  return ui.deliveredNote(rec.count, rec.at);
+}
+
 export function exportLine(model: PopupModel): string {
   const rec = model.lastExport;
   return rec ? ui.exportNote(rec) : ui.exportNoHistory();
@@ -604,6 +783,13 @@ export function renderPopup(model: PopupModel): PopupView {
     pause: pauseLine(model),
     // "Export undelivered captures": appears only when something has not been
     // delivered — an empty button is pure noise.
+    //
+    // 🔴 EXT-12 · No extra "and also when the outbox is near-full" clause here.
+    //    A spool that is near-full or full is one that has entries in it, so
+    //    `hasUndelivered` is already true whenever that clause could fire — it
+    //    would have been a second path to the same verdict, and one that reads as
+    //    though a full outbox could somehow be empty. The escape hatch a full
+    //    outbox needs is this same button, reached by the same condition.
     exportFile: { label: ui.exportButtonLabel(), visible: hasUndelivered },
     lastExport: exportLine(model),
     failures: hasFailures ? failuresLine(model.failures) : null,
@@ -625,6 +811,10 @@ export function renderPopup(model: PopupModel): PopupView {
       //    be saved — and the missing line says why.
       disabled: model.block === 'no-store',
     },
+    onlyInBrowser: onlyInBrowserView(model),
+    firstRun: firstRunView(model),
+    outboxBar: outboxBarView(model),
+    delivered: deliveredView(model),
     locale: {
       label: t('popup.locale.label'),
       options: localeOptions(),
@@ -655,6 +845,12 @@ function runningLine(model: PopupModel): string {
       //    reason to pause — this machine's host is unreachable. Not one debt
       //    was moved, and it carries on from the same item once the host answers.
       return t('popup.running.hostPaused');
+    case 'outbox-near-full':
+      // 🔴 EXT-12 · A congested delivery exit, but not the host being down: the
+      //    outbox (the live-capture spool) is near its cap and a healthy host
+      //    would be draining it. The non-urgent producer pauses; the urgent one
+      //    (live capture) does not.
+      return t('popup.running.outboxNearFull');
     case 'no-targets':
       // 🔴 C30 · This and 'no-http-port' are **two different things** and must
       //    be two different sentences: the channel may be perfectly connected
@@ -730,7 +926,16 @@ function missingLine(model: PopupModel): string {
         : '')
         + t('popup.missing.noTargets.body');
     case 'host-paused':
-      return t('popup.missing.hostPaused');
+      // 🔴 EXT-12 · Two histories, two sentences, and the choice between them is
+      //    whether any evidence says a CLI exists here. With none, naming the
+      //    `chat-stasher install-native-host …` command would instruct the user
+      //    to run a program that may not be installed — so the never-connected
+      //    half points at the one-line installer instead.
+      return neverConnected(model)
+        ? t('popup.missing.hostPausedNeverConnected')
+        : t('popup.missing.hostPaused');
+    case 'outbox-near-full':
+      return t('popup.missing.outboxNearFull');
     case 'disabled':
     case null:
       return '';
@@ -928,6 +1133,8 @@ export function describeTickReason(reason: string): string {
       return t('tick.reason.noStore');
     case 'host-paused':
       return t('tick.reason.hostPaused');
+    case 'outbox-near-full':
+      return t('tick.reason.outboxNearFull');
     case 'already-running':
       return t('tick.reason.alreadyRunning');
     case 'ran':
@@ -1030,12 +1237,26 @@ export function harnessBreakdown(summary: StageSummary): string {
   return list;
 }
 
-/** The summary line for the "no usable answer" states: never a zero, always the reason. */
-function summaryFailureLine(state: Exclude<SummaryState, { kind: 'answer' }>): string {
+/**
+ * The summary line for the "no usable answer" states: never a zero, always the reason.
+ *
+ * 🔴 EXT-12 · `neverConnected` decides which of the two `hostMissing` sentences
+ *    is used. Both describe the same failure, but one may name a
+ *    `chat-stasher install-native-host …` command and the other may not, and the
+ *    difference is whether anything has ever proved a CLI exists on this machine.
+ *    `olderHost` needs no such split and gets none: a host that answered "unknown
+ *    message type" is itself proof that a CLI is installed.
+ */
+function summaryFailureLine(
+  state: Exclude<SummaryState, { kind: 'answer' }>,
+  neverConnectedHere: boolean,
+): string {
   if (state.kind === 'unasked') return t('popup.summary.unasked');
   if (state.olderHost) return t('popup.summary.olderHost');
   if (state.reason === 'no-runtime-api' || state.reason === 'send-failed') {
-    return t('popup.summary.hostMissing');
+    return neverConnectedHere
+      ? t('popup.summary.hostMissingNeverConnected')
+      : t('popup.summary.hostMissing');
   }
   return t('popup.summary.unavailable', { reason: state.detail || state.reason });
 }
@@ -1050,7 +1271,7 @@ function summaryFailureLine(state: Exclude<SummaryState, { kind: 'answer' }>): s
 export function summaryLine(model: PopupModel): string {
   const state = model.summary;
   if (!state || state.kind !== 'answer') {
-    return summaryFailureLine(state ?? { kind: 'unasked' });
+    return summaryFailureLine(state ?? { kind: 'unasked' }, neverConnected(model));
   }
   const summary = state.summary;
   // 🔴 The parentheses around the split live in the catalog, in
@@ -1112,7 +1333,17 @@ export function dashboardButton(model: PopupModel): {
     return { label, enabled: false, reason: t('popup.dashboard.reason.olderHost') };
   }
   if (state.reason === 'no-runtime-api' || state.reason === 'send-failed') {
-    return { label, enabled: false, reason: t('popup.dashboard.reason.hostMissing') };
+    // 🔴 EXT-12 · The dashboard needs the CLI, so with no evidence that one exists
+    //    the reason must not name a `chat-stasher …` command (see `cliKnown`); it
+    //    points at the one-line installer instead. `olderHost` above keeps its own
+    //    sentence either way — that state proves a host is installed.
+    return {
+      label,
+      enabled: false,
+      reason: neverConnected(model)
+        ? t('popup.dashboard.reason.hostMissingNeverConnected')
+        : t('popup.dashboard.reason.hostMissing'),
+    };
   }
   return {
     label,
@@ -1574,7 +1805,31 @@ export function popupText(view: PopupView): string {
   // 🔴 W2: the pause line follows the channel line — it is the next consequence
   //    of the channel being broken, and the two sentences must be read together.
   if (view.pause) lines.push(view.pause);
+  // 🔴 EXT-12 · The delivered notice and the persistent extension-only state,
+  //    right after the channel: they are current-state facts like it, and "the
+  //    host is down" and "these captures are not a backup yet" must read together.
+  if (view.delivered) lines.push(view.delivered);
+  if (view.onlyInBrowser) {
+    lines.push(view.onlyInBrowser.title);
+    lines.push(view.onlyInBrowser.reason);
+  }
+  if (view.outboxBar) {
+    lines.push(view.outboxBar.caption);
+    if (view.outboxBar.stateLine) lines.push(view.outboxBar.stateLine);
+  }
   if (view.outbox) lines.push(view.outbox);
+  // 🔴 EXT-12 · The first-run card is content the user must read, so it appears
+  //    in the flattened text, and its two actions (Copy the installer, Export now)
+  //    appear as buttons exactly like the others below.
+  if (view.firstRun) {
+    lines.push(view.firstRun.title);
+    lines.push(view.firstRun.body);
+    lines.push(view.firstRun.whyHelper);
+    lines.push(view.firstRun.whatNow);
+    lines.push(`${view.firstRun.installLabel}: ${view.firstRun.command}`);
+    lines.push(t('popup.buttonTag', { label: view.firstRun.copy }));
+    lines.push(t('popup.buttonTag', { label: view.firstRun.exportNow }));
+  }
   lines.push(view.lastExport);
   if (view.failures) lines.push(view.failures);
   lines.push(view.running);

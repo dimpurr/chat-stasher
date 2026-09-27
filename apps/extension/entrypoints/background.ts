@@ -41,7 +41,9 @@ import {
   drainOutbox,
   enqueue,
   getEntry,
+  loadConnectDelivery,
   outboxApiPresent,
+  recordConnectDelivery,
   summary as outboxSummary,
   type EnqueueResult,
 } from '../lib/outbox';
@@ -58,6 +60,7 @@ import { HELLO_PROBE_TIMEOUT_MS } from '../lib/native-host';
 import {
   BACKFILL_ENABLED_KEY,
   isBackfillEnabled,
+  productionOutboxNearFull,
   tickBackfill,
   tickBlockReason,
   type TickResult,
@@ -359,6 +362,12 @@ export async function handleCaptured(captured: CapturedFetch): Promise<HandledRe
   // Try one drain right after enqueueing (the second of task 5's two occasions;
   // the first is the alarm heartbeat).
   const drained = await drainSafely();
+  // 🔴 EXT-12b · This drain empties the spool as surely as the popup's does, so it
+  //    is one of the moments the "delivered N" notice can be earned. Evidence-gated
+  //    ("was the helper away?" — see `noteConnectDelivery`): a backlog that only
+  //    exists because the helper was away is the story the notice tells, and an
+  //    ordinary first capture is not that story.
+  await noteConnectDelivery(browserLocalStore(), drained);
   await syncOutboxAlarmSafely();
 
   const lookup = await getEntry(queued.sha256);
@@ -497,7 +506,7 @@ async function drainSafely(): Promise<Awaited<ReturnType<typeof drainOutbox>>> {
     return await drainOutbox();
   } catch (err) {
     console.warn('[chat-stasher] outbox drain failed', (err as Error).message);
-    return { attempted: 0, delivered: 0, rejected: 0, waiting: 0, stoppedBy: 'outbox-unavailable' };
+    return { attempted: 0, delivered: 0, deliveredRetried: 0, rejected: 0, waiting: 0, stoppedBy: 'outbox-unavailable' };
   }
 }
 
@@ -668,11 +677,110 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
  * the only way it is still visible the next time the popup opens.
  */
 export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
+  let status: HostStatusRecord | null;
   try {
-    return await checkHost(browserLocalStore(), { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
+    status = await checkHost(browserLocalStore(), { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
   } catch (err) {
     console.warn('[chat-stasher] host check failed', (err as Error).message);
-    return await loadHostStatus(browserLocalStore());
+    status = await loadHostStatus(browserLocalStore());
+  }
+  // 🔴 EXT-12 · A `hello` that succeeds means the host (and therefore the CLI that
+  //    installs it) is present now. If there is a backlog waiting, deliver it at
+  //    once instead of waiting for the 5-minute outbox alarm, and record the
+  //    connected drain so the popup can say "delivered N".
+  if (status?.ok) {
+    void hostConnectedDrain(browserLocalStore());
+  }
+  return status;
+}
+
+/**
+ * 🔴 EXT-12 · "The host first connects → drain automatically → show 'delivered N'".
+ *
+ * Runs whenever a `hello` succeeds and the outbox holds pending work. It sends
+ * the backlog immediately (not on the next alarm), and records the first such
+ * drain's delivered count (`CONNECT_DELIVERY_KEY`) once — the popup reads that
+ * record for the delivered line. A subsequent popup-open drain with nothing
+ * pending writes nothing.
+ */
+export async function hostConnectedDrain(store: BackfillStore | null): Promise<void> {
+  if (!outboxApiPresent()) return;
+  try {
+    const s = await outboxSummary();
+    if (s === null || s.pending === 0) return;
+  } catch (err) {
+    console.warn('[chat-stasher] host-connect drain summary failed', (err as Error).message);
+    return;
+  }
+  const report = await drainSafely();
+  markOutboxDrain(report);
+  await refreshBadgeSafely();
+  await syncOutboxAlarmSafely();
+  // 🔴 A `hello` that succeeded is the proof itself here, so this path does not ask
+  //    for the pause record — it is the one drain whose evidence *is* a connect.
+  await writeConnectDeliveryOnce(store, report.delivered);
+}
+
+/**
+ * 🔴 EXT-12b · Note a drain that carried a backlog out **when the helper had been
+ * away** — from wherever the drain happened: the popup's probe, the capture's own
+ * drain, the 5-minute outbox alarm, or the backfill tick's drain.
+ *
+ * 🔴 EXT-12c · Why the drain is asked, not only the pause record. The sentence the
+ *    record fills is "these were waiting here and went to the archive when the
+ *    helper connected", so the fact that has to hold is "the helper was away, and
+ *    now it is not". Two independent testimonies can establish it, and either
+ *    suffices:
+ *
+ *    · **The outbox's own ledger.** An entry carries a never-reset `attempts`
+ *      count that only a real failed delivery writes, and in the extension-only
+ *      state the drain itself produces them: every wake tries to send, every
+ *      missing helper fails on the entry's own record. A drain that delivers such
+ *      an entry is the helper coming back by the queue's own earlier testimony.
+ *      The pause record **cannot** serve this state — its only production writer
+ *      is the backfill leg (`deliverBackfillItem`, on `host-unavailable`), and
+ *      with the backfill switch at its shipped default (off) that leg never runs,
+ *      so an extension-only install has no pause record ever to read (W214c
+ *      review, finding 1). This is why the report travels whole rather than as a
+ *      bare count: `deliveredRetried` is that ledger's voice.
+ *
+ *    · **The pause record** (lib/host-status.ts, written when a backfill item
+ *      found the exit unreachable). Kept for the flows where backfill *is* on,
+ *      because there it can be the only testimony: an entry enqueued during a
+ *      covered outage can still be delivered on its very first attempt.
+ *
+ * 🔴 Gated on "away" so the notice stays the extension-only → connected story.
+ *    A helper that never went away leaves no failed attempt and no pause on any
+ *    entry it delivers, so an ordinary first capture writes nothing — without
+ *    that gate every install would carry a permanent "delivered 1" line for its
+ *    very first capture, which is not a connect and is not news.
+ */
+async function noteConnectDelivery(store: BackfillStore | null, report: Awaited<ReturnType<typeof drainOutbox>>): Promise<void> {
+  if (report.delivered <= 0) return;
+  // Testimony one is self-contained — it is read from the entries themselves and
+  // survives a pause record that was already cleared, and a store that will not
+  // open cannot erase it.
+  if (report.deliveredRetried <= 0) {
+    // Testimony two needs the store; unreadable is unknown, and unknown does not
+    // license a "delivered after the helper came back" sentence (invariant 1).
+    try {
+      if ((await loadHostPause(store)) === null) return;
+    } catch (err) {
+      console.warn('[chat-stasher] connect-delivery pause read failed', (err as Error).message);
+      return;
+    }
+  }
+  await writeConnectDeliveryOnce(store, report.delivered);
+}
+
+/** The write both callers share: the first delivery on record wins, and zero is not a delivery. */
+async function writeConnectDeliveryOnce(store: BackfillStore | null, delivered: number): Promise<void> {
+  if (delivered <= 0) return;
+  try {
+    if ((await loadConnectDelivery(store)) !== null) return;
+    await recordConnectDelivery(store, { at: Date.now(), count: delivered });
+  } catch (err) {
+    console.warn('[chat-stasher] connect-delivery record failed', (err as Error).message);
   }
 }
 
@@ -2185,6 +2293,16 @@ async function runAlarmTickBody(): Promise<TickResult> {
   markOutboxDrain(drain);
   await syncOutboxAlarmSafely();
   await refreshBadgeSafely();
+  // 🔴 EXT-12c · The tick sends the outbox before any gate, so it can be the one
+  //    that finally empties a backlog the helper was away for — the backfill alarm
+  //    (5–10 min, jittered) can beat the outbox alarm's next 5-minute period to
+  //    it. This is wired **before** the gates below on purpose: the gate probe is
+  //    a `tickBackfill` call, and with the switch on and a pause on record its
+  //    resume `hello` clears the pause in this very tick (`resumeBackfill`) —
+  //    after which the pause testimony is gone, while the outbox's own attempts
+  //    ledger (what `drain.deliveredRetried` reads) survives the clearing, being
+  //    written on the entries themselves.
+  await noteConnectDelivery(store, drain);
 
   const targets = await loadTargets(store);
 
@@ -2227,6 +2345,9 @@ async function runAlarmTickBody(): Promise<TickResult> {
       hasStore: store !== null,
       isEnabled: () => isBackfillEnabled(store),
       isHostPaused: () => isBackfillHostPaused(store),
+      // 🔴 EXT-12 · The same near-full probe the engine and the popup use, so this
+      //    last-tick record cannot disagree with either about why nothing ran.
+      isOutboxNearFull: productionOutboxNearFull,
       // 🔴 C30: both of these are **facts**. This used to hardcode hasHttp to
       //    false and then fall back to 'no-http-port', so "the channel is
       //    perfectly connected, there simply are no targets" was reported as a
@@ -3117,6 +3238,11 @@ export default defineBackground(() => {
         markOutboxDrain(report);
         await refreshBadgeSafely();
         await syncOutboxAlarmSafely();
+        // 🔴 EXT-12b · The alarm is the retry loop for a spool the helper could not
+        //    take. When it is the alarm that finally empties it, this is the wake
+        //    the "delivered N" notice exists for — and the only one, if the user
+        //    never opens the popup.
+        await noteConnectDelivery(browserLocalStore(), report);
         return report;
       });
       return;

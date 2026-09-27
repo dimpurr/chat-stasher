@@ -82,8 +82,7 @@ export async function checkHost(
   const result = await hello(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs });
   const previous = await loadHostStatus(store);
   const record = toRecord(result, at, previous);
-  await saveHostStatus(store, record);
-  return record;
+  return await saveHostStatus(store, record);
 }
 
 export function toRecord(
@@ -112,12 +111,47 @@ export function toRecord(
   };
 }
 
-async function saveHostStatus(store: BackfillStore | null, record: HostStatusRecord): Promise<void> {
-  if (!store) return;
+/**
+ * Write the check result down, and **never let it destroy the stage evidence**.
+ *
+ * 🔴 W214/EXT-12 · `lastKnownStage` is the only proof the extension ever gets that
+ * a CLI exists on this machine (a `hello` that succeeded; topology principle 8's
+ * `cliKnown` reads it, and the whole "never suggest a `chat-stasher …` command to
+ * a user who has no CLI" rule hangs on it). `checkHost` is a read-modify-write on
+ * one key, and two probes can interleave: a check that read a record with no
+ * stage — or ran before one was ever stored — writes its failure record *after*
+ * another writer stored the evidence, and the evidence is gone. Nothing warned;
+ * the popup simply began telling a user with a working CLI to install it.
+ *
+ * So the field is monotonic by construction rather than by timing: re-read the
+ * stored record immediately before writing, and carry a stage forward whenever
+ * this record has none. A failure can therefore never clear it, and a success
+ * updates it to what the host just reported.
+ *
+ * 🔴 The residual window is one `storage.local.set`: two probes could still both
+ *    pass the re-read before either writes. `storage.local` has no
+ *    compare-and-swap to close it, and the consequence is bounded to one stale
+ *    `lastKnownStage` — which is *evidence that was already true*, not a false
+ *    one. That is why it is narrowed rather than eliminated; the alternative, a
+ *    second key written only on success, was rejected as a wider change than the
+ *    defect needs (it would have to be read and migrated alongside this one).
+ */
+async function saveHostStatus(
+  store: BackfillStore | null,
+  record: HostStatusRecord,
+): Promise<HostStatusRecord> {
+  if (!store) return record;
   try {
-    await store.save(HOST_STATUS_KEY, record);
+    const stored = await loadHostStatus(store);
+    const kept: HostStatusRecord =
+      record.lastKnownStage == null && stored?.lastKnownStage != null
+        ? { ...record, lastKnownStage: stored.lastKnownStage }
+        : record;
+    await store.save(HOST_STATUS_KEY, kept);
+    return kept;
   } catch (err) {
     console.warn('[chat-stasher] host status write failed', (err as Error).message);
+    return record;
   }
 }
 

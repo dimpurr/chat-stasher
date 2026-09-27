@@ -23,6 +23,12 @@ common:
   # 🔴 W36b · A one-word "I do not know", for a field that has no unit and no
   # longer sentence to carry. Never used where a number is expected.
   unknownShort: unknown
+  # 🔴 EXT-12 · The two states of the installer card's copy button. "Copied" is
+  # not a claim the button may make on its own: lib/../popup/main.ts sets it only
+  # after the clipboard write actually succeeded, and leaves the label alone when
+  # it did not.
+  copy: Copy
+  copied: Copied
 
 # ---------------------------------------------------------------------------
 # Delivery channel (the native host)
@@ -46,6 +52,62 @@ channel:
     unknown: unknown reason
 
 # ---------------------------------------------------------------------------
+# 🔴 EXT-12 · Extension-only: no helper has ever answered on this machine
+# ---------------------------------------------------------------------------
+# Topology principle 8 (docs: 36-EXTENSION-TOPOLOGY.md) makes "the extension is
+# installed and the CLI is not" a first-class state rather than an error. These
+# sentences are the whole of its UX, because the menu-bar app and the dashboard
+# both need the CLI and therefore do not exist yet.
+#
+# 🔴 None of these may name a `chat-stasher …` command. The one-line installer is
+#    a JS constant (lib/ui-strings.ts's INSTALLER_COMMAND), never a catalog entry,
+#    because the catalog reserves ` | ` for plural forms — so a `curl … | sh` line
+#    placed here would be parsed as a plural rather than shown.
+extensionOnly:
+  title: Only in this browser — not a backup yet
+  # Said when no helper has EVER answered here: the first-run card is the remedy.
+  neverConnected: >-
+    No helper has ever answered on this machine, so these captures exist only in
+    this browser and in no archive. There is a one-line installer in this popup;
+    until a helper answers, clearing this browser's data would take them with it.
+  # Said when a helper HAS answered before and is not answering now. A different
+  # state from the one above, and it must not borrow its sentence: here something
+  # that used to work has stopped.
+  hostBroken: >-
+    This machine's helper has answered before and does not answer now, so nothing
+    is being delivered and these captures are not in an archive yet. Nothing has
+    been deleted, and delivery resumes by itself once the helper answers again.
+  exportNow: Export now
+  # 🔴 EXT-12 · The record is written once and never cleared, so {at} is part of
+  #    the sentence: without it a drain from months ago reads as if it just happened.
+  delivered: >-
+    Delivered: {count} capture(s) that were waiting here went to the archive when
+    the helper connected at {at}.
+
+# 🔴 EXT-12 · The onboarding card, shown only in the never-connected state and
+# only while something is actually waiting: what this is, why the helper has to
+# be a separate thing, the one line that installs it, and the export escape hatch.
+# `installLabel` labels the line below it; the command itself is the JS constant.
+firstRun:
+  title: This browser captures — but it is not a backup yet
+  body: >-
+    This extension captures the conversations you choose and holds them here, in
+    this browser. Something still has to write them into files you own on this
+    machine, and that is the chat-stasher helper.
+  whyHelper: >-
+    Why a separate helper rather than the extension writing the files itself: the
+    archive has to outlive this browser. Clearing browsing data, uninstalling the
+    extension, or moving to another profile would take anything that lives only in
+    the browser's storage with it, and a file you can open, copy and back up
+    yourself cannot be taken that way. A browser extension can only write inside
+    its own storage, so the part that writes real files is a thing you install.
+  whatNow: >-
+    Run this one line in a terminal on this machine. The helper is installed for
+    the browsers on this machine; it does not need the extension to be removed or
+    reinstalled, and nothing waiting here is lost while you do it.
+  installLabel: "Install the helper:"
+
+# ---------------------------------------------------------------------------
 # Outbox
 # ---------------------------------------------------------------------------
 outbox:
@@ -61,6 +123,25 @@ outbox:
   unreadable: >-
     Outbox: unreadable — this browser context has no IndexedDB, so the extension
     cannot say what is queued. Nothing has been deleted.
+
+# ---------------------------------------------------------------------------
+# 🔴 EXT-12 · The outbox usage bar (bytes against the 256 MiB cap)
+# ---------------------------------------------------------------------------
+# Two thresholds, and they are different things on purpose:
+#   80%  near-full — the non-urgent producer (backfill) pauses until it drains;
+#   100% full      — new captures are refused. Nothing queued is ever dropped,
+#                    which is the behaviour that already existed and is unchanged.
+# The width of the bar is a proportion computed in lib/popup-view.ts, never a
+# number written into a sentence here.
+outboxBar:
+  line: "Waiting in this browser: {bytes} of {capacity}."
+  nearFull: >-
+    This browser's staging area is at or above 80% of its cap, so backfill (past
+    conversations) is paused until it drains. Live captures are still accepted,
+    and nothing already waiting has been touched.
+  full: >-
+    This browser's staging area is FULL: new captures are refused until the
+    helper takes what is already queued. Nothing queued was deleted.
 
 # ---------------------------------------------------------------------------
 # Export
@@ -158,6 +239,14 @@ popup:
       Stage summary: no answer from the chat-stasher host, so nothing is being
       counted here. It is installed by `chat-stasher install-native-host --stage
       <your stage path>`, pointing at a directory that exists.
+    # 🔴 EXT-12 · No helper has ever answered on this machine, so no
+    #    `chat-stasher …` command may be named here: it would assume a CLI that
+    #    nothing has ever shown to exist. Points at the installer instead.
+    hostMissingNeverConnected: >-
+      Stage summary: no answer from the chat-stasher helper, so nothing is being
+      counted here — and none has ever answered on this machine. The one-line
+      installer in this popup is the first step; the summary fills in once a
+      helper is there to answer.
     olderHost: >-
       Stage summary: the host installed in your browsers is older than this
       extension, so it does not answer a summary request at all.
@@ -189,6 +278,14 @@ popup:
         Open dashboard is unavailable: the chat-stasher host does not answer.
         Install it with `chat-stasher install-native-host --stage <your stage
         path>`.
+      # 🔴 EXT-12 · The never-connected half of the same state: the dashboard
+      #    needs the CLI, so with no helper there is nothing to open and the
+      #    installer is the only honest instruction.
+      hostMissingNeverConnected: >-
+        Open dashboard is unavailable: the chat-stasher helper does not answer,
+        and none has ever answered on this machine, so there is nothing to open
+        yet. The one-line installer in this popup installs it; the dashboard
+        becomes reachable once a helper answers.
       olderHost: >-
         Open dashboard is unavailable: the installed host is older than this
         extension and does not know this request. Install the current binary and
@@ -207,6 +304,15 @@ popup:
       Running: NOT running — this machine's host is unreachable, so it is
       paused; the debts are untouched, and the next heartbeat asks whether the
       host is there first and carries on from the same item once it answers.
+    # 🔴 EXT-12 · A different exit from `hostPaused` above: there the helper is
+    #    unreachable, here it may be answering perfectly well and simply not
+    #    taking captures down fast enough. Saying "the host is unreachable" for
+    #    this would be a wrong explanation, so it gets its own sentence.
+    outboxNearFull: >-
+      Running: NOT running — this browser's staging area is at or above 80% of
+      its cap, so the backfill leg paused until it drains. The helper may be
+      answering normally; backfill is the part that can wait, and live captures
+      are still accepted. No debt was touched.
     noTargets: >-
       Running: NOT running — the switch is on, but there are no backfill targets
       at all, so the alarm wakes up with nothing to do and not one conversation
@@ -249,6 +355,23 @@ popup:
       pointing at a directory that exists; once that is done this leg recovers
       by itself (the heartbeat asks the host first), with nothing for you to
       click.
+    # 🔴 EXT-12 · The same state with the opposite history: no helper has ever
+    #    answered here, so the CLI may not exist at all and naming a
+    #    `chat-stasher …` command would assume the very thing that is missing.
+    #    The one-line installer in this popup is what is shown instead.
+    hostPausedNeverConnected: >-
+      Missing: the chat-stasher helper on this machine does not answer, and none
+      has ever answered here, so this browser may have no helper installed at
+      all. The one-line installer in this popup installs it; once it answers,
+      this leg recovers by itself, with nothing for you to click.
+    # 🔴 EXT-12 · The near-full spool, from the "what is missing" angle: nothing
+    #    is missing from the machine, there is simply no room to keep producing.
+    outboxNearFull: >-
+      Missing: room in this browser's staging area. This browser is holding at
+      least 80% of the space captures may use, so backfill waits rather than
+      filling the last fifth — the helper is not necessarily at fault, and live
+      captures are unaffected. Nothing is lost: what is still owed resumes from
+      where it stopped once the staging area drains.
   failures:
     head: "🔴 Failures: {count} past conversation(s) had their body fetched but were NOT stored, and they will NOT be retried automatically."
     headDropped: >-
@@ -707,6 +830,11 @@ tick:
     disabled: the switch was off at the time
     noStore: browser storage was unavailable at the time
     hostPaused: this machine's host is unreachable, so this leg paused until it answers
+    # 🔴 EXT-12 · A congested delivery exit rather than a broken one: the helper may
+    #    be answering fine, but the staging area is at or above 80% of its cap, so
+    #    the non-urgent leg (backfill) waits instead of adding more to a spool that
+    #    is not draining. Distinct from `hostPaused` above for that reason.
+    outboxNearFull: this browser's staging area is at or above 80% of its cap, so the non-urgent backfill leg paused until it drains
     alreadyRunning: the previous tick had not finished, so this one stepped aside
     ran: it ran
     unknown: "outcome code: {reason}"
@@ -823,10 +951,16 @@ coverage:
     off: >-
       The backfill switch is off. Nothing is being fetched and no request will be
       made until you turn it on in the extension's popup.
+    # 🔴 EXT-12 · This sentence may not say "start the host": on a machine that
+    #    never had a helper installed there is nothing to start. It states the fact
+    #    that holds either way — the helper is not answering — and points at the
+    #    popup for the one-line installer, which is where the never-connected half
+    #    is worded.
     hostPaused: >-
-      This machine's chat-stasher host is unreachable, so this leg has paused
-      rather than fetching bodies it cannot deliver. Start the host and it
-      resumes from the same conversation.
+      This machine's chat-stasher helper is not answering, so this leg has paused
+      rather than fetching bodies it cannot deliver. It resumes from the same
+      conversation by itself once the helper answers; if no helper has ever been
+      installed here, the extension's popup carries the one line that installs it.
     haltedNoRecord: >-
       A stop was recorded here but its record could not be read, so the reason is
       unknown. Nothing is being fetched until it is looked at.

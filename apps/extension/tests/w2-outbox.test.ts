@@ -224,6 +224,29 @@ describe('W2-OUTBOX · exponential backoff after a retryable failure', () => {
     expect(ob.backoffMs(50)).toBe(3_600_000);
     expect(ob.backoffMs(0)).toBe(0);
   });
+
+  it('🔴 EXT-12c · the report says which deliveries were retries — the entries\' own ledger, the notice\'s evidence', async () => {
+    const ob = await outbox();
+    let now = 1_000_000;
+    let helperUp = false;
+    // A fails once — a missing helper leaves its mark on the entry itself — and
+    // the retry window passes; then B is captured, with no failed attempt, into
+    // the same drain that finally sends both.
+    await ob.enqueue(NAME_A, PAYLOAD_A, { now: () => now });
+    await ob.drainOutbox({ deliver: async () => (helperUp ? DELIVERED : RETRYABLE), now: () => now });
+    now += ob.RETRY_BASE_MS;
+    helperUp = true;
+    await ob.enqueue(NAME_B, PAYLOAD_B, { now: () => now });
+
+    const report = await ob.drainOutbox({ deliver: async () => DELIVERED, now: () => now });
+    expect(report).toMatchObject({ attempted: 2, delivered: 2, deliveredRetried: 1, stoppedBy: 'drained' });
+
+    // A drain whose every delivery is a first attempt reports zero — the number
+    // is the ledger's, not the bucket size remembered from the last run.
+    await ob.enqueue(NAME_A, PAYLOAD_A, { now: () => now });
+    const fresh = await ob.drainOutbox({ deliver: async () => DELIVERED, now: () => now });
+    expect(fresh).toMatchObject({ attempted: 1, delivered: 1, deliveredRetried: 0 });
+  });
 });
 
 // ===========================================================================
