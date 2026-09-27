@@ -705,7 +705,10 @@ run and a GUI app require (`crates/chat-stasher/src/credentials.rs:1-25`):
   (`NAME=value` lines, `#` comments, an optional `export ` prefix).
 - `keychain:ACCOUNT` (or `keychain:SERVICE:ACCOUNT`) — the secret is a macOS
   generic-password item, service `chat-stasher` by default. Store one with
-  `security add-generic-password -s chat-stasher -a ACCOUNT -w`.
+  `security add-generic-password -s chat-stasher -a ACCOUNT -w`. This form is
+  macOS-only: on Linux and Windows the reference is refused up front, with a
+  message naming the reference and saying it is not supported on that
+  operating system — use `file:` or `env-file:` there, which work everywhere.
 
 Unlike `env:NAME`, these three are **fail-closed**: a reference that cannot be
 resolved refuses the config with a message naming the option and the missing
