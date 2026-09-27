@@ -41,6 +41,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { withI18n } from './i18n-harness';
+import { syntheticCoordinationResponse } from './synthetic-native-host';
 import {
   BACKFILL_FETCH_MESSAGE,
   CLAUDE_ORG_REQUEST_MESSAGE,
@@ -85,8 +86,9 @@ const pageCalls: string[] = [];
 const sentOnBehalf: string[] = [];
 
 /** What the platform answers. A path with no route is a failure the test did not expect. */
-type Route = (u: URL) => { status: number; text: string };
+type Route = (u: URL) => { status: number; text: string; retryAfter?: string };
 let routes: Record<string, Route> = {};
+let pageFetchGate: Promise<void> | null = null;
 
 function jsonRoute(body: () => string, status = 200): Route {
   return () => ({ status, text: body() });
@@ -99,18 +101,20 @@ function jsonRoute(body: () => string, status = 200): Route {
  */
 const pageFetch = async (url: string) => {
   pageCalls.push(url);
+  if (pageFetchGate) await pageFetchGate;
   const u = new URL(url);
   const route = routes[u.pathname];
   if (!route) throw new Error(`the page was asked for an unexpected path: ${u.pathname}`);
   const answer = route(u);
-  return { status: answer.status, text: async () => answer.text };
+  return { status: answer.status, text: async () => answer.text, retryAfter: answer.retryAfter };
 };
 
 /** The organizations endpoint, answering with `uuids` (or a status). */
-function organizationsEndpoint(uuids: string[] | 'http-500'): Route {
-  return uuids === 'http-500'
-    ? () => ({ status: 500, text: 'synthetic server error' })
-    : jsonRoute(() => JSON.stringify(uuids.map((uuid) => ({ uuid, name: 'synthetic' }))));
+function organizationsEndpoint(uuids: string[] | 'http-500' | 'http-403' | 'http-429'): Route {
+  if (Array.isArray(uuids)) {
+    return jsonRoute(() => JSON.stringify(uuids.map((uuid) => ({ uuid, name: 'synthetic' }))));
+  }
+  return () => ({ status: Number(uuids.slice(5)), text: 'synthetic endpoint refusal' });
 }
 
 /**
@@ -138,10 +142,42 @@ let currentTab: FakeTab | null = null;
 const store: Record<string, unknown> = {};
 const backgroundListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmBook = new Map<string, unknown>();
+let coordinationMessages: Array<Record<string, unknown>> = [];
+let failRateLimitCoordination = false;
+let denyClaudeLease = false;
+let denyClaudeToken = false;
+let oldCoordinationHost = false;
 
 const fakeBrowser: any = {
   runtime: {
     id: 'mock-extension-id',
+    sendNativeMessage: (_host: string, message: unknown) => {
+      const msg = message as Record<string, unknown>;
+      if (msg.type === 'coordination') coordinationMessages.push(msg);
+      if (oldCoordinationHost && msg.type === 'coordination') {
+        return Promise.resolve({ protocol: 1, type: 'nack', request_id: null,
+          kind: 'bad-request', retryable: false, detail: 'unknown message type "coordination"' });
+      }
+      if ((denyClaudeLease || (denyClaudeToken && msg.mode === 'token'))
+        && msg.type === 'coordination' && msg.platform === 'claude'
+        && (msg.mode === 'claim' || msg.mode === 'token')) {
+        return Promise.resolve({
+          protocol: 1, type: 'coordination', ok: true,
+          request_id: String(msg.request_id), granted: false,
+          active_installs: 1, gentle: false, cooldown_until: 0, wait_ms: 0,
+        });
+      }
+      if (failRateLimitCoordination && msg.type === 'coordination' && msg.mode === 'rate_limit') {
+        return Promise.reject(new Error('synthetic host unavailable'));
+      }
+      if (msg.type === 'hello') {
+        return Promise.resolve({
+          protocol: 1, type: 'hello', ok: true,
+          host_version: '0.3.0', machine: 'synthetic-machine', stage: '/synthetic-stage',
+        });
+      }
+      return Promise.resolve(syntheticCoordinationResponse(message));
+    },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn: any) { backgroundListeners.push(fn); } },
     async sendMessage() { return undefined; },
@@ -302,7 +338,13 @@ beforeEach(async () => {
   sentOnBehalf.length = 0;
   alarmBook.clear();
   routes = {};
+  pageFetchGate = null;
   currentTab = null;
+  coordinationMessages = [];
+  failRateLimitCoordination = false;
+  denyClaudeLease = false;
+  denyClaudeToken = false;
+  oldCoordinationHost = false;
   runtimeNow = 1_700_000_000_000;
   vi.stubGlobal('browser', withI18n(fakeBrowser));
   vi.stubGlobal('chrome', fakeBrowser);
@@ -316,6 +358,80 @@ beforeEach(async () => {
 // 1 · The popup's start button, on a page that has made no request yet
 // ---------------------------------------------------------------------------
 describe('W31c-1 · starting a Claude backfill resolves the organization through the page', () => {
+  it('holds a Claude lease and enumeration token before popup start can resolve an organization', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    denyClaudeLease = true;
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+    expect(reply?.ok).toBe(false);
+  });
+
+  it('does not resolve an organization when the lease exists but its enumeration token is denied', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    denyClaudeToken = true;
+
+    await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim', 'token', 'release']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it.each([403, 429] as const)('shares an organization-discovery HTTP %i refusal with the native host', async (status) => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint(`http-${status}` as 'http-403' | 'http-429');
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(reply?.ok).toBe(false);
+    expect(coordinationMessages.filter((message) => message.mode === 'rate_limit'))
+      .toMatchObject([{ type: 'coordination', mode: 'rate_limit', platform: 'claude', status }]);
+  });
+
+  it('forwards the organization-discovery Retry-After duration to the native host', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal', retryAfter: '120' });
+
+    await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(coordinationMessages.filter((message) => message.mode === 'rate_limit'))
+      .toMatchObject([{ type: 'coordination', mode: 'rate_limit', platform: 'claude', status: 429, retry_after_ms: 120_000 }]);
+  });
+
+  it('pauses local backfill when the host cannot accept Claude organization-discovery cooldown', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { loadHostPause } = await import('../lib/host-status');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal', retryAfter: '120' });
+    failRateLimitCoordination = true;
+
+    const reply = await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(reply?.ok).toBe(false);
+    expect(await loadHostPause(browserLocalStore())).not.toBeNull();
+  });
+
   it('🔴 no captured URL, one organization ⇒ the page is asked, and the target is registered with it', async () => {
     const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
     await enableBackfill();
@@ -560,6 +676,101 @@ describe('W31c-3 · the allowlist compares the path segment against the page\'s 
 // 4 · The alarm retries a transient failure, and does not poll a permanent one
 // ---------------------------------------------------------------------------
 describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
+  it('the alarm entry point makes no Claude request when its lease is not granted', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+    denyClaudeLease = true;
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it('the automatic retry reclaims a lease before asking Claude again', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal' });
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { openLedger } = await import('../lib/backfill/ledger');
+    const localStore = browserLocalStore();
+    if (!localStore) throw new Error('the synthetic browser has no local store');
+    const prior = await openLedger(localStore, 'claude', 'default');
+    expect(prior.ok && prior.state.halted?.retryAt).toBeDefined();
+    runtimeNow = prior.ok ? prior.state.halted!.retryAt! : runtimeNow;
+    pageCalls.length = 0;
+    sentOnBehalf.length = 0;
+    coordinationMessages = [];
+    denyClaudeLease = true;
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it('a resumed host pause still requires the Claude lease before discovery', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { setHostPause, loadHostPause } = await import('../lib/host-status');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+    await setHostPause(browserLocalStore(), { reason: 'host-unavailable', at: 1 });
+    denyClaudeLease = true;
+
+    await mod.runAlarmTick();
+
+    expect(await loadHostPause(browserLocalStore())).toBeNull();
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it('reports an organizations-endpoint 429 to the host while the alarm owns the Claude lease', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal', retryAfter: '120' });
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.filter((message) => message.mode === 'rate_limit'))
+      .toMatchObject([{ type: 'coordination', mode: 'rate_limit', platform: 'claude', status: 429, retry_after_ms: 120_000 }]);
+  });
+
+  it('pauses the alarm backfill locally if the host rejects an organizations-endpoint cooldown report', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    failRateLimitCoordination = true;
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    const { loadHostPause } = await import('../lib/host-status');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+
+    await mod.runAlarmTick();
+
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    expect(await loadHostPause(browserLocalStore())).not.toBeNull();
+  });
+
   it('reproduces W99: a stored resolved scope reaches a fresh /new page and the page establishes its own allowlist', async () => {
     const mod = await bootBackground();
     await enableBackfill();
@@ -890,6 +1101,118 @@ describe('W31c-4 · the alarm\'s side of a scope that is not known yet', () => {
     expect(after.haltRetried, 'a written refusal is the verdict on the attempt it replaced').toBeUndefined();
     expect(after.halted.build).toBe(build);
     expect(await scopeRetryDue(s, 'claude', UNRESOLVED_SCOPE, now)).toBe(false);
+  });
+});
+
+describe('W212f · every discovery entry point uses the lease gateway', () => {
+  it('refuses a resolved alarm list before any request when the host has no arbiter', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: ORG, at: 1 });
+    oldCoordinationHost = true;
+
+    await mod.runAlarmTick();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it('refuses a live capture tick before any request when the host has no arbiter', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7, { cookie: `lastActiveOrg=${ORG}` });
+    routes[`/api/organizations/${ORG}/chat_conversations`] = jsonRoute(() => '[]');
+    oldCoordinationHost = true;
+    const captured = {
+      url: `${DETAIL_URL}?tree=True&rendering_mode=messages&render_all_tools=true`,
+      method: 'GET', status: 200,
+      text: JSON.stringify({ uuid: ID, chat_messages: [] }),
+      pageUrl: `${CLAUDE_ORIGIN}/chat/${ID}`, capturedAt: Date.now(),
+    };
+
+    await dispatchFromTab({ type: 'chat-captured', payload: captured }, 7);
+    await mod.backfillTickSettled();
+
+    expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+    expect(pageCalls).toEqual([]);
+    expect(sentOnBehalf).toEqual([]);
+  });
+
+  it.each(['popup', 'alarm', 'retry', 'resume'] as const)(
+    '%s sends no platform request when the host has no arbiter', async (entry) => {
+      const mod = await bootBackground();
+      await enableBackfill();
+      await tabHello(7);
+      routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+      const { browserLocalStore } = await import('../lib/backfill/store');
+      const { rememberTarget } = await import('../lib/backfill/alarm');
+      const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+      if (entry !== 'popup') {
+        await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+      }
+      if (entry === 'retry') {
+        routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+        await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+        const { openLedger } = await import('../lib/backfill/ledger');
+        const localStore = browserLocalStore();
+        if (!localStore) throw new Error('synthetic store missing');
+        const prior = await openLedger(localStore, 'claude', 'default');
+        if (!prior.ok || prior.state.halted?.retryAt === undefined) throw new Error('retry fixture missing');
+        runtimeNow = prior.state.halted.retryAt;
+        routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+        pageCalls.length = 0;
+        sentOnBehalf.length = 0;
+        coordinationMessages = [];
+      }
+      if (entry === 'resume') {
+        const { setHostPause } = await import('../lib/host-status');
+        await setHostPause(browserLocalStore(), { reason: 'host-unavailable', at: 1 });
+      }
+      oldCoordinationHost = true;
+      if (entry === 'popup') await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+      else await mod.runAlarmTick();
+
+      expect(coordinationMessages.map((message) => message.mode)).toEqual(['claim']);
+      expect(pageCalls).toEqual([]);
+      expect(sentOnBehalf).toEqual([]);
+      expect(store.cs_ext_coordination_unavailable_v1).toBe(true);
+    },
+  );
+
+  it('keeps one host lease until both overlapping popup callers finish', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint([ORG]);
+    let unblock!: () => void;
+    pageFetchGate = new Promise<void>((resolve) => { unblock = resolve; });
+    const first = dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    await vi.waitFor(() => expect(pageCalls).toHaveLength(1));
+    const second = dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+    await vi.waitFor(() => expect(coordinationMessages.filter((m) => m.mode === 'token').length).toBeGreaterThanOrEqual(2));
+    expect(coordinationMessages.filter((m) => m.mode === 'claim')).toHaveLength(1);
+    expect(coordinationMessages.filter((m) => m.mode === 'release')).toHaveLength(0);
+    unblock();
+    await Promise.all([first, second]);
+    expect(coordinationMessages.filter((m) => m.mode === 'release')).toHaveLength(1);
+  });
+
+  it('reports alarm discovery cooldown before releasing its lease', async () => {
+    const mod = await bootBackground();
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = organizationsEndpoint('http-429');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+    await mod.runAlarmTick();
+    expect(coordinationMessages.map((m) => m.mode)).toEqual(['claim', 'token', 'rate_limit', 'release']);
   });
 });
 

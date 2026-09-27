@@ -28,7 +28,7 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { coordinate, deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
 import { recordLiveCapture } from '../lib/live-capture';
 import {
   captureFingerprint,
@@ -98,7 +98,8 @@ import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
+import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
+import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, parseRetryAfterMs, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
 import {
   BACKFILL_PING_MESSAGE,
   askTabForClaudeOrg,
@@ -745,6 +746,124 @@ export function configureBackfillPace(override: BackfillSeam | null): void {
   backfillPaceOverride = override;
 }
 
+const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_unavailable_v1';
+
+async function rememberCoordinationAvailability(unavailable: boolean): Promise<void> {
+  try {
+    const store = browserLocalStore();
+    if (store) await store.save(COORDINATION_UNAVAILABLE_KEY, unavailable);
+  } catch (err) {
+    console.warn('[chat-stasher] coordination availability status could not be saved', (err as Error).message);
+  }
+}
+
+async function pauseForCoordinationFailure(reason: string): Promise<void> {
+  await rememberCoordinationAvailability(true);
+  await setHostPause(browserLocalStore(), {
+    reason: HOST_UNAVAILABLE,
+    at: Date.now(),
+    detail: `backfill coordination: ${reason}`,
+  });
+}
+
+type BackfillLease = {
+  request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T>;
+  rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean>;
+  release(): Promise<void>;
+  gentle: boolean;
+};
+type SharedBackfillLease = { holders: number; ready: Promise<BackfillLease | null>; releasing?: Promise<void> };
+const backfillLeases = new Map<string, SharedBackfillLease>();
+
+/** The sole gateway for requests made by live, alarm, retry, resume and popup discovery. */
+async function acquireBackfillLease(platform: string): Promise<BackfillLease | null> {
+  const previous = backfillLeases.get(platform);
+  if (previous?.releasing) {
+    await previous.releasing;
+    return acquireBackfillLease(platform);
+  }
+  if (previous) {
+    previous.holders += 1;
+    const lease = await previous.ready;
+    return lease ? { ...lease, release: releaseOnce(previous, lease.release) } : null;
+  }
+  const shared: SharedBackfillLease = { holders: 1, ready: Promise.resolve(null) };
+  backfillLeases.set(platform, shared);
+  shared.ready = (async (): Promise<BackfillLease | null> => {
+    const install = await getInstallIdentity();
+    const installId = install.install_id;
+    const claim = await coordinate({ mode: 'claim', platform, installId });
+    if (!claim.ok) {
+      await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+      return null;
+    }
+    await rememberCoordinationAvailability(false);
+    if (!claim.granted) return null;
+    let held = true;
+    return {
+      gentle: claim.gentle,
+      async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
+        if (!held) throw new Error('backfill lease is not held');
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const token = await coordinate({ mode: 'token', platform, installId, segment });
+          if (!token.ok) {
+            await pauseForCoordinationFailure(token.reason ?? 'unknown');
+            throw new Error(`machine-wide backfill coordination unavailable: ${token.reason ?? 'unknown'}`);
+          }
+          if (token.granted) return send();
+          if (attempt === 2 || token.waitMs <= 0 || token.waitMs > 60_000) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.max(250, token.waitMs)));
+        }
+        throw new Error('machine-wide backfill request budget is waiting');
+      },
+      async rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean> {
+        if (!held) return false;
+        const report = await coordinate({ mode: 'rate_limit', platform, installId, status,
+          retryAfterMs: parseRetryAfterMs(retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0 });
+        if (report.ok) return true;
+        await pauseForCoordinationFailure(report.reason ?? 'rate-limit report failed');
+        return false;
+      },
+      async release(): Promise<void> {
+        if (!held) return;
+        held = false;
+        await coordinate({ mode: 'release', platform, installId });
+      },
+    };
+  })();
+  const lease = await shared.ready;
+  if (!lease) {
+    if (backfillLeases.get(platform) === shared) backfillLeases.delete(platform);
+    return null;
+  }
+  return { ...lease, release: releaseOnce(shared, lease.release) };
+}
+
+function releaseOnce(shared: SharedBackfillLease, hostRelease: () => Promise<void>): () => Promise<void> {
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    shared.holders -= 1;
+    if (shared.holders === 0) {
+      shared.releasing = hostRelease().finally(() => {
+        for (const [platform, current] of backfillLeases) {
+          if (current === shared) backfillLeases.delete(platform);
+        }
+      });
+      await shared.releasing;
+    }
+  };
+}
+
+/** Share Claude organization-discovery refusals before the last holder releases. */
+async function reportClaudeOrganizationRateLimit(lease: BackfillLease, status: 403 | 429, retryAfter?: string): Promise<boolean> {
+  const shared = await lease.rateLimit(status, retryAfter);
+  if (shared) return true;
+  console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared');
+  return false;
+}
+
 /**
  * 🔴 W113 · **The speed preset this tick runs with** (ADR-032 §3, ADR-033).
  *
@@ -769,6 +888,35 @@ async function presetTickOptions(
     ? SPEED_PLANS[backfillPaceOverride.preset]
     : await readSpeedPlan(store);
   return { pace: plan.pace, maxDetails: plan.tickDetails };
+}
+
+/** Run only while the gateway holds this install's machine-wide platform lease. */
+async function coordinatedTick(
+  platform: string,
+  http: HttpPort | undefined,
+  run: (http: HttpPort | undefined, gentle: boolean) => Promise<TickResult>,
+): Promise<TickResult> {
+  if (!http) {
+    // No request can be made. Preserve any previous old-host warning until a
+    // successful claim proves that backfill is available again.
+    return run(undefined, false);
+  }
+  const lease = await acquireBackfillLease(platform);
+  if (!lease) return { ran: false, reason: 'host-paused', report: null };
+  const coordinatedHttp: HttpPort = async (url, init) => {
+    const segment = coordinationSegmentForRequest(platform, url);
+    const response = await lease.request(segment, () => http(url, init));
+    if (response.status === 403 || response.status === 429) {
+      if (!(await lease.rateLimit(response.status, response.retryAfter)))
+        throw new Error('machine-wide rate-limit coordination unavailable');
+    }
+    return response;
+  };
+  try {
+    return await run(coordinatedHttp, lease.gentle);
+  } finally {
+    await lease.release();
+  }
 }
 
 /** The most recent tick's result (for tests and diagnosis, and for C18's popup). */
@@ -889,10 +1037,17 @@ export async function backfillRuntimeStatus(): Promise<BackfillRuntimeStatus> {
   //    platform is it). Asking twice would allow a self-contradictory answer:
   //    "there is a channel, but I cannot say which platform".
   const live = await liveTransport();
+  let coordinationUnavailable = false;
+  try {
+    coordinationUnavailable = (await browserLocalStore()?.load(COORDINATION_UNAVAILABLE_KEY)) === true;
+  } catch (err) {
+    console.warn('[chat-stasher] coordination availability status could not be read', (err as Error).message);
+  }
   return {
     transportWired: live.wired,
     lastTickReason: lastTick?.reason ?? null,
     liveTarget: live.target,
+    ...(coordinationUnavailable ? { coordinationUnavailable: true } : {}),
   };
 }
 
@@ -1608,7 +1763,7 @@ export async function registerBackfillTargetHere(): Promise<
   | {
     ok: false;
     reason: 'no-store' | 'no-live-transport' | 'origin-not-a-platform'
-      | 'org-ambiguous' | 'org-unresolved' | 'transport-error';
+      | 'org-ambiguous' | 'org-unresolved' | 'transport-error' | 'coordination-unavailable';
   }
 > {
   const store = browserLocalStore();
@@ -1620,15 +1775,24 @@ export async function registerBackfillTargetHere(): Promise<
   let scope = UNRESOLVED_SCOPE;
   const resolver = scopeResolverFor(platform);
   if (resolver) {
-    const resolved = (await resolver(live.tabId, origin)).resolved;
-    if (resolved.ok) {
-      scope = resolved.org;
-    } else {
-      await recordBackfillHalt(store, {
-        platform, scope, reason: resolved.halt, detail: resolved.detail,
-      });
-      await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
-      return { ok: false, reason: resolved.halt };
+    const lease = await acquireBackfillLease(platform);
+    if (lease === null) return { ok: false, reason: 'coordination-unavailable' };
+    try {
+      const resolved = (await lease.request('enumerate', () => resolver(live.tabId, origin))).resolved;
+      if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
+        await reportClaudeOrganizationRateLimit(lease, resolved.rateLimitStatus, resolved.retryAfter);
+      }
+      if (resolved.ok) {
+        scope = resolved.org;
+      } else {
+        await recordBackfillHalt(store, {
+          platform, scope, reason: resolved.halt, detail: resolved.detail,
+        });
+        await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
+        return { ok: false, reason: resolved.halt };
+      }
+    } finally {
+      await lease.release();
     }
   }
   const target = { platform, origin, scope };
@@ -1725,10 +1889,11 @@ export async function kickBackfill(
    * record cannot disagree about which account this capture came from.
    */
   await applyAccountObservationForCapture(store, target.platform, captured);
-  const result = await tickBackfill({
+  const http = await resolveHttpPort(target.origin, senderTabId);
+  const result = await coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
     ...target,
     store,
-    http: await resolveHttpPort(target.origin, senderTabId),
+    http: coordinated,
     // The archive exit = the backfill leg's own delivery function (**not through
     // the outbox**; see §10 and deliverBackfillItem).
     // 🔴 C20: **the return is mandatory**. This used to be
@@ -1739,7 +1904,8 @@ export async function kickBackfill(
     // W113 · The stored speed preset (ADR-032 §3), then the test seam over it.
     ...(await presetTickOptions(store)),
     ...(backfillPaceOverride ?? {}),
-  });
+    ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
+  }));
   /**
    * 🔴 W199 · **The run's own discovery, after the live leg's.** The capture already told
    *    the registry which account is signed in; this adds the case the live leg cannot
@@ -1907,10 +2073,12 @@ function scopeRequestSpend(answer: ScopeAnswer): ScopeRequest {
 async function resolveScopeForTick(
   store: ReturnType<typeof browserLocalStore>,
   target: { platform: string; origin: string; scope: string },
+  acquireScopeRequest: () => Promise<BackfillLease | null>,
 ): Promise<{
   scope: string;
   request: ScopeRequest;
   source?: 'observed' | 'cookie' | 'organizations-endpoint';
+  coordinationBlocked?: boolean;
 }> {
   if (!backfillPlanFor(target.platform)?.scopeInPath) {
     return { scope: target.scope, request: 'none' };
@@ -1964,17 +2132,35 @@ async function resolveScopeForTick(
    * closed: returning the sentinel here issues nothing, and the leg is no worse off —
    * the engine still stops this scope by name, and the popup still says why.
    */
+  const lease = await acquireScopeRequest();
+  if (lease === null) {
+    return { scope: UNRESOLVED_SCOPE, request: 'none', coordinationBlocked: true };
+  }
   if (!(await markScopeRetried(store, {
     platform: target.platform, scope: UNRESOLVED_SCOPE,
   }))) {
+    await lease.release();
     return { scope: UNRESOLVED_SCOPE, request: 'none' };
   }
-  const answer = await resolver(null, target.origin);
+  let answer: ScopeAnswer;
+  let rateLimitShared = true;
+  try {
+    answer = await lease.request('enumerate', () => resolver(null, target.origin));
+    const resolved = answer.resolved;
+    if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
+      rateLimitShared = await reportClaudeOrganizationRateLimit(lease, resolved.rateLimitStatus, resolved.retryAfter);
+    }
+  } finally {
+    await lease.release();
+  }
   const resolved = answer.resolved;
   if (!resolved.ok) {
     await recordBackfillHalt(store, {
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
+    if (!rateLimitShared) {
+      return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(answer), coordinationBlocked: true };
+    }
     // The engine now finds the halt record and stops by name, issuing nothing.
     return { scope: UNRESOLVED_SCOPE, request: scopeRequestSpend(answer) };
   }
@@ -2163,7 +2349,16 @@ async function runAlarmTickBody(): Promise<TickResult> {
     //    reason to serve nothing, not a reason to lose the whole tick.
     const target = targets[idx];
     if (!target) continue;
-    const scopeResolution = await resolveScopeForTick(store, target);
+    const scopeResolution = await resolveScopeForTick(store, target, async () => {
+      // Claude's organization fallback is a platform request too. Take the same
+      // host lease and an enumeration permit before asking the page to issue it.
+      return acquireBackfillLease(target.platform);
+    });
+    if (scopeResolution.coordinationBlocked) {
+      schedule.skipped.push({ platform: target.platform, reason: 'waiting-retry' });
+      last = { ran: false, reason: 'host-paused', report: null };
+      break;
+    }
     const scope = scopeResolution.scope;
     claudeScopeSource = scopeResolution.source ?? claudeScopeSource;
     /**
@@ -2211,19 +2406,20 @@ async function runAlarmTickBody(): Promise<TickResult> {
     };
     // `async` since W113: the preset is read per tick, and a body-less arrow cannot await.
     const tickOne = async (http: Awaited<ReturnType<typeof resolveHttpPort>>): Promise<TickResult> =>
-      tickBackfill({
+      coordinatedTick(target.platform, http, async (coordinated, gentle) => tickBackfill({
         platform: target.platform,
         origin: target.origin,
         scope,
         store,
-        http,
+        http: coordinated,
         // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
         //    and one of them reporting while the other does not is not acceptable).
         sink: (c) => deliverBackfillItem(c),
         // W113 · The alarm's path. Read once per tick, the same as the live leg's kick.
         ...(await presetTickOptions(store)),
         ...(backfillPaceOverride ?? {}),
-      });
+        ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
+      }));
     let http = await resolveHttpPort(target.origin);
     if (http === undefined) {
       // 🔴 W76 · A target with no live tab is a **skip**, not a run: it must not
@@ -2284,6 +2480,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
         }
       }
       if (http === undefined) {
+        await rememberCoordinationAvailability(false);
         schedule.skipped.push({ platform: target.platform, reason: 'no-http-port' });
         // The page this target would have run against is gone — but a `proven` or
         // `possible` resolution means a request did go out earlier in this wake, and

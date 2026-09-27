@@ -389,6 +389,7 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     await bootAndDispatch(liveCapture());
     const beforeTrip = await stateOf();
     expect(beforeTrip.archived.length).toBe(2);
+    const requestsBeforeTrip = [...server.calls];
 
     // 🔴 W2 · Really create this pause: the host goes entirely offline and the next debt cannot be delivered.
     //    This is not a "download stall" but a **non-delivery** in §1's sense —
@@ -398,8 +399,9 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
     console.log('[C17-2.2] tick reason while the host is absent =', mod.lastBackfillTick()?.reason);
     const paused = await stateOf();
     console.log('[C17-2.2] debts after the pause:', { archived: paused.archived.length, pending: paused.pending.length });
-    expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    expect(mod.lastBackfillTick()?.report).toBeNull();
+    expect(server.calls).toEqual(requestsBeforeTrip); // the arbiter failure prevents any platform request
     /**
      * 🔴 W18 · These two used to be `toEqual` against `beforeTrip`, and **both were
      *    vacuous**. `stateOf()` handed back the live object the fake store held,
@@ -411,14 +413,12 @@ describe('C17 task 2 · counter-case 2: the host becomes unreachable mid-way (ho
      *
      *    It went red as soon as the accessor began returning a fresh snapshot,
      *    which is what an assertion is meant to compare. So the **premise** was
-     *    wrong, not the engine: a tick legitimately reads one more list page while
-     *    the host is down, and those newly named conversations are owed. What the
-     *    criterion actually claims is asserted now, and only that:
-     *      · not one debt that was owed stopped being owed;
-     *      · nothing passed itself off as archived;
-     *      · and none was judged dead.
+     *    wrong, not the engine: before machine arbitration a tick could read one more
+     *    list page while the delivery host was down. EXT-3 now pauses before any
+     *    platform request when the arbiter itself is unreachable, so the exact debt
+     *    snapshot must remain unchanged.
      */
-    expect(paused.pending).toEqual(expect.arrayContaining(beforeTrip.pending));
+    expect(paused.pending).toEqual(beforeTrip.pending);
     expect(paused.archived).toEqual(beforeTrip.archived);            // not one passed itself off as a success
     expect(paused.failures ?? []).toEqual([]);                       // and none was judged dead
 
@@ -671,8 +671,8 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
     // Now the host goes offline ⇒ the next one cannot be delivered.
     // 🔴 This case's ancestor is C17-3.C "BUG-4": back then a sink that threw was swallowed whole,
     //    with neither a halt nor a trace (the debt was still there, but the ledger showed nothing had happened).
-    //    Since W2 the sink does not throw, it **answers** — and the answer has a named third outcome:
-    //    retryLater ⇒ the debt stays, and this leg stops with a trace as 'host-unavailable'.
+    //    EXT-3 pauses before making a platform request when the machine-wide arbiter is
+    //    unreachable; no debt is attempted or cleared on this tick.
     hostDown = true;
     await bootAndDispatch(liveCapture());
 
@@ -687,8 +687,8 @@ describe('C17 task 3 · seam C: the progress denominator comes from enumeration 
     expect(after.pending[0]).toBe(UUIDS[2]);
     // The side that **differs** from the BUG-4 era: this tick's outcome is visible at runtime,
     // and it is named rather than a leftover from "the last success".
-    expect(mod.lastBackfillTick()?.reason).toBe('ran');
-    expect(mod.lastBackfillTick()?.report?.stopped).toBe('host-unavailable');
+    expect(mod.lastBackfillTick()?.reason).toBe('host-paused');
+    expect(mod.lastBackfillTick()?.report).toBeNull();
     expect(after.halted).toBeNull();          // this leg did not break itself; no halt may be left
     expect(after.failures ?? []).toEqual([]); // and this item may not be judged dead either
   });

@@ -254,6 +254,8 @@ popup:
       🔴 我们不会为了让它「看起来在动」而去猜一个接口地址：猜错的结果不是报错，
       而是你以为历史在补、实际上一条都没补。宁可在这里明说还不支持。
   notes:
+    coordinationUnavailable: >-
+      更新 chat-stasher 后才能回溯历史。此浏览器的实时捕获仍会继续。
     target: "这份进度对应：平台 {platform} · 归档范围 {scope}"
     noTarget: 还没有任何平台的回溯记录，所以这里没有可显示的归档范围。
     # 🔴 W54b · 目标注册表的逐出记录（alarm.ts，cs_backfill_evicted_v1）——

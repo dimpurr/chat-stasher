@@ -336,6 +336,8 @@ popup:
       history is being backfilled while not one conversation is. Saying plainly
       that it is not supported yet is the better answer.
   notes:
+    coordinationUnavailable: >-
+      Update chat-stasher to enable backfill. Live capture remains active in this browser.
     target: "This progress is for: platform {platform} · archive scope {scope}"
     noTarget: >-
       There is no backfill record for any platform yet, so there is no archive

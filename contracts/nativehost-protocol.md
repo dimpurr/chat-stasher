@@ -384,6 +384,30 @@ the answer is a promise that the content will still be there at delivery time.
 negotiation is involved, and none is needed: every outcome other than
 `held: true` ⇒ deliver.
 
+### 6.7 `coordination` — machine-wide backfill arbitration (EXT-3)
+
+Requests carry `request_id`, `mode`, `platform`, and `install_id`. `mode` is
+`claim`, `token`, `release`, or `rate_limit`. `token` also carries `segment`
+(`enumerate` or `detail`); `rate_limit` carries `status` (403 or 429) and
+optional `retry_after_ms`.
+
+The host persists arbitration in its local state database, scoped to this
+machine and platform. A successful claim grants one install a 120-second lease;
+each token refreshes it. Expired leases can be claimed by another install.
+Install presence is measured from claims and requests in the preceding 24
+hours. More than one observed install returns `gentle: true`. Detail tokens are
+limited to 400 per local day, with at least 20 seconds between requests; with
+multiple installs the shared floors are 45 seconds for details and 4 seconds
+for enumeration. A denied token returns `wait_ms`; the caller waits and asks
+again. No token is granted while a platform cooldown is active. Any 403 or 429
+sets a platform cooldown of at least 60 seconds and at least the supplied
+`Retry-After` duration (clamped to 30 days).
+
+An older host answers `bad-request` for the unknown `coordination` type. The
+extension reports coordination unavailable and pauses backfill until the host
+is updated. Live capture continues. This protocol addition does not compare
+account fingerprints and cannot coordinate separate machines.
+
 ## 7. Idempotency
 
 The duplicate key is the SHA-256 of the payload bytes — the same `fileSha256`

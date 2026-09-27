@@ -36,6 +36,12 @@
     },
     {
       "$ref": "#/$defs/hasResponse"
+    },
+    {
+      "$ref": "#/$defs/coordinationRequest"
+    },
+    {
+      "$ref": "#/$defs/coordinationResponse"
     }
   ],
   "$defs": {
@@ -485,6 +491,40 @@
           "description": "finished_at_unix of the most recent run-once pass recorded as `completed`."
         }
       }
+    },
+    "coordinationRequest": {
+      "type": "object",
+      "required": ["protocol", "type", "request_id", "mode", "platform", "install_id"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "coordination" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "mode": { "enum": ["claim", "token", "release", "rate_limit"] },
+        "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "install_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "segment": { "enum": ["enumerate", "detail"] },
+        "status": { "enum": [403, 429] },
+        "retry_after_ms": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Machine-wide backfill claim, request token, release or rate-limit report (nativehost-protocol.md §6.7)."
+    },
+    "coordinationResponse": {
+      "type": "object",
+      "required": ["protocol", "type", "ok", "request_id", "granted", "active_installs", "gentle", "cooldown_until", "wait_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "coordination" },
+        "ok": { "const": true },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "granted": { "type": "boolean" },
+        "active_installs": { "type": "integer", "minimum": 0 },
+        "gentle": { "type": "boolean" },
+        "cooldown_until": { "type": "integer" },
+        "wait_ms": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Arbitration measurement and token grant (nativehost-protocol.md §6.7)."
     },
     "dashboardRequest": {
       "type": "object",

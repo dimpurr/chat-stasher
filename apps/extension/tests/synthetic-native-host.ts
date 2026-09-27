@@ -45,12 +45,13 @@ export interface SyntheticHostOptions {
    */
   summary?: unknown;
   /**
-   * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack an older host
-   * sends. `has` belongs here because a host that predates §6.4 predates §6.6 too,
-   * and the fallback it must produce is the same one: every question it cannot
-   * answer reads as "not held" ⇒ deliver.
+   * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack for those
+   * unsupported capabilities. Arbitration remains available so the `has`
+   * fallback can be exercised while backfill stays leased.
    */
   unsupported?: boolean;
+  /** A host that predates EXT-3, for fail-closed backfill tests. */
+  unsupportedCoordination?: boolean;
   /**
    * Empty this host's stage while keeping its path and machine — the review's
    * finding, as a stub primitive: an archive that was replaced or restored where it
@@ -91,6 +92,17 @@ export interface SyntheticHost {
   hasCount(): number;
   /** Empty the stage at the same path — see `SyntheticHostOptions.replaceStage`. */
   replaceStage(): void;
+}
+
+/** A deterministic coordination success for tests whose browser fake has no host concerns. */
+export function syntheticCoordinationResponse(message: unknown): unknown {
+  const msg = message as Record<string, unknown>;
+  if (msg.type !== 'coordination') return undefined;
+  return {
+    protocol: 1, type: 'coordination', ok: true,
+    request_id: String(msg.request_id), granted: true,
+    active_installs: 1, gentle: false, cooldown_until: 0, wait_ms: 0,
+  };
 }
 
 export async function sha256Of(text: string): Promise<string> {
@@ -154,7 +166,8 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
       // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if (options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard')) {
+      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard'))
+          || (options.unsupportedCoordination && msg.type === 'coordination')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
           kind: 'bad-request', retryable: false,
@@ -227,6 +240,13 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
           protocol: 1, type: 'hello', ok: true,
           host_version: hostVersion, machine, stage,
         };
+      }
+
+      // Backfill tests use a supported single-install host by default. Tests
+      // that need an older binary opt into `unsupported` above, which answers
+      // with the same unknown-message nack as the real host.
+      if (msg.type === 'coordination') {
+        return syntheticCoordinationResponse(msg);
       }
 
       if (msg.type !== 'deliver') throw new Error(`unexpected request type ${String(msg.type)}`);

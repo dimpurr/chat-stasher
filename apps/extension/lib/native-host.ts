@@ -831,6 +831,60 @@ export async function hello(options: { timeoutMs?: number } = {}): Promise<Hello
   return { ok: true, machine: res.machine, stage: res.stage, hostVersion: res.host_version };
 }
 
+export interface CoordinationResult {
+  ok: boolean;
+  granted: boolean;
+  activeInstalls: number;
+  gentle: boolean;
+  cooldownUntil: number;
+  waitMs: number;
+  reason?: string;
+  olderHost?: boolean;
+}
+
+/** Host mutations may wait behind another short SQLite transaction. */
+export const COORDINATION_TIMEOUT_MS = 10_000;
+
+/** EXT-3 host arbiter. An older host's unknown-type nack is explicit unavailability. */
+export async function coordinate(input: {
+  mode: 'claim' | 'token' | 'release' | 'rate_limit';
+  platform: string;
+  installId: string;
+  segment?: 'enumerate' | 'detail';
+  status?: 403 | 429;
+  retryAfterMs?: number;
+}): Promise<CoordinationResult> {
+  const requestId = newRequestId();
+  if (!requestId) return { ok: false, granted: false, activeInstalls: 0, gentle: false, cooldownUntil: 0, waitMs: 0, reason: 'crypto-unavailable' };
+  const outcome = await sendOnce(getRuntime(), {
+    protocol: PROTOCOL, type: 'coordination', request_id: requestId,
+    mode: input.mode, platform: input.platform, install_id: input.installId,
+    ...(input.segment ? { segment: input.segment } : {}),
+    ...(input.status ? { status: input.status } : {}),
+    ...(input.retryAfterMs === undefined ? {} : { retry_after_ms: input.retryAfterMs }),
+  }, COORDINATION_TIMEOUT_MS);
+  const classified = classify(outcome, (value) => {
+    if (value.protocol !== PROTOCOL || value.type !== 'coordination' || value.ok !== true
+      || typeof value.request_id !== 'string' || !REQUEST_ID_RE.test(value.request_id)
+      || typeof value.granted !== 'boolean' || !Number.isInteger(value.active_installs)
+      || typeof value.gentle !== 'boolean' || !Number.isInteger(value.cooldown_until)
+      || !Number.isInteger(value.wait_ms)) return 'malformed coordination response';
+    return value;
+  }, requestId);
+  if (!classified.ok) {
+    const unavailable = classified.reason === 'nack'
+      ? `${classified.kind ?? 'nack'}: ${classified.detail ?? ''}`
+      : classified.reason;
+    return { ok: false, granted: false, activeInstalls: 0, gentle: false, cooldownUntil: 0, waitMs: 0,
+      reason: unavailable,
+      olderHost: classified.reason === 'nack' && looksLikeOlderHost(classified)
+        && /unknown message type\s+["']?coordination/i.test(classified.detail ?? '') };
+  }
+  const value = classified.value as Record<string, unknown>;
+  return { ok: true, granted: value.granted as boolean, activeInstalls: value.active_installs as number,
+    gentle: value.gentle as boolean, cooldownUntil: value.cooldown_until as number, waitMs: value.wait_ms as number };
+}
+
 /**
  * §6.4 — how much is in the stage, in counts only.
  *

@@ -4366,7 +4366,7 @@ export function planHoldsAccountLease(platform: string): boolean {
   return ACCOUNT_LEASE_PLATFORMS.includes(platform);
 }
 
-const PLANS: readonly BackfillEnumPlan[] = [
+export const BACKFILL_PLANS: readonly BackfillEnumPlan[] = [
   DEEPSEEK_PLAN,
   PERPLEXITY_PLAN,
   CHATGPT_PLAN,
@@ -4459,7 +4459,7 @@ export const BACKFILL_UNSUPPORTED: readonly UnsupportedBackfill[] = [
 
 /** The plan if it can be backfilled, otherwise null. */
 export function backfillPlanFor(platform: string): BackfillEnumPlan | null {
-  return PLANS.find((p) => p.platform === platform) ?? null;
+  return BACKFILL_PLANS.find((p) => p.platform === platform) ?? null;
 }
 
 /**

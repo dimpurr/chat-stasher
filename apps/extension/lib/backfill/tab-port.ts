@@ -1113,7 +1113,19 @@ export function readClaudeOrgReply(reply: unknown, tabId: number): OrgResolution
   if (halt !== 'org-ambiguous' && halt !== 'org-unresolved' && halt !== 'transport-error') {
     return { ok: false, halt: 'transport-error', detail: `tab ${tabId} refused the organization question unrecognisably` };
   }
-  return { ok: false, halt, detail: typeof reply.detail === 'string' ? reply.detail : '' };
+  const rateLimitStatus = reply.rateLimitStatus === 403 || reply.rateLimitStatus === 429
+    ? reply.rateLimitStatus
+    : undefined;
+  const retryAfter = typeof reply.retryAfter === 'string' && reply.retryAfter.length <= 64
+    ? reply.retryAfter
+    : undefined;
+  return {
+    ok: false,
+    halt,
+    detail: typeof reply.detail === 'string' ? reply.detail : '',
+    ...(rateLimitStatus ? { rateLimitStatus } : {}),
+    ...(retryAfter ? { retryAfter } : {}),
+  };
 }
 
 /**

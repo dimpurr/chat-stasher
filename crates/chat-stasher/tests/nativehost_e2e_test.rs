@@ -25,6 +25,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const CHROME_ORIGIN: &str = "chrome-extension://gihmdkkmmmkeiagjjiimacmgkdilofhi/";
 const FIREFOX_ID: &str = "chat-stasher@team.iopho.com";
@@ -1699,6 +1701,133 @@ fn open_dashboard_without_a_configured_destination_is_refused_before_anything_st
     let detail = response["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("[native_host] destination"), "{detail}");
     assert!(detail.contains("no default destination"), "{detail}");
+}
+
+// -------------------------------------------------------- EXT-3 coordination
+
+#[test]
+fn coordination_concurrent_first_claimants_have_one_winner() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let barrier = Arc::new(Barrier::new(2));
+    let responses = thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for (request_id, install_id) in [("race-a", "install-a"), ("race-b", "install-b")] {
+            let barrier = Arc::clone(&barrier);
+            let fixture = &fixture;
+            workers.push(scope.spawn(move || {
+                let input = frame(&json!({"protocol":1,"type":"coordination",
+                    "request_id":request_id,"mode":"claim","platform":"chatgpt","install_id":install_id}));
+                barrier.wait();
+                let out = fixture.chrome(&input);
+                assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+                let response = one_frame(&out.stdout);
+                assert_matches_schema(&response);
+                response
+            }));
+        }
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("claim process joins"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|reply| reply["granted"] == true)
+            .count(),
+        1,
+        "simultaneous processes cannot both own the first lease: {responses:?}"
+    );
+}
+
+#[test]
+fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let ask = |request_id: &str, mode: &str, install_id: &str| {
+        let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+            "request_id":request_id,"mode":mode,"platform":"chatgpt","install_id":install_id})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        let response = one_frame(&out.stdout);
+        assert_matches_schema(&response);
+        response
+    };
+    let first = ask("claim-a", "claim", "install-a");
+    assert_eq!(first["granted"], true);
+    let contender = ask("claim-b", "claim", "install-b");
+    assert_eq!(contender["granted"], false);
+    assert_eq!(contender["active_installs"], 2);
+    assert_eq!(contender["gentle"], true);
+
+    let db = fixture
+        .home
+        .join("data/chat-stasher/state/extension-coordination.sqlite3");
+    let conn = rusqlite::Connection::open(db).expect("coordination database exists");
+    conn.execute(
+        "UPDATE ext_platform SET lease_until=0 WHERE platform='chatgpt'",
+        [],
+    )
+    .expect("expire lease");
+    drop(conn);
+    let after_expiry = ask("claim-c", "claim", "install-b");
+    assert_eq!(
+        after_expiry["granted"], true,
+        "expired lease can be claimed"
+    );
+
+    let limited = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"rate-a","mode":"rate_limit","platform":"chatgpt","install_id":"install-b",
+        "status":429,"retry_after_ms":300_000})));
+    let limited = one_frame(&limited.stdout);
+    assert_matches_schema(&limited);
+    let blocked = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"token-a","mode":"token","platform":"chatgpt","install_id":"install-b","segment":"detail"})));
+    let blocked = one_frame(&blocked.stdout);
+    assert_matches_schema(&blocked);
+    assert_eq!(blocked["granted"], false);
+    assert!(
+        blocked["wait_ms"].as_i64().unwrap_or_default() >= 299_000,
+        "cooldown reaches every install: {blocked}"
+    );
+}
+
+#[test]
+fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let send = |request_id: &str, mode: &str, install_id: &str| {
+        let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+            "request_id":request_id,"mode":mode,"platform":"claude","install_id":install_id})));
+        assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+        one_frame(&out.stdout)
+    };
+    assert_eq!(send("claim", "claim", "install-a")["granted"], true);
+    let out = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
+        "request_id":"limited","mode":"rate_limit","platform":"claude","install_id":"install-a",
+        "status":429,"retry_after_ms":120_000})));
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_of(&out));
+    let db = fixture
+        .home
+        .join("data/chat-stasher/state/extension-coordination.sqlite3");
+    let conn = rusqlite::Connection::open(db).expect("coordination database exists");
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("platform row exists");
+    assert_eq!(owner.as_deref(), Some("install-a"));
+    assert_eq!(send("release", "release", "install-a")["granted"], true);
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("platform row exists after release");
+    assert_eq!(owner, None);
 }
 
 #[test]

@@ -188,7 +188,13 @@ export type OrgResolution =
    *                        Transient: the leg will ask again by itself. It is
    *                        **not** "you have no conversations".
    */
-  | { ok: false; halt: 'org-ambiguous' | 'org-unresolved' | 'transport-error'; detail: string };
+  | {
+    ok: false;
+    halt: 'org-ambiguous' | 'org-unresolved' | 'transport-error';
+    detail: string;
+    rateLimitStatus?: 403 | 429;
+    retryAfter?: string;
+  };
 
 export interface OrgResolutionInput {
   /** The last organization this tab's own requests carried, or null if none was seen. */
@@ -274,7 +280,16 @@ export async function resolveClaudeOrgOnPage(
   try {
     text = await fetchOrganizations();
   } catch (err) {
-    return { ok: false, halt: 'transport-error', detail: (err as Error).message };
+    const status = (err as Error & { status?: unknown }).status;
+    const rateLimitStatus = status === 403 || status === 429 ? status : undefined;
+    const retryAfter = (err as Error & { retryAfter?: unknown }).retryAfter;
+    return {
+      ok: false,
+      halt: 'transport-error',
+      detail: (err as Error).message,
+      ...(rateLimitStatus ? { rateLimitStatus } : {}),
+      ...(typeof retryAfter === 'string' && retryAfter.length <= 64 ? { retryAfter } : {}),
+    };
   }
   return resolveClaudeOrg({ ...input, endpoint: { kind: 'text', text } });
 }
