@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # The selftest for scripts/check-citation-drift.py: proof that it still catches
-# drift. Nine probes. Each one edits a real file in place and restores it from a
-# backup whatever the outcome; the run ends by printing `git status`.
+# drift. Nine probes.
+#
+# Every probe is SELF-CONTAINED: it builds its own throwaway fixture — a
+# temp-dir tree with the documents, the target files they cite, and the
+# citations.lock — and runs the checker against that tree by importing
+# scripts/check-citation-drift.py and pointing its module globals (REPO,
+# DOC_FILES, LOCK_PATH) at the fixture. No probe reads a live repo document,
+# so a citation that moves in the real tree cannot void a probe; all nine stay
+# reproducible on any branch, whatever the live docs say. The working tree is
+# never touched, and the run ends by printing `git status` (which must be cold).
 #
 # The first version of the checker asked only two questions — is the line number
 # in bounds, is that line non-empty. A citation moved to a line that exists and
@@ -18,439 +26,437 @@
 #   probe 8  code that precedes a :N but names no file (W35b)                => green
 #   probe 9  a path-shaped citation of a missing file (W35b)                 => red
 #
-# 🔴 Probes 1 and 2 name coordinates in real files, and coordinates rot when
-#    those files move. They had rotted by W32: both could no longer apply their
-#    own edit and reported the selftest itself as void. That is why every probe
-#    below checks that its edit landed *before* it judges the checker — a stale
-#    coordinate must fail loudly here, never pass quietly.
+# 🔴 A probe must prove what it says it proves, or fail loudly. So every probe
+#    first builds a GREEN fixture and asserts that green; only then does it
+#    apply the mutation that must flip it red (or keep it green), and it checks
+#    the fixture change landed before it judges the checker — the same "void
+#    selftest" discipline the coordinate-based version used, but now against a
+#    fixture the probe itself controls, so it cannot rot out from under the
+#    probe when a real doc moves.
 #
-#    Probe 1 goes two steps further, and both steps were paid for by a rot.
-#    Since W33 no line number is written down: a two-line edit elsewhere in
-#    docs-dev/threat-model.md moved the dashboard row from :148 to :150 and the
-#    hardcoded 148 silently stopped pointing at it. Since W193 not even the
-#    citation text is written down: the literal `view.rs:256`, `:180` stopped
-#    matching once nine lines were added above `pub fn route(` and the citation,
-#    correctly, became `view.rs:265`, `:180` — so the probe applied no edit at
-#    all, called itself void, and judged nothing while the document it was
-#    judging was right. What is written down now is the *shape*: the probe asks
-#    the checker's own parser for a continuation citation and moves the first one
-#    it can onto a legal line. That cannot rot with the code, and finding nothing
-#    is a loud void, never a quiet pass.
+# Each probe returns 0 when its assertions all held, 1 otherwise; bash sums
+# them and exits non-zero if any probe failed, so a single ✘ is a red run.
 
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHECK="python3 $REPO/scripts/check-citation-drift.py"
 cd "$REPO" || exit 2
 
 TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 FAILED=0
 
-restore() {
-  [ -f "$TMP/threat-model.md" ] && cp "$TMP/threat-model.md" "$REPO/docs-dev/threat-model.md"
-  [ -f "$TMP/engine.ts" ] && cp "$TMP/engine.ts" "$REPO/apps/extension/lib/backfill/engine.ts"
-  [ -f "$TMP/store.rs" ] && cp "$TMP/store.rs" "$REPO/crates/chat-stasher/src/store.rs"
-  [ -f "$TMP/nativehost-protocol.md" ] && cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-}
-trap 'restore; rm -rf "$TMP"' EXIT
+cat > "$TMP/common.py" <<'PY'
+# Shared machinery for the self-contained citation-drift selftest. Runs the
+# real checker as a module against a throwaway fixture tree: the module's REPO,
+# DOC_FILES and LOCK_PATH globals are re-pointed at the fixture, so every parse
+# and hash happens inside the fixture and the working tree is never touched.
+import contextlib
+import difflib
+import glob
+import importlib.util
+import io
+import os
+import sys
 
-expect() { # expect <期望退出码> <实际退出码> <说明>
-  if [ "$1" -eq "$2" ]; then
-    echo "  ✔ 期望 rc=$1, 实际 rc=$2 — $3"
-  else
-    echo "  ✘ 期望 rc=$1, 实际 rc=$2 — $3"
-    FAILED=1
-  fi
-}
+REPO = sys.argv[1]
+BASE = sys.argv[2]
+OK = "✔"  # ✔
+KO = "✘"  # ✘
 
-echo "=============================================================="
-echo "Probe 1: move a citation to a line that exists, is not empty, and"
-echo "  has nothing to do with the claim it is attached to."
-# The target is found by shape, never by a written-down coordinate — and both
-# kinds of coordinate have now rotted: the line number (W33, see the header) and
-# then the citation text itself (W193: `view.rs:256`, `:180` became `view.rs:265`,
-# `:180` when nine lines went in above `pub fn route(`, so the probe applied no
-# edit and judged nothing).
-#
-# So the probe asks the checker's own parser which citations in the document are
-# continuations — a bare `:N` that inherits the file named before it in the same
-# sentence — and moves the first one it can. Spelling that shape out a second
-# time as a regex here would be a second answer to "what is a citation", which is
-# what check-citation-drift.py's parse_text() exists to prevent; probe 5 imports
-# the same module for the same reason.
-#
-# The destination is always line 1 of the file the continuation inherits, and a
-# candidate is skipped unless line 1 exists and is non-empty: the red has to come
-# from the citation pointing somewhere else, never from the line being out of
-# bounds or blank, which is the hole the first checker had.
-PROBE1_PICK="$(python3 - "$REPO" <<'PY'
-import importlib.util, os, sys
 
-root = sys.argv[1]
-spec = importlib.util.spec_from_file_location(
-    "citation_drift", os.path.join(root, "scripts", "check-citation-drift.py")
-)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+def load_checker():
+    spec = importlib.util.spec_from_file_location(
+        "citation_drift", os.path.join(REPO, "scripts", "check-citation-drift.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-doc = "docs-dev/threat-model.md"
-with open(os.path.join(root, doc), encoding="utf-8") as fh:
-    lines = fh.read().splitlines()
 
-citations, _ = module.parse_text(doc, lines, module.build_basename_index())
+class Fixture:
+    """A throwaway, repo-shaped tree the checker is pointed at."""
 
-for cit in citations:
-    if not cit.raw.startswith(":"):  # the file name is written down: not this branch
-        continue
-    if cit.start != cit.end or cit.start == 1:  # a range, or already on line 1
-        continue
-    if f"`{cit.raw}`" not in lines[cit.doc_line - 1]:
-        continue  # the citation is not literally on that line; an edit would miss
-    try:
-        with open(os.path.join(root, cit.target), encoding="utf-8", errors="replace") as fh:
-            body = fh.read().splitlines()
-    except OSError:
-        continue
-    first = body[0].strip() if body else ""
-    if not first:
-        continue  # line 1 is absent or blank: a red there would prove nothing
-    print(f"{cit.doc_line}\t{cit.raw}\t{cit.target}\t{first[:60]}")
-    sys.exit(0)
+    def __init__(self, docfile="spec.md"):
+        self.root = os.path.join(BASE, "fx_%d" % os.getpid())
+        os.makedirs(os.path.join(self.root, "docs-dev"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "contracts"), exist_ok=True)
+        self.mod = load_checker()
+        self.mod.REPO = self.root
+        self.mod.LOCK_PATH = os.path.join(self.root, "docs-dev", "citations.lock")
+        self.mod.DOC_FILES = [docfile]
 
-print(f"no moveable continuation citation is left in {doc}", file=sys.stderr)
-sys.exit(1)
+    def write(self, rel, content):
+        p = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def update(self):
+        """Regenerate the fixture lock from its current docs; rc=0 if written."""
+        self.mod._file_cache.clear()
+        entries, problems = self.mod.collect()
+        return cap(lambda: self.mod.cmd_update(entries, problems))[0]
+
+    def check(self):
+        """Re-parse and check current fixture state; returns (rc, combined text)."""
+        self.mod._file_cache.clear()
+        entries, problems = self.mod.collect()
+        rc, out, err = cap(lambda: self.mod.cmd_check(entries, problems))
+        return rc, out + err
+
+    def listed(self):
+        """--list of current fixture state; returns (rc, stdout text)."""
+        self.mod._file_cache.clear()
+        entries, problems = self.mod.collect()
+        rc, out, _ = cap(lambda: self.mod.cmd_list(entries, problems))
+        return rc, out
+
+
+def cap(fn):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = fn()
+    return rc, out.getvalue(), err.getvalue()
+
+
+def ck(label, got, want):
+    if got == want:
+        print("  %s %s" % (OK, label))
+        return 0
+    print("  %s %s (got rc=%s, want rc=%s)" % (KO, label, got, want))
+    return 1
+
+
+def ck_in(label, text, needle):
+    if needle in text:
+        print("  %s %s" % (OK, label))
+        return 0
+    print("  %s %s; '%s' not in:\n%s" % (KO, label, needle, text))
+    return 1
+
+
+def ck_not_in(label, text, needle):
+    if needle in text:
+        print("  %s %s; '%s' shows up:\n%s" % (KO, label, needle, text))
+        return 1
+    print("  %s %s" % (OK, label))
+    return 0
 PY
-)"
-PROBE1_LINE="$(printf '%s\n' "$PROBE1_PICK" | cut -f1)"
-PROBE1_OLD="$(printf '%s\n' "$PROBE1_PICK" | cut -f2)"
-PROBE1_TARGET="$(printf '%s\n' "$PROBE1_PICK" | cut -f3)"
-PROBE1_FIRST="$(printf '%s\n' "$PROBE1_PICK" | cut -f4)"
-if [ -n "$PROBE1_LINE" ]; then
-  echo "  Target: docs-dev/threat-model.md:${PROBE1_LINE}, \`${PROBE1_OLD}\` -> \`:1\`"
-  echo "  (Chosen because it is a *continuation* citation: the file name is"
-  echo "   omitted and inferred from the citation before it on the same line, so"
-  echo "   this exercises the other parsing branch. It inherits ${PROBE1_TARGET},"
-  echo "   whose line 1 is: ${PROBE1_FIRST}"
-  echo "   — that line exists, it is not empty, and it has nothing to do with the"
-  echo "   claim the sentence makes. That is exactly what the previous checker let"
-  echo "   through: bounds and non-emptiness were the whole test.)"
-else
-  echo "  Target: none — see the void report below"
-fi
-echo "=============================================================="
-if [ -z "$PROBE1_LINE" ] || [ -z "$PROBE1_OLD" ] || [ -z "$PROBE1_TARGET" ]; then
-  echo "  ✘ probe 1 found no continuation citation it can move onto a legal line;"
-  echo "    the selftest itself is void (the shape left the document, or the line"
-  echo "    it would move to is gone)"
-  FAILED=1
-fi
-cp "$REPO/docs-dev/threat-model.md" "$TMP/threat-model.md"
-if [ -n "$PROBE1_LINE" ]; then
-  sed -i '' "${PROBE1_LINE}s/\`${PROBE1_OLD}\`/\`:1\`/" "$REPO/docs-dev/threat-model.md"
-  PROBE1_AFTER="$(sed -n "${PROBE1_LINE}p" "$REPO/docs-dev/threat-model.md")"
-  if printf '%s\n' "$PROBE1_AFTER" | grep -q -F "\`${PROBE1_OLD}\`" \
-    || ! printf '%s\n' "$PROBE1_AFTER" | grep -q -F '`:1`'; then
-    echo "  ✘ probe 1's edit did not land on docs-dev/threat-model.md:${PROBE1_LINE};"
-    echo "    the selftest itself is void"
-    FAILED=1
-  fi
-fi
-$CHECK
-rc=$?
-expect 1 "$rc" "a citation moved to an unrelated but legal line must be red"
-cp "$TMP/threat-model.md" "$REPO/docs-dev/threat-model.md"
-echo
 
-echo "=============================================================="
-echo "Probe 2: leave the document alone and edit a line *inside* a cited"
-echo "  range."
-# Re-pointed twice: once after the Claude merge moved engine.ts, and again for
-# ADR-034, which inserted the body-cache code inside this range and moved the
-# docs' citation from 261-296 to 271-345. The probe must edit a line that sits
-# inside a range the lockfile actually holds, so it looks the range up first and
-# fails loudly (void selftest) if the range is gone, instead of editing an
-# uncited line and "passing" while testing nothing.
-#
-# The target line is picked as "inside the range, past its first line": the
-# snippet a human reads in the lockfile is the range's first non-empty line
-# (271, a closing brace), and that line must not be the one edited — otherwise
-# the check could pass by comparing snippets instead of hashing the range.
-PROBE2_RANGE='crates/chat-stasher/src/store.rs:271-345'
-PROBE2_FILE='crates/chat-stasher/src/store.rs'
-PROBE2_LINE=318
-echo "  Target: ${PROBE2_FILE}:${PROBE2_LINE}, inside the cited range 271-345."
-echo "  It sits in the middle, not on the first line: the snippet a human reads"
-echo "  in the lockfile is the range's first non-empty line, and that line does"
-echo "  not change."
-echo "  (This is the most common drift in the wild: code is edited, the line"
-echo "   numbers survive, the content moves on. Only hashing the whole range"
-echo "   catches it — comparing the snippet would not.)"
-echo "=============================================================="
-if ! grep -q "^${PROBE2_RANGE} " "$REPO/docs-dev/citations.lock"; then
-  echo "  ✘ probe 2's range ${PROBE2_RANGE} is no longer in the lockfile; the selftest itself is void"
-  FAILED=1
-fi
-cp "$REPO/$PROBE2_FILE" "$TMP/store.rs"
-sed -i '' "${PROBE2_LINE}s/.*/        \/\/ PROBE2: content changed inside the cited range/" "$REPO/$PROBE2_FILE"
-if ! sed -n "${PROBE2_LINE}p" "$REPO/$PROBE2_FILE" | grep -q PROBE2; then
-  echo "  ✘ probe 2 could not modify the code; the selftest itself is void"
-  FAILED=1
-fi
-$CHECK
-rc=$?
-expect 1 "$rc" "content inside the cited range changed, must be red"
-cp "$TMP/store.rs" "$REPO/$PROBE2_FILE"
-echo
+# append the nine probe bodies to common.py
+cat >> "$TMP/common.py" <<'PY'
 
-echo "=============================================================="
-echo "Probe 3: change nothing"
-echo "=============================================================="
-$CHECK
-rc=$?
-expect 0 "$rc" "a clean tree must be green"
-echo
 
-echo "=============================================================="
-echo "Probe 4 (W32): a dangling citation inside contracts/"
-echo "  contracts/ was outside the scan until W32, so a citation there"
-echo "  could name a file that does not exist and every gate stayed"
-echo "  green. This probe appends exactly that to the real contract"
-echo "  document and demands a red."
-echo "  Scope: the citation is written in the syntax the checker parses"
-echo "  (a path followed by :line). A bare path with no line number is"
-echo "  outside that syntax and is NOT what this probe covers."
-echo "=============================================================="
-cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
-printf '\nW32 probe: see `crates/chat-stasher/src/w32-probe-missing.rs:1`.\n' \
-  >> "$REPO/contracts/nativehost-protocol.md"
-if ! grep -q 'w32-probe-missing.rs:1' "$REPO/contracts/nativehost-protocol.md"; then
-  echo "  ✘ probe 4 could not modify the contract document; the selftest itself is void"
-  FAILED=1
-fi
-$CHECK
-rc=$?
-expect 1 "$rc" "a citation naming a file that does not exist, in contracts/, must be red"
-cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-echo
+def probe_1(base):
+    # A continuation (`:N` that inherits its file from the sentence before it)
+    # moved onto a line that exists, is non-empty, and is unrelated to the
+    # claim must go red — the hole the first checker let through.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs",
+             "// header comment: has nothing to do with the claim\n"
+             "use std::fmt;\n"
+             "pub fn fmt() {}\n")
+    fx.write("spec.md", "See `src/mod.rs:2`, `:3`.\n")
+    bad += ck("fixture builds a green lock holding `src/mod.rs:2`,`:3`", fx.update(), 0)
+    rc, _ = fx.check()
+    bad += ck("base continuation `:3` is green", rc, 0)
+    fx.write("spec.md", "See `src/mod.rs:2`, `:1`.\n")
+    rc, text = fx.check()
+    bad += ck("continuation moved to an unrelated-but-legal line must be red", rc, 1)
+    bad += ck_in("the red names the moved anchor src/mod.rs:1",
+                 text, "src/mod.rs:1")
+    return 0 if bad == 0 else 1
 
-echo "=============================================================="
-echo "Probe 5 (W32): every contracts/*.md is in the scan set"
-echo "  Probe 4 proves a red; this one proves what the red is for —"
-echo "  the scan set really is DOC_FILES plus every contract document,"
-echo "  read from the checker itself rather than from the prose here."
-echo "=============================================================="
-python3 - "$REPO" <<'PY'
-import glob, importlib.util, os, sys
 
-root = sys.argv[1]
-spec = importlib.util.spec_from_file_location(
-    "citation_drift", os.path.join(root, "scripts", "check-citation-drift.py")
-)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+def probe_2(base):
+    # Edit a line *inside* a cited multi-line range, leave the range's first
+    # line (the snippet a reader/naive check compares) alone: only hashing the
+    # whole range can catch it. Proven deterministically: after the inner edit
+    # flips the run red, the range's first line is byte-for-byte unchanged, so
+    # the red can only have come from the changed inner line.
+    bad = 0
+    fx = Fixture()
+    body = "".join("        let v%d = %d;\n" % (i, i) for i in range(350))
+    fx.write("src/store.rs", body)
+    fx.write("spec.md", "See `src/store.rs:271-345`.\n")
+    bad += ck("fixture builds a green lock for the cited range", fx.update(), 0)
+    rc, _ = fx.check()
+    bad += ck("base cited range 271-345 is green", rc, 0)
+    lines = body.splitlines(True)
+    first = lines[270]  # line 271 — the first line a reader/naive check compares
+    lines[317] = "        // PROBE2: content changed inside the cited range\n"
+    fx.write("src/store.rs", "".join(lines))
+    rc, text = fx.check()
+    bad += ck("content edited inside the cited range must be red", rc, 1)
+    with open(os.path.join(fx.root, "src/store.rs"), encoding="utf-8") as fh:
+        after = fh.read().splitlines(True)
+    if after[270] == first and rc == 1:
+        print("  %s the red is the inner-line digest: the range's first line is unchanged"
+              % OK)
+    else:
+        print("  %s the probe did not isolate the inner line as the cause of the red" % KO)
+        bad += 1
+    return 0 if bad == 0 else 1
 
-scanned = set(module.doc_files())
-on_disk = {
-    os.path.relpath(path, root)
-    for path in glob.glob(os.path.join(root, "contracts", "*.md"))
-}
-if not on_disk:
-    print("  no contract document found at all — the probe checked nothing")
-    sys.exit(1)
-missing = sorted(on_disk - scanned)
-if missing:
-    print(f"  scan set is missing: {', '.join(missing)}")
-    sys.exit(1)
-print(f"  {len(on_disk)} contract document(s) in the scan set: {', '.join(sorted(on_disk))}")
+
+def probe_3(base):
+    # Change nothing about a green fixture: it must stay green.
+    fx = Fixture()
+    fx.write("src/mod.rs", "pub fn f() {}\nuse std::fmt;\n")
+    fx.write("spec.md", "See `src/mod.rs:2`.\n")
+    bad = ck("fixture builds a green lock", fx.update(), 0)
+    rc, _ = fx.check()
+    bad += ck("a clean fixture must stay green", rc, 0)
+    return 0 if bad == 0 else 1
+
+
+def probe_4(base):
+    # contracts/ was outside the scan until W32, so a citation there could name
+    # a file that does not exist while every gate stayed green. Add exactly that
+    # to a fixture contract document and demand a red.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "x\n")
+    fx.write("spec.md", "See `src/mod.rs:1`.\n")
+    bad += ck("fixture base lock is green", fx.update(), 0)
+    fx.write("contracts/contract.md",
+             "W32 probe: see `crates/chat-stasher/src/w32-probe-missing.rs:1`.\n")
+    rc, text = fx.check()
+    bad += ck("a dangling citation inside contracts/ must be red", rc, 1)
+    bad += ck_in("the red names the missing contract citation",
+                 text, "w32-probe-missing.rs")
+    return 0 if bad == 0 else 1
+
+
+def probe_5(base):
+    # Probe 4 proves a red; this one proves what the red is for — the scan set
+    # really is DOC_FILES plus every contract document. Read both from the
+    # checker in the fixture, never from prose here.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "x\n")
+    fx.write("spec.md", "See `src/mod.rs:1`.\n")
+    fx.write("contracts/alpha.md", "See `src/mod.rs:1`.\n")
+    fx.write("contracts/beta.md", "See `src/mod.rs:1`.\n")
+    scanned = set(fx.mod.doc_files())
+    on_disk = set(
+        os.path.relpath(p, fx.root)
+        for p in glob.glob(os.path.join(fx.root, "contracts", "*.md"))
+    )
+    if not on_disk:
+        print("  %s no fixture contract document found at all — nothing checked" % KO)
+        return 1
+    missing = sorted(on_disk - scanned)
+    if missing:
+        print("  %s scan set is missing: %s" % (KO, ", ".join(missing)))
+        bad += 1
+    else:
+        print("  %s scan set covers all %d fixture contracts: %s"
+              % (OK, len(on_disk), ", ".join(sorted(on_disk))))
+    if "spec.md" in scanned:
+        print("  %s spec.md (a DOC_FILES entry) is in the scan set" % OK)
+    else:
+        print("  %s spec.md (a DOC_FILES entry) is missing from the scan set" % KO)
+        bad += 1
+    return 0 if bad == 0 else 1
+
+
+def probe_6(base):
+    # An extensionless citation must be attributed to its own file (W35). The
+    # fixture sentence cites `src/mod.rs:1` first, so a parser that failed to
+    # see `.gitignore` as a path would inherit `src/mod.rs` and mis-anchor the
+    # bare `:12` — the exact bug. Green, and --list must own `.gitignore:12`
+    # with no inherited `src/mod.rs:12`.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "".join("mod l%d;\n" % i for i in range(20)))
+    fx.write(".gitignore", "\n".join("entry%d" % i for i in range(1, 16)) + "\n")
+    fx.write("spec.md", "W35 probe: see `src/mod.rs:1` and `.gitignore:12`.\n")
+    bad += ck("fixture builds a green lock including .gitignore:12", fx.update(), 0)
+    rc, _ = fx.check()
+    bad += ck("an extensionless citation of an unchanged fixture must stay green", rc, 0)
+    rc, out = fx.listed()
+    bad += ck_in("--list attributes the citation to .gitignore:12", out, ".gitignore:12")
+    bad += ck_not_in("no inherited src/mod.rs:12 anchor is invented", out, "src/mod.rs:12")
+    return 0 if bad == 0 else 1
+
+
+def probe_7(base):
+    # A continuation behind a token that is *shaped* like a path (it contains a
+    # slash) but names no file must fail instead of inheriting the citation
+    # before it (W35 / fail-loudly). The appended locked anchor keeps the red
+    # attributable to the token, not to a moved anchor.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "x\n")
+    fx.write("spec.md", "See `src/mod.rs:1`.\n")
+    bad += ck("fixture base lock is green", fx.update(), 0)
+    fx.write("spec.md",
+             "See `src/mod.rs:1`.\n\n"
+             "W35 probe: see `src/mod.rs:1`, `W35-PROBE-NOT-A-DIR/not-a-file:1`.\n")
+    rc, text = fx.check()
+    bad += ck("a continuation behind an unresolvable path token must be red", rc, 1)
+    bad += ck_in("the red names the token it could not resolve",
+                 text, "W35-PROBE-NOT-A-DIR/not-a-file")
+    return 0 if bad == 0 else 1
+
+
+def probe_8(base):
+    # code that merely precedes a colon and a number is not a citation (W35b).
+    # The appended sentence names a port, a host:port, a Rust path and a clock
+    # time — none path-shaped. The run stays green, and --list must not gain an
+    # anchor for any of them.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "x\n")
+    fx.write("spec.md", "See `src/mod.rs:1`.\n")
+    bad += ck("fixture base lock is green", fx.update(), 0)
+    _, before = fx.listed()
+    fx.write("spec.md",
+             "See `src/mod.rs:1`.\n\n"
+             "W35b probe: a port like `http://x:8080`, a host and port like `example.com:8080`,\n"
+             "a Rust path like `std::fmt:5` and a time like `HH:23` are plain code.\n")
+    rc, text = fx.check()
+    bad += ck("code that merely precedes a colon and a number must stay green", rc, 0)
+    _, after = fx.listed()
+    if before == after:
+        print("  %s no anchor was created for any of the four tokens" % OK)
+    else:
+        print("  %s the citation list changed; a token that names no file became an anchor:"
+              % KO)
+        for ln in difflib.unified_diff(before.splitlines(), after.splitlines(), n=1):
+            print("      " + ln)
+        bad += 1
+    return 0 if bad == 0 else 1
+
+
+def probe_9(base):
+    # Probe 8 widens what counts as *not* a citation. This pins the other edge:
+    # a citation that is a path by the letter of the rule (slash, known
+    # extension) of a file that does not exist must still be red, and name the
+    # path.
+    bad = 0
+    fx = Fixture()
+    fx.write("src/mod.rs", "x\n")
+    fx.write("spec.md", "See `src/mod.rs:1`.\n")
+    bad += ck("fixture base lock is green", fx.update(), 0)
+    fx.write("spec.md", "See `src/mod.rs:1`.\n\nW35b probe: see `not-a-real/dir.rs:3`.\n")
+    rc, text = fx.check()
+    bad += ck("a path-shaped citation of a missing file must be red", rc, 1)
+    bad += ck_in("the red names the path it could not resolve", text, "not-a-real/dir.rs")
+    return 0 if bad == 0 else 1
+
+
+PROBES = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+
+def run(num):
+    fn = globals().get("probe_%s" % num)
+    if fn is None:
+        print("unknown probe %s" % num, file=sys.stderr)
+        return 2
+    return fn(BASE)
 PY
-rc=$?
-expect 0 "$rc" "contracts/*.md must all be in the scan set"
+
+run_one() { # run_one <num>
+  python3 - "$REPO" "$TMP" "$1" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[2])
+import common as C
+sys.exit(C.run(sys.argv[3]))
+PY
+  return $?
+}
+
+titled() { # titled <num> <title> [desc...]
+  echo "=============================================================="
+  echo "Probe $1: $2"
+  shift 2
+  for line in "$@"; do echo "$line"; done
+  echo "=============================================================="
+}
+
+titled 1 "a continuation moved to an unrelated-but-legal line must be red (W33/W193)"
+echo "  Move \`:3\` (a continuation inheriting src/mod.rs) onto \`:1\` — a line that"
+echo "  exists and is non-empty but says nothing about the claim. Only hashing the"
+echo "  cited line catches it; bounds-and-non-empty would pass it."
+run_one 1; rc=$?
 echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 2 "content edited inside a cited range must be red"
+echo "  The range's first line (the snippet; line 271) is left alone and an inner"
+echo "  line is edited. Only hashing the whole range detects it."
+run_one 2; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 3 "change nothing must stay green"
+run_one 3; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 4 "a dangling citation inside contracts/ must be red (W32)"
+echo "  contracts/ sat outside the scan until W32; a citation there naming a"
+echo "  missing file must go red."
+run_one 4; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 5 "every contracts/*.md is in the scan set (W32)"
+echo "  Reads the scan set from the checker against the fixture, and compares it"
+echo "  with what is actually on disk in the fixture."
+run_one 5; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 6 "an extensionless citation is its own anchor (.gitignore, W35)"
+echo "  The fixture sentence also cites \`src/mod.rs:1\` first, so a parser that"
+echo "  failed to see \`.gitignore\` as a path would inherit src/mod.rs and mis-anchor"
+echo "  the bare \`:12\`. Green, and --list must own \`.gitignore:12\` with no inherited"
+echo "  \`src/mod.rs:12\`."
+run_one 6; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 7 "a continuation behind an unresolvable path token must be red (W35)"
+echo "  A token with a slash names no file; it must fail loudly instead of"
+echo "  inheriting the citation before it."
+run_one 7; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 8 "code that precedes a :N but names no file is not a citation (W35b)"
+echo "  A port, a host:port, a Rust path and a clock time stay green, and --list"
+echo "  must not gain an anchor for any of them."
+run_one 8; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
+
+titled 9 "a path-shaped citation of a missing file must still be red (W35b)"
+echo "  The other edge of probe 8: a slash + known-ext token of a missing file"
+echo "  is a citation, and it must be red and name the path."
+run_one 9; rc=$?
+echo
+[ "$rc" -ne 0 ] && FAILED=1
 
 echo "=============================================================="
-echo "Probe 6 (W35): an extensionless citation must be attributed to"
-echo "  its own file."
-echo "  docs-dev/install.md:188 writes \`.gitignore:12\`. The parser used to"
-echo "  recognise a path only when its extension was in CITED_EXTS, so"
-echo "  \`:15\` read as a *continuation* and inherited"
-echo "  apps/extension/package.json — a file the sentence never names,"
-echo "  anchored to content that had nothing to do with the claim."
-echo ""
-echo "  The probe cites \`.gitignore:12\` from the contract document — a"
-echo "  citation the lockfile already holds, word for word — and asks"
-echo "  two things of the run: it must stay green (so the citation is"
-echo "  answered by .gitignore's own lines, which have not changed), and"
-echo "  --list must attribute it to .gitignore and to nothing else."
-echo "  A parser that does not see .gitignore as a path reads the bare"
-echo "  \`:15\` instead, and there is no citation in that sentence for it"
-echo "  to inherit: red, and no such anchor in --list."
+echo "After: the working tree is untouched (all probes ran in \$TMP)"
 echo "=============================================================="
-PROBE6_CITE='W35 probe: see `.gitignore:12`.'
-PROBE6_DOC_ANCHOR='`.gitignore:12`'
-PROBE6_DOC_HITS="$(grep -c -F "$PROBE6_DOC_ANCHOR" "$REPO/docs-dev/install.md")"
-echo "  Target: contracts/nativehost-protocol.md, citing ${PROBE6_DOC_ANCHOR}"
-if [ "$PROBE6_DOC_HITS" != "1" ]; then
-  echo "  ✘ probe 6's anchor is on ${PROBE6_DOC_HITS} line(s) of docs-dev/install.md, not 1;"
-  echo "    the selftest itself is void (the citation moved, or the wording changed)"
+remains="$(git status --porcelain)"
+if [ -n "$remains" ]; then
+  printf '%s\n' "$remains"
   FAILED=1
-  PROBE6_CITE=""
-fi
-if ! grep -q '^\.gitignore:12  ' "$REPO/docs-dev/citations.lock"; then
-  echo "  ✘ .gitignore:12 is not a locked anchor; the probe would prove nothing"
-  FAILED=1
-  PROBE6_CITE=""
-fi
-cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
-if [ -n "$PROBE6_CITE" ]; then
-  printf '\n%s\n' "$PROBE6_CITE" >> "$REPO/contracts/nativehost-protocol.md"
-  if ! grep -q -F "$PROBE6_CITE" "$REPO/contracts/nativehost-protocol.md"; then
-    echo "  ✘ probe 6 could not modify the contract document; the selftest itself is void"
-    FAILED=1
-  fi
-fi
-$CHECK >"$TMP/probe6.out" 2>&1
-rc=$?
-expect 0 "$rc" "an extensionless citation of an unchanged, locked range must be green"
-if $CHECK --list 2>/dev/null | grep -q '^\.gitignore:12  '; then
-  echo "  ✔ --list attributes the citation to .gitignore:12"
 else
-  echo "  ✘ --list has no .gitignore:12 anchor; the citation was attributed elsewhere:"
-  sed 's/^/      /' "$TMP/probe6.out"
-  FAILED=1
+  echo "(empty)"
 fi
-cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-echo
-
-echo "=============================================================="
-echo "Probe 7 (W35; token re-pointed by W35b): a continuation whose own"
-echo "  path token cannot be resolved must fail instead of inheriting"
-echo "  the citation before it."
-echo "  The probe appends one line to the real contract document: a"
-echo "  citation of a range the lockfile holds, then a bare range"
-echo "  written behind a token that is shaped like a path — it contains"
-echo "  a slash, so W35b treats it as a citation that must resolve — and"
-echo "  names no file in the repository."
-echo "  Hereditary reading of that bare range points at the locked"
-echo "  anchor, so an inheriting parser stays green — which is the bug."
-echo "  W35b narrowed what this probe can be aimed at: a token with no"
-echo "  slash is plain inline code there (HH:23), it is not a citation,"
-echo "  and inheriting is the documented behaviour for it. The slash is"
-echo "  what keeps this probe pointed at the fail-loudly rule."
-echo "  The locked anchor is read from docs-dev/citations.lock at run time,"
-echo "  so it cannot rot into a copy of a range that no longer exists."
-echo "=============================================================="
-PROBE7_ANCHOR="$(awk '!/^#/ && NF>=3 && $1 ~ /\// {print $1; exit}' "$REPO/docs-dev/citations.lock")"
-PROBE7_RANGE="${PROBE7_ANCHOR##*:}"
-echo "  Target: contracts/nativehost-protocol.md, anchor ${PROBE7_ANCHOR:-none}"
-if [ -z "$PROBE7_ANCHOR" ] || ! grep -q -F "$PROBE7_ANCHOR  " "$REPO/docs-dev/citations.lock"; then
-  echo "  ✘ probe 7 found no path-shaped anchor in docs-dev/citations.lock; the selftest itself is void"
-  FAILED=1
-  PROBE7_ANCHOR=""
-fi
-PROBE7_TOKEN='W35-PROBE-NOT-A-DIR/not-a-file'
-cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
-if [ -n "$PROBE7_ANCHOR" ]; then
-  printf '\nW35 probe: see `%s`, `%s:%s`.\n' "$PROBE7_ANCHOR" "$PROBE7_TOKEN" "$PROBE7_RANGE" \
-    >> "$REPO/contracts/nativehost-protocol.md"
-  if ! grep -q -F "$PROBE7_TOKEN" "$REPO/contracts/nativehost-protocol.md"; then
-    echo "  ✘ probe 7 could not modify the contract document; the selftest itself is void"
-    FAILED=1
-  fi
-fi
-$CHECK >"$TMP/probe7.out" 2>&1
-rc=$?
-expect 1 "$rc" "a continuation behind an unresolvable path token must be red"
-if grep -q -F "$PROBE7_TOKEN" "$TMP/probe7.out"; then
-  echo "  ✔ the failure names the token it could not resolve"
-else
-  echo "  ✘ the failure does not name $PROBE7_TOKEN:"
-  sed 's/^/      /' "$TMP/probe7.out"
-  FAILED=1
-fi
-cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-echo
-
-echo "=============================================================="
-echo "Probe 8 (W35b): ordinary inline code that precedes a number is"
-echo "  not a citation."
-echo "  The probe appends one sentence to the real contract document:"
-echo "  a port, a host and a port, a Rust path and a clock time, each in"
-echo "  backticks. The token before each colon is \`//x\` (inside a URL"
-echo "  scheme), \`example.com\`, \`fmt\` and \`HH\` — none of them a file,"
-echo "  and none of them shaped like one."
-echo "  Two things are asked of the run: it must stay green, and the"
-echo "  anchor list must not change. A parser that demands every token"
-echo "  resolve fails here with 'is not a file in this repository'; a"
-echo "  parser that silently gives the bare \`:8080\` an inherited file"
-echo "  invents an anchor. Both are caught: the first by the exit code,"
-echo "  the second by the --list diff."
-echo "=============================================================="
-PROBE8_TEXT='W35b probe: a port like `http://x:8080`, a host and port like `example.com:8080`,
-a Rust path like `std::fmt:5` and a time like `HH:23` are plain code.'
-cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
-$CHECK --list >"$TMP/probe8.before" 2>&1
-printf '\n%s\n' "$PROBE8_TEXT" >> "$REPO/contracts/nativehost-protocol.md"
-if ! grep -q -F 'http://x:8080' "$REPO/contracts/nativehost-protocol.md" \
-  || ! grep -q -F 'HH:23' "$REPO/contracts/nativehost-protocol.md"; then
-  echo "  ✘ probe 8 could not modify the contract document; the selftest itself is void"
-  FAILED=1
-fi
-$CHECK >"$TMP/probe8.out" 2>&1
-rc=$?
-expect 0 "$rc" "code that merely precedes a colon and a number must not be red"
-$CHECK --list >"$TMP/probe8.after" 2>&1
-if diff -q "$TMP/probe8.before" "$TMP/probe8.after" >/dev/null; then
-  echo "  ✔ no anchor was created for any of the four tokens"
-else
-  echo "  ✘ the citation list changed; a token that names no file became an anchor:"
-  diff "$TMP/probe8.before" "$TMP/probe8.after" | sed 's/^/      /'
-  FAILED=1
-fi
-if [ "$rc" -ne 0 ]; then
-  sed 's/^/      /' "$TMP/probe8.out"
-fi
-cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-echo
-
-echo "=============================================================="
-echo "Probe 9 (W35b): a path-shaped citation of a missing file is"
-echo "  still red."
-echo "  Probe 8 widens what counts as *not* a citation. This one pins"
-echo "  the other edge: the same document gets a citation that is a"
-echo "  path by the letter of the rule — it contains a slash and ends"
-echo "  in a known extension — and that file does not exist. Silencing"
-echo "  it would be the cheap way to make probe 8 green, so the red is"
-echo "  asserted here, together with the token named in the failure."
-echo "=============================================================="
-PROBE9_CITE='W35b probe: see `not-a-real/dir.rs:3`.'
-cp "$REPO/contracts/nativehost-protocol.md" "$TMP/nativehost-protocol.md"
-printf '\n%s\n' "$PROBE9_CITE" >> "$REPO/contracts/nativehost-protocol.md"
-if ! grep -q -F 'not-a-real/dir.rs:3' "$REPO/contracts/nativehost-protocol.md"; then
-  echo "  ✘ probe 9 could not modify the contract document; the selftest itself is void"
-  FAILED=1
-fi
-$CHECK >"$TMP/probe9.out" 2>&1
-rc=$?
-expect 1 "$rc" "a citation of a file that does not exist must be red"
-if grep -q -F 'not-a-real/dir.rs' "$TMP/probe9.out"; then
-  echo "  ✔ the failure names the path it could not resolve"
-else
-  echo "  ✘ the failure does not name not-a-real/dir.rs:"
-  sed 's/^/      /' "$TMP/probe9.out"
-  FAILED=1
-fi
-cp "$TMP/nativehost-protocol.md" "$REPO/contracts/nativehost-protocol.md"
-echo
-
-echo "=============================================================="
-echo "After: the working tree should hold only the intended new files"
-echo "=============================================================="
-git status --porcelain
 echo
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "SELFTEST PASS: all nine probes returned the exit code they must."
+  echo "SELFTEST PASS: all nine probes asserted what they must, against self-contained fixtures."
   exit 0
 fi
-echo "SELFTEST FAIL: a probe returned the wrong exit code."
+echo "SELFTEST FAIL: at least one probe returned the wrong result."
 exit 1
