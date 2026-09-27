@@ -2,6 +2,7 @@
 name: chat-stasher
 description: Install, check and operate chat-stasher, the encrypted append-only archive of AI conversations. Use when asked to back up, check or find AI chat history.
 license: Apache-2.0
+compatibility: Requires the chat-stasher CLI, version 0.5.0 or newer. Run `chat-stasher --version` first and use the manual path when the binary predates that.
 metadata:
   homepage: https://github.com/dimpurr/chat-stasher
 ---
@@ -14,9 +15,9 @@ This skill is deliberately thin. **The CLI is the authority. This file only tell
 
 ## Rules that always apply
 
-1. **Start with the read-only checks.** Run `chat-stasher --version`, then `chat-stasher doctor --json` (see [Step 1](#step-1-check-the-machine)). If the binary is missing, go to [Step 0](#step-0-is-it-installed).
+1. **Start with the read-only checks, and read the version first.** Run `chat-stasher --version`, then `chat-stasher doctor --json` (see [Step 1](#step-1-check-the-machine)). The version decides which setup path you may offer, so read it before you offer either: the floor this file declares is in its `compatibility` line at the top, and rule 2 says what to do below it. If the binary is missing, go to [Step 0](#step-0-is-it-installed).
 2. **Only use commands and flags that exist in the installed version.** Confirm them with `chat-stasher --help` and `chat-stasher <command> --help`. Do not invent subcommands. In particular:
-   - `setup` exists from the 0.5.0 release candidates onward. 0.4.0 and older do not have it, so check before you offer it and use the manual path in [Step 2](#step-2-first-archive-on-this-disk) if it is absent;
+   - `setup` needs **0.5.0 or newer**: that is the floor in this file's `compatibility` line. `0.4.0` and older have no such command at all, so on those tell the user and use the manual path in [Step 2](#step-2-first-archive-on-this-disk); do not offer a command that is not there. Ask `chat-stasher setup --help` whether it is there before you plan around it, and if it is, use it: even an early build does more than the manual path. What such a build may lack are the flags that came later. The release candidate `0.5.0-rc.2` has `setup`, but its destination and scheduler steps only print what they would do, so its `setup --help` does not list `--remote`, `--trust-host` or `--uninstall-schedule`. Confirm every flag before you pass it, and never spend the user's answer on a flag their build does not have;
    - there is **no `restore`** command: nothing writes a session back into a tool's own folder;
    - there is **no `delete`** command.
 3. **Secrets never pass through you.** Storage credentials (R2 / S3 keys, SFTP passwords) and the master key file are typed or copied by the user, **on their own machine, into their own files**. Do not ask for them in chat. Do not put them on a command line; command lines end up in logs and shell history. The two credential flags of `setup` name the **environment variables** that hold the credentials, never the values. Do not print key files, or config sections that hold credentials.
@@ -76,50 +77,95 @@ If it is already healthy, skip to [Everyday use](#everyday-use).
 
 ## Step 2: first archive, on this disk
 
-If `setup` exists in the installed version, prefer it: it runs the first pass, proves a second pass adds nothing, reads one session back out, and shows the user the one file they cannot lose.
+`setup` is the path. One run scans, archives once, proves that a second pass adds nothing, reads one session back out, and shows the user the one file they cannot lose. In a terminal it prompts. With no terminal it takes named flags instead, prints exactly one JSON object, and never prompts:
 
 ```sh
-chat-stasher setup
+chat-stasher setup --stage <stage> --json
 ```
 
-A non-TTY run does the same work from named flags and prints one JSON object, including any missing named parameters. The destination step writes a `[destinations.<name>]` block and then runs `dest-init`. The scheduler step is still a stub: it plans and prints, and installs nothing, so do [Step 3](#step-3-hourly-archiving) yourself.
+Use that form even when it would be chosen for you, because you are not a terminal: `--json` states the contract you are reading from.
 
-Otherwise, do it by hand, but know that this is **less** than `setup` does, not the same work. `setup` runs the pass twice and reads a session back out; the manual path runs **one** pass and reads nothing back, so it gives you no evidence that the archive can be opened again. If the user needs that proof, use `setup`.
+- `--stage <stage>` is the one required parameter. The stage is a folder where sealed sessions wait before they are archived, so it must not be deleted. Suggest `~/stash/chat-stasher/stage`, and let the user confirm the path: every future run deposits their data there.
+- A missing named parameter is **reported, never guessed**: `missing_parameters` names the flags the run needed and did not get, and the run exits `2`. Supply them and run it again. Nothing was written.
+- The exit codes are the tool's own: `0` finished · `1` finished and a step failed · `3` did not finish reading, so nothing it failed to look at may be reported as absent · `2` a usage error. The `exit_code` field inside the object is the same decision as the process status, not a second opinion.
+- Warnings go to stderr. Read stdout only, and parse it as one object.
+
+Read the object before you report anything:
+
+| Field | What it tells you |
+|---|---|
+| `steps.stage` | `provided` or `missing` |
+| `steps.local_save` | `created` (this run made the repository and the masterkey), `existed`, `nothing_to_archive`, `failed`, `unknown` |
+| `steps.masterkey` | `declared`, `not_declared`, or `absent` when no key exists yet |
+| `steps.destination`, `steps.schedule`, `steps.native_host` | how far those steps got |
+| `chain` | `init`, `noop` and `readback`, each `observed` where the run watched it happen, and an explicit unknown where it did not |
+| `incomplete` | the steps that did not finish, named one by one |
+| `unread` | the parts that could not be read. When this is not empty the exit code is `3`, and every empty collection elsewhere in the object means "did not look" rather than "nothing there" |
+
+`chain.readback` being `known` is the evidence that the archive can be opened again; the manual path below cannot give you that. Report an unknown as unknown, with its `why`: never as `0`, never as `no`, never as `nothing`.
+
+**Human step: the master key.** The first pass that archives something creates `~/.local/share/chat-stasher/masterkey.json`. A pass with nothing to archive creates neither the repository nor the key, and then `steps.masterkey` is `absent`, which is a third answer and not a "no": there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there.
+
+When a key does exist, the run records whether the user has said they keep a copy. Until they have, `steps.masterkey` is `not_declared` and the run exits `2` with `masterkey_saved_elsewhere` in `missing_parameters`. Tell the user to copy that file somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file. Wait for their answer, then re-run the same command with `--masterkey-saved-elsewhere`, which records it.
+
+Do not pass that flag before they answer: it is a declaration about their machine, and the tool's own output says so, with `masterkey.declaration_is_verified` set to `false`. Nothing here, and nothing anywhere else, can check that a copy exists.
+
+The off-site copy and the hourly timer are the steps that follow, and `setup` can take both: [Step 4](#step-4-an-off-site-copy-optional-recommended) for `--destination` and `--remote`, [Step 3](#step-3-hourly-archiving) for `--install-schedule`.
+
+### If the installed version has no `setup`
+
+Below 0.5.0 there is no wizard, and the manual path is **less** than what `setup` does, not the same work: `setup` runs the pass twice and reads a session back out, while this runs **one** pass and reads nothing back, so it gives you no evidence that the archive can be opened again. Say that to the user rather than offering the two as equivalent.
 
 ```sh
 chat-stasher init
-```
-
-This writes a commented `~/.config/chat-stasher/config.toml` only if none exists, and never overwrites one.
-
-Ask the user where the **stage** should live. The stage is a folder where sessions wait before being archived, so it must not be deleted. Suggest `~/stash/chat-stasher/stage`, then:
-
-```sh
 mkdir -p <stage>
 chat-stasher run-once --stage <stage>
 ```
 
-With no destination declared, this archives to `~/.local/share/chat-stasher/repo`. Success ends with `result: COMPLETED` on the first run, and `result: NOOP` when nothing changed. Both exit `0`.
-
-**Human step: the master key (only if the run actually created one).** The key is made by the step that writes a snapshot, so a `NOOP` run creates neither the repository nor `~/.local/share/chat-stasher/masterkey.json`: there was nothing to archive, and `push` never ran. In that case there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there. The step applies to the first run that archives something. Read the `result:` line, and treat `COMPLETED` as "a key now exists".
-
-When a key does exist, tell the user to copy `~/.local/share/chat-stasher/masterkey.json` somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file.
+`init` writes a commented `~/.config/chat-stasher/config.toml` only if none exists, and never overwrites one. Ask the user where the stage should live before running the second command. With no destination declared, `run-once` archives to `~/.local/share/chat-stasher/repo`. Success ends with `result: COMPLETED` on the first run, and `result: NOOP` when nothing changed. Both exit `0`. The master key step above applies here too, with one difference you have to read for yourself: a key exists only if the run actually archived something, so treat `COMPLETED` as "a key now exists" and `NOOP` as "there is nothing to back up yet".
 
 ## Step 3: hourly archiving
+
+If you are already running `setup`, pass it `--install-schedule` and let the wizard do this as its last step: it installs the timer, exercises the scheduled command once, and reports when the timer will next run. Otherwise the work is two commands, one that renders the timer and one that installs it.
 
 ```sh
 chat-stasher schedule --stage <stage> --output ~/Library/LaunchAgents/com.chat-stasher.run-once.plist
 ```
 
-On Linux, use `--format systemd --output ~/.config/systemd/user/`.
+On Linux, use `--format systemd --output ~/.config/systemd/user/`. Without `--output`, `schedule` prints the rendered unit instead of writing it.
 
-`schedule` **writes the timer file but does not install it**, and the install action it offers is macOS-only. It prints the exact command to run instead. Show that command to the user, and run it only if they agree: it registers a background job. Then confirm the timer with `chat-stasher status`.
+`schedule` **writes the timer file but does not install it**. `chat-stasher schedule install --stage <stage>` installs it with the platform's scheduler (add `--format systemd` on Linux), and `chat-stasher schedule uninstall` stops and removes it. Installing registers a background job, so show the user what it will do and run it only if they agree. Then confirm the timer with `chat-stasher status`.
 
-If destinations are declared (Step 4), `run-once` and `schedule` also need `--destination <name>`.
+The next run is reported where the scheduler itself can answer it, and otherwise the report says why there is no time to give. A cadence is never printed as a timestamp, so do not turn one into a timestamp yourself.
+
+If destinations are declared (Step 4), `run-once`, `schedule` and `schedule install` also need `--destination <name>`.
 
 ## Step 4: an off-site copy (optional, recommended)
 
-Read [docs/destinations.md](docs/destinations.md) for the exact config of each kind. Your part:
+Read [docs/destinations.md](docs/destinations.md) for the exact config of each kind.
+
+`setup` does all of it in one run when you hand it the recipe, and reports it in the same JSON object as the steps before it:
+
+```sh
+chat-stasher setup --stage <stage> --destination <name> --remote <kind> --json
+```
+
+`sftp` also needs `--remote-endpoint ssh://<host>:<port>` and `--remote-user <user>`. `s3` also needs `--remote-endpoint <url>`, `--remote-bucket <bucket>`, and the **names** of two environment variables, `--remote-access-key-id-env <VAR>` and `--remote-secret-key-env <VAR>`. Names are what those two flags take, never the credentials themselves: a pasted key is refused before anything is read or written. The user exports those variables in their own shell; the config records the names, so the values never pass through you, a command line, or a log.
+
+A variable the user has not exported yet is not a reason to stop the run: the config block is still written, `credentials` reports that variable as unset, and the connection fails later with a credential error. Tell the user to export it, and run `setup` again (or `dest-init` on its own): the destination block does not have to change. A destination already declared in the config is adopted and verified as it stands, never rewritten, so a second run needs no parameters.
+
+Then read `destination` in the object, field by field:
+
+| Field | What it tells you |
+|---|---|
+| `config` | `written`, `already_declared`, `not_written`, `failed` |
+| `reach` | `reached`, `untrusted_host`, `host_key_changed`, `unreachable`, `unreadable` |
+| `trust` | `not_required`, `required`, `declared`, `declined`, with `known_hosts_write_authorized` and, for `declared`, `declaration_is_verified` |
+| `dest_init` | `ran` with its `exit_code`, or `not_run` with the reason it never started |
+| `credentials` | `checked` per variable, or `none_named`, or `not_checked` with why |
+| `recommended_remote_kind` | the kind the wizard suggests |
+
+Doing it by hand is the same work in more steps:
 
 1. Ask which destination the user wants. The choices are Cloudflare R2, an SFTP server, or an external disk.
 2. Show the config block from that page **with placeholders**. The user fills in the real values themselves, in `~/.config/chat-stasher/config.toml`. If the block holds credentials, suggest `chmod 600` on the file.
@@ -128,11 +174,11 @@ Read [docs/destinations.md](docs/destinations.md) for the exact config of each k
    ```sh
    chat-stasher dest-init --destination <name> --stage <stage>
    ```
-4. **SFTP, first connection:** the command stops with exit code `3` and prints the fingerprints the server presented, and writes nothing.
-   - **Human step:** ask the user to compare them with the fingerprints their provider publishes.
-   - Only if they say the fingerprints match, re-run with `--trust-host`. It is the only thing in chat-stasher that writes `~/.ssh/known_hosts`.
-   - If a host's key has *changed* since it was trusted, stop. Do not try to get past it.
-5. Exit `3` means "did not finish reading". It never means "the destination is empty".
+4. **SFTP, first connection: stop for the human step.** The command stops with exit code `3` and prints the fingerprints the server presented, and writes nothing. The `setup` form stops the same way: `trust.kind` is `required`, `known_hosts_write_authorized` is `false`, and `dest-init` does not run at all.
+   - **Human step:** ask the user to compare the fingerprints with the ones their provider publishes.
+   - Only if they say the fingerprints match, re-run with `--trust-host`, which `setup` takes under the same condition. It is the only thing in chat-stasher that writes `~/.ssh/known_hosts`, and the object records it as a declaration, not a verification: `declaration_is_verified` is `false`.
+   - If a host's key has *changed* since it was trusted, stop. Do not try to get past it, and do not offer a way to.
+5. Exit `3` means "did not finish reading". It never means "the destination is empty", and it never means the archive is not there.
 
 ## Step 5: web chats (optional)
 
@@ -142,7 +188,9 @@ The browser extension needs the local host, registered with the **same stage**. 
 chat-stasher install-native-host --stage <stage>
 ```
 
-It prints every file it wrote, and `--uninstall` removes exactly those. This half is per **machine**, not per browser profile: one run registers every installed browser, all of them pointing at the same stage, so never tell the user to run it again for another profile.
+`setup` does not do this step for you. Its `steps.native_host` field is a read-only check of whether a registration already exists on this machine, and it installs nothing, so a run that reports `none_registered` has told you what to do next rather than having done it.
+
+`install-native-host` prints every file it wrote, and `--uninstall` removes exactly those. This half is per **machine**, not per browser profile: one run registers every installed browser, all of them pointing at the same stage, so never tell the user to run it again for another profile.
 
 **Human step:** the user downloads `chat-stasher-extension-X.Y.Z.zip` from the [latest release](https://github.com/dimpurr/chat-stasher/releases/latest), unzips it into a folder they keep, and loads it in `chrome://extensions` → Developer mode → **Load unpacked**. Then they reload any chat tabs that were already open, because a tab that existed before the extension was installed is not captured until it is reloaded. You cannot click these for them.
 
