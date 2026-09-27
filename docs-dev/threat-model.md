@@ -342,9 +342,12 @@ never synced (`apps/extension/lib/account-fingerprint.ts:153-188`,
 `:195-219`). It exists so a capture made after an account switch is
 distinguishable from one made before it, which the identity above cannot always
 do. Two limits are worth stating rather than leaving to be discovered: the
-**input id is never written** and no email is ever used as input, so the value
-cannot be turned back into an account id from the archive alone; and because the
-salt is per install, fingerprints from two installs or two profiles are
+fingerprint value is not the input id, and no email is ever used as input, so
+the fingerprint cannot be turned back into an account id from the archive alone.
+W218 keeps the raw id as a separate local outbox field until native delivery;
+the host discards it after deriving the cross-install key, and the sidecar is
+not part of the payload or export. Because the fingerprint salt is per install,
+fingerprints from two installs or two profiles are
 **incomparable** — a mismatch there is not evidence of a switch
 (`apps/extension/lib/contract.ts:1095-1099`). When no account id is visible the
 bundle carries an explicit `unknown` with a named reason instead of a value, so

@@ -187,6 +187,12 @@
         "fingerprint": {
           "$ref": "#/$defs/sha256",
           "description": "Optional. The content fingerprint of the capture this payload was built from, recorded on the sealed shard and answered back by `has` (§6.6). Not required: an extension that does not send it, and every shard sealed before this field existed, is recognised by its exact bytes alone (§7). Since W213 the bundle inside `payload` carries the same value under the same field name (inbox.schema.json), so a payload written to an §8 export file does not lose it on import; this message-level field remains the one a live `deliver` seals from."
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "W218 optional transient platform account id. The host derives a masterkey-scoped HMAC and does not return or persist this raw value."
         }
       },
       "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
@@ -552,6 +558,11 @@
         "retry_after_ms": {
           "type": "integer",
           "minimum": 0
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
         }
       },
       "description": "Machine-wide backfill claim, request token, release or rate-limit report (nativehost-protocol.md §6.7)."

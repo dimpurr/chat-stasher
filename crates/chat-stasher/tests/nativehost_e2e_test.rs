@@ -1811,7 +1811,7 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
         .join("data/chat-stasher/state/extension-coordination.sqlite3");
     let conn = rusqlite::Connection::open(db).expect("coordination database exists");
     conn.execute(
-        "UPDATE ext_platform SET lease_until=0 WHERE platform='chatgpt'",
+        "UPDATE ext_platform_v2 SET lease_until=0 WHERE platform='chatgpt' AND account_key=''",
         [],
     )
     .expect("expire lease");
@@ -1859,7 +1859,7 @@ fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
     let conn = rusqlite::Connection::open(db).expect("coordination database exists");
     let owner: Option<String> = conn
         .query_row(
-            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            "SELECT owner FROM ext_platform_v2 WHERE platform='claude' AND account_key=''",
             [],
             |row| row.get(0),
         )
@@ -1868,7 +1868,7 @@ fn coordination_rate_limit_keeps_owner_until_last_holder_releases() {
     assert_eq!(send("release", "release", "install-a")["granted"], true);
     let owner: Option<String> = conn
         .query_row(
-            "SELECT owner FROM ext_platform WHERE platform='claude'",
+            "SELECT owner FROM ext_platform_v2 WHERE platform='claude' AND account_key=''",
             [],
             |row| row.get(0),
         )

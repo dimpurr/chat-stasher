@@ -506,6 +506,10 @@ struct ShardRecord {
     /// id or the dedup key — those remain `platform.sessionId` / `file_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<serde_json::Value>,
+    /// W218 · comparable account key derived by the native host, never supplied
+    /// by extension bundle bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -811,6 +815,7 @@ pub fn seal_payload(
     machine: &str,
     bucket_cap: usize,
     fingerprint: Option<&str>,
+    account_key: Option<&str>,
 ) -> Result<SealOutcome, SealError> {
     store::assert_stage_writer_audited(store::StageWriter::Ingest).map_err(SealError::Other)?;
 
@@ -860,6 +865,7 @@ pub fn seal_payload(
             .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
         identity: parsed.identity,
         account: parsed.account,
+        account_key: account_key.map(str::to_string),
         install_id: parsed.install_id,
         browser: parsed.browser,
         profile_label: parsed.profile_label,
@@ -1014,7 +1020,7 @@ fn consume_one(
     //    `ingest_export_file` therefore seals), a hand-dropped file naming a
     //    `fingerprint` proves nothing, so this channel does not read the field
     //    at all.
-    let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap, None)?;
+    let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap, None, None)?;
     // Seal first, retire second.
     retire(name, path, consumed_dir)?;
     Ok(outcome)
@@ -1103,6 +1109,7 @@ fn ingest_export_file(
             machine,
             bucket_cap,
             fingerprint.as_deref(),
+            None,
         ) {
             Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
             Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
@@ -1953,6 +1960,32 @@ mod tests {
             rec.get("account").is_none(),
             "an @1 bundle must not gain an account key",
         );
+    }
+
+    #[test]
+    fn host_derived_account_key_is_stored_in_shard_metadata_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let payload = synthetic_bundle_v2_account(
+            "sess-key",
+            "synthetic body",
+            r#"{"kind":"fingerprint","value":"0000000000000000000000000000000000000000000000000000000000000000","saltId":"install-salt","source":"response-body-platform-uid"}"#,
+        );
+        let account_key = "a".repeat(64);
+        seal_payload(
+            "deepseek-sess-key.json",
+            payload.as_bytes(),
+            &stage,
+            "mbp-test",
+            store::DEFAULT_SHARD_BUCKET_CAP,
+            None,
+            Some(&account_key),
+        )
+        .unwrap();
+        let record = only_shard_record(&stage, "mbp-test", "deepseek.sess-key");
+        assert_eq!(record["account_key"].as_str().unwrap().len(), 64);
+        assert!(!payload.contains("account_key"));
     }
 
     /// An `account` that is not a fingerprint envelope (no string `kind`) is not

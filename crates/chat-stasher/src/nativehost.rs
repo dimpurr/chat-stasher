@@ -1214,6 +1214,8 @@ struct DeliverRequest {
     /// only by its exact bytes, which is exactly the behaviour before this field
     /// existed.
     fingerprint: Option<String>,
+    /// W218 · transient account id used only by the host to derive the archive key.
+    account_id: Option<String>,
 }
 
 /// `has` request body (§6.6). `protocol` and `type` are checked before this is
@@ -1235,6 +1237,84 @@ struct CoordinationRequest {
     segment: Option<String>,
     status: Option<u16>,
     retry_after_ms: Option<u64>,
+    /// W218 · raw id crosses native messaging only; the host stores its HMAC.
+    account_id: Option<String>,
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Vec::with_capacity(64 + message.len());
+    inner.extend(block.iter().map(|b| b ^ 0x36));
+    inner.extend_from_slice(message);
+    let digest = Sha256::digest(&inner);
+    let mut outer = Vec::with_capacity(96);
+    outer.extend(block.iter().map(|b| b ^ 0x5c));
+    outer.extend_from_slice(&digest);
+    Sha256::digest(&outer).into()
+}
+
+fn account_key_from_masterkey_bytes(
+    masterkey: &[u8],
+    platform: &str,
+    account_id: &str,
+) -> Option<String> {
+    if masterkey.is_empty()
+        || account_id.is_empty()
+        || account_id.len() > 4096
+        || account_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let salt = hmac_sha256(masterkey, b"chat-stasher/cross-install-account/salt/v1");
+    let message = format!("chat-stasher/cross-install-account/v1\0{platform}\0{account_id}");
+    let digest = hmac_sha256(&salt, message.as_bytes());
+    Some(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Derive the cross-install key from the configured archive masterkey. Missing,
+/// ambiguous, or unreadable key configuration deliberately means no comparable key.
+fn cross_install_account_key(platform: &str, account_id: &str) -> Option<String> {
+    if account_id.is_empty() || account_id.len() > 4096 || account_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let config = Config::load().ok()?;
+    let key_file = if let Some(native) = config
+        .native_host
+        .as_ref()
+        .and_then(|h| h.destination.as_deref())
+    {
+        config
+            .destinations
+            .get(native)
+            .and_then(|d| d.key_file.as_deref())
+            .or(config.rustic_key_file.as_deref())?
+    } else if config.destinations.is_empty() {
+        config.rustic_key_file.as_deref()?
+    } else if config.destinations.len() == 1 {
+        config
+            .destinations
+            .values()
+            .next()?
+            .key_file
+            .as_deref()
+            .or(config.rustic_key_file.as_deref())?
+    } else {
+        return None;
+    };
+    let masterkey = crate::store::load_key_file(&crate::store::StoreConfig {
+        key_file: PathBuf::from(key_file),
+        ..Default::default()
+    })
+    .ok()?;
+    let material = crate::store::serialize_key(&masterkey).ok()?;
+    account_key_from_masterkey_bytes(material.as_bytes(), platform, account_id)
 }
 
 /// EXT-3 coordination state. Native messaging starts a fresh host process per
@@ -1256,6 +1336,10 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
         || (parsed.mode == "token"
             && !matches!(parsed.segment.as_deref(), Some("enumerate" | "detail")))
         || (parsed.mode == "rate_limit" && !matches!(parsed.status, Some(403 | 429)))
+        || parsed
+            .account_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control))
     {
         return nack(
             request_id,
@@ -1289,7 +1373,11 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
     let setup = conn.execute_batch(
         "PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS ext_install(platform TEXT NOT NULL, install_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id));
-         CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));"
+         CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));
+         CREATE TABLE IF NOT EXISTS ext_install_v2(platform TEXT NOT NULL, install_id TEXT NOT NULL, account_key TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id,account_key));
+         CREATE TABLE IF NOT EXISTS ext_platform_v2(machine TEXT NOT NULL, platform TEXT NOT NULL, account_key TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform,account_key));
+         INSERT OR IGNORE INTO ext_install_v2(platform,install_id,account_key,seen_at) SELECT platform,install_id,'',seen_at FROM ext_install;
+         INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key,owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count) SELECT machine,platform,'',owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform;"
     );
     if let Err(e) = setup {
         return nack(
@@ -1307,21 +1395,27 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
     }
     let now = chrono::Utc::now().timestamp_millis();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let account_key = parsed
+        .account_id
+        .as_deref()
+        .and_then(|id| cross_install_account_key(&parsed.platform, id))
+        // reason: missing account identity or masterkey keeps arbitration platform-wide.
+        .unwrap_or_default(); // reason: missing account identity or masterkey keeps arbitration platform-wide.
     let result = (|| -> anyhow::Result<serde_json::Value> {
         conn.execute(
-            "DELETE FROM ext_install WHERE seen_at<=?1",
+            "DELETE FROM ext_install_v2 WHERE seen_at<=?1",
             [now - 30 * 24 * 60 * 60 * 1000],
         )?;
-        conn.execute("INSERT INTO ext_install(platform,install_id,seen_at) VALUES(?1,?2,?3) ON CONFLICT(platform,install_id) DO UPDATE SET seen_at=excluded.seen_at", rusqlite::params![parsed.platform, parsed.install_id, now])?;
+        conn.execute("INSERT INTO ext_install_v2(platform,install_id,account_key,seen_at) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,install_id,account_key) DO UPDATE SET seen_at=excluded.seen_at", rusqlite::params![parsed.platform, parsed.install_id, account_key, now])?;
         conn.execute(
-            "INSERT OR IGNORE INTO ext_platform(machine,platform) VALUES(?1,?2)",
-            rusqlite::params![machine, parsed.platform],
+            "INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key) VALUES(?1,?2,?3)",
+            rusqlite::params![machine, parsed.platform, account_key],
         )?;
-        let (owner, lease_until, cooldown_until, next_enum, next_detail, detail_day, detail_count): (Option<String>,i64,i64,i64,i64,String,i64) = conn.query_row("SELECT owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
-        conn.execute("UPDATE ext_platform SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND lease_until<=?3", rusqlite::params![machine,parsed.platform,now])?;
+        let (owner, lease_until, cooldown_until, next_enum, next_detail, detail_day, detail_count): (Option<String>,i64,i64,i64,i64,String,i64) = conn.query_row("SELECT owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform_v2 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+        conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND lease_until<=?4", rusqlite::params![machine,parsed.platform,account_key,now])?;
         let active: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ext_install WHERE platform=?1 AND seen_at>?2",
-            rusqlite::params![parsed.platform, now - 24 * 60 * 60 * 1000],
+            "SELECT COUNT(*) FROM ext_install_v2 WHERE platform=?1 AND account_key=?2 AND seen_at>?3",
+            rusqlite::params![parsed.platform, account_key, now - 24 * 60 * 60 * 1000],
             |r| r.get(0),
         )?;
         let mut granted = false;
@@ -1340,11 +1434,11 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
                 };
                 granted = owner_available && wait == 0;
                 if granted && wait == 0 {
-                    conn.execute("UPDATE ext_platform SET owner=?3,lease_until=?4 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,parsed.install_id,now+120_000])?;
+                    conn.execute("UPDATE ext_platform_v2 SET owner=?4,lease_until=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id,now+120_000])?;
                 }
             }
             "release" => {
-                conn.execute("UPDATE ext_platform SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND owner=?3", rusqlite::params![machine,parsed.platform,parsed.install_id])?;
+                conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND owner=?4", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id])?;
                 granted = true;
             }
             "rate_limit" => {
@@ -1353,7 +1447,7 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
                     .unwrap_or(0) // reason: missing Retry-After still applies the 60s machine cooldown floor.
                     .min(30 * 24 * 60 * 60 * 1000) as i64;
                 new_cooldown = now + header.max(60_000);
-                conn.execute("UPDATE ext_platform SET cooldown_until=MAX(cooldown_until,?3) WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,new_cooldown])?;
+                conn.execute("UPDATE ext_platform_v2 SET cooldown_until=MAX(cooldown_until,?4) WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,new_cooldown])?;
                 wait = header.max(60_000);
             }
             _ => {
@@ -1384,9 +1478,9 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
                     };
                     let next_at = now + interval;
                     if is_detail {
-                        conn.execute("UPDATE ext_platform SET lease_until=?3,next_detail=?4,detail_day=?5,detail_count=CASE WHEN detail_day=?5 THEN detail_count+1 ELSE 1 END WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,now+120_000,next_at,today])?;
+                        conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_detail=?5,detail_day=?6,detail_count=CASE WHEN detail_day=?6 THEN detail_count+1 ELSE 1 END WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at,today])?;
                     } else {
-                        conn.execute("UPDATE ext_platform SET lease_until=?3,next_enum=?4 WHERE machine=?1 AND platform=?2", rusqlite::params![machine,parsed.platform,now+120_000,next_at])?;
+                        conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_enum=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at])?;
                     }
                 }
             }
@@ -1831,6 +1925,13 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
             return nack(request_id, NackKind::BadRequest, "malformed `fingerprint`");
         }
     }
+    if parsed
+        .account_id
+        .as_ref()
+        .is_some_and(|id| id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control))
+    {
+        return nack(request_id, NackKind::BadRequest, "malformed `account_id`");
+    }
     let request_id = Some(parsed.request_id.clone());
 
     // Recomputed over the UTF-8 bytes of the *decoded* payload, which is what
@@ -1856,6 +1957,25 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
     if let Err(detail) = inbox::check_bundle(parsed.payload.as_bytes()) {
         return nack(request_id, NackKind::InvalidBundle, detail);
     }
+    let bundle: serde_json::Value = match serde_json::from_str(&parsed.payload) {
+        Ok(value) => value,
+        Err(e) => {
+            return nack(
+                request_id,
+                NackKind::InvalidBundle,
+                format!("invalid JSON bundle: {e}"),
+            )
+        }
+    };
+    // reason: validated legacy bundles without a platform cannot produce a cross-platform key.
+    let platform = bundle
+        .get("platform")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default(); // reason: validated legacy bundles without a platform cannot produce a cross-platform key.
+    let account_key = parsed
+        .account_id
+        .as_deref()
+        .and_then(|id| cross_install_account_key(platform, id));
 
     match inbox::seal_payload(
         &parsed.name,
@@ -1864,6 +1984,7 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         &machine,
         crate::store::DEFAULT_SHARD_BUCKET_CAP,
         parsed.fingerprint.as_deref(),
+        account_key.as_deref(),
     ) {
         Ok(inbox::SealOutcome::Stored(consumed)) => serde_json::json!({
             "protocol": PROTOCOL,
@@ -2834,6 +2955,50 @@ pub fn serve_stdin() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use crate::json_out::TimeState;
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_sample() {
+        let digest = hmac_sha256(&[0x0b; 20], b"Hi There");
+        assert_eq!(
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn cross_install_account_key_is_masterkey_scoped_and_never_exists_without_a_key() {
+        let first = account_key_from_masterkey_bytes(
+            b"synthetic-masterkey",
+            "claude",
+            "synthetic-account-a",
+        )
+        .unwrap();
+        let second_install = account_key_from_masterkey_bytes(
+            b"synthetic-masterkey",
+            "claude",
+            "synthetic-account-a",
+        )
+        .unwrap();
+        let other_account = account_key_from_masterkey_bytes(
+            b"synthetic-masterkey",
+            "claude",
+            "synthetic-account-b",
+        )
+        .unwrap();
+        let other_platform = account_key_from_masterkey_bytes(
+            b"synthetic-masterkey",
+            "chatgpt",
+            "synthetic-account-a",
+        )
+        .unwrap();
+        assert_eq!(first, second_install);
+        assert_ne!(first, other_account);
+        assert_ne!(first, other_platform);
+        assert!(account_key_from_masterkey_bytes(b"", "claude", "synthetic-account-a").is_none());
+    }
 
     #[test]
     fn host_name_grammar_rejects_hyphen_and_uppercase() {

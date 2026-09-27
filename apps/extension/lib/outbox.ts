@@ -106,6 +106,8 @@ export interface OutboxEntry {
   name: string;
   /** §6.2 `payload` — the bundle serialised with JSON.stringify. */
   payload: string;
+  /** W218 · Local-only id passed to the native host; never part of payload/export. */
+  accountId?: string;
   bytes: number;
   enqueuedAt: number;
   /** Failed delivery attempts so far. Never reset — it drives the backoff. */
@@ -364,6 +366,7 @@ export async function enqueue(
   name: string,
   payload: string,
   options: OutboxOptions = {},
+  accountId?: string,
 ): Promise<EnqueueResult> {
   const now = options.now ?? Date.now;
   const db = await openDb();
@@ -373,6 +376,8 @@ export async function enqueue(
   if (sha256 === null) return { accepted: false, reason: 'crypto-unavailable' };
 
   const bytes = new TextEncoder().encode(payload).byteLength;
+  const accountIdBytes = accountId ? new TextEncoder().encode(accountId).byteLength : 0;
+  const storageBytes = bytes + accountIdBytes;
   const capacityBytes = capacityOf(options);
 
   const tx = db.transaction([OUTBOX_STORE, OUTBOX_META_STORE], 'readwrite');
@@ -386,7 +391,7 @@ export async function enqueue(
   const meta = tx.objectStore(OUTBOX_META_STORE);
   const currentBytes = await requestToPromise(meta.get(OUTBOX_META_BYTES_KEY) as IDBRequest<number | undefined>);
   const used = typeof currentBytes === 'number' && currentBytes > 0 ? currentBytes : 0;
-  if (used + bytes > capacityBytes) {
+  if (used + storageBytes > capacityBytes) {
     // 🔴 Refuse the newcomer. Not one existing entry is touched (§10).
     const stateIndex = store.index('state');
     const [pendingCount, rejectedCount] = await Promise.all([
@@ -418,6 +423,7 @@ export async function enqueue(
     sha256,
     name,
     payload,
+    ...(accountId ? { accountId } : {}),
     bytes,
     enqueuedAt: now(),
     attempts: 0,
@@ -426,7 +432,7 @@ export async function enqueue(
     state: 'pending',
   };
   store.put(entry);
-  meta.put(used + bytes, OUTBOX_META_BYTES_KEY);
+  meta.put(used + storageBytes, OUTBOX_META_BYTES_KEY);
   await txDone(tx);
   return { accepted: true, sha256, entry };
 }
@@ -443,7 +449,8 @@ export async function markDelivered(sha256: string): Promise<void> {
     const meta = tx.objectStore(OUTBOX_META_STORE);
     const currentBytes = await requestToPromise(meta.get(OUTBOX_META_BYTES_KEY) as IDBRequest<number | undefined>);
     const used = typeof currentBytes === 'number' && currentBytes > 0 ? currentBytes : 0;
-    meta.put(Math.max(0, used - existing.bytes), OUTBOX_META_BYTES_KEY);
+    const accountIdBytes = existing.accountId ? new TextEncoder().encode(existing.accountId).byteLength : 0;
+    meta.put(Math.max(0, used - existing.bytes - accountIdBytes), OUTBOX_META_BYTES_KEY);
   }
   await txDone(tx);
 }
@@ -647,6 +654,7 @@ export type DeliveryFn = (
   name: string,
   payload: string,
   fingerprint: string | null,
+  accountId?: string,
 ) => Promise<DeliverResult>;
 
 export interface DrainOptions {
@@ -763,7 +771,7 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
     //    metadata the host records on the shard, never a delivery precondition: a
     //    payload it cannot be derived from is delivered without one, exactly as
     //    before this field existed.
-    const result = await deliverFn(entry.name, entry.payload, await deliveryFingerprint(entry.payload));
+    const result = await deliverFn(entry.name, entry.payload, await deliveryFingerprint(entry.payload), entry.accountId);
     report.attempted += 1;
 
     if (result.delivered) {

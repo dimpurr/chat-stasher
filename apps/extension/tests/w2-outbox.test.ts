@@ -76,6 +76,21 @@ describe('W2-OUTBOX · write-ahead and delete-only-on-ack', () => {
     expect(res.sha256).toBe(expected);
   });
 
+  it('keeps the account id in local outbox metadata and passes it only to host delivery', async () => {
+    const ob = await outbox();
+    await ob.enqueue(NAME_A, PAYLOAD_A, {}, 'synthetic-account');
+    const queued = await ob.listEntries();
+    expect(queued?.[0]?.accountId).toBe('synthetic-account');
+    expect(ob.buildExportFile(queued ?? [], 1, null, 'abcdef').content).toBe(`${PAYLOAD_A}\n`);
+    let forwarded: unknown;
+    await ob.drainOutbox({ deliver: async (_name, payload, _fingerprint, accountId) => {
+      forwarded = { payload, accountId };
+      return DELIVERED;
+    } });
+    expect(forwarded).toEqual({ payload: PAYLOAD_A, accountId: 'synthetic-account' });
+    expect(await ob.listEntries()).toEqual([]);
+  });
+
   it('🔴 a matching ack ⇒ the entry is deleted and the outbox is empty', async () => {
     const ob = await outbox();
     await ob.enqueue(NAME_A, PAYLOAD_A);
