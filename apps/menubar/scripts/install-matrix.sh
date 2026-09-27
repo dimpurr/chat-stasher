@@ -16,11 +16,16 @@
 #   (up) upgrade direction: the real install.sh puts an older CLI down, the
 #        app reports it too old, then the real install.sh upgrades it in
 #        place and the app reports the new one healthy
-#   (*)  two evidence scenarios from driving a real machine:
+#   (*)  evidence scenarios from driving a real machine:
 #        a CLI answering status --json without the contracted `local`
 #        section (the 0.4.x shape), and a CLI answering garbage — the app
 #        must classify both as the too-old family, never as a config
-#        problem.
+#        problem; and a CLI refusing with the structured config-error
+#        document the shipped CLI writes for a config it cannot use
+#        (`config_source: "unreadable"`, no `local` section, exit 3) — that
+#        one must keep its own credential / setup class, because there the
+#        missing `local` section is the CLI saying it never got as far as
+#        reading this machine's local layer.
 #
 # The app is asked through its own headless handshake, `--resolve-cli`,
 # which runs the same spawnCli/readStatus path the panel runs and prints
@@ -92,11 +97,19 @@ HOST_TARGET="$HOST_OS-$HOST_ARCH"
 #                  neither `local` nor `cli_version` exists, the exact
 #                  shape a real stale install has
 #   garbage      — prose, nothing parseable
+#   config-error-credentials / config-error-unreadable — the document the
+#                  shipped CLI writes when it cannot use the config
+#                  (`status_json_config_error`): schema/command/cli_version
+#                  present, exit code 3, `config_source: "unreadable"`, a
+#                  `config_error_kind`, and deliberately NO `local` section.
+#                  The two kinds are the split the app must keep: the
+#                  credential refusal gets its own card, everything else is
+#                  the setup card.
 # The whole body is one file with the version baked in, because the real
 # install.sh moves exactly the one artifact file — a sibling would not
 # survive installation.
 make_shim() {
-  local dir="$1" version="$2" shape="${3:-contracted}" body
+  local dir="$1" version="$2" shape="${3:-contracted}" body status_exit=0
   case "$shape" in
     contracted)
       body='{"schema_version":1,"command":"status","exit_code":0,"cli_version":"'"$version"'","config_source":"file","config_error":null,"config_error_kind":null,"scanner":{"kind":"ok","why":null},"local":{"schedule":{"kind":"launchd","installed":true,"units":[]},"last_run":null,"stage":{"waiting_to_upload":{"kind":"known","value":0,"why":null}},"destination_names":[]}}'
@@ -107,6 +120,12 @@ make_shim() {
     garbage)
       body='This CLI only speaks an older status format.'
       ;;
+    config-error-credentials|config-error-unreadable)
+      local kind="credentials"
+      [ "$shape" = "config-error-unreadable" ] && kind="unreadable"
+      body='{"schema_version":1,"command":"status","cli_version":"'"$version"'","healthy":false,"exit_code":3,"exit_semantics":"3 = no conclusion possible","config_source":"unreadable","config_error":"destination \"r2\": the config could not be used","config_error_kind":"'"$kind"'","scanner":{"kind":"failed","why":"the config could not be used"}}'
+      status_exit=3
+      ;;
   esac
   mkdir -p "$dir"
   cat > "$dir/chat-stasher" <<SHIM
@@ -114,7 +133,7 @@ make_shim() {
 case "\$1" in
   status)
     printf '%s\n' '$body'
-    exit 0 ;;
+    exit $status_exit ;;
   overview)
     printf '%s\n' '{"schema_version":1,"command":"overview","variant":"summary","exit_code":0,"totals":{"machines":0,"sources":0,"sessions":0,"unknown_time_sessions":0,"no_conversation_content_sessions":0},"machines":[],"sources":[],"days":[]}'
     exit 0 ;;
@@ -214,6 +233,8 @@ OLD_DIR="$WORK/old-cli"
 NEW_DIR="$WORK/new-cli"
 PRECONTRACT_DIR="$WORK/precontract-cli"
 GARBAGE_DIR="$WORK/garbage-cli"
+CFGCRED_DIR="$WORK/config-error-credentials-cli"
+CFGREAD_DIR="$WORK/config-error-unreadable-cli"
 HOME_A="$WORK/home-a"        # (a2): the app exists first; CLI installed later
 HOME_UP="$WORK/home-up"      # (up): older CLI, upgraded in place later
 OLD_DIST="$WORK/dist-old"
@@ -224,6 +245,8 @@ make_shim "$OLD_DIR" "$OLD_VERSION" contracted
 make_shim "$NEW_DIR" "$NEW_VERSION" contracted
 make_shim "$PRECONTRACT_DIR" "$OLD_VERSION" precontract
 make_shim "$GARBAGE_DIR" "$OLD_VERSION" garbage
+make_shim "$CFGCRED_DIR" "$NEW_VERSION" config-error-credentials
+make_shim "$CFGREAD_DIR" "$NEW_VERSION" config-error-unreadable
 mock_dist "$NEW_DIST" "$NEW_VERSION"
 mock_dist "$OLD_DIST" "$OLD_VERSION"
 
@@ -351,7 +374,7 @@ else
 fi
 
 echo ""
-echo "## evidence scenarios from the real machine: stale shapes map to the too-old family"
+echo "## evidence scenarios from the real machine: which shapes mean 'too old', and which do not"
 echo "-- a CLI answering status without the contracted local section (0.4.x shape)"
 p_line="$(app_reports "$PRECONTRACT_DIR:/usr/bin:/bin" "$HOME_A")"
 if [ "$(line_field "$p_line" cli)" = "$PRECONTRACT_DIR/chat-stasher" ] \
@@ -367,6 +390,26 @@ if [ "$(line_field "$g_line" cli)" = "$GARBAGE_DIR/chat-stasher" ] \
   ok "garbage answer classified as too old"
 else
   bad "garbage app line: $g_line"
+fi
+echo "-- a CURRENT CLI refusing with the structured config-error document (credentials)"
+cc_line="$(app_reports "$CFGCRED_DIR:/usr/bin:/bin" "$HOME_A")"
+if [ "$(execvp_finds "$CFGCRED_DIR:/usr/bin:/bin")" = "$CFGCRED_DIR/chat-stasher" ] \
+   && [ "$(line_field "$cc_line" cli)" = "$CFGCRED_DIR/chat-stasher" ] \
+   && [ "$(line_field "$cc_line" state)" = credentials ] \
+   && [ "$(line_field "$cc_line" version)" = "$NEW_VERSION" ] \
+   && at_floor "$NEW_VERSION"; then
+  ok "credential refusal on an up-to-date CLI stays a credential problem (not 'too old')"
+else
+  bad "config-error (credentials) app line: $cc_line"
+fi
+echo "-- a CURRENT CLI refusing with the structured config-error document (other unreadable config)"
+cr_line="$(app_reports "$CFGREAD_DIR:/usr/bin:/bin" "$HOME_A")"
+if [ "$(line_field "$cr_line" cli)" = "$CFGREAD_DIR/chat-stasher" ] \
+   && [ "$(line_field "$cr_line" state)" = setup ] \
+   && [ "$(line_field "$cr_line" version)" = "$NEW_VERSION" ]; then
+  ok "unusable-config refusal stays a setup problem (not 'too old')"
+else
+  bad "config-error (unreadable) app line: $cr_line"
 fi
 
 echo ""

@@ -427,6 +427,11 @@ enum FailureKind: Equatable {
 struct OverviewFailure: Error {
     let kind: FailureKind
     let message: String
+    /// The `cli_version` a `status --json` document declared before the app
+    /// rejected it, when it declared one. A CLI that refuses to answer — the
+    /// credential case — still says which version refused, and the handshake
+    /// report should not turn that known version into `unknown`.
+    var cliVersion: String? = nil
 }
 
 func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: OverviewFailure?, now: Date = Date(), silenceThresholdOverrideDays: Int? = nil) -> ArchiveStatus {
@@ -526,23 +531,35 @@ func statusConfigFailureKind(_ configErrorKind: String?) -> FailureKind {
 }
 
 /// The failure a decoded `status --json` document that yields no local
-/// snapshot represents. A document carrying no `local` section comes from a
-/// CLI that predates this app's contract — 0.4.x writes status without
-/// `local` and without `cli_version` — so the shape itself is the too-old
-/// state, never "set up chat-stasher": the missing section is inside that
-/// CLI, not in the machine's configuration, and the only fix is the
-/// upgrade the too-old card names. A document that instead declares its
-/// own config unusable (`config_source: "unreadable"`) keeps the setup /
-/// credential class its `config_error_kind` names. nil = usable as-is.
+/// snapshot represents. Two shapes reach here and the order of the two tests
+/// below is the entire difference between them.
+///
+/// A document that declares its own config unusable (`config_source:
+/// "unreadable"`, `config_error_kind` naming why) keeps the setup / credential
+/// class its `config_error_kind` names: the config is a thing on this machine
+/// the user can fix. The shipped CLI writes that document *instead of* a local
+/// layer — `status_json_config_error` in `crates/chat-stasher/src/main.rs` —
+/// so it is always the no-`local` shape too, and testing `hasLocal` first would
+/// relabel every credential refusal from an up-to-date CLI as "too old" and
+/// send the user to reinstall a CLI that is fine. Reading `"unreadable"` first
+/// costs the too-old state nothing either: the `ConfigSource` variant shipped
+/// in 0.5.0-rc.1, so no 0.4.x CLI can emit that word.
+///
+/// A document with no `local` section and no such declaration comes from a CLI
+/// that predates this app's contract — 0.4.x writes status without `local` and
+/// without `cli_version` — so the shape itself is the too-old state, never
+/// "set up chat-stasher": the missing section is inside that CLI, not in the
+/// machine's configuration, and the only fix is the upgrade the too-old card
+/// names. nil = usable as-is.
 func statusUnusableLocalFailure(configSource: String?, hasLocal: Bool,
                                 configErrorKind: String?, configError: String?) -> OverviewFailure? {
-    guard hasLocal else {
-        return OverviewFailure(kind: .cliTooOld,
-                               message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
-    }
     if configSource == "unreadable" {
         return OverviewFailure(kind: statusConfigFailureKind(configErrorKind),
                                message: "Set up chat-stasher in Terminal first. \(configError ?? "")")
+    }
+    guard hasLocal else {
+        return OverviewFailure(kind: .cliTooOld,
+                               message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
     }
     return nil
 }
@@ -906,14 +923,19 @@ private final class ArchiveModel: ObservableObject {
             throw OverviewFailure(kind: .cliTooOld,
                                   message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
         }
-        if let failure = statusUnusableLocalFailure(configSource: document.configSource,
+        if var failure = statusUnusableLocalFailure(configSource: document.configSource,
                                                     hasLocal: document.local != nil,
                                                     configErrorKind: document.configErrorKind,
                                                     configError: document.configError) {
+            // The refusal document names its own version; a report that the app
+            // found *this* CLI keeps it rather than calling it unknown.
+            failure.cliVersion = document.cliVersion
             throw failure
         }
-        // statusUnusableLocalFailure rejects every document without a local
-        // section before control reaches here; this restates the invariant.
+        // Both of statusUnusableLocalFailure's branches return non-nil when
+        // there is no local section — the unusable-config one and the too-old
+        // one — so a document without one was already thrown; this restates
+        // the invariant for the compiler and for a reader.
         guard let local = document.local else {
             throw OverviewFailure(kind: .unreadable,
                                   message: "Status response carried no local section.")
@@ -1059,7 +1081,16 @@ func cliOnPath(_ path: String?, name: String = "chat-stasher") -> String? {
     guard let path, !path.contains("\0") else { return nil }
     let components = path.split(separator: ":", omittingEmptySubsequences: false)
     for component in components {
-        let dir = component.isEmpty ? "." : String(component)
+        // An empty component, and a literal `.`, both mean the current
+        // directory — the same directory execvp would search. It is spelled
+        // out rather than returned as `./name` because this answer is what the
+        // app names in the About sheet as the found CLI's absolute location
+        // and what it hands to `Process.executableURL`, which resolves a
+        // relative path against the app's own working directory, not against
+        // the one the PATH walk looked in.
+        let dir = component.isEmpty || component == "."
+            ? FileManager.default.currentDirectoryPath
+            : String(component)
         let slash = dir.hasSuffix("/") ? "" : "/"
         let candidate = dir == "/" ? "/" + name : dir + slash + name
         var isDirectory: ObjCBool = false
@@ -1087,9 +1118,11 @@ func cliResolveLine(local: LocalSnapshot?, failure: OverviewFailure?, resolvedPa
     }
     if let failure {
         // Nothing was found is `none`, an answer distinct from finding a
-        // binary whose path somehow went missing.
+        // binary whose path somehow went missing. The version is whatever the
+        // failing document declared — a CLI that refused to answer still said
+        // which version it is — and `unknown` only when it declared none.
         let path = failure.kind == .cliMissing ? "none" : (resolvedPath ?? "unknown")
-        return "cli=\(path) version=unknown state=\(resolveCliStateToken(failure.kind))"
+        return "cli=\(path) version=\(failure.cliVersion ?? "unknown") state=\(resolveCliStateToken(failure.kind))"
     }
     // The spawn itself threw (an error no path classified): the resolution
     // still happened, so the binary that was found gets named.
