@@ -4,7 +4,7 @@
 //! and quoted attributes, unit-carrying byte/instant/age formats (never a bare
 //! ratio), and the three statements [`footer`] puts on every page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::schedule::sh_single_quote;
 use crate::selector::Selector;
@@ -425,28 +425,39 @@ pub(super) fn merged_counts(data: &UiData) -> String {
 /// what makes the first one readable.
 pub(super) fn machine_axis_counts(data: &UiData) -> String {
     let in_view = &data.sessions;
-    let conversations: usize = in_view
-        .iter()
-        .map(|s| s.session_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
+    // One entry per **conversation**, not per row: every row of a conversation
+    // carries the same stamped verdict, so grouping by archive id first is what
+    // keeps a conversation archived on two machines from being named twice —
+    // the per-machine double-count this whole section exists to remove. The
+    // list below is built from this map, so it has one `<li>` per conversation
+    // however many machines hold it; the count printed over it is
+    // `data.account_collisions`, which is the same map's size (first row wins,
+    // and every row of an id carries the same verdict).
+    let mut conversations: BTreeMap<&str, &UiSession> = BTreeMap::new();
+    for s in in_view {
+        conversations.entry(s.session_id.as_str()).or_insert(s);
+    }
     let machines: BTreeSet<&str> = in_view.iter().map(|s| s.machine.as_str()).collect();
-    let shared: usize = in_view
-        .iter()
-        .filter(|s| s.seen_on_machines > 1)
-        .map(|s| s.session_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let collisions: Vec<&UiSession> = in_view.iter().filter(|s| s.account_collision).collect();
+    let shared = data.conversations_on_multiple_machines;
+    let collisions: Vec<&UiSession> = conversations
+        .values()
+        .copied()
+        .filter(|s| s.account_collision)
+        .collect();
 
     let mut out = format!(
-        "<p class=sub><b>across machines:</b> the {conversations} conversation(s) counted above \
+        "<p class=sub><b>across machines:</b> the {} conversation(s) counted above \
          are {rows} row(s) over {} machine(s) — an archive id archived on more than one machine \
          is one conversation and one row per machine. {shared} conversation(s) were seen on \
          more than one machine and are counted once above.</p>\n",
+        data.conversations,
         machines.len(),
         rows = in_view.len(),
     );
+    // Both readings below are over the rows in view, like every other number on
+    // this page — `data.conversations` and the blind spot it is measured against
+    // are the same row set, so the sentence cannot contradict the headline above
+    // it by quoting a conversation the filter left out.
     let not_recorded = data.account_not_recorded_conversations;
     if collisions.is_empty() {
         let comparable = data.conversations - not_recorded;

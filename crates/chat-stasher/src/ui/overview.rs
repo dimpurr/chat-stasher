@@ -49,11 +49,11 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     // reading is printed under this number by `machine_axis_counts`, never
     // dropped — the same distinct/raw pair `merged_counts` keeps for the
     // destination axis.
-    let conversations_in_view: usize = in_view
-        .iter()
-        .map(|s| s.session_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
+    //
+    // It is `UiData`'s own count rather than a second one taken here: the
+    // sentences under it read the same field, and two counts of one thing are
+    // how a page ends up disagreeing with itself.
+    let conversations_in_view = data.conversations;
     let sessions_word = if filtered {
         "conversations in view"
     } else {

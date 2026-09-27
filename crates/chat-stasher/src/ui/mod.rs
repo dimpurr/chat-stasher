@@ -284,23 +284,33 @@ pub struct UiData {
     /// than one being chosen — the pair is what says "two copies of one
     /// conversation, not two conversations".
     pub raw_sessions: usize,
-    /// W219 · The **conversation** count: distinct archive ids over the whole
-    /// merged inventory. This is the reading the headline stat uses, because one
-    /// conversation archived on a laptop and a desktop is one conversation —
-    /// while [`Self::archive_sessions`] and [`Self::raw_sessions`] keep counting
-    /// rows, so the page can still say how many observations and copies are
-    /// behind a number instead of choosing one reading and dropping the other.
+    /// W219 · The **conversation** count: distinct archive ids among the rows in
+    /// view. This is the reading the headline stat uses, because one conversation
+    /// archived on a laptop and a desktop is one conversation — while
+    /// [`Self::archive_sessions`] and [`Self::raw_sessions`] keep counting rows,
+    /// so the page can still say how many observations and copies are behind a
+    /// number instead of choosing one reading and dropping the other.
+    ///
+    /// The four conversation-identity counts below are counted over
+    /// [`Self::sessions`] rather than over the merged inventory, because every
+    /// sentence that quotes them — the headline, the machine-axis paragraph, the
+    /// account-collision block — says "in view". A count taken from the rows the
+    /// launch filter dropped would be the page arguing with itself about how
+    /// many conversations it is describing. The per-row facts a conversation
+    /// carries ([`UiSession::seen_on_machines`], [`UiSession::account_collision`])
+    /// are still archive-scoped: they say what the archive holds, which does not
+    /// change because a filter hid the row.
     pub conversations: usize,
-    /// W219 · Conversations whose id was seen in more than one machine
+    /// W219 · In-view conversations whose id was seen in more than one machine
     /// partition — the size of the cross-machine duplication, which the
     /// conversation count deliberately hides.
     pub conversations_on_multiple_machines: usize,
-    /// W219 · Conversations holding a provable account collision (two
+    /// W219 · In-view conversations holding a provable account collision (two
     /// fingerprints under one `saltId`). Never counts "no comparable key": that
     /// is a different state and the page words it differently.
     pub account_collisions: usize,
-    /// W219 · Conversations that carried **no comparable account key**, so no
-    /// collision could have been detected for them. Published beside
+    /// W219 · In-view conversations that carried **no comparable account key**,
+    /// so no collision could have been detected for them. Published beside
     /// [`Self::account_collisions`] because a zero there is only a measurement
     /// over the conversations that could be compared.
     pub account_not_recorded_conversations: usize,
@@ -378,34 +388,6 @@ impl UiData {
         // archive, not about the view, so a filtered page must not shrink it.
         merge::stamp_conversation_identity(&mut all);
         let distinct_sessions = all.len();
-        // W219 · the conversation axis over the whole inventory — the reading
-        // the headline stat uses, so a conversation archived on two machines is
-        // counted once. `distinct_sessions` above stays the row count: the two
-        // are never derived from one another (same rule as `raw_sessions`).
-        let conversations = crate::overview::conversation_count(
-            &all.iter().map(UiSession::overview_row).collect::<Vec<_>>(),
-        );
-        let conversations_on_multiple_machines = all
-            .iter()
-            .filter(|s| s.seen_on_machines > 1)
-            .map(|s| s.session_id.as_str())
-            .collect::<BTreeSet<_>>()
-            .len();
-        let account_collisions = all
-            .iter()
-            .filter(|s| s.account_collision)
-            .map(|s| s.session_id.as_str())
-            .collect::<BTreeSet<_>>()
-            .len();
-        // Counted from the rows' own keys rather than from a second identity
-        // pass, so it cannot drift from `stamp_conversation_identity`'s verdict:
-        // an id is "not recorded" exactly when none of its rows carried a key.
-        let with_keys: BTreeSet<&str> = all
-            .iter()
-            .filter(|s| !s.account_keys.is_empty())
-            .map(|s| s.session_id.as_str())
-            .collect();
-        let account_not_recorded_conversations = conversations - with_keys.len();
         // `index` is a position in `all`, and stays one: a drill-down URL is a
         // handle into the whole inventory, not into whatever the launch filter
         // left behind, so the same link keeps working under any launch filter.
@@ -418,6 +400,42 @@ impl UiData {
             .into_iter()
             .filter(|s| keep.contains(&s.index))
             .collect();
+        // W219 · the conversation axis, counted over the rows the launch filter
+        // left **in view** — the same set every sentence and every gated column
+        // on the page is drawn from. The per-row facts above stay archive-scoped
+        // (that is what a row is); these counts do not, because a page that
+        // quoted an archive-wide number under "in view" wording would be
+        // describing two different row sets in one paragraph. A conversation
+        // archived on two machines is counted once here, which is the reading
+        // the headline stat uses; `distinct_sessions` stays the row count, never
+        // derived from it (same rule as `raw_sessions`).
+        let conversations = crate::overview::conversation_count(
+            &sessions
+                .iter()
+                .map(UiSession::overview_row)
+                .collect::<Vec<_>>(),
+        );
+        let conversations_on_multiple_machines = sessions
+            .iter()
+            .filter(|s| s.seen_on_machines > 1)
+            .map(|s| s.session_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let account_collisions = sessions
+            .iter()
+            .filter(|s| s.account_collision)
+            .map(|s| s.session_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        // Counted from the rows' own keys rather than from a second identity
+        // pass, so it cannot drift from `stamp_conversation_identity`'s verdict:
+        // an id is "not recorded" exactly when none of its rows carried a key.
+        let with_keys: BTreeSet<&str> = sessions
+            .iter()
+            .filter(|s| !s.account_keys.is_empty())
+            .map(|s| s.session_id.as_str())
+            .collect();
+        let account_not_recorded_conversations = conversations - with_keys.len();
         let mut destinations = merged.destinations;
         for (position, state) in destinations.iter_mut().enumerate() {
             state.in_view = sessions
@@ -2039,6 +2057,14 @@ mod tests {
     /// A dashboard over exactly these hits. Every count on `UiData` is derived
     /// from them, so a test can never assert against a number it typed itself.
     fn data_of(hits: Vec<crate::search::SessionHit>) -> UiData {
+        data_of_with_launch(hits, Selector::default())
+    }
+
+    /// The same, opened with a launch filter — the `ui --machine …` shape. The
+    /// whole-inventory readings stay whole (that is what the filter must not
+    /// shrink) while `sessions` holds only what the filter kept, so a test can
+    /// tell the two row sets apart rather than assume they coincide.
+    fn data_of_with_launch(hits: Vec<crate::search::SessionHit>, launch: Selector) -> UiData {
         let report = SearchReport {
             destination: "dest-under-test".into(),
             hits,
@@ -2056,7 +2082,7 @@ mod tests {
             data_blobs_read: 0,
             index_files_read: 1,
         };
-        UiData::from_report(&report, "dest-under-test", Selector::default(), NOW)
+        UiData::from_report(&report, "dest-under-test", launch, NOW)
     }
 
     fn account_key(salt: &str, value: &str) -> crate::activity::AccountKey {
@@ -2115,6 +2141,123 @@ mod tests {
         // The fingerprint values are opaque and are never rendered.
         assert!(!html.contains("aa"), "{html}");
         assert!(!html.contains("bb"), "{html}");
+    }
+
+    /// The banner counts **conversations**, not rows. `collisions` is built from
+    /// in-view rows and every row of a colliding conversation carries the flag,
+    /// so a per-row count puts the per-machine double-count this feature exists
+    /// to remove back into the one sentence that names the feature.
+    #[test]
+    fn a_collision_is_named_once_per_conversation_not_once_per_row() {
+        let d = two_machines_one_conversation(
+            vec![account_key("salt-1", "aa")],
+            vec![account_key("salt-1", "bb")],
+        );
+        assert_eq!(d.sessions.len(), 2, "two rows in view");
+        assert_eq!(d.account_collisions, 1, "… of one conversation");
+
+        let html = req("/", &d, &NoContent).body;
+        assert!(
+            html.contains("1 conversation(s) in view hold two or more account fingerprints"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("2 conversation(s) in view hold"),
+            "two rows, one conversation: the banner must not add the rows up: {html}"
+        );
+        let banner = html
+            .split("Account collision.")
+            .nth(1)
+            .expect("the banner is on the page");
+        assert_eq!(
+            banner
+                .split("</div>")
+                .next()
+                .unwrap()
+                .matches("<li class=mono>")
+                .count(),
+            1,
+            "one list item per colliding conversation, not per row: {html}"
+        );
+    }
+
+    /// The sentences under the headline are counted over the same rows the
+    /// headline is. `data.conversations` and
+    /// `data.account_not_recorded_conversations` are **whole-inventory**
+    /// readings, so quoting them under "in view" wording puts two row sets in
+    /// one paragraph and contradicts the stat tile directly above it.
+    #[test]
+    fn the_no_collision_sentence_counts_the_same_rows_as_the_headline() {
+        // Four conversations. The one that carried a comparable key is the one
+        // the launch filter rejects; the three it keeps carried none. So the
+        // page must say three in view and nothing comparable among them —
+        // never "1 comparable" borrowed from the four-row inventory.
+        let mut keyed = fixture::hit_for("m-1", "deepseek.s1");
+        keyed.account_keys = vec![account_key("salt-1", "aa")];
+        let d = data_of_with_launch(
+            vec![
+                keyed,
+                fixture::hit_for("m-2", "deepseek.s2"),
+                fixture::hit_for("m-2", "deepseek.s3"),
+                fixture::hit_for("m-2", "deepseek.s4"),
+            ],
+            Selector::default().machine("m-2"),
+        );
+        assert_eq!(d.sessions.len(), 3, "three of the four rows are in view");
+        assert_eq!(
+            d.conversations, 3,
+            "the count the page renders is the view's, not the inventory's"
+        );
+        assert_eq!(
+            d.account_not_recorded_conversations, 3,
+            "and so is the blind spot it is measured against"
+        );
+
+        let html = req("/", &d, &NoContent).body;
+        assert!(
+            html.contains("<span class=v>3</span><span class=l>conversations in view</span>"),
+            "the headline is the in-view reading: {html}"
+        );
+        assert!(
+            html.contains(
+                "none of the 3 conversation(s) in view carried a comparable account fingerprint"
+            ),
+            "the sentence below it must count those same three rows: {html}"
+        );
+        assert!(
+            !html.contains("none detected in the"),
+            "nothing in view was comparable, so no comparison result may be reported: {html}"
+        );
+    }
+
+    /// A gated identity column is gated on the rows the table is drawn from, not
+    /// on the whole archive: a column whose every cell is empty is a column
+    /// readers learn to skip, which is the reason the gate exists at all.
+    #[test]
+    fn a_gated_identity_column_is_absent_when_no_row_in_view_carries_the_fact() {
+        let mut mbp = fixture::hit_for("m-1", "deepseek.shared");
+        mbp.account_keys = vec![account_key("salt-1", "aa")];
+        let mut air = fixture::hit_for("m-2", "deepseek.shared");
+        air.account_keys = vec![account_key("salt-1", "bb")];
+        let only = fixture::hit_for("m-3", "deepseek.solo");
+        let d = data_of_with_launch(vec![mbp, air, only], Selector::default().machine("m-3"));
+        assert_eq!(d.sessions.len(), 1, "one row in view");
+        assert_eq!(
+            d.conversations_on_multiple_machines, 0,
+            "the archive holds a cross-machine conversation, the view holds none"
+        );
+        assert_eq!(d.account_collisions, 0, "likewise for the collision");
+
+        let html = req("/sessions", &d, &NoContent).body;
+        assert!(html.contains("<td class=mono>m-3</td>"), "{html}");
+        assert!(
+            !html.contains(">on machines</th>"),
+            "no row in view is on more than one machine, so the column says nothing: {html}"
+        );
+        assert!(
+            !html.contains(">identity</th>"),
+            "no row in view collides, so the column says nothing: {html}"
+        );
     }
 
     /// Two installs hold two salts, so two values under two salts are two

@@ -218,7 +218,29 @@ fn distinct_labels(rows: &[OverviewRow], pick: impl Fn(&OverviewRow) -> &str) ->
 pub enum AccountVerdict {
     NotRecorded,
     Consistent,
-    Collision { salt_id: String, accounts: usize },
+    /// One archive id, **every** salt that holds more than one fingerprint under
+    /// it — never emptied, and never narrowed to the first one.
+    ///
+    /// A list rather than a single salt because one id can disagree under two
+    /// installs at once, and a report that named only the first would tell a
+    /// reader the archive holds one disagreement where it holds two. They are
+    /// reported side by side and never summed: a salt is only comparable to
+    /// itself, so two salts holding two values each is two disagreements, not
+    /// four accounts.
+    Collision {
+        salts: Vec<CollidingSalt>,
+    },
+}
+
+/// One install salt under which one archive id recorded more than one
+/// fingerprint. `accounts` is always ≥ 2 — a salt holding a single value is not
+/// a disagreement, and `NotRecorded` is a different state again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollidingSalt {
+    /// The public half of the salt the values were computed under. Opaque.
+    pub salt_id: String,
+    /// Distinct fingerprint values recorded under this salt.
+    pub accounts: usize,
 }
 
 impl AccountVerdict {
@@ -287,17 +309,22 @@ pub fn conversation_identities(rows: &[OverviewRow]) -> Vec<ConversationIdentity
     by_id
         .into_iter()
         .map(|(session_id, (harness, machines, salts))| {
-            // A collision is reported for the first salt (in sorted order) that
-            // holds more than one value — not for the union of all salts, which
-            // would count incomparable values as if they were comparable.
+            // A collision is reported per salt — every salt that holds more than
+            // one value, and not the union of all of them, which would count
+            // incomparable values as if they were comparable. Each colliding
+            // salt is its own provable statement about one install, so each is
+            // carried; `salts` is sorted because the map is, and the first entry
+            // is the one the rendered lines lead with.
+            let colliding: Vec<CollidingSalt> = salts
+                .iter()
+                .filter(|(_, values)| values.len() > 1)
+                .map(|(salt_id, values)| CollidingSalt {
+                    salt_id: (*salt_id).to_string(),
+                    accounts: values.len(),
+                })
+                .collect();
             let collision =
-                salts
-                    .iter()
-                    .find(|(_, values)| values.len() > 1)
-                    .map(|(salt_id, values)| AccountVerdict::Collision {
-                        salt_id: (*salt_id).to_string(),
-                        accounts: values.len(),
-                    });
+                (!colliding.is_empty()).then_some(AccountVerdict::Collision { salts: colliding });
             let accounts = match collision {
                 Some(verdict) => verdict,
                 None if salts.values().any(|values| !values.is_empty()) => {
@@ -407,7 +434,7 @@ pub fn render_conversation_identity(rows: &[OverviewRow]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "conversation identity: {} conversation(s) · {} on more than one machine · \
-         {} with two accounts under one id\n",
+         {} with two or more accounts under one id\n",
         ids.len(),
         shared.len(),
         collisions.len()
@@ -422,16 +449,33 @@ pub fn render_conversation_identity(rows: &[OverviewRow]) -> String {
         ));
     }
     for c in &collisions {
-        let AccountVerdict::Collision { salt_id, accounts } = &c.accounts else {
+        let AccountVerdict::Collision { salts } = &c.accounts else {
             continue;
         };
-        out.push_str(&format!(
-            "  COLLISION {} / {}: one archive id, {accounts} account fingerprint(s) under \
-             install salt {} — these records are NOT the same account and were not merged\n",
-            crate::id::short_session_id(&c.session_id),
-            c.harness,
-            crate::id::short_session_id(salt_id)
-        ));
+        // One line per conversation, so the lines below match the count the
+        // header states. `salts` is never empty — `conversation_identities`
+        // builds a `Collision` only from a salt that held more than one value —
+        // so the `if let` is a shape, not a case that can drop a line.
+        if let Some((first, also)) = salts.split_first() {
+            out.push_str(&format!(
+                "  COLLISION {id} / {harness}: one archive id, {accounts} account fingerprint(s) \
+                 under install salt {salt} — these records are NOT the same account and were not \
+                 merged\n",
+                id = crate::id::short_session_id(&c.session_id),
+                harness = c.harness,
+                accounts = first.accounts,
+                salt = crate::id::short_session_id(&first.salt_id),
+            ));
+            for salt in also {
+                out.push_str(&format!(
+                    "    also colliding under install salt {} ({accounts} fingerprint(s)) — a \
+                     salt is only comparable to itself, so this is a further disagreement under \
+                     the same id and not the same one\n",
+                    crate::id::short_session_id(&salt.salt_id),
+                    accounts = salt.accounts,
+                ));
+            }
+        }
     }
     out.push_str(&format!(
         "  not comparable: {not_recorded} conversation(s) recorded no account fingerprint \
@@ -546,10 +590,17 @@ fn conversation_json(
     let account = match &c.accounts {
         AccountVerdict::NotRecorded => serde_json::json!({"state": "not_recorded"}),
         AccountVerdict::Consistent => serde_json::json!({"state": "consistent"}),
-        AccountVerdict::Collision { salt_id, accounts } => serde_json::json!({
+        AccountVerdict::Collision { salts } => serde_json::json!({
             "state": "collision",
-            "salt_id": salt_id,
-            "accounts": accounts,
+            // Every salt the id disagrees under, each with its own count. A
+            // list rather than one scalar per field because an id can collide
+            // under more than one salt, and a document that published only the
+            // first would under-report the archive by exactly that difference.
+            // They are never summed — a salt is comparable only to itself.
+            "salts": salts
+                .iter()
+                .map(|s| serde_json::json!({"salt_id": s.salt_id, "accounts": s.accounts}))
+                .collect::<Vec<_>>(),
         }),
     };
     serde_json::json!({
@@ -1747,8 +1798,10 @@ mod tests {
         assert_eq!(
             ids[0].accounts,
             AccountVerdict::Collision {
-                salt_id: "salt-1".into(),
-                accounts: 2
+                salts: vec![CollidingSalt {
+                    salt_id: "salt-1".into(),
+                    accounts: 2
+                }]
             }
         );
         assert!(ids[0].accounts.is_collision());
@@ -1796,7 +1849,10 @@ mod tests {
         let text = render_conversation_identity(&rows);
         assert!(text.contains("2 conversation(s)"), "{text}");
         assert!(text.contains("1 on more than one machine"), "{text}");
-        assert!(text.contains("1 with two accounts under one id"), "{text}");
+        assert!(
+            text.contains("1 with two or more accounts under one id"),
+            "{text}"
+        );
         assert!(text.contains("COLLISION"), "{text}");
         assert!(text.contains("not merged"), "{text}");
         assert!(text.contains("not comparable: 1 conversation(s)"), "{text}");
@@ -1809,6 +1865,62 @@ mod tests {
             !text.contains("bb"),
             "a fingerprint value was printed: {text}"
         );
+    }
+
+    /// One id colliding under two salts is **two** disagreements, not one. The
+    /// report names every salt it holds for: a reader shown only the first is
+    /// told the archive holds one where it holds two. They stay separate because
+    /// a salt is only comparable to itself, so they can never be added up into
+    /// "three accounts".
+    #[test]
+    fn every_colliding_salt_is_named_not_only_the_first() {
+        const VALUE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const VALUE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const VALUE_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        const VALUE_D: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let rows = vec![
+            observed(
+                "deepseek.s1",
+                "mbp",
+                vec![key("salt-1", VALUE_A), key("salt-2", VALUE_B)],
+            ),
+            observed(
+                "deepseek.s1",
+                "air",
+                vec![key("salt-1", VALUE_C), key("salt-2", VALUE_D)],
+            ),
+        ];
+        let ids = conversation_identities(&rows);
+        assert_eq!(
+            ids[0].accounts,
+            AccountVerdict::Collision {
+                salts: vec![
+                    CollidingSalt {
+                        salt_id: "salt-1".into(),
+                        accounts: 2,
+                    },
+                    CollidingSalt {
+                        salt_id: "salt-2".into(),
+                        accounts: 2,
+                    },
+                ],
+            }
+        );
+        assert_eq!(collision_count(&rows), 1, "still one conversation");
+
+        let text = render_conversation_identity(&rows);
+        assert!(text.contains("COLLISION"), "{text}");
+        assert!(text.contains("salt-1~"), "the first colliding salt: {text}");
+        assert!(
+            text.contains("salt-2~"),
+            "the second colliding salt is named too: {text}"
+        );
+        for value in [VALUE_A, VALUE_B, VALUE_C, VALUE_D] {
+            assert!(
+                !text.contains(value),
+                "a fingerprint value was printed: {text}"
+            );
+        }
     }
 
     /// The whole rendered report states the conversation reading and keeps the
@@ -1852,8 +1964,11 @@ mod tests {
         assert_eq!(c["session_id"], serde_json::json!("deepseek.s1"));
         assert_eq!(c["seen_on_machines"], serde_json::json!(2));
         assert_eq!(c["account"]["state"], serde_json::json!("collision"));
-        assert_eq!(c["account"]["salt_id"], serde_json::json!("salt-1"));
-        assert_eq!(c["account"]["accounts"], serde_json::json!(2));
+        assert_eq!(
+            c["account"]["salts"],
+            serde_json::json!([{"salt_id": "salt-1", "accounts": 2}]),
+            "one entry per colliding salt, each with its own count"
+        );
         // The fingerprint values themselves are never published.
         let rendered = v.to_string();
         assert!(!rendered.contains("\"aa\""), "{rendered}");

@@ -215,6 +215,7 @@ fn account_keys_survive_the_index_and_decide_the_conversation() {
     // ---- and the verdict over exactly these rows -------------------------
     use chat_stasher::overview::{
         conversation_count, conversation_identities, cross_machine_count, AccountVerdict,
+        CollidingSalt,
     };
     assert_eq!(
         conversation_count(&rows),
@@ -248,8 +249,10 @@ fn account_keys_survive_the_index_and_decide_the_conversation() {
     assert_eq!(
         verdict(collided),
         AccountVerdict::Collision {
-            salt_id: "salt-mbp".to_string(),
-            accounts: 2,
+            salts: vec![CollidingSalt {
+                salt_id: "salt-mbp".to_string(),
+                accounts: 2,
+            }],
         },
         "one salt, two values: the provable collision"
     );
