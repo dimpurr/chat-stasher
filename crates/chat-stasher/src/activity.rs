@@ -77,6 +77,43 @@ pub struct ActivityRow {
     /// inside `captured` and is never converted to no-project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProjectProvenance>,
+    /// W219 · The account keys this session's records actually carry, deduped
+    /// and sorted. Each is a **comparable** pair: the fingerprint value and the
+    /// `saltId` that makes it comparable to another value.
+    ///
+    /// Empty means *no comparable key was recorded* — an `account` envelope of
+    /// kind `unknown`, a bundle that predates the field, or an index line
+    /// written before this field existed. Those are different histories and the
+    /// same answer to the only question this field exists for ("can two records
+    /// be compared?"), so they fold to one state rather than to three
+    /// indistinguishable ones. Nothing here ever holds a raw account id: the
+    /// value is the irreversible HMAC the extension computed
+    /// (`apps/extension/lib/account-fingerprint.ts`), and a row that could
+    /// carry an id by accident cannot exist.
+    ///
+    /// Additive for the same reason as [`ActivityRow::source_zone`]: an index
+    /// written before W219 has no such key and must still deserialize.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_keys: Vec<AccountKey>,
+}
+
+/// One **comparable** account key: the fingerprint value plus the `saltId` it
+/// may be compared under.
+///
+/// The extension's salt is per install (`storage.local`), and
+/// `contracts/inbox.schema.json` states the rule this type exists to keep
+/// visible: two fingerprints may be compared **only when their `saltId` values
+/// are equal**, and "a per-install salt makes values from different installs or
+/// profiles incomparable, and that must not be read as an account switch".
+/// So the pair travels together — a bare `value` compared across salts would
+/// invent an account switch out of a salt rotation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AccountKey {
+    /// The public half of the salt the value was computed under. Opaque; not
+    /// the key and not derivable from it.
+    pub salt_id: String,
+    /// Lowercase hex HMAC-SHA256. Irreversible: the input id is never stored.
+    pub value: String,
 }
 
 /// Capture-time project evidence plus the latest append-only source supplement.
@@ -1994,7 +2031,56 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         source_zone: a.source_zone,
         title: Some(a.title),
         provenance: project_provenance(lines),
+        account_keys: account_keys(lines),
     }
+}
+
+/// W219 · Every comparable account key this session's records carry.
+///
+/// Read from the `account` envelope the extension wrote on each bundle
+/// (`contracts/inbox.schema.json`). Only `kind: "fingerprint"` yields a key: for
+/// `kind: "unknown"` the account is *not known*, and an unknown is not a value —
+/// folding it in would let an unknown silently agree (or disagree) with a real
+/// fingerprint, which is the failure invariant 1 forbids. A malformed envelope
+/// yields nothing for the same reason a malformed line is skipped everywhere
+/// else in this module: it is not evidence about an account.
+///
+/// Deduped and sorted so the row is a set, not a log: the same account captured
+/// twice is one key, and the row's bytes do not depend on line order — which is
+/// what lets the index stay a pure function of the session's content.
+fn account_keys(lines: &[&str]) -> Vec<AccountKey> {
+    let mut out: Vec<AccountKey> = Vec::new();
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(account) = record.get("account").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        if account.get("kind").and_then(|k| k.as_str()) != Some("fingerprint") {
+            continue;
+        }
+        let Some(value) = account.get("value").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(salt_id) = account.get("saltId").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // An empty string is not a key: it would make every session with an
+        // empty value comparable to every other one.
+        if value.is_empty() || salt_id.is_empty() {
+            continue;
+        }
+        let key = AccountKey {
+            salt_id: salt_id.to_string(),
+            value: value.to_string(),
+        };
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out.sort();
+    out
 }
 
 fn project_provenance(lines: &[&str]) -> Option<ProjectProvenance> {
@@ -2082,6 +2168,122 @@ mod tests {
         format!(
             r#"{{"timestamp":"{ts}","type":"{ty}","payload":{{"message":{{"role":"user","content":"hi"}}}},"cwd":"/x"}}"#
         )
+    }
+
+    // ------------------------------------------------- W219 · account keys
+
+    /// A shard record line carrying one account envelope, spelled exactly the
+    /// way `contracts/inbox.schema.json` and the extension write it.
+    fn with_account(account: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher/inbox@2","platform":"deepseek","sessionId":"s","account":{account},"raw":{{"text":"x","bytes":1}}}}"#
+        )
+    }
+
+    fn fingerprint(salt: &str, value: &str) -> String {
+        format!(
+            r#"{{"kind":"fingerprint","value":"{value}","source":"response-body-platform-uid","saltId":"{salt}"}}"#
+        )
+    }
+
+    /// The keys are a **set**: the same account captured twice is one key, and
+    /// the order the lines happen to be in does not change the row — which is
+    /// what lets the index stay a pure function of the session's content.
+    #[test]
+    fn account_keys_are_deduped_and_sorted_into_a_set() {
+        let ok = AccountKey {
+            salt_id: "salt-1".into(),
+            value: "aa".into(),
+        };
+        // Same two keys, written in the two orders, with one line repeated.
+        let a = with_account(&fingerprint("salt-1", "aa"));
+        let b = with_account(&fingerprint("salt-1", "bb"));
+        let forward = build_row("deepseek.s", "mbp", "deepseek", &[a.as_str(), b.as_str()]);
+        let backward = build_row(
+            "deepseek.s",
+            "mbp",
+            "deepseek",
+            &[b.as_str(), a.as_str(), a.as_str()],
+        );
+        assert_eq!(
+            forward.account_keys.len(),
+            2,
+            "the repeated line is one key"
+        );
+        assert_eq!(
+            forward.account_keys, backward.account_keys,
+            "line order must not change the row"
+        );
+        assert_eq!(forward.account_keys[0], ok);
+    }
+
+    /// Two accounts under one salt are **both** kept: this is the fact the
+    /// collision verdict is read from, so dropping either would erase it.
+    #[test]
+    fn two_accounts_under_one_salt_are_both_recorded() {
+        let a = with_account(&fingerprint("salt-1", "aa"));
+        let b = with_account(&fingerprint("salt-1", "bb"));
+        let row = build_row("deepseek.s", "mbp", "deepseek", &[a.as_str(), b.as_str()]);
+        assert_eq!(
+            row.account_keys,
+            vec![
+                AccountKey {
+                    salt_id: "salt-1".into(),
+                    value: "aa".into()
+                },
+                AccountKey {
+                    salt_id: "salt-1".into(),
+                    value: "bb".into()
+                },
+            ]
+        );
+    }
+
+    /// An **unknown** account is not a value. Recording it as a key would let it
+    /// silently agree or disagree with a real fingerprint, which is exactly the
+    /// "unknown recorded as a concrete value" failure invariant 1 forbids.
+    #[test]
+    fn an_unknown_account_records_no_key() {
+        for reason in [
+            "no-account-id-in-capture",
+            "email-is-not-an-account-id",
+            "salt-unreadable",
+        ] {
+            let line = with_account(&format!(r#"{{"kind":"unknown","reason":"{reason}"}}"#));
+            let row = build_row("deepseek.s", "mbp", "deepseek", &[line.as_str()]);
+            assert!(
+                row.account_keys.is_empty(),
+                "`{reason}` is not a key: {:?}",
+                row.account_keys
+            );
+        }
+    }
+
+    /// A fingerprint envelope missing either half of the comparable pair is not
+    /// comparable, so it is not a key. `saltId` is the whole reason the pair
+    /// travels together: a value with no salt would be compared against every
+    /// other salt's values.
+    #[test]
+    fn a_fingerprint_without_a_salt_or_a_value_records_no_key() {
+        let no_salt = with_account(r#"{"kind":"fingerprint","value":"aa"}"#);
+        let no_value = with_account(r#"{"kind":"fingerprint","saltId":"salt-1"}"#);
+        let empty = with_account(&fingerprint("", ""));
+        for line in [no_salt, no_value, empty] {
+            let row = build_row("deepseek.s", "mbp", "deepseek", &[line.as_str()]);
+            assert!(row.account_keys.is_empty(), "{:?}", row.account_keys);
+        }
+    }
+
+    /// An index written before W219 has no `account_keys` key at all, and must
+    /// still deserialize — the same additive rule `source_zone` and `title`
+    /// follow.
+    #[test]
+    fn an_index_line_without_account_keys_still_deserializes() {
+        let old = r#"{"session_id":"deepseek.s","machine":"m","harness":"deepseek","first_unix":1,"last_unix":2,"line_count":3,"time_source":{"kind":"exact"}}"#;
+        let row: ActivityRow = serde_json::from_str(old).expect("a pre-W219 line still reads");
+        assert!(row.account_keys.is_empty());
+        // And a row with no keys writes no key, so `@1`-era output is unchanged.
+        assert!(!to_jsonl(&row).contains("account_keys"));
     }
 
     // ------------------------------------------------------------------ Exact

@@ -118,6 +118,10 @@ pub struct OverviewRow {
     pub line_count: u64,
     pub time_source: TimeSource,
     pub provenance: Option<crate::activity::ProjectProvenance>,
+    /// W219 · the comparable account keys the session's own records carry —
+    /// see [`crate::activity::ActivityRow::account_keys`]. Empty means no
+    /// comparable key was recorded, which is the only state this module needs.
+    pub account_keys: Vec<crate::activity::AccountKey>,
 }
 
 /// The vertical axis of the heatmap.
@@ -190,14 +194,182 @@ fn distinct_labels(rows: &[OverviewRow], pick: impl Fn(&OverviewRow) -> &str) ->
     set.into_iter().collect()
 }
 
+// ---------------------------------------------------------------------------
+// W219 · conversation identity: one conversation per archive id, however many
+// machines observed it, and an explicit verdict when two accounts share one id.
+// ---------------------------------------------------------------------------
+
+/// What the archive can say about the account behind one conversation id.
+///
+/// The three states are three different claims and must stay three:
+///
+/// * [`AccountVerdict::NotRecorded`] — no comparable key exists (no fingerprint
+///   on any record, or every one was `kind: "unknown"`). This is *not* "one
+///   account": a comparison that had nothing to compare with proves nothing.
+/// * [`AccountVerdict::Consistent`] — at least one comparable key exists and no
+///   two of them disagree within a salt.
+/// * [`AccountVerdict::Collision`] — two different fingerprint values were
+///   recorded **under the same `saltId`**, which is the only comparison the
+///   format licenses (`contracts/inbox.schema.json`: values from different
+///   installs or profiles are incomparable "and that must not be read as an
+///   account switch"). So a collision is a *provable* statement: one install
+///   wrote records for one archive id under two different accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountVerdict {
+    NotRecorded,
+    Consistent,
+    Collision { salt_id: String, accounts: usize },
+}
+
+impl AccountVerdict {
+    /// True only for the provable collision — the state that must never be
+    /// silently merged, and the one the UI badges.
+    pub fn is_collision(&self) -> bool {
+        matches!(self, AccountVerdict::Collision { .. })
+    }
+}
+
+/// One archive conversation: the id that names it, every machine that archived
+/// it, and what the archive can say about its account.
+///
+/// `session_id` **is** the archive identity axis (D3, 2026-09-26): it is
+/// `platform.sessionId`, machine-independent by construction
+/// (`inbox::session_dir_id`), which is exactly why the same conversation
+/// captured on a laptop and a desktop lands under one id in two machine
+/// partitions — two rows, one conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationIdentity {
+    pub session_id: String,
+    pub harness: String,
+    /// Distinct machines that hold this conversation, sorted. Always ≥ 1.
+    pub machines: Vec<String>,
+    pub accounts: AccountVerdict,
+}
+
+impl ConversationIdentity {
+    /// How many machines archived this conversation. `> 1` is the
+    /// "seen on N machines" fact.
+    pub fn seen_on_machines(&self) -> usize {
+        self.machines.len()
+    }
+}
+
+/// Group `rows` by archive id — the conversation axis — and judge each one.
+///
+/// Deliberately grouped by `session_id` **alone**, not by `(machine,
+/// session_id)`: `session_id` already carries the platform prefix
+/// (`session_dir_id` builds `platform.sessionId`), so it is archive-wide unique
+/// and two machines holding it are two observations of one conversation, not
+/// two conversations. That is the whole point of this function, and it is the
+/// axis [`crate::ui::merge`] does **not** cover: that merge collapses the
+/// *destination* axis (one machine, two backup copies), which is a different key
+/// and stays a different fact.
+///
+/// Rows are visited in order and the output is sorted by id, so the result is a
+/// pure function of the row set.
+pub fn conversation_identities(rows: &[OverviewRow]) -> Vec<ConversationIdentity> {
+    // session_id -> (harness, machines, salt_id -> distinct fingerprint values)
+    let mut by_id: BTreeMap<&str, (&str, BTreeSet<&str>, BTreeMap<&str, BTreeSet<&str>>)> =
+        BTreeMap::new();
+    for r in rows {
+        let entry = by_id
+            .entry(r.session_id.as_str())
+            .or_insert_with(|| (r.harness.as_str(), BTreeSet::new(), BTreeMap::new()));
+        entry.1.insert(r.machine.as_str());
+        for key in &r.account_keys {
+            entry
+                .2
+                .entry(key.salt_id.as_str())
+                .or_default()
+                .insert(key.value.as_str());
+        }
+    }
+    by_id
+        .into_iter()
+        .map(|(session_id, (harness, machines, salts))| {
+            // A collision is reported for the first salt (in sorted order) that
+            // holds more than one value — not for the union of all salts, which
+            // would count incomparable values as if they were comparable.
+            let collision =
+                salts
+                    .iter()
+                    .find(|(_, values)| values.len() > 1)
+                    .map(|(salt_id, values)| AccountVerdict::Collision {
+                        salt_id: (*salt_id).to_string(),
+                        accounts: values.len(),
+                    });
+            let accounts = match collision {
+                Some(verdict) => verdict,
+                None if salts.values().any(|values| !values.is_empty()) => {
+                    AccountVerdict::Consistent
+                }
+                None => AccountVerdict::NotRecorded,
+            };
+            ConversationIdentity {
+                session_id: session_id.to_string(),
+                harness: harness.to_string(),
+                machines: machines.into_iter().map(str::to_string).collect(),
+                accounts,
+            }
+        })
+        .collect()
+}
+
+/// Number of distinct conversations — the count that must not inflate when the
+/// same conversation was archived on more than one machine.
+pub fn conversation_count(rows: &[OverviewRow]) -> usize {
+    rows.iter()
+        .map(|r| r.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// Conversations archived on more than one machine — the size of the
+/// cross-machine duplication, reported rather than hidden by the deduped count.
+pub fn cross_machine_count(rows: &[OverviewRow]) -> usize {
+    conversation_identities(rows)
+        .iter()
+        .filter(|c| c.seen_on_machines() > 1)
+        .count()
+}
+
+/// Conversations holding a provable account collision. Zero here is a
+/// measurement over rows that carried comparable keys, not a proof of
+/// consistency: [`AccountVerdict::NotRecorded`] conversations are counted
+/// separately, never folded in.
+pub fn collision_count(rows: &[OverviewRow]) -> usize {
+    conversation_identities(rows)
+        .iter()
+        .filter(|c| c.accounts.is_collision())
+        .count()
+}
+
+/// Conversations with no comparable account key at all. Reported so a zero
+/// collision count can be read for what it is — see [`collision_count`].
+pub fn account_not_recorded_count(rows: &[OverviewRow]) -> usize {
+    conversation_identities(rows)
+        .iter()
+        .filter(|c| c.accounts == AccountVerdict::NotRecorded)
+        .count()
+}
+
 /// Aggregate everything into a single rendered report.
+///
+/// W219 · the headline count is **conversations**, not rows: one conversation
+/// archived on a laptop and a desktop is one conversation with two observations,
+/// and adding the two rows together would inflate the archive by exactly the
+/// redundancy the backup is supposed to provide. The row count is printed beside
+/// it so the raw reading stays recoverable, and the cross-machine share is named
+/// rather than left for the reader to infer.
 pub fn render_overview(rows: &[OverviewRow], width: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "machines {} · harnesses {} · sessions {} · total lines {}\n",
+        "machines {} · harnesses {} · conversations {} (of {} observation{}) · total lines {}\n",
         machine_count(rows),
         harness_count(rows),
+        conversation_count(rows),
         rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
         total_lines(rows)
     ));
     out.push('\n');
@@ -207,7 +379,64 @@ pub fn render_overview(rows: &[OverviewRow], width: usize) -> String {
     out.push('\n');
     out.push_str(&render_no_conversation_content(rows));
     out.push('\n');
+    out.push_str(&render_conversation_identity(rows));
+    out.push('\n');
     out.push_str(&render_heatmap(rows, width, HeatmapAxis::Machine));
+    out
+}
+
+/// One line per conversation archived on more than one machine, plus every
+/// provable account collision, plus the tally of conversations that carried no
+/// comparable account key.
+///
+/// The third tally is the reason this section is not empty when there is nothing
+/// to report: "0 collisions" over conversations nobody could compare is not the
+/// same statement as "0 collisions" over conversations that were compared, and a
+/// reader who is shown only the first will take the second from it.
+pub fn render_conversation_identity(rows: &[OverviewRow]) -> String {
+    let ids = conversation_identities(rows);
+    let not_recorded = ids
+        .iter()
+        .filter(|c| c.accounts == AccountVerdict::NotRecorded)
+        .count();
+    let shared: Vec<&ConversationIdentity> =
+        ids.iter().filter(|c| c.seen_on_machines() > 1).collect();
+    let collisions: Vec<&ConversationIdentity> =
+        ids.iter().filter(|c| c.accounts.is_collision()).collect();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "conversation identity: {} conversation(s) · {} on more than one machine · \
+         {} with two accounts under one id\n",
+        ids.len(),
+        shared.len(),
+        collisions.len()
+    ));
+    for c in &shared {
+        out.push_str(&format!(
+            "  {} / {}: seen on {} machines ({})\n",
+            crate::id::short_session_id(&c.session_id),
+            c.harness,
+            c.seen_on_machines(),
+            c.machines.join(", ")
+        ));
+    }
+    for c in &collisions {
+        let AccountVerdict::Collision { salt_id, accounts } = &c.accounts else {
+            continue;
+        };
+        out.push_str(&format!(
+            "  COLLISION {} / {}: one archive id, {accounts} account fingerprint(s) under \
+             install salt {} — these records are NOT the same account and were not merged\n",
+            crate::id::short_session_id(&c.session_id),
+            c.harness,
+            crate::id::short_session_id(salt_id)
+        ));
+    }
+    out.push_str(&format!(
+        "  not comparable: {not_recorded} conversation(s) recorded no account fingerprint \
+         (an unknown account is not an account), so no comparison was possible for them\n"
+    ));
     out
 }
 
@@ -251,7 +480,20 @@ pub fn overview_json(
         "summary": {
             "machines": machine_count(rows),
             "harnesses": harness_count(rows),
-            "sessions": rows.len(),
+            // W219 · the total is the **conversation** count, deduped by archive
+            // id: one conversation archived on a laptop and a desktop is one
+            // conversation, and two rows. `observations` carries the raw reading
+            // so nothing is lost by the dedup — the two are never derived from
+            // one another, exactly as `ui::merge` keeps its distinct and raw
+            // session counts apart.
+            "sessions": conversation_count(rows),
+            "observations": rows.len(),
+            "conversations_on_multiple_machines": cross_machine_count(rows),
+            "account_collisions": collision_count(rows),
+            // A zero collision count over conversations nobody could compare is
+            // a weaker statement than a zero over conversations that were
+            // compared, so the size of that blind spot travels with the number.
+            "account_not_recorded_conversations": account_not_recorded_count(rows),
             "lines": total_lines(rows),
             // ADR-035: "time unknown" counts only real conversations whose time
             // could not be obtained; "no conversation content" is a separate
@@ -272,7 +514,55 @@ pub fn overview_json(
             "missing_index": missing.iter().map(|m| display_name(m, display_names)).collect::<Vec<_>>(),
             "undeclared": undeclared.iter().map(|m| display_name(m, display_names)).collect::<Vec<_>>(),
         },
+        // W219 · one record per archive conversation: which machines archived it
+        // and what the archive can say about its account. `session_id` is the
+        // archive identity axis, unchanged (D3) — this is a *reading* of the
+        // existing key, never a migration of it.
+        "conversations": conversation_identities(rows)
+            .iter()
+            .map(|c| conversation_json(c, display_names))
+            .collect::<Vec<_>>(),
         "sessions": rows.iter().map(|r| row_json(r, display_names)).collect::<Vec<_>>(),
+    })
+}
+
+/// One [`ConversationIdentity`] as JSON.
+///
+/// `account` is a tagged object, never a bare string: the three verdicts are
+/// three different claims, and a consumer that had to read "collision": true
+/// would have no way to tell "one account" from "nothing was comparable" — the
+/// exact collapse this field exists to prevent.
+///
+/// The fingerprint values are deliberately **not** emitted. They are opaque and
+/// irreversible, but a reader only ever needs "how many accounts under this
+/// salt", and the archive's own rule is that a value is comparable only within
+/// its salt; printing values would invite exactly the cross-salt comparison the
+/// schema forbids. The `salt_id` is emitted because it is the scope that makes
+/// the collision claim checkable.
+fn conversation_json(
+    c: &ConversationIdentity,
+    display_names: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let account = match &c.accounts {
+        AccountVerdict::NotRecorded => serde_json::json!({"state": "not_recorded"}),
+        AccountVerdict::Consistent => serde_json::json!({"state": "consistent"}),
+        AccountVerdict::Collision { salt_id, accounts } => serde_json::json!({
+            "state": "collision",
+            "salt_id": salt_id,
+            "accounts": accounts,
+        }),
+    };
+    serde_json::json!({
+        "session_id": c.session_id,
+        "short_id": crate::id::short_session_id(&c.session_id),
+        "harness": c.harness,
+        "seen_on_machines": c.seen_on_machines(),
+        "machines": c
+            .machines
+            .iter()
+            .map(|m| display_name(m, display_names))
+            .collect::<Vec<_>>(),
+        "account": account,
     })
 }
 
@@ -513,7 +803,13 @@ pub fn overview_summary_json(
         "totals": {
             "machines": machine_count(rows),
             "sources": harness_count(rows),
-            "sessions": rows.len(),
+            // W219 · same reading as the full document's `summary.sessions`:
+            // the deduped conversation count, with the raw row count beside it.
+            "sessions": conversation_count(rows),
+            "observations": rows.len(),
+            "conversations_on_multiple_machines": cross_machine_count(rows),
+            "account_collisions": collision_count(rows),
+            "account_not_recorded_conversations": account_not_recorded_count(rows),
             "lines": total_lines(rows),
             // ADR-035, same split as the full document: a session with no
             // conversation content is never folded into time-unknown.
@@ -1349,11 +1645,243 @@ mod tests {
             line_count: lines,
             time_source: ts,
             provenance: None,
+            account_keys: Vec::new(),
         }
     }
 
     // Fixed unix timestamps (UTC) for test convenience.
     const D1: i64 = 1_777_651_200; // 2026-05-01T16:00:00Z → civil date 2026-05-01
+
+    // ------------------------------------------------ W219 · conversation identity
+
+    fn key(salt: &str, value: &str) -> crate::activity::AccountKey {
+        crate::activity::AccountKey {
+            salt_id: salt.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    /// One machine's observation of `id`, with `keys` recorded on its records.
+    fn observed(id: &str, machine: &str, keys: Vec<crate::activity::AccountKey>) -> OverviewRow {
+        let mut r = row(
+            id,
+            machine,
+            "deepseek",
+            Some(D1),
+            Some(D1),
+            1,
+            TimeSource::Exact,
+        );
+        r.account_keys = keys;
+        r
+    }
+
+    /// One conversation archived on two machines is **one** conversation. This
+    /// is the count that used to inflate: `sessions` was `rows.len()`, so a
+    /// laptop and a desktop holding the same id added up to two.
+    #[test]
+    fn one_conversation_on_two_machines_is_counted_once() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", Vec::new()),
+            observed("deepseek.s1", "air", Vec::new()),
+            observed("deepseek.s2", "mbp", Vec::new()),
+        ];
+        assert_eq!(rows.len(), 3, "three observations …");
+        assert_eq!(conversation_count(&rows), 2, "… of two conversations");
+        assert_eq!(cross_machine_count(&rows), 1);
+
+        let ids = conversation_identities(&rows);
+        let shared = ids
+            .iter()
+            .find(|c| c.session_id == "deepseek.s1")
+            .expect("the shared id is grouped");
+        assert_eq!(shared.seen_on_machines(), 2);
+        assert_eq!(
+            shared.machines,
+            vec!["air", "mbp"],
+            "every machine is named"
+        );
+        assert_eq!(
+            shared.accounts,
+            AccountVerdict::NotRecorded,
+            "no fingerprint here: counted once, and nothing claimed about its account"
+        );
+    }
+
+    /// The **same** account seen on two machines is not a collision: two
+    /// installs hold two salts, so the two values are incomparable, and the
+    /// schema says that must not be read as an account switch. Two rows, one
+    /// conversation, no collision — all three at once.
+    #[test]
+    fn the_same_account_on_two_machines_is_not_a_collision() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", vec![key("salt-mbp", "aa")]),
+            observed("deepseek.s1", "air", vec![key("salt-air", "zz")]),
+        ];
+        let ids = conversation_identities(&rows);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].accounts, AccountVerdict::Consistent);
+        assert_eq!(collision_count(&rows), 0);
+        assert_eq!(
+            cross_machine_count(&rows),
+            1,
+            "the duplicate is still reported"
+        );
+    }
+
+    /// Two fingerprints under **one** salt are two accounts, provably: the
+    /// comparison is the only one the format licenses. This is the case that
+    /// must never be merged, and it is reported as an explicit collision.
+    #[test]
+    fn two_accounts_under_one_salt_is_an_explicit_collision() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", vec![key("salt-1", "aa")]),
+            observed("deepseek.s1", "mbp", vec![key("salt-1", "bb")]),
+        ];
+        let ids = conversation_identities(&rows);
+        assert_eq!(
+            ids.len(),
+            1,
+            "one id, so one conversation — not merged away"
+        );
+        assert_eq!(
+            ids[0].accounts,
+            AccountVerdict::Collision {
+                salt_id: "salt-1".into(),
+                accounts: 2
+            }
+        );
+        assert!(ids[0].accounts.is_collision());
+        assert_eq!(collision_count(&rows), 1);
+        assert_eq!(rows.len(), 2, "both observations are still in the archive");
+    }
+
+    /// A collision is judged **per salt**. One value under each of two salts is
+    /// not a collision, however different the two values look: they were never
+    /// comparable.
+    #[test]
+    fn values_under_different_salts_never_collide() {
+        let rows = vec![observed(
+            "deepseek.s1",
+            "mbp",
+            vec![key("salt-1", "aa"), key("salt-2", "bb")],
+        )];
+        let ids = conversation_identities(&rows);
+        assert_eq!(ids[0].accounts, AccountVerdict::Consistent);
+        assert_eq!(collision_count(&rows), 0);
+    }
+
+    /// No comparable key is a **third** state, not a quiet "consistent": a
+    /// conversation nobody could compare must not be counted as one that was
+    /// checked and agreed.
+    #[test]
+    fn a_conversation_with_no_comparable_key_is_not_recorded() {
+        let rows = vec![observed("deepseek.s1", "mbp", Vec::new())];
+        let ids = conversation_identities(&rows);
+        assert_eq!(ids[0].accounts, AccountVerdict::NotRecorded);
+        assert!(!ids[0].accounts.is_collision());
+        assert_eq!(collision_count(&rows), 0);
+        assert_eq!(account_not_recorded_count(&rows), 1);
+    }
+
+    /// The rendered text names the collision, names the machines a shared
+    /// conversation was seen on, and always states the size of the blind spot.
+    #[test]
+    fn the_rendered_report_names_collisions_and_the_blind_spot() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", vec![key("salt-1", "aa")]),
+            observed("deepseek.s1", "air", vec![key("salt-1", "bb")]),
+            observed("deepseek.s2", "mbp", Vec::new()),
+        ];
+        let text = render_conversation_identity(&rows);
+        assert!(text.contains("2 conversation(s)"), "{text}");
+        assert!(text.contains("1 on more than one machine"), "{text}");
+        assert!(text.contains("1 with two accounts under one id"), "{text}");
+        assert!(text.contains("COLLISION"), "{text}");
+        assert!(text.contains("not merged"), "{text}");
+        assert!(text.contains("not comparable: 1 conversation(s)"), "{text}");
+        // The rendered text never carries a fingerprint value.
+        assert!(
+            !text.contains("aa"),
+            "a fingerprint value was printed: {text}"
+        );
+        assert!(
+            !text.contains("bb"),
+            "a fingerprint value was printed: {text}"
+        );
+    }
+
+    /// The whole rendered report states the conversation reading and keeps the
+    /// row reading beside it, so the dedup destroys no evidence.
+    #[test]
+    fn the_rendered_report_headline_counts_conversations_not_rows() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", Vec::new()),
+            observed("deepseek.s1", "air", Vec::new()),
+        ];
+        let text = render_overview(&rows, 100);
+        assert!(
+            text.contains("conversations 1 (of 2 observations)"),
+            "{text}"
+        );
+    }
+
+    /// The `--json` document carries the same reading under `summary`, plus the
+    /// per-conversation records. Both are additive: `schema_version` stays 1.
+    #[test]
+    fn overview_json_carries_the_conversation_axis() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", vec![key("salt-1", "aa")]),
+            observed("deepseek.s1", "air", vec![key("salt-1", "bb")]),
+        ];
+        let snap: BTreeSet<String> = ["air", "mbp"].iter().map(|s| s.to_string()).collect();
+        let v = overview_json(&rows, &snap, &snap, &snap, &BTreeMap::new(), 0);
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["summary"]["sessions"], serde_json::json!(1));
+        assert_eq!(v["summary"]["observations"], serde_json::json!(2));
+        assert_eq!(
+            v["summary"]["conversations_on_multiple_machines"],
+            serde_json::json!(1)
+        );
+        assert_eq!(v["summary"]["account_collisions"], serde_json::json!(1));
+        assert_eq!(
+            v["summary"]["account_not_recorded_conversations"],
+            serde_json::json!(0)
+        );
+        let c = &v["conversations"][0];
+        assert_eq!(c["session_id"], serde_json::json!("deepseek.s1"));
+        assert_eq!(c["seen_on_machines"], serde_json::json!(2));
+        assert_eq!(c["account"]["state"], serde_json::json!("collision"));
+        assert_eq!(c["account"]["salt_id"], serde_json::json!("salt-1"));
+        assert_eq!(c["account"]["accounts"], serde_json::json!(2));
+        // The fingerprint values themselves are never published.
+        let rendered = v.to_string();
+        assert!(!rendered.contains("\"aa\""), "{rendered}");
+    }
+
+    /// The summary variant carries the same totals — a menubar reading
+    /// `totals.sessions` must get the deduped number, not the row count.
+    #[test]
+    fn the_summary_variant_dedupes_too() {
+        let rows = vec![
+            observed("deepseek.s1", "mbp", Vec::new()),
+            observed("deepseek.s1", "air", Vec::new()),
+        ];
+        let times: BTreeMap<String, i64> = BTreeMap::new();
+        let v = overview_summary_json(
+            &rows,
+            &times,
+            &[],
+            &[],
+            &BTreeMap::new(),
+            0,
+            NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            &|_| None,
+        );
+        assert_eq!(v["totals"]["sessions"], serde_json::json!(1));
+        assert_eq!(v["totals"]["observations"], serde_json::json!(2));
+    }
+
     const D1P1: i64 = 1_777_737_600; // D1 + 1 day → 2026-05-02
     const D1P7: i64 = 1_777_651_200 + 7 * 86_400; // D1 + 7 days → 2026-05-08
 
@@ -1676,6 +2204,10 @@ mod tests {
             top,
             [
                 "command",
+                // W219 · the conversation axis, one record per archive id.
+                // Deliberate and additive: a consumer that does not know the
+                // key ignores it, and `schema_version` stays 1.
+                "conversations",
                 "exit_code",
                 "healthy",
                 "machines",
@@ -1689,10 +2221,18 @@ mod tests {
         assert_eq!(
             summary.keys().map(String::as_str).collect::<Vec<_>>(),
             [
+                // W219 · the collision count is never reported without the size
+                // of the blind spot it was measured over.
+                "account_collisions",
+                "account_not_recorded_conversations",
+                "conversations_on_multiple_machines",
                 "harnesses",
                 "lines",
                 "machines",
                 "no_conversation_content_sessions",
+                // W219 · the raw row count, so the deduped `sessions` reading
+                // does not destroy its own evidence.
+                "observations",
                 "sessions",
                 "unknown_time_sessions",
             ]

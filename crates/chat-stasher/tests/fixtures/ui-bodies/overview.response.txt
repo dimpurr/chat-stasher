@@ -79,7 +79,9 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <p class=sub>destination <b>dest-under-test</b> · 2 snapshot(s) scanned of 2 in repository · this page rendered 2026-02-02 02:40 UTC of the archive metadata only</p>
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
 <div class=warn><b>Machines without an activity index.</b> 1 machine(s) hold sessions but no activity index beside the snapshot, so their conversation times were never recorded: their heatmap rows, and any time filter below, are <i>UNKNOWN</i> for them, not empty. Run <code>chat-stasher activity-index</code> on that machine to record one.<ul><li class=mono>m-3</li></ul></div>
-<section class=stats><div class=stat><span class=v>4</span><span class=l>sessions</span></div><div class=stat><span class=v>370 B</span><span class=l>bytes (shard sizes)</span></div><div class=stat><span class=v>3</span><span class=l>machines</span></div><div class=stat><span class=v>3</span><span class=l>sources</span></div></section>
+<section class=stats><div class=stat><span class=v>4</span><span class=l>conversations</span></div><div class=stat><span class=v>370 B</span><span class=l>bytes (shard sizes)</span></div><div class=stat><span class=v>3</span><span class=l>machines</span></div><div class=stat><span class=v>3</span><span class=l>sources</span></div></section>
+<p class=sub><b>across machines:</b> the 4 conversation(s) counted above are 4 row(s) over 2 machine(s) — an archive id archived on more than one machine is one conversation and one row per machine. 0 conversation(s) were seen on more than one machine and are counted once above.</p>
+<p class=sub><b>account collision:</b> none <i>could</i> be detected — none of the 4 conversation(s) in view carried a comparable account fingerprint, so there was nothing to compare.</p>
 <section><h2>Machines</h2>
 <div class=scroll><table>
 <thead><tr><th>machine</th><th>newest snapshot</th><th>health</th><th class=n>sessions</th><th class=n>bytes</th><th>activity index</th></tr></thead>

@@ -1231,7 +1231,9 @@ fn a_launch_filter_is_named_on_the_page() {
     assert!(html.contains("Filter in force"), "{html}");
     assert!(html.contains("mbp-a"), "{html}");
     assert!(
-        html.contains("sessions in view"),
+        // W219 · the headline counts conversations, not per-machine rows; the
+        // "in view" half is unchanged and is what this test is about.
+        html.contains("conversations in view"),
         "the headline must say it is a filtered count: {html}"
     );
     // …and the filter is still applied by the shared selector, so a drill-down

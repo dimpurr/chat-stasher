@@ -42,10 +42,22 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     let sources: BTreeSet<String> = in_view.iter().map(|s| s.source_label()).collect();
     let machines = data.machine_keys();
     let filtered = describe_selector(&data.launch).is_some();
+    // W219 · the headline total is the **conversation** count: distinct archive
+    // ids in view. One conversation archived on a laptop and a desktop is one
+    // conversation and two rows, and a page that added the two rows would
+    // inflate the archive by exactly the redundancy the backup provides. The row
+    // reading is printed under this number by `machine_axis_counts`, never
+    // dropped — the same distinct/raw pair `merged_counts` keeps for the
+    // destination axis.
+    let conversations_in_view: usize = in_view
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     let sessions_word = if filtered {
-        "sessions in view"
+        "conversations in view"
     } else {
-        "sessions"
+        "conversations"
     };
     let bytes_word = if filtered {
         "bytes in view (shard sizes)"
@@ -59,7 +71,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
          <div class=stat><span class=v>{m}</span><span class=l>machines</span></div>\
          <div class=stat><span class=v>{h}</span><span class=l>sources</span></div>\
          </section>\n",
-        n = in_view.len(),
+        n = conversations_in_view,
         b = esc(&fmt_bytes(total_bytes)),
         m = machines.len(),
         h = sources.len(),
@@ -73,6 +85,11 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     // with a single destination it is empty, because there the two readings
     // are equal by construction.
     out.push_str(&merged_counts(data));
+    // W219 · the machine axis, stated beside the destination one. Two different
+    // questions ("how many backup copies" vs "how many machines hold this
+    // conversation") with two different answers, so neither is derived from the
+    // other and both reach the page.
+    out.push_str(&super::html::machine_axis_counts(data));
     if sel.not_matched > 0 || !sel.unplaced.is_empty() {
         out.push_str(&format!(
             "<p>{} session(s) were evaluated and <b>rejected</b> by the filter in force; \

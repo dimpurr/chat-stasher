@@ -35,6 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fts;
+use crate::overview::OverviewRow;
 use crate::search::{HostSnapshot, SearchReport};
 
 use super::{DestinationState, IndexState, QueryResult, TextIndex, UiSession};
@@ -188,6 +189,47 @@ fn row_of(hit: &crate::search::SessionHit, destination: usize) -> UiSession {
         archive_time_unix: hit.archive_time_unix,
         data_blobs: hit.data_blobs,
         destinations: vec![destination],
+        account_keys: hit.account_keys.clone(),
+        // W219 · both are facts about the archive id across **all** machines, so
+        // they are decided in one pass over the merged inventory
+        // (`UiData::from_reports`), never per destination here. A default is the
+        // honest value until that pass runs.
+        seen_on_machines: 1,
+        account_collision: false,
+    }
+}
+
+/// W219 · Stamp every row with the facts that belong to its **archive id**
+/// rather than to its machine: how many machines hold that conversation, and
+/// whether two accounts provably share it.
+///
+/// One pass over the merged inventory, keyed by `session_id` — the archive
+/// identity axis (D3) — through the very function `overview` uses, so the two
+/// surfaces cannot drift. The merge's own key stays `(machine, session_id)`:
+/// that key answers "is this the same session in two destinations", which is a
+/// different question with a different badge, and collapsing the two would lose
+/// the destination axis entirely.
+///
+/// Rows the index never saw (a session whose machine has no activity index at
+/// all) simply have no account key: their `seen_on_machines` is still counted,
+/// because "which machines hold this id" comes from the tree, not the index.
+pub(super) fn stamp_conversation_identity(sessions: &mut [UiSession]) {
+    let rows: Vec<OverviewRow> = sessions.iter().map(UiSession::overview_row).collect();
+    let by_id: BTreeMap<String, (usize, bool)> = crate::overview::conversation_identities(&rows)
+        .into_iter()
+        .map(|c| {
+            let facts = (c.seen_on_machines(), c.accounts.is_collision());
+            (c.session_id, facts)
+        })
+        .collect();
+    for s in sessions.iter_mut() {
+        // A row always has a row in `by_id` — the map was built from these very
+        // rows — so the `if let` is a borrow-checking shape, not a fallback that
+        // can silently leave a session at its default.
+        if let Some((machines, collision)) = by_id.get(s.session_id.as_str()) {
+            s.seen_on_machines = *machines;
+            s.account_collision = *collision;
+        }
     }
 }
 
