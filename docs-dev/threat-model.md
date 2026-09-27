@@ -30,17 +30,17 @@ Understanding the roles below requires knowing the path the content takes.
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
-   (`apps/extension/lib/outbox.ts:363-432`;
-   `apps/extension/entrypoints/background.ts:345-362`).
+   (`apps/extension/lib/outbox.ts:365-437`;
+   `apps/extension/entrypoints/background.ts:350-367`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:760-810`;
-   `crates/chat-stasher/src/nativehost.rs:1838-1865`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:1980-1995`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:1008-1017`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:1012-1021`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:756-806`).
@@ -105,17 +105,17 @@ Concretely, five separate plaintext exposures:
 1. **The outbox window, before delivery.** The extension writes each captured
    session as an ordinary, unencrypted record into its outbox IndexedDB
    database, inside your browser profile
-   (`apps/extension/lib/outbox.ts:102-118`, `:363-432`). The record's `raw.text`
+   (`apps/extension/lib/outbox.ts:102-119`, `:365-437`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:235-238`). It sits there,
+   (`apps/extension/entrypoints/background.ts:240-243`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
-   and the record is deleted (`apps/extension/lib/outbox.ts:434-449`). **We do
+   and the record is deleted (`apps/extension/lib/outbox.ts:440-455`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
    that window.** How long it is depends on how often the host is reachable; if
    it never is, the plaintext stays indefinitely. A second plaintext copy of a
    capture exists if you press the popup's export button, which writes the same
    bodies into an ordinary download file
-   (`apps/extension/lib/outbox.ts:581-614`). (An **archived** session can also be
+   (`apps/extension/lib/outbox.ts:588-621`). (An **archived** session can also be
    written out decrypted, by `export --out` — that is exposure 5, below.)
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
@@ -133,7 +133,7 @@ Concretely, five separate plaintext exposures:
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
    `chat-stasher-export-<UTC>-<install-short-id>-<nonce>.jsonl`
-   (`apps/extension/lib/outbox.ts:533-571`). The name's install segment is a
+   (`apps/extension/lib/outbox.ts:540-578`). The name's install segment is a
    short id for this browser profile — metadata of the same kind as the one
    the bundle carries — and the nonce says nothing but "this export".
    That is metadata, not content — it says an export happened and when, not
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:2732-2766`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:2853-2887`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -331,7 +331,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:1189-1204`, `:1291-1307`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:216-218`). It never leaves your
+(`apps/extension/entrypoints/background.ts:221-223`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
@@ -365,7 +365,7 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1301-1357`, `:1428-1444`). Two limits
+(`apps/extension/entrypoints/background.ts:1281-1337`, `:1408-1424`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
@@ -428,27 +428,27 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:2732-2766`).
+  (`crates/chat-stasher/src/nativehost.rs:2853-2887`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:1487-1554`, `:1559-1588`).
+  (`crates/chat-stasher/src/nativehost.rs:1581-1648`, `:1653-1682`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1160-1188`). Two browsers, two
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1167-1195`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1836-1845`;
-  `apps/extension/lib/native-host.ts:1008-1017`).
+  (`crates/chat-stasher/src/nativehost.rs:1937-1946`;
+  `apps/extension/lib/native-host.ts:1012-1021`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1852-1858`).
+  (`crates/chat-stasher/src/nativehost.rs:1953-1959`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -588,7 +588,7 @@ a real limitation of the current code.
 1. **Plaintext window before delivery.** Described in full above. Captured
    conversations sit unencrypted in the extension's outbox, inside your browser
    profile, until the host answers a matching `ack`
-   (`apps/extension/lib/outbox.ts:363-432`, `:434-449`). **We do not currently
+   (`apps/extension/lib/outbox.ts:365-437`, `:440-455`). **We do not currently
    defend this.** Mitigation available to you today: keep the popup's channel
    line healthy so deliveries go through, uninstall the extension when you are
    done with it, and put your browser profile on an encrypted volume.
@@ -694,7 +694,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-153`;
-   `apps/extension/entrypoints/background.ts:1605-1665`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1585-1645`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
