@@ -2258,8 +2258,15 @@ fn redact_activity_index_paths(
     {
         safe = safe.replace(&private.to_string_lossy().to_string(), "<private path>");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        safe = safe.replace(&home.to_string_lossy().to_string(), "~");
+    // The home directory is `$HOME` on Unix and `$USERPROFILE` on Windows,
+    // where `$HOME` is normally not set at all. Both spellings are replaced
+    // when the environment declares them, so a message cannot name the
+    // user's home directory on the platform whose convention it happens to
+    // be written in.
+    for var in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(var) {
+            safe = safe.replace(&home.to_string_lossy().to_string(), "~");
+        }
     }
     safe
 }
@@ -9144,6 +9151,53 @@ mod decision_surface_tests {
             "message exposed a home path"
         );
         assert!(safe.contains("<private path>"));
+    }
+
+    /// The home-directory redaction must cover the Windows spelling of "home".
+    /// `$USERPROFILE`, not `$HOME`, names the profile directory there, so with
+    /// HOME unset (its normal state on Windows) the redaction still has to
+    /// fire — otherwise an activity-index error names `C:\Users\<user>\…`,
+    /// the one thing this redaction exists to prevent. Both halves of the
+    /// swap read their result only after the environment is restored, and the
+    /// lock serialises them against this process's other env-reading tests.
+    #[test]
+    fn home_redaction_covers_the_windows_home_spelling() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\alice");
+        let windows_home = redact_activity_index_paths(
+            r"cannot replay C:\Users\alice\.local\share\chat-stasher\shards",
+            &StoreConfig::default(),
+            None,
+        );
+        std::env::remove_var("USERPROFILE");
+        std::env::set_var("HOME", "/home/alice");
+        let unix_home = redact_activity_index_paths(
+            "cannot replay /home/alice/.local/share/chat-stasher/shards",
+            &StoreConfig::default(),
+            None,
+        );
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        assert_eq!(
+            windows_home, r"cannot replay ~\.local\share\chat-stasher\shards",
+            "a USERPROFILE-named home path is user-identifying on Windows: {windows_home}"
+        );
+        assert_eq!(
+            unix_home, "cannot replay ~/.local/share/chat-stasher/shards",
+            "sanity: unchanged behaviour for the HOME spelling"
+        );
     }
 
     #[test]
