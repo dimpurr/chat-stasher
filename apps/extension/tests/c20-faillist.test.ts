@@ -229,7 +229,7 @@ describe('C20-2 · the sink fails ⇒ the debt is not cleared, it enters the fai
 
     // (b) 🔴 the debt is **not cleared** — it does not enter archived, so the progress numerator cannot lie
     expect(s.archived).toEqual([]);
-    expect(mod.lastBackfillTick()!.report!.progress).toContain('Archived 0');
+    expect(mod.lastBackfillTick()!.report!.progress).toContain('Captured by this browser: 0');
     expect(mod.lastBackfillTick()!.report!.progress).not.toContain('100%');
 
     // (c) 🔴 it enters the failure list

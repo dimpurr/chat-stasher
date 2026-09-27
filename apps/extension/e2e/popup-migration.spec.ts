@@ -118,7 +118,7 @@ test('opening the popup moves a pre-W18 record on its own, and says so', async (
   // names the move it made instead of doing it silently.
   await expect.poll(async () => (await popup.textContent('#progress')) ?? '').not.toContain('not started yet');
   const progress = (await popup.textContent('#progress')) ?? '';
-  expect(progress).toContain('Archived 1');
+  expect(progress).toContain('Captured by this browser: 1');
   const notes = (await popup.textContent('#notes')) ?? '';
   expect(notes).toContain('Storage layout');
 

@@ -341,7 +341,8 @@ function totalFact(row: CoverageRow): string {
 }
 
 /**
- * The "stored in full" value: a count, and a proportion **only** when `computeProgress` produced one.
+ * The "captured in full" value (D6, EXT-10: the label speaks this browser's own records): a count,
+ * and a proportion **only** when `computeProgress` produced one.
  * 🔴 The decision is not made here — `row.percent` is null exactly when `progress.ts`'s four conditions
  *    failed. With a percent, the sentence carries it as "N of total (P%)"; without, it is the bare count
  *    and `percentNote` says why there is no percentage.

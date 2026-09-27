@@ -547,9 +547,9 @@ describe('C17 task 3 · seam A: are the debt key and the on-disk file name the s
     expect(s.failures).toEqual([
       { shortId: 'shortid', platform: 'chatgpt', reason: 'not-saved', at: expect.any(Number) },
     ]);
-    // 🔴 The progress numerator no longer lies: 0 archived, not 100%.
+    // 🔴 The progress numerator no longer lies: 0 captured, not 100%.
     expect(mod.lastBackfillTick()!.report!.progress).not.toContain('100%');
-    expect(mod.lastBackfillTick()!.report!.progress).toContain('Archived 0');
+    expect(mod.lastBackfillTick()!.report!.progress).toContain('Captured by this browser: 0');
     expect(mod.lastBackfillTick()!.report!.failedThisRun).toHaveLength(1);
   });
 
