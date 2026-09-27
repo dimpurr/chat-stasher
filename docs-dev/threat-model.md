@@ -31,16 +31,16 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:318-386`;
-   `apps/extension/entrypoints/background.ts:339-356`).
+   `apps/extension/entrypoints/background.ts:340-357`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:760-810`;
-   `crates/chat-stasher/src/nativehost.rs:1507-1534`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:1705-1732`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:938-947`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:992-1001`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:756-806`).
@@ -107,7 +107,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:65-81`, `:318-386`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:229-232`). It sits there,
+   (`apps/extension/entrypoints/background.ts:230-233`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:388-403`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:2401-2435`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:2599-2633`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -305,7 +305,7 @@ it bounds what you may safely assume is archived:
 |---|---|---|
 | **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversation-list requests **and** requests per conversation — one on ChatGPT, DeepSeek, Kimi and Claude, **one per page** on Gemini (a long conversation is several requests), **two** on Grok (a skeleton call, then a content call), plus **one** resolution request on Claude when neither the page's own requests nor its cookie names the organization | The conversation text (`apps/extension/lib/backfill/enumerate.ts:4682-4706`). On all six this is **implemented but not yet observed completing in a real browser**; on Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page those endpoints. On DeepSeek it is unverified too and the endpoint is not paged either — but the body is **checked before it is stored**: the response is a tree, the extension walks it from its newest message back to a root, and a walk that leaves the messages the response carries means that conversation is not archived (`apps/extension/lib/backfill/enumerate.ts:2806-2833`). Gemini **is** paged, to the end of the continuation token, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/engine.ts:2650-2690`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:3164-3225`; `apps/extension/lib/backfill/engine.ts:2069-2149`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:268-305`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:2872-2885`) |
 | **Perplexity** | Conversation-list requests **and** one `GET /rest/thread/<slug>` per conversation — the same route the live-capture row registers (`apps/extension/lib/contract.ts:384-399`; `apps/extension/lib/backfill/enumerate.ts:2919-2930`) | The conversation text, on the condition the body's own top-level signal says there is no more. A 2026-09-23 logged-in probe observed `has_next_page` (boolean) and `next_cursor` (string or null), so a body that declares more is refused and listed as a failure rather than archived in part, and a body with no `entries` is never a confirmed receipt (`apps/extension/lib/backfill/enumerate.ts:2267-2311`). Implemented, **not yet observed completing a backfill in a real browser**; the observed thread had one entry, so whether a genuinely long thread answers the "more" signal when it truncates was not directly observed. |
-| **Claude** | Conversation-list requests **and** requests per conversation, each addressed by an account-scoped organization; plus **one** organization-list request when the page's own requests and the cookie both answered nothing | The conversation text — the active branch is walked from its newest message back to the branch root; a branch ending at a parent the response does not carry is the branch root only when the body's own shape corroborates it (one shared absent parent, and a root at the foot of the `index` counter — the shared tree-root id every real body omits, measured 2026-09-24), and a missing middle, a dropped prefix, a missing newest message or a cycle in the parent links is refused and listed as a failure (`apps/extension/lib/backfill/enumerate.ts:4066-4144`). Every request path carries the organization, which the page URL does not; it is resolved from evidence in a fixed order and the leg **stops** rather than choosing when an account has several (`apps/extension/lib/backfill/claude-org.ts:211-265`), so the request that is sent is always one the extension itself built for one resolved organization (`apps/extension/lib/backfill/tab-port.ts:464-484`) |
+| **Claude** | Conversation-list requests **and** requests per conversation, each addressed by an account-scoped organization; plus **one** organization-list request when the page's own requests and the cookie both answered nothing | The conversation text — the active branch is walked from its newest message back to the branch root; a branch ending at a parent the response does not carry is the branch root only when the body's own shape corroborates it (one shared absent parent, and a root at the foot of the `index` counter — the shared tree-root id every real body omits, measured 2026-09-24), and a missing middle, a dropped prefix, a missing newest message or a cycle in the parent links is refused and listed as a failure (`apps/extension/lib/backfill/enumerate.ts:4066-4144`). Every request path carries the organization, which the page URL does not; it is resolved from evidence in a fixed order and the leg **stops** rather than choosing when an account has several (`apps/extension/lib/backfill/claude-org.ts:217-271`), so the request that is sent is always one the extension itself built for one resolved organization (`apps/extension/lib/backfill/tab-port.ts:464-484`) |
 
 🔴 The completeness rule is a refusal, not a guess. On Perplexity the extension
 now lists your past conversations *and* fetches their content, one
@@ -331,7 +331,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:1189-1204`, `:1291-1307`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:210-212`). It never leaves your
+(`apps/extension/entrypoints/background.ts:211-213`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
@@ -362,14 +362,14 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1036-1092`, `:1163-1179`). Two limits
+(`apps/extension/entrypoints/background.ts:1191-1247`, `:1318-1334`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
 a visible account is never accused, because an absence is not evidence of a
 switch. A suspension does not expire the way a backoff does — it is lifted by an
 observation that agrees with it, which in practice is that account being used
-again (`apps/extension/lib/backfill/types.ts:1814-1834`).
+again (`apps/extension/lib/backfill/types.ts:1820-1840`).
 
 ### The browser extension ecosystem — other extensions installed alongside ours
 
@@ -425,12 +425,12 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:2401-2435`).
+  (`crates/chat-stasher/src/nativehost.rs:2599-2633`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:1291-1358`, `:1363-1392`).
+  (`crates/chat-stasher/src/nativehost.rs:1487-1554`, `:1559-1588`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -441,11 +441,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1505-1514`;
-  `apps/extension/lib/native-host.ts:938-947`).
+  (`crates/chat-stasher/src/nativehost.rs:1703-1712`;
+  `apps/extension/lib/native-host.ts:992-1001`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1521-1527`).
+  (`crates/chat-stasher/src/nativehost.rs:1719-1725`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -678,7 +678,7 @@ a real limitation of the current code.
    requests. Claude adds a second kind of unverified: every one of its requests
    is addressed by an organization the page URL does not carry, so a resolution
    that cannot name exactly one stops the leg instead of reading some other
-   organization's history (`apps/extension/lib/backfill/claude-org.ts:211-265`).
+   organization's history (`apps/extension/lib/backfill/claude-org.ts:217-271`).
    That resolution is asked for **in the claude.ai page** over the channel
    backfill already fetches through, and only when it is needed — at the popup's
    start button, on an unresolved-scope wake-up, or when a fresh page receives a
@@ -690,8 +690,8 @@ a real limitation of the current code.
    judgement written by another build is not this one's, and the attempt is
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
-   (`apps/extension/lib/backfill/claude-page.ts:70-148`;
-   `apps/extension/entrypoints/background.ts:1340-1400`). Kimi's routes, by contrast, were measured in a logged-in session,
+   (`apps/extension/lib/backfill/claude-page.ts:70-153`;
+   `apps/extension/entrypoints/background.ts:1495-1555`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
