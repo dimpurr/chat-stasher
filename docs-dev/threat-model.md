@@ -31,22 +31,22 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:365-437`;
-   `apps/extension/entrypoints/background.ts:350-367`).
+   `apps/extension/entrypoints/background.ts:351-368`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:760-810`;
-   `crates/chat-stasher/src/nativehost.rs:1980-1995`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:2216-2231`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:1012-1021`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:1045-1054`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:756-806`).
+   (`crates/chat-stasher/src/main.rs:759-809`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:319-356`).
+   (`crates/chat-stasher/src/main.rs:322-359`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -107,7 +107,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:102-119`, `:365-437`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:240-243`). It sits there,
+   (`apps/extension/entrypoints/background.ts:241-244`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:440-455`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -128,7 +128,7 @@ Concretely, five separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:319-323`).
+   (`crates/chat-stasher/src/main.rs:322-326`).
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
@@ -143,7 +143,7 @@ Concretely, five separate plaintext exposures:
 
 5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
    archived sessions it selected back out **decrypted**, one file per session,
-   into a directory you name (`crates/chat-stasher/src/main.rs:638-718`). Unlike
+   into a directory you name (`crates/chat-stasher/src/main.rs:641-721`). Unlike
    the stage, nothing here is sealed and nothing moves it on: the files stay
    exactly as written until you delete them, and the command keeps no record of
    where they went. Name a directory you would be willing to lose, and delete it
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:2853-2887`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:3089-3123`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -331,7 +331,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:1189-1204`, `:1291-1307`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:221-223`). It never leaves your
+(`apps/extension/entrypoints/background.ts:222-224`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
@@ -365,7 +365,7 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1281-1337`, `:1408-1424`). Two limits
+(`apps/extension/entrypoints/background.ts:1282-1338`, `:1409-1425`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
@@ -423,17 +423,17 @@ The properties that bound this boundary:
   pinned constants — `gihmdkkmmmkeiagjjiimacmgkdilofhi` and
   `chat-stasher@team.iopho.com` — and the extension's own Chrome id is pinned by
   a public key in its manifest, so it cannot vary per machine
-  (`crates/chat-stasher/src/nativehost.rs:151-164`, `:643-687`;
+  (`crates/chat-stasher/src/nativehost.rs:150-163`, `:642-686`;
   `apps/extension/wxt.config.ts:126-132`).
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:2853-2887`).
+  (`crates/chat-stasher/src/nativehost.rs:3089-3123`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:1581-1648`, `:1653-1682`).
+  (`crates/chat-stasher/src/nativehost.rs:1580-1647`, `:1652-1681`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -444,11 +444,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:1937-1946`;
-  `apps/extension/lib/native-host.ts:1012-1021`).
+  (`crates/chat-stasher/src/nativehost.rs:2173-2182`;
+  `apps/extension/lib/native-host.ts:1045-1054`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:1953-1959`).
+  (`crates/chat-stasher/src/nativehost.rs:2189-2195`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -505,8 +505,8 @@ between one profile's install and another's. Any install in any profile of any
 registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
-them (`crates/chat-stasher/src/nativehost.rs:495-608`, `:484-487`;
-`crates/chat-stasher/src/main.rs:1978-1993`). The host's `summary` answer is
+them (`crates/chat-stasher/src/nativehost.rs:494-607`, `:483-486`;
+`crates/chat-stasher/src/main.rs:1981-1996`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
 
@@ -536,12 +536,12 @@ machine:
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
   asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2010-2056`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:383,460-461`).
+  (`crates/chat-stasher/src/main.rs:386,463-464`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:808-840`).
+  the old inode (`crates/chat-stasher/src/main.rs:811-843`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -559,9 +559,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6814-6910`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6843-6939`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6786-6793`).
+  (`crates/chat-stasher/src/main.rs:6815-6822`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -572,7 +572,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:5139-5195`).
+  as many words (`crates/chat-stasher/src/main.rs:5168-5224`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -614,15 +614,15 @@ a real limitation of the current code.
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
    `activity-index`, `machine-declare`, `machine-label`, `overview`, `index`
-   (`crates/chat-stasher/src/main.rs:161-1176`); **a command that puts sessions
+   (`crates/chat-stasher/src/main.rs:164-1179`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:415-417,7146-7285`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:418-420,7175-7314`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
-   **plaintext** (`crates/chat-stasher/src/main.rs:638-718`) — see exposure 5
+   **plaintext** (`crates/chat-stasher/src/main.rs:641-721`) — see exposure 5
    above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
@@ -634,7 +634,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7447-7679`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7476-7708`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
@@ -650,7 +650,7 @@ a real limitation of the current code.
    It also distinguishes "nothing matched" from "could not finish reading"
    **and** from "read it all but could not place every session in time", which
    is the same unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:596-600`).
+   (`crates/chat-stasher/src/main.rs:599-603`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -694,7 +694,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-153`;
-   `apps/extension/entrypoints/background.ts:1585-1645`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1586-1646`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
@@ -775,5 +775,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:472-510`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:475-513`) rather than assuming
    the archive is intact.
