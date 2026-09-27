@@ -419,7 +419,7 @@ apps/extension/lib/ui-strings.ts:110-133  15d7068df650  lines=24
   <- docs-dev/install.md:416  :: export function channelDisconnected(f: ChannelFacts): strin…
 apps/extension/package.json:4  3aa57759f9e4  lines=1
   <- docs-dev/install.md:1043  :: "private": true,
-apps/extension/package.json:8-19  d3db38339dc6  lines=12
+apps/extension/package.json:8-20  9028dab8df44  lines=13
   <- docs-dev/install.md:325, docs-dev/install.md:1045  :: "dev": "wxt",
 apps/extension/wxt.config.ts:78  8973cb78d41e  lines=1
   <- docs-dev/install.md:1119  :: default_locale: 'en',
