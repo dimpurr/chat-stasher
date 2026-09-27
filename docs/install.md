@@ -97,7 +97,7 @@ chat-stasher doctor
 
 ## The browser extension
 
-The extension is released alongside the CLI as `chat-stasher-extension-X.Y.Z.zip`, on each release page from 0.4.0 onwards. It is **not in any extension store yet**, so you load it yourself. It runs in Chromium-based browsers: Chrome, Edge, Brave, Vivaldi and Chromium.
+The extension is released alongside the CLI as `chat-stasher-extension-X.Y.Z.zip`, on each release page from 0.4.0 onwards. It is **not in any extension store yet**, so you load it yourself. It runs in Chromium-based browsers. Chrome, Chromium, Edge, Brave and Arc are the supported and tested set; Chrome Beta, Chrome Canary, Opera and Vivaldi are best effort, marked **unverified**: `install-native-host` still registers them and reports what it did, but nothing is promised. Arc has no Linux build, so on Linux there is nothing to register for it. The full browser table, one cell per browser × OS, is generated into the [README's support section](../README.md#support-at-a-glance). Firefox is registered too, with its own manifest layout, and its support rows sit outside the Chromium table that decision speaks about.
 
 **Which platforms it covers.** The released build covers ChatGPT, Claude, DeepSeek, Gemini and Grok. Perplexity and Kimi are in the development build only. The [README](../README.md#support-at-a-glance) shows what is verified on each.
 

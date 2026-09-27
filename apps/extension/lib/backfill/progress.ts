@@ -167,10 +167,13 @@ export function computeProgress(state: ProgressInput): ProgressView {
 
 /**
  * One line of plain-language progress.
- * With an unknown denominator it reads like: `Archived 12, still owed 30, total
- * unknown (the API did not provide a total)` — say how much is done, how much
- * is still owed, and why there is no denominator. What it does not do is
- * produce a percentage.
+ * With an unknown denominator it reads like: `Captured by this browser: 12,
+ * still owed 30, total unknown (the API did not provide a total)` — say how
+ * much this browser has confirmed done, how much is still owed, and why there
+ * is no denominator. 🔴 D6 (EXT-10): the opening phrase is the extension's
+ * claim word for its own records and never the archive layer's "Archived",
+ * because this number is an install's tally, not the archive's content view.
+ * What it does not do is produce a percentage.
  */
 export function formatProgress(state: ProgressInput, now: number = Date.now()): string {
   const view = computeProgress(state);

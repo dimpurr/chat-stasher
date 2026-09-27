@@ -172,10 +172,10 @@ test('the coverage page is a real page that renders the record, and sends nothin
   expect(body).toContain('no denominator');
   expect(body).not.toContain('%');
 
-  // 3 · the debt store is the authority: 1 stored / 1 owed, not the header's 3 / 9.
-  expect(body).toContain('stored in full');
+  // 3 · the debt store is the authority: 1 captured / 1 owed, not the header's 3 / 9.
+  expect(body).toContain('captured in full');
   expect(body).toContain('still owed');
-  expect(body).not.toMatch(/stored in full\s*9/);
+  expect(body).not.toMatch(/captured in full\s*9/);
   expect(body).toContain('not stored, by reason');
 
   // 4 · the state, in plain words. Nothing is stopping this leg, so it must not claim a stop.
@@ -297,7 +297,7 @@ test('the popup carries the summary card and the link into the page', async ({ e
   // page's caveats.
   const cardText = await card.innerText();
   expect(cardText).toContain(PLATFORM);
-  expect(cardText).toContain('stored 1');
+  expect(cardText).toContain('captured 1');
   expect(cardText).toContain('owed 1');
   expect(cardText).not.toContain('%');
   expect(cardText).not.toContain('estimate');

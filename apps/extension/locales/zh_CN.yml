@@ -301,7 +301,7 @@ popup:
       🔴 它们不会被自动重试 —— 这是刻意的：同一个出口刚刚已经失败过一次，
       闷头再试一遍只会把同一个失败重复一遍，还会让你以为它已经好了。
     ledger: >-
-      欠账账本上它们既不算「已归档」也不再排队，所以进度里的数字没有把它们
+      欠账账本上它们既不算「这个浏览器已捕获」也不再排队，所以进度里的数字没有把它们
       冒充成成功。
     clear: 清空这份清单只是「我知道了」，不会触发任何重新抓取。
   lastTick:
@@ -432,8 +432,9 @@ popup:
       （定时器也会一并清掉）。
     relisted: >-
       这个平台的历史回溯：{when} 发现它的进度记录里列着 {recorded} 条对话 id，
-      而存储里的欠账集合只剩 {held} 条。已经补过哪些的记录无法恢复，所以对话列表
-      是从头重新列了一遍，这些对话会再走一遍。你的归档里没有被删掉任何东西。
+      而这个浏览器持有的欠账清单只剩 {held} 条。已经补过哪些的记录无法恢复，所以
+      对话列表是从头重新列了一遍，这些对话会再走一遍。这个浏览器的记录里没有被删
+      掉任何东西。
     halted:
       unsupportedPlatform: >-
         这个平台（{platform}）的历史回溯还没有实现，所以这条腿在发出任何请求
@@ -580,15 +581,17 @@ tick:
 progress:
   haltedPrefix: "[已停止：{reason}] "
   retryPrefix: "[等待重试：{reason}（第 {attempts} 次，约 {minutes} 分钟后）] "
-  unknownTotal: "已归档 {archived} 条，欠账 {pending} 条，总数未知（{reason}）"
-  withTotal: "已归档 {archived} / 共 {total} 条（{percent}%），欠账 {pending} 条"
+  # 🔴 D6（EXT-10）· 这三句是本浏览器自己的回溯记录确认的数字，所以用扩展这一侧的说法
+  #    「这个浏览器已捕获」开头，永远不说「已归档」——那是归档层的话，两边不许互串。
+  unknownTotal: "这个浏览器已捕获 {archived} 条，欠账 {pending} 条，总数未知（{reason}）"
+  withTotal: "这个浏览器已捕获 {archived} / 共 {total} 条（{percent}%），欠账 {pending} 条"
   withContradictedTotal: >-
-    已归档 {archived} 条，欠账 {pending} 条 —— 目前至少已列出 {listed} 条；
+    这个浏览器已捕获 {archived} 条，欠账 {pending} 条 —— 目前至少已列出 {listed} 条；
     接口自报的 total 已经被实际返回的行数超过，所以不用它当分母
   reason:
     noTotalFromApi: 接口未提供 total
     totalNotPositiveInt: total 不是可用的正整数
-    totalExpired: 已归档数超过 total，分母已过期
+    totalExpired: 已捕获数超过 total，分母已过期
     totalContradicted: 接口自报的 total 已经被实际列出数超过
 
 failure:
@@ -624,7 +627,7 @@ coverage:
       本页只读本浏览器自己的进度记录：不向任何平台发送任何请求。归档自身的视图是
       "chat-stasher ui" 命令。
   empty: >-
-    还没有任何进度记录。这不等于「什么都没归档」：它的意思是这个浏览器还没有回溯过任何平台，
+    还没有任何进度记录。这不等于「这个浏览器什么都没捕获」：它的意思是这个浏览器还没有回溯过任何平台，
     第一次在开关打开的情况下打开某个受支持平台时才会出现。
   state:
     off: >-
@@ -642,7 +645,7 @@ coverage:
     capped: >-
       这个平台今天的额度已经用完了（{cap} 条），这是限速在按预期工作，不是故障。明天它会自己继续。
     waiting: "此刻没有在跑：{why}。"
-    done: 这个平台列出来的对话都已经存下了。
+    done: 这个平台列出来的对话都已经由这个浏览器捕获了。
     # 🔴 W199 · 挂起不会自己到期，所以这一句既不能借用 waiting 的「此刻」（听着像一会
     #    儿就回来），也不能借用 halted 的终结感。它只说那一件要做的事。
     accountSuspended: >-
@@ -657,7 +660,7 @@ coverage:
     sourceBody: 响应正文
   counts:
     fromHeader: >-
-      存欠账的那份清单读不出来，所以「已存」「待存」是进度头里记下的数字：
+      这个浏览器持有的欠账清单读不出来，所以「已捕获」「待存」是进度头里记下的数字：
       那是方便读的副本，不是权威。清单本身没有被改动。
   enum:
     complete: "已列出：{listed}，这个列表已经读到末尾"
@@ -680,7 +683,8 @@ coverage:
     contradicted: >-
       平台自报的总数已经被实际返回的行数超过了，所以不拿它当分母
   labels:
-    archived: 已完整存下
+    # 🔴 D6（EXT-10）· 分段标签说的是本浏览器自己的记录，所以完成段说「已完整捕获」，不说「存下/归档」。
+    archived: 已完整捕获
     archivedOf: "{archived} / 已列出 {total}（{percent}%）"
     noPercent: "没有百分比：{reason}"
     pending: 仍欠
@@ -691,9 +695,9 @@ coverage:
       被搁置：它们的正文回来是空的，而且还没有任何东西证明这个平台仍然会返回对话
     emptyStreak: "连续空正文：{count}"
     relisted: >-
-      这个平台存下的对话列表在 {when} 被重新读过一遍：记录里写着 {recorded} 个对话 id，
-      而存下的欠账清单只持有 {held}。你的归档没有被删除；并且一条已经存过的对话和一条从没取过的
-      对话无法分辨。
+      这个浏览器持有的平台对话列表在 {when} 被重新读过一遍：记录里写着 {recorded} 个对话 id，
+      而欠账清单只持有 {held}。这个浏览器的记录没有被删除；并且一条这个浏览器已经捕获过的
+      对话和一条从没取过的对话无法分辨。
     never: 从不
   speed:
     noCap: "当前没有生效的每日上限（这个计划不取正文）。"
@@ -730,7 +734,8 @@ coverage:
   card:
     open: 打开覆盖页
     title: 覆盖情况
-    line: "{platform}（{scope}）：已存 {archived}，欠 {pending}"
+    # 🔴 D6（EXT-10）· 摘要卡说的是这个浏览器自己的回溯记录，所以计数说「已捕获」，不说「已存」。
+    line: "{platform}（{scope}）：已捕获 {archived}，欠 {pending}"
   failuresShort: "{count} 条取到过正文但没有存下。它们不会被自动重试。"
   dismiss: 暂不显示
   bar:
@@ -741,10 +746,10 @@ coverage:
     note: >-
       按平台自己的列表给每条对话的时间统计，用的是本浏览器的日历。平台没有给出时间的那些
       单独计在下面，【不会】摊到月份里：没有记到时间不等于属于某个月。
-    archived: 已存
+    archived: 已捕获
     pending: 待存
     unknownTime: >-
-      时间未知：已存 {archived} 条、待存 {pending} 条：平台的列表没有给出它们的时间，
+      时间未知：已捕获 {archived} 条、待存 {pending} 条：平台的列表没有给出它们的时间，
       所以它们不在上面任何一个月里
     none: >-
       这里还没有任何一条对话记下了时间，所以没有月度分布可看。这不是「历史是空的」：

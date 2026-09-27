@@ -20,11 +20,20 @@ semantic constraints this repo will not bend on (they are spec, not style):
        with a word-boundary archive-context word, so "bundle sessionId is missing"
        (a missing JSON field) is NOT an archive claim and stays silent.
   T4 · one-word-one-meaning-reap. "reap" is only permitted in ssh master connection
-       reclaim context; all stage shard-body reclamation must say reclaim.
+        reclaim context; all stage shard-body reclamation must say reclaim.
   T5 · no-cjk-characters.       Source code and tests under crates/ and under
-       apps/extension/ must not contain Chinese characters in comments or code
-       strings. The extension's Chinese lives in apps/extension/locales/zh_CN.yml
-       and nowhere else; T5_SCOPES below lists what is scanned and what is not.
+        apps/extension/ must not contain Chinese characters in comments or code
+        strings. The extension's Chinese lives in apps/extension/locales/zh_CN.yml
+        and nowhere else; T5_SCOPES below lists what is scanned and what is not.
+  T6 · captured-by-this-browser-≠-saved. Decision D6 (36-EXTENSION-TOPOLOGY §5):
+        the extension's surfaces may state what THIS install has confirmed only
+        as "captured by this browser", the archive layer (CLI, dashboard) speaks
+        "saved"/"archived" for archive contents, and the two never say each other.
+        Enforced in two places: a CLI user-visible string may not claim
+        "captured by this browser" (that is the extension's claim word, and a CLI
+        surface showing it is the mix D6 exists to prevent), and an extension
+        locale value may not word a count claim as "Archived {n}" / "saved {n}"
+        (so the next "Archived 5 of 40" top line is stopped before it ships).
 
 Output format mirrors scripts/check-semantic-defaults.py:
     FAILED:<n>
@@ -152,6 +161,39 @@ RULES = [
             "apps/extension/locales/zh_CN.yml 里。"
         ),
     },
+    {
+        # 🔴 T6 · Decision D6 (`36-EXTENSION-TOPOLOGY.md` §5), landed as EXT-10.
+        # Two surfaces, one boundary: an install's confirmed counts are the
+        # extension's claim ("captured by this browser"); the archive's own
+        # contents are the CLI's claim ("saved", "archived"). Neither may say
+        # the other's word, because a user with two browsers reading the wrong
+        # layer's word on the wrong surface is exactly whose misreading D6
+        # records as a defect.
+        "id": "T6",
+        "name": "captured-by-this-browser-≠-saved",
+        "patterns": [
+            # The CLI half: the extracted CLI user-visible strings may never
+            # carry the extension's claim phrase. Near-misses stay silent: the
+            # plain word "captured" in other CLI sentences is not the phrase,
+            # and tests are already excluded by the extractor's in_test flag.
+            {"forbidden": r"captured by this browser"},
+        ],
+        # The extension half is scanned by check_d6_locales(): every
+        # apps/extension/locales/*.yml value, never a comment. `Archived {…}`
+        # and `saved {…}` before a placeholder are the count-claim shapes that
+        # pass an install's tally off as an archive total.
+        "locale_patterns": (
+            r"\b(?:archived|saved)\s*\{",
+            r"(?:已归档|已保存)\s*\{",
+        ),
+        "suggestion": (
+            "D6 措辞：扩展一侧（弹窗/覆盖页/弹条）报这个实例自己的对账数，只能说 "
+            "『captured by this browser』；归档层（CLI/看板）说 saved/archived。"
+            "两边不许互串：CLI 字符串里不许出现 captured by this browser；扩展语料里"
+            "不许再出现 『Archived {n}』『saved {n}』（中文『已归档 {n}』『已保存 {n}』）"
+            "这类把本实例计数说成归档总数的说法。"
+        ),
+    },
 ]
 
 # ------------------------------------------------------------------ T5 scope
@@ -235,6 +277,59 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
     return out
 
 
+def check_d6_locales(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
+    """Scan every apps/extension/locales/*.yml value for the archive layer's
+    count words (D6). The extension's own well-formed claim ("Captured by this
+    browser: …") never matches: the pattern fires only when archived/saved sits
+    immediately before a `{placeholder}`, which is the shape of a count claim
+    and of nothing else in this catalog ("the speed setting could not be saved
+    ({detail})" has the placeholder after a parenthesis, and keys like
+    `archived: captured in full` have a colon, not a brace).
+
+    Comments are skipped: the catalog documents its own wording decisions in
+    prose above the values, including quotes of old wording, and a comment is
+    not a user-visible string. A file that cannot be read or decoded is
+    reported, never skipped, for the same reason as T5.
+    """
+    out: list[tuple[FileLineHit, dict]] = []
+    locale_dir = os.path.join(root, "apps", "extension", "locales")
+    if not os.path.isdir(locale_dir):
+        return out
+    # IGNORECASE because the en pattern must catch a sentence-leading capital
+    # ("Archived {n}") as well as a mid-sentence "saved {n}"; the Chinese
+    # patterns have no case and are unaffected by the flag.
+    patterns = [re.compile(p, re.IGNORECASE) for p in rule.get("locale_patterns", ())]
+    if not patterns:
+        return out
+    for fname in sorted(os.listdir(locale_dir)):
+        if not fname.endswith(".yml"):
+            continue
+        full_path = os.path.join(locale_dir, fname)
+        rel_path = os.path.relpath(full_path, root)
+        try:
+            with open(full_path, "r", encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, start=1):
+                    content = line.rstrip("\r\n")
+                    if content.lstrip().startswith("#") or not content.strip():
+                        continue
+                    if any(pat.search(content) for pat in patterns):
+                        out.append(
+                            (
+                                FileLineHit(
+                                    path=rel_path,
+                                    line=lineno,
+                                    text=content.strip(),
+                                ),
+                                rule,
+                            )
+                        )
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append(
+                (FileLineHit(path=rel_path, line=0, text=f"cannot read file: {exc}"), rule)
+            )
+    return out
+
+
 def run_rules(hits: list[us.Hit]) -> list[tuple[us.Hit, dict]]:
     """(hit, rule) pairs where a rule fired. One report per rule per hit."""
     out: list[tuple[us.Hit, dict]] = []
@@ -266,9 +361,14 @@ def run_rules(hits: list[us.Hit]) -> list[tuple[us.Hit, dict]]:
 def check(root: str) -> int:
     hits = us.extract_all(root)
     violations = run_rules(hits)
-    t5_rule = next((r for r in RULES if r["id"] == "T5"), None)
-    if t5_rule:
-        violations.extend(check_cjk(root, t5_rule))
+    for special in ("T5", "T6"):
+        rule = next((r for r in RULES if r["id"] == special), None)
+        if rule is None:
+            continue
+        if special == "T5":
+            violations.extend(check_cjk(root, rule))
+        else:
+            violations.extend(check_d6_locales(root, rule))
     if not violations:
         print("OK — no terminology violations")
         return 0
@@ -308,6 +408,14 @@ FIXTURE_VIOLATING = {
         'pub fn bad_reap() {\n'
         '    println!("reap-stage: dry run reports what would be reclaimed");\n'
         '    eprintln!("the reap is blocked: nothing was deleted");\n'
+        '}\n'
+    ),
+    "t6_violation.rs": (
+        # The CLI half of D6: the archive layer never says the extension's
+        # claim phrase. This is the shape of a future "--extension-counts"
+        # string sneaking the install tally into a CLI surface.
+        'pub fn bad_d6_cli() {\n'
+        '    eprintln!("overview: captured by this browser: 3 of 30, still owed 27");\n'
         '}\n'
     ),
     "clap_help_violation.rs": (
@@ -355,7 +463,7 @@ FIXTURE_CLEAN_EXTENSION = {
         'export const good = 1;\n'
     ),
     # Installed dependencies and build artifacts: excluded directories, so the
-    # Chinese inside them is nobody's business — they are generated from the
+    # Chinese inside them is nobody\'s business — they are generated from the
     # sources that ARE scanned.
     os.path.join("apps", "extension", "node_modules", "dep", "t5_violation.ts"): (
         '// 依赖里的中文\n'
@@ -365,6 +473,35 @@ FIXTURE_CLEAN_EXTENSION = {
     ),
     os.path.join("apps", "extension", ".wxt", "t5_violation.ts"): (
         '// 生成目录里的中文\n'
+    ),
+}
+
+# The D6 half of the extension fixtures: locale value violations only, in
+# locale files the other fixtures do not touch (so the "near-miss stays out of
+# the report" probes above keep meaning what they say). Written to the
+# violating tree only; the clean tree never sees them.
+FIXTURE_VIOLATING_D6_LOCALES = {
+    os.path.join("apps", "extension", "locales", "de.yml"): (
+        '# a comment quoting old wording is not a value: Archived {n} stays silent here\n'
+        'd6_bad: "Archived {n} of {total}, still owed {pending}"\n'
+    ),
+    os.path.join("apps", "extension", "locales", "ja.yml"): (
+        'd6_bad: 已归档 {n} 条，欠账 {pending} 条\n'
+    ),
+}
+
+# D6 near-misses: the same words in the OTHER meanings must stay out of the
+# report. Joined into the clean tree as locale files.
+FIXTURE_CLEAN_D6_LOCALES = {
+    os.path.join("apps", "extension", "locales", "de.yml"): (
+        'settledLabel: Credit is due for {n} of {total} (saved progress record)\n'
+        'speedNote: "The speed setting could not be saved ({detail}), so nothing changed."\n'
+        'archived: captured in full\n'
+        'capturedLine: "Captured by this browser: {archived} of {total} ({percent}%)"\n'
+    ),
+    os.path.join("apps", "extension", "locales", "ja.yml"): (
+        'savedLabel: 已保存进度记录\n'
+        'd6Good: "{archived} 已捕获、{pending} 待存"\n'
     ),
 }
 
@@ -453,6 +590,7 @@ def selftest() -> int:
             fh.write(b"{\"note\": \"\xff\xfe not valid utf-8\"}\n")
         _write_fixtures(tmp, FIXTURE_VIOLATING_EXTENSION)
         _write_fixtures(tmp, FIXTURE_CLEAN_EXTENSION)
+        _write_fixtures(tmp, FIXTURE_VIOLATING_D6_LOCALES)
         proc = subprocess.run([sys.executable, script, tmp], capture_output=True, text=True)
         report = proc.stdout + proc.stderr
         say(f"violating tree -> exit {proc.returncode}")
@@ -460,14 +598,21 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        # 13 from crates/ (unchanged) + 2 from apps/extension/.
-        expect("FAILED:15" in report, "violating tree reports exactly 15 violations")
+        # 14 from crates/ (the 13 plus T6's CLI fixture) + 2 from apps/extension/
+        # (T5) + 2 from the locale files (T6 extension half).
+        expect("FAILED:18" in report, "violating tree reports exactly 18 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
         expect("t4_violation.rs" in report, "T4 fixture is named in the report")
         expect("t5_violation.rs" in report, "T5 fixture is named in the report")
+        expect("t6_violation.rs" in report, "T6 CLI fixture is named in the report")
         expect("t5_violation.json" in report, "T5 also covers .json under crates/")
+        expect("d6_bad" in report, "T6 catches the count claim in a locale value")
+        expect(
+            "a comment quoting old wording is not a value" not in report,
+            "T6 skips comments even when they quote a violating shape",
+        )
         expect("t5_undecodable.json" in report and "cannot read file" in report,
                "an undecodable file is reported, not silently skipped")
         expect("clap_help_violation.rs" in report, "clap-help surface fixture is named in the report")
@@ -476,8 +621,9 @@ def selftest() -> int:
             and "[T2 " in report
             and "[T3 " in report
             and "[T4 " in report
-            and "[T5 " in report,
-            "each of T1/T2/T3/T4/T5 is named with its suggestion",
+            and "[T5 " in report
+            and "[T6 " in report,
+            "each of T1/T2/T3/T4/T5/T6 is named with its suggestion",
         )
 
         # -- the extension half of T5
@@ -518,6 +664,9 @@ def selftest() -> int:
             for path, content in FIXTURE_VIOLATING_EXTENSION.items()
             if path in T5_SCOPES[1]["skip_files"]
         })
+        # The D6 half: the same words in their OTHER meanings, in locale files,
+        # must stay out of the report the way the real catalog does.
+        _write_fixtures(os.path.join(tmp, "clean"), FIXTURE_CLEAN_D6_LOCALES)
         proc2 = subprocess.run([sys.executable, script, os.path.join(tmp, "clean")],
                                capture_output=True, text=True)
         say(f"clean tree -> exit {proc2.returncode} ({proc2.stdout.strip()})")

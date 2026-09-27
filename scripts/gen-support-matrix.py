@@ -6,8 +6,13 @@ The support matrix is a DERIVED artifact. Its two inputs are:
   * `crates/chat-stasher/data/harness-registry-v1.json` — the 12 local AI
     coding harnesses and, per harness, one cell per OS (macOS / Linux /
     Windows) with the session-path template, format, evidence confidence and
-    source. This file ships inside the binary (`scanner.rs` embeds it), so what
-    this script renders is what an installed `chat-stasher` will scan.
+    source; plus the `browsers` section: one row per browser the native host
+    can register, with one tier cell per OS. The harness cells ship inside the
+    binary (`scanner.rs` embeds the file), and the browser rows are what the
+    binary's `Browser` enum enacts (`nativehost.rs`; the agreement is pinned
+    by a test in the Rust suite, so a row here cannot claim a tier the build
+    does not report). This file therefore renders what an installed
+    `chat-stasher` will scan and register.
   * `apps/extension/lib/contract.ts` — the browser extension's `ALL_PLATFORMS`
     table: each web chat platform's exact origins, its release `channel`
     (`stable` / `experimental`) and its capture `credibility`. That table is the
@@ -43,8 +48,28 @@ and must not collapse into one glyph:
     not supported                no scannable cell at all (every OS cell is
                                  `unascertained`), or the platform has no cell.
 
+The browser × OS section carries its own tier vocabulary, because a browser
+tier answers a different question than a platform status ("can the native
+host register this browser on this OS?"), and collapsing the two vocabularies
+would let one borrow the other's promise:
+
+    supported                    the promised tier. The discovery path, and on
+                                 Windows the registry key, is documented, and
+                                 `install-native-host` registers the pair.
+    unverified                   the best-effort tier. Registration is
+                                 attempted and reported, never promised: this
+                                 marks a browser outside the supported list, a
+                                 discovery path with no primary vendor source,
+                                 or a Windows build with no registry key known.
+    no native build              the browser itself ships no build for this OS,
+                                 so there is nothing to register. A fact about
+                                 the browser's distribution, never a judgement
+                                 by this tool.
+
 A registry cell whose confidence is `unascertained` is never rendered as
-"supported": the scanner skips it, and this script says so.
+"supported": the scanner skips it, and this script says so. The same honesty
+applies to the browser sections: a `browsers` key that is missing, or a tier
+slug outside the vocabulary above, is an error and never a guess.
 
 Absent values. A cell field with nothing recorded — no verification date, no
 format, no source URL — renders as a single plain ASCII hyphen, `ABSENT` below.
@@ -59,6 +84,7 @@ which is the word for the glyph this emits.
 Usage:
     python3 scripts/gen-support-matrix.py                    # print both tables
     python3 scripts/gen-support-matrix.py --emit short       # one of them
+    python3 scripts/gen-support-matrix.py --emit full        # ... or the other
     python3 scripts/gen-support-matrix.py --update-fixtures  # rewrite the committed tables
     python3 scripts/gen-support-matrix.py --write-readme README.md
     python3 scripts/gen-support-matrix.py --write-docs docs-dev/support.md
@@ -115,6 +141,28 @@ STATUS_EXPERIMENTAL = "experimental"
 STATUS_UNCERTAIN = "uncertain (unverified)"
 STATUS_UNSUPPORTED = "not supported"
 
+# Browser tiers, from the registry's `browsers` section. These answer "can the
+# native host register this browser on this OS?" and are deliberately their own
+# vocabulary, not a reuse of the platform statuses above: a browser's cell is a
+# promise about registration, while a platform's row is a claim about capture,
+# and a shared word would let one borrow the other's promise. The slugs are the
+# ones `doctor` and the Rust pin test speak (`Support::id` plus the explicit
+# third state for "this browser ships no build for that OS").
+BROWSER_TIER_SUPPORTED = "supported"
+BROWSER_TIER_UNVERIFIED = "unverified"
+BROWSER_TIER_NO_NATIVE_BUILD = "no-native-build"
+BROWSER_TIERS = {
+    BROWSER_TIER_SUPPORTED,
+    BROWSER_TIER_UNVERIFIED,
+    BROWSER_TIER_NO_NATIVE_BUILD,
+}
+# The reassuring tier words stay unchanged; the third one becomes prose.
+BROWSER_TIER_LABEL = {
+    BROWSER_TIER_SUPPORTED: "supported",
+    BROWSER_TIER_UNVERIFIED: "unverified",
+    BROWSER_TIER_NO_NATIVE_BUILD: "no native build",
+}
+
 # The one placeholder for "nothing is recorded here". Defined once so the
 # renderings and the probes that guard them cannot disagree about the glyph; see
 # the module docstring for why it is a plain ASCII hyphen and not an em dash.
@@ -156,6 +204,62 @@ def load_harnesses(root: str) -> list[dict[str, Any]]:
         if not isinstance(hid, str) or not hid:
             raise SupportMatrixError(f"{REGISTRY_REL}: a harness has no string `id`")
         out.append(h)
+    return out
+
+
+def load_browsers(root: str) -> list[dict[str, Any]]:
+    """The registry's `browsers` section: one row per browser, one tier cell per OS.
+
+    The section is required, not optional: a registry without browser rows must
+    fail loudly rather than render a browser-less matrix nobody asked for. The
+    shapes checked here are the same ones the Rust pin test
+    (`tests/nativehost_browser_matrix_test.rs`) holds against the `Browser`
+    enum, so a row that drifts from what the binary registers is caught twice,
+    once by the build and once by this gate's own error path.
+    """
+    path = os.path.join(root, REGISTRY_REL)
+    if not os.path.isfile(path):
+        raise SupportMatrixError(f"harness registry not found: {REGISTRY_REL}")
+    with open(path, "r", encoding="utf-8") as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise SupportMatrixError(f"{REGISTRY_REL} is not valid JSON: {exc}") from exc
+    browsers = data.get("browsers")
+    if not isinstance(browsers, list) or not browsers:
+        raise SupportMatrixError(f"{REGISTRY_REL} has no `browsers` list")
+    seen_ids: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for b in browsers:
+        bid = b.get("id")
+        if not isinstance(bid, str) or not bid:
+            raise SupportMatrixError(f"{REGISTRY_REL}: a browser row has no string `id`")
+        if bid in seen_ids:
+            raise SupportMatrixError(f"{REGISTRY_REL}: browser `{bid}` appears twice")
+        seen_ids.add(bid)
+        name = b.get("display_name")
+        if not isinstance(name, str) or not name:
+            raise SupportMatrixError(f"{REGISTRY_REL}: browser `{bid}` has no `display_name`")
+        tiers = b.get("tiers")
+        if not isinstance(tiers, dict):
+            raise SupportMatrixError(f"{REGISTRY_REL}: browser `{bid}` has no `tiers` object")
+        # Every OS is required: a missing cell is ambiguous between "nobody
+        # recorded this pair" and "there is nothing to record", and a matrix
+        # that guesses between the two is exactly the collapse this tool
+        # refuses (a `no-native-build` cell is how the second one is said).
+        for os_name in OS_ORDER:
+            cell = tiers.get(os_name)
+            if not isinstance(cell, dict):
+                raise SupportMatrixError(
+                    f"{REGISTRY_REL}: browser `{bid}` has no `{os_name}` tier cell"
+                )
+            tier = cell.get("tier")
+            if tier not in BROWSER_TIERS:
+                raise SupportMatrixError(
+                    f"{REGISTRY_REL}: browser `{bid}` x `{os_name}` has unknown tier "
+                    f"`{tier}` (known: {sorted(BROWSER_TIERS)})"
+                )
+        out.append(b)
     return out
 
 
@@ -312,7 +416,7 @@ def verified_date(status: str) -> str:
     return m.group(1) if m and status.startswith(STATUS_VERIFIED) else ABSENT
 
 
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Rendering
 # --------------------------------------------------------------------------
 
@@ -325,7 +429,24 @@ def code(text: Any) -> str:
     return "`" + str(text).replace("`", "'") + "`"
 
 
-def render_short(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]]) -> str:
+def browser_legend_short() -> str:
+    return (
+        "`supported` is the promised tier: the discovery path, and on Windows the registry "
+        "key, is documented and `install-native-host` registers it. `unverified` is the "
+        "best-effort tier: registration is attempted and reported, never promised. "
+        "`no native build` means the browser itself ships no build for that OS, so there "
+        "is nothing to register. Firefox is carried as supported outside these "
+        "Chromium-family tiers, on paths from Mozilla's own documentation. One "
+        "registration serves every profile of a browser on a machine; the extension itself "
+        "still needs loading once per profile."
+    )
+
+
+def render_short(
+    harnesses: list[dict[str, Any]],
+    platforms: list[dict[str, Any]],
+    browsers: list[dict[str, Any]],
+) -> str:
     out: list[str] = []
     out.append("**5+ platforms.** Local AI coding tools and web chats, archived the same way.")
     out.append("")
@@ -344,10 +465,24 @@ def render_short(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]
         "Verified means a maintainer archived a real session end to end on their own machine. "
         "Formats change, so a date is recorded instead of a permanent check."
     )
+    out.append("")
+    out.append("**Browsers.** Native host registration, per browser and per OS:")
+    out.append("")
+    out.append("| Browser | macOS | Linux | Windows |")
+    out.append("|---|---|---|---|")
+    for b in browsers:
+        cells = [BROWSER_TIER_LABEL[b["tiers"][os_name]["tier"]] for os_name in OS_ORDER]
+        out.append(f"| {esc(b['display_name'])} | " + " | ".join(esc(c) for c in cells) + " |")
+    out.append("")
+    out.append(browser_legend_short())
     return "\n".join(out) + "\n"
 
 
-def render_full(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]]) -> str:
+def render_full(
+    harnesses: list[dict[str, Any]],
+    platforms: list[dict[str, Any]],
+    browsers: list[dict[str, Any]],
+) -> str:
     out: list[str] = []
     out.append("### Local AI coding tools")
     out.append("")
@@ -395,22 +530,43 @@ def render_full(harnesses: list[dict[str, Any]], platforms: list[dict[str, Any]]
             )
         )
     out.append("")
+    out.append("### Browsers (native messaging host registration)")
+    out.append("")
+    out.append("| Browser | OS | Status | Source |")
+    out.append("|---|---|---|---|")
+    for b in browsers:
+        for os_name in OS_ORDER:
+            cell = b["tiers"][os_name]
+            tier = BROWSER_TIER_LABEL[cell["tier"]]
+            source = first_url(cell.get("source", "")) or first_url(b.get("source", ""))
+            out.append(
+                "| {name} | {os} | {status} | {src} |".format(
+                    name=esc(b["display_name"]),
+                    os=OS_LABEL[os_name],
+                    status=esc(tier),
+                    src=esc(source or ABSENT),
+                )
+            )
+    out.append("")
     out.append(
         "`supported` means the path or route has a source and the scanner/extension "
         "will act on it; `verified end-to-end` additionally means a real session was "
         "archived on a real machine and the date is recorded. `unascertained` cells are "
         "not scanned and are rendered as `not supported`."
     )
+    out.append("")
+    out.append(browser_legend_short())
     return "\n".join(out) + "\n"
 
 
 def render(kind: str, root: str) -> str:
     harnesses = load_harnesses(root)
     platforms = parse_contract_platforms(root)
+    browsers = load_browsers(root)
     if kind == "short":
-        return render_short(harnesses, platforms)
+        return render_short(harnesses, platforms, browsers)
     if kind == "full":
-        return render_full(harnesses, platforms)
+        return render_full(harnesses, platforms, browsers)
     raise SupportMatrixError(f"unknown rendering kind: {kind}")
 
 
@@ -594,9 +750,42 @@ def write_into_file(root: str, rel_path: str, kind: str) -> int:
 # Self-test
 # --------------------------------------------------------------------------
 
+# Two browsers exercise every part of the browser section's shape: one whose
+# three cells share the row-level source, and one whose every cell differs
+# (including the third vocabulary word, which must never be spellable as a
+# promise). Lives inside _SELFTEST_REGISTRY so a deep-copied variant that
+# mutates a harness cell keeps a well-formed browser section with it.
 _SELFTEST_REGISTRY = {
     "schema_version": 1,
     "generated": "2026-01-01",
+    "browsers": [
+        {
+            "id": "b-chrome",
+            "display_name": "B-Chrome",
+            "source": "https://example.com/b-chrome",
+            "tiers": {
+                "macos": {"tier": "supported"},
+                "linux": {"tier": "supported"},
+                "windows": {"tier": "supported"},
+            },
+        },
+        {
+            "id": "b-arc",
+            "display_name": "B-Arc",
+            "source": "https://example.com/b-arc",
+            "tiers": {
+                "macos": {"tier": "supported"},
+                "linux": {
+                    "tier": "no-native-build",
+                    "source": "https://example.com/b-arc-linux",
+                },
+                "windows": {
+                    "tier": "unverified",
+                    "source": "https://example.com/b-arc-windows",
+                },
+            },
+        },
+    ],
     "harnesses": [
         {
             "id": "alpha",
@@ -673,6 +862,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
 ];
 """
 
+# Two browsers exercise every part of the browser section's shape live inside
+# _SELFTEST_REGISTRY above ("browsers"): one whose three cells share the
+# row-level source, and one whose every cell differs, including the third
+# vocabulary word, which must never be spellable as a promise. They live in the
+# registry dict itself so a deep-copied variant that mutates a harness cell
+# still carries a well-formed browser section.
+
 
 def _scaffold(root: str, registry: dict[str, Any] | None = None, contract: str | None = None) -> None:
     reg_path = os.path.join(root, REGISTRY_REL)
@@ -703,8 +899,13 @@ def selftest() -> int:
 
         harnesses = load_harnesses(tmp)
         platforms = parse_contract_platforms(tmp)
+        browsers = load_browsers(tmp)
         probe("registry parsed", [h["id"] for h in harnesses] == ["alpha", "beta", "gamma", "delta"])
         probe("contract parsed", [p["id"] for p in platforms] == ["p-stable", "p-exp", "p-unver"])
+        probe(
+            "browsers parsed",
+            [b["id"] for b in browsers] == ["b-chrome", "b-arc"],
+        )
         probe(
             "a URL followed by a parenthetical is extracted without the parenthetical",
             first_url("https://example.com/epsilon(original text: x)") == "https://example.com/epsilon",
@@ -723,8 +924,8 @@ def selftest() -> int:
         probe("experimental channel is experimental", web_status(web["p-exp"]) == STATUS_EXPERIMENTAL)
         probe("unverified credibility is uncertain", web_status(web["p-unver"]) == STATUS_UNCERTAIN)
 
-        short = render_short(harnesses, platforms)
-        full = render_full(harnesses, platforms)
+        short = render_short(harnesses, platforms, browsers)
+        full = render_full(harnesses, platforms, browsers)
         probe("short table carries the fixed 5+ platforms headline", "5+ platforms" in short)
         probe("short table has no generated count in prose", not re.search(r"\b\d+ (?:platform|harness|tool)", short))
         probe("short table renders every status word", all(
@@ -732,6 +933,34 @@ def selftest() -> int:
         ))
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
         probe("full table carries the verified date", "(2026-09)" in full)
+
+        # The browser grid: one row per browser, one cell per OS, in the row
+        # order the registry carries (tier-grouped, never alphabetical, so a
+        # reader comparing machines finds the promised browsers together).
+        probe(
+            "the short browser grid renders a row whose cells share the row source",
+            "| B-Chrome | supported | supported | supported |" in short,
+        )
+        probe(
+            "the short browser grid renders the no-promise third word",
+            "| B-Arc | supported | no native build | unverified |" in short,
+        )
+        probe(
+            "a full browser cell with its own source keeps that source",
+            "| B-Arc | Linux | no native build | https://example.com/b-arc-linux |" in full,
+        )
+        probe(
+            "a full browser cell with no cell source falls back to the row source",
+            "| B-Chrome | Windows | supported | https://example.com/b-chrome |" in full,
+        )
+        probe(
+            "a full browser cell's override wins over the row source",
+            "| B-Arc | Windows | unverified | https://example.com/b-arc-windows |" in full,
+        )
+        probe(
+            "the short legend states the Firefox exception to the tier vocabulary",
+            "Firefox is carried as supported outside these Chromium-family tiers" in short,
+        )
 
         # The rendered tables are DATA that gets copied into other documents, so
         # a glyph has to survive whatever font and pipeline it lands in. The
@@ -782,6 +1011,7 @@ def selftest() -> int:
                  "paths": {"macos": {"template": "~/.s-conf", "format": "jsonl"}}},
             ],
             [],
+            [],
         )
         probe(
             "a cell with no format recorded renders the placeholder",
@@ -807,17 +1037,43 @@ def selftest() -> int:
         with open(short_path, "w", encoding="utf-8") as fh:
             fh.write(original_short)
 
-        # Changing the input without regenerating must fail.
+        # Changing the input without regenerating must fail. One probe per
+        # family: a harness cell and a browser cell are different inputs of the
+        # same kind of fact (both are registry data the tables derive from),
+        # and a regression that misses one of the two sections would otherwise
+        # prove the other still fails while quietly rendering the first.
         changed = json.loads(json.dumps(_SELFTEST_REGISTRY))
         changed["harnesses"][0]["paths"]["macos"]["template"] = "~/.alpha/changed/<uuid>.jsonl"
         _scaffold(tmp, registry=changed)
         probe("a changed registry fails the check", run_check(tmp) == 1)
+        changed_browsers = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        changed_browsers["browsers"][0]["tiers"]["windows"] = {"tier": "unverified"}
+        _scaffold(tmp, registry=changed_browsers)
+        probe("a changed browser tier fails the check", run_check(tmp) == 1)
+        _scaffold(tmp)
+
+        # A browsers section that cannot be read at all is an error, never a
+        # guess: absent, half-filled, or with a tier this vocabulary does not
+        # know. `check` exits 2 (input error), which the check distinguishes
+        # from 1 (stale tables) and reports as such.
+        no_browsers = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        del no_browsers["browsers"]
+        _scaffold(tmp, registry=no_browsers)
+        probe("a registry with no browsers section is an error", run_check(tmp) == 2)
+        gappy = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        del gappy["browsers"][1]["tiers"]["linux"]
+        _scaffold(tmp, registry=gappy)
+        probe("a browser row missing an OS cell is an error", run_check(tmp) == 2)
+        weird_tier = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        weird_tier["browsers"][0]["tiers"]["linux"] = {"tier": "probably-fine"}
+        _scaffold(tmp, registry=weird_tier)
+        probe("an unknown browser tier is an error", run_check(tmp) == 2)
         _scaffold(tmp)
 
         # Markers in a document are checked, and a half pair is loud.
         readme = os.path.join(tmp, "README.md")
         with open(readme, "w", encoding="utf-8") as fh:
-            fh.write(f"# t\n\n{SHORT_START}\n{render_short(harnesses, platforms).strip()}\n{SHORT_END}\n")
+            fh.write(f"# t\n\n{SHORT_START}\n{render_short(harnesses, platforms, browsers).strip()}\n{SHORT_END}\n")
         probe("a correct in-document block passes", run_check(tmp) == 0)
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nwrong\n{SHORT_END}\n")

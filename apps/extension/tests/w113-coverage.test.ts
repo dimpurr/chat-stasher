@@ -558,10 +558,10 @@ describe('W113 · the report as a whole', () => {
     // 2 · where the total came from — this fixture has no total, so the sentence says which number is
     //     missing rather than leaving a blank
     expect(card.detailRows.map((r) => r.value)).toContain('the platform does not provide a total for this list, so there is no denominator');
-    // 3 · stored against owed. Both labels are present even though one of them is zero.
+    // 3 · captured against owed. Both labels are present even though one of them is zero.
     const labels = card.detailRows.map((r) => r.label);
-    expect(labels).toEqual(expect.arrayContaining(['stored in full', 'still owed']));
-    expect(card.detailRows.find((r) => r.label === 'stored in full')!.value).toBe('1');
+    expect(labels).toEqual(expect.arrayContaining(['captured in full', 'still owed']));
+    expect(card.detailRows.find((r) => r.label === 'captured in full')!.value).toBe('1');
     expect(card.detailRows.find((r) => r.label === 'still owed')!.value).toBe('1');
     // 5 · the estimate, and it says so in the sentence itself
     expect(card.eta).toContain('estimate');

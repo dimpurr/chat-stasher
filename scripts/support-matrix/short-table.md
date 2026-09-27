@@ -23,3 +23,20 @@
 | Web | grok | supported | - |
 
 Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check.
+
+**Browsers.** Native host registration, per browser and per OS:
+
+| Browser | macOS | Linux | Windows |
+|---|---|---|---|
+| Chrome | supported | supported | supported |
+| Chromium | supported | supported | supported |
+| Edge | supported | supported | supported |
+| Brave | supported | supported | supported |
+| Arc | supported | no native build | supported |
+| Chrome Beta | unverified | unverified | unverified |
+| Chrome Canary | unverified | unverified | unverified |
+| Opera | unverified | unverified | unverified |
+| Vivaldi | unverified | unverified | unverified |
+| Firefox | supported | supported | supported |
+
+`supported` is the promised tier: the discovery path, and on Windows the registry key, is documented and `install-native-host` registers it. `unverified` is the best-effort tier: registration is attempted and reported, never promised. `no native build` means the browser itself ships no build for that OS, so there is nothing to register. Firefox is carried as supported outside these Chromium-family tiers, on paths from Mozilla's own documentation. One registration serves every profile of a browser on a machine; the extension itself still needs loading once per profile.

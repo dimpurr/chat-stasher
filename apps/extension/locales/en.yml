@@ -386,8 +386,9 @@ popup:
       just failed once, and hammering it again would only repeat the same
       failure and make you think it is fine now.
     ledger: >-
-      On the debt ledger they count neither as archived nor as queued, so the
-      numbers in the progress line do not pass them off as successes.
+      On the debt ledger they count neither as captured by this browser nor as
+      queued, so the numbers in the progress line do not pass them off as
+      successes.
     clear: >-
       Clearing this list only means “I have seen it”; it does not trigger any
       re-fetch.
@@ -621,14 +622,15 @@ popup:
     # is gone as soon as the scope is re-listed — which is the point of the
     # repair, and exactly why it cannot be the only place this is said. This one
     # reads the header, so it survives, and it says the one cost the user would
-    # otherwise have to guess at: the ids are gone, so a conversation that had
-    # already been archived cannot be told from one that never was.
+    # otherwise have to guess at: the ids are gone, so a conversation this
+    # browser has already captured cannot be told from one that it never has.
     relisted: >-
       Backfill history for this platform: on {when} its progress record listed
-      {recorded} conversation id(s) and the stored debt set held only {held}. The
-      record of what had already been fetched could not be recovered, so the
-      conversation list was read again from the start and those conversations are
-      being worked through a second time. Nothing was deleted from your archive.
+      {recorded} conversation id(s) and this browser's debt list held only
+      {held}. The record of what had already been fetched could not be
+      recovered, so the conversation list was read again from the start and
+      those conversations are being worked through a second time. Nothing was
+      deleted from this browser's records.
     halted:
       unsupportedPlatform: >-
         This platform ({platform}) has no history backfill implemented, so this
@@ -866,20 +868,25 @@ progress:
   # leg, so it must not borrow `haltedPrefix`: this one says it is waiting, how many
   # attempts deep the streak is, and when it tries again. Nothing has been written off.
   retryPrefix: "[waiting to retry: {reason} (attempt {attempts}, about {minutes} min)] "
-  unknownTotal: "Archived {archived}, still owed {pending}, total unknown ({reason})"
-  withTotal: "Archived {archived} of {total} ({percent}%), still owed {pending}"
+  # 🔴 D6 (EXT-10) · These three are the counts this browser's own backfill
+  #    records confirm, so they open with the extension's claim word and never
+  #    with the archive layer's: "Captured by this browser", not "Archived".
+  #    The archive's own view is a different surface ("chat-stasher ui"), and
+  #    the same pair of words may never say each other.
+  unknownTotal: "Captured by this browser: {archived}, still owed {pending}, total unknown ({reason})"
+  withTotal: "Captured by this browser: {archived} of {total} ({percent}%), still owed {pending}"
   # 🔴 W10 · The total was not missing, it was **wrong**: more rows came back
   # than it claims exist. So the line says what is actually known (how many have
   # been listed at least) and carries no percent sign — dividing by a number the
   # list endpoint has already contradicted would be a fabricated figure.
   withContradictedTotal: >-
-    Archived {archived}, still owed {pending} — at least {listed} listed so far;
-    the API's own total has already been exceeded by the rows actually returned,
-    so it is not used as a denominator
+    Captured by this browser: {archived}, still owed {pending}, with at least
+    {listed} listed so far; the API's own total has already been exceeded by
+    the rows actually returned, so it is not used as a denominator
   reason:
     noTotalFromApi: the API did not provide a total
     totalNotPositiveInt: total is not a usable positive integer
-    totalExpired: the archived count exceeds total, so the denominator is stale
+    totalExpired: the captured count exceeds total, so the denominator is stale
     totalContradicted: the API's total has already been exceeded by the rows actually listed
 
 # ---------------------------------------------------------------------------
@@ -942,9 +949,10 @@ coverage:
       nothing to any chat platform. The archive's own view is the
       "chat-stasher ui" command.
   empty: >-
-    No progress record exists yet. That is not "nothing has been archived": it
-    means this browser has never backfilled a platform, which happens the first
-    time you open one of the supported platforms with the backfill switch on.
+    No progress record exists yet. That is not "nothing has been captured by
+    this browser": it means this browser has never backfilled a platform, which
+    happens the first time you open one of the supported platforms with the
+    backfill switch on.
   # ADR-032 §4 · The state, in plain words. `in-progress` deliberately has no
   # sentence: the ordinary case must not read like a notice.
   state:
@@ -972,7 +980,7 @@ coverage:
       pacing working as intended rather than a failure. It continues by itself
       tomorrow.
     waiting: "Not running right now: {why}."
-    done: Every conversation this platform has listed has been stored.
+    done: Every conversation this platform has listed has been captured by this browser.
     # 🔴 W199 · A suspension does not elapse, so this sentence may not borrow `waiting`'s patience
     #    ("not running right now") or `halted`'s finality. It names the one action.
     accountSuspended: >-
@@ -990,9 +998,9 @@ coverage:
     sourceBody: the response body
   counts:
     fromHeader: >-
-      The stored debt list could not be read, so the archived and owed numbers
-      are the ones the progress header recorded: a convenience copy, not the
-      authority. The list itself is untouched.
+      The debt list this browser holds could not be read, so the captured and
+      owed numbers are the ones the progress header recorded: a convenience
+      copy, not the authority. The list itself is untouched.
   enum:
     complete: "listed: {listed}, and the list has been read to its end"
     inProgress: "still listing: ≥ {listed} so far"
@@ -1018,7 +1026,9 @@ coverage:
       the platform's own total has already been exceeded by the rows actually
       returned, so it is not used as a denominator
   labels:
-    archived: stored in full
+    # 🔴 D6 (EXT-10) · The segment labels speak this browser's own records, so
+    #    the settled segment says captured and never stored/archived.
+    archived: captured in full
     archivedOf: "{archived} of {total} listed ({percent}%)"
     # 🔴 The percentage is missing **by rule** (computeProgress), and the sentence says which
     #    condition failed rather than leaving the reader to wonder why there is no number.
@@ -1032,11 +1042,11 @@ coverage:
       platform still returns conversations
     emptyStreak: "empty bodies in a row: {count}"
     relisted: >-
-      This platform's stored list of conversations had to be read again on
-      {when}: the record claimed {recorded} conversation id(s) and the stored
-      debt list held {held}. Nothing was deleted from your archive, and a
-      conversation that had already been stored cannot be told apart from one
-      that never was.
+      This platform's list of conversations held by this browser had to be read
+      again on {when}: the record claimed {recorded} conversation id(s) and the
+      debt list held {held}. Nothing was deleted from this browser's records,
+      and a conversation that this browser has already captured cannot be told
+      apart from one that it never has.
     never: never
   speed:
     noCap: "No daily limit in force (this plan fetches no bodies)."
@@ -1089,7 +1099,9 @@ coverage:
   card:
     open: Open the coverage page
     title: Coverage
-    line: "{platform} ({scope}): stored {archived}, owed {pending}"
+    # 🔴 D6 (EXT-10) · The card summarizes this browser's own backfill record,
+    #    so its count says captured, never stored.
+    line: "{platform} ({scope}): captured {archived}, owed {pending}"
   # One dismissible alert per defect that can be acted on. Never more than the
   # facts: the count, and the one thing that will not happen by itself.
   failuresShort: "{count} fetched but not stored. They will not be retried automatically."
@@ -1109,10 +1121,10 @@ coverage:
       this browser's calendar. Months the platform gave no time for are counted
       separately and are NOT spread across the months: an unrecorded time is
       not a month.
-    archived: stored
+    archived: captured
     pending: owed
     unknownTime: >-
-      time unknown: {archived} stored and {pending} owed: the platform's list
+      time unknown: {archived} captured and {pending} owed: the platform's list
       gave no time for these, so they are not in any month above
     none: >-
       No conversation here has a recorded time yet, so there is no monthly
