@@ -256,7 +256,8 @@ export interface PopupModel {
    * 🔴 EXT-12 · What background recorded the first time the host came up and the
    * outbox was drained automatically — the "delivered N" notice. Omitted ⇒ not
    * looked; null ⇒ nothing recorded yet. `at` keeps a stale delivery from
-   * reading as if it just happened.
+   * reading as if it just happened: the sentence names the moment the helper
+   * connected, so `deliveredView` renders it rather than dropping it.
    */
   delivered?: { at: number; count: number } | null;
   /**
@@ -746,11 +747,18 @@ export function outboxBarView(model: PopupModel): PopupView['outboxBar'] {
   };
 }
 
-/** 🔴 EXT-12 · "Delivered N…", or null when nothing is on record. */
+/**
+ * 🔴 EXT-12 · "Delivered N…", or null when nothing is on record.
+ *
+ * 🔴 `at` is rendered, not just carried: the record is written once and never
+ *    cleared, so a drain from months ago would otherwise read exactly like one
+ *    that just happened. The sentence says *when* the helper connected, which is
+ *    what makes a stale delivery honest rather than stale.
+ */
 export function deliveredView(model: PopupModel): PopupView['delivered'] {
   const rec = model.delivered;
   if (!rec || rec.count <= 0) return null;
-  return ui.deliveredNote(rec.count);
+  return ui.deliveredNote(rec.count, rec.at);
 }
 
 export function exportLine(model: PopupModel): string {

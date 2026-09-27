@@ -33,6 +33,7 @@
 
 import { runBackfill, type BackfillOptions, type HttpPort, type RunReport } from './engine';
 import { loadHostPause, resumeBackfill } from '../host-status';
+import { summary as outboxSummary } from '../outbox';
 import type { BackfillStore } from './store';
 
 /** The switch's storage key. Same cs_* key family; no new permission. */
@@ -203,8 +204,11 @@ export async function tickBlockReason(gate: {
    * capacity. A spool that full is one a healthy host would be draining, so the
    * non-urgent producer — the backfill leg — pauses above this line rather than
    * adding more demand on a delivery exit that is already congested.
-   * Omitted ⇒ treated as "not near-full" so existing call sites change nothing;
-   * the popup and the alarm path pass it explicitly.
+   * Omitted ⇒ treated as "not near-full" so existing call sites change nothing.
+   * 🔴 EXT-12b · The three production call sites all pass it now — the runtime
+   * engine (`tickBackfill`, which is the only place a *run* is decided), the
+   * alarm's no-target pass, and the popup. It used to be the popup alone, and a
+   * pause that only the popup took is not a pause: see `productionOutboxNearFull`.
    */
   isOutboxNearFull?: () => boolean | Promise<boolean>;
   hasHttp: boolean;
@@ -311,6 +315,30 @@ export function productionHostGate(store: BackfillStore | null): HostGate {
 }
 
 /**
+ * 🔴 EXT-12 · The production near-full probe: the real spool, measured the way
+ * the popup measures it.
+ *
+ * 🔴 An unreadable spool is **not** near-full. `summary()` answers `null` for
+ *    "this could not be read" — its own three-state rule (lib/outbox.ts, and
+ *    CLAUDE.md invariant 1) — and an unknown must not be turned into a pause: a
+ *    spool we cannot measure says nothing about congestion, and stopping the
+ *    producer on it would halt archiving for a reason nobody can name. It is
+ *    also exactly what the popup's render decides for the same field, so the two
+ *    cannot disagree about what "near-full" is.
+ *
+ * 🔴 This is the same read the popup does, which is what makes the pause real.
+ *    Until W214b this function had no caller: `isOutboxNearFull` was passed by
+ *    the popup only, so the popup rendered "the backfill leg paused until it
+ *    drains" on one screen while `tickBackfill` — the only runtime entry point —
+ *    kept fetching and delivering on the other. The gate existed as a display,
+ *    not as a decision.
+ */
+export async function productionOutboxNearFull(): Promise<boolean> {
+  const s = await outboxSummary();
+  return s !== null && s.nearFull;
+}
+
+/**
  * Run one backfill. **This is the only runtime entry point**, and the check order
  * is deliberate:
  *   single-flight → storage → switch → host pause (try to wake it first) → the
@@ -337,6 +365,11 @@ export async function tickBackfill(deps: TickDeps): Promise<TickResult> {
       hasStore: deps.store !== null,
       isEnabled: () => isBackfillEnabled(deps.store),
       isHostPaused: () => gate.paused(),
+      // 🔴 EXT-12 · The engine's own pass of the near-full gate. Without this line
+      //    the gate was a sentence on the popup and nothing else: this function is
+      //    the only runtime entry point, so a spool past 80% has to stop *here* for
+      //    the pause to exist at all.
+      isOutboxNearFull: productionOutboxNearFull,
       hasHttp: deps.http !== undefined,
     });
     if (blocked) return { ran: false, reason: blocked, report: null };

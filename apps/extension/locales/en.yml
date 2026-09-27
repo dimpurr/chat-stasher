@@ -78,9 +78,11 @@ extensionOnly:
     is being delivered and these captures are not in an archive yet. Nothing has
     been deleted, and delivery resumes by itself once the helper answers again.
   exportNow: Export now
+  # 🔴 EXT-12 · The record is written once and never cleared, so {at} is part of
+  #    the sentence: without it a drain from months ago reads as if it just happened.
   delivered: >-
     Delivered: {count} capture(s) that were waiting here went to the archive when
-    the helper connected.
+    the helper connected at {at}.
 
 # 🔴 EXT-12 · The onboarding card, shown only in the never-connected state and
 # only while something is actually waiting: what this is, why the helper has to
@@ -949,10 +951,16 @@ coverage:
     off: >-
       The backfill switch is off. Nothing is being fetched and no request will be
       made until you turn it on in the extension's popup.
+    # 🔴 EXT-12 · This sentence may not say "start the host": on a machine that
+    #    never had a helper installed there is nothing to start. It states the fact
+    #    that holds either way — the helper is not answering — and points at the
+    #    popup for the one-line installer, which is where the never-connected half
+    #    is worded.
     hostPaused: >-
-      This machine's chat-stasher host is unreachable, so this leg has paused
-      rather than fetching bodies it cannot deliver. Start the host and it
-      resumes from the same conversation.
+      This machine's chat-stasher helper is not answering, so this leg has paused
+      rather than fetching bodies it cannot deliver. It resumes from the same
+      conversation by itself once the helper answers; if no helper has ever been
+      installed here, the extension's popup carries the one line that installs it.
     haltedNoRecord: >-
       A stop was recorded here but its record could not be read, so the reason is
       unknown. Nothing is being fetched until it is looked at.

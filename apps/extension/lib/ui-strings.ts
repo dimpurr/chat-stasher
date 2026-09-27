@@ -247,8 +247,16 @@ export function outboxBarFull(): string {
   return t('outboxBar.full');
 }
 
-export function deliveredNote(count: number): string {
-  return t('extensionOnly.delivered', { count });
+/**
+ * 🔴 EXT-12 · The "delivered N" notice.
+ *
+ * 🔴 The time travels with the count, the same way `exportNote` carries its own.
+ *    The record is written once and never cleared, so without the date a drain
+ *    from months ago reads exactly like one that just happened; `at` is the whole
+ *    reason the record stores a time (W214b review, finding 2).
+ */
+export function deliveredNote(count: number, at: number): string {
+  return t('extensionOnly.delivered', { count, at: stamp(at) });
 }
 
 // ---------------------------------------------------------------------------

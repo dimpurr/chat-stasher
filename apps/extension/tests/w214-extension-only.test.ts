@@ -333,6 +333,18 @@ describe('W214 · the delivered-on-connect record', () => {
     expect(line).toContain('archive');
   });
 
+  it('🔴 the line carries the moment it happened — a record from months ago cannot read as "just now"', () => {
+    // 🔴 The record is written once and never cleared, so the time is the only
+    //    thing that keeps a stale drain from reading as a fresh one. `at` is why
+    //    the record stores a time at all (W214b review, finding 2).
+    const old = deliveredView(model({ delivered: { at: AT, count: 7 } }))!;
+    const other = deliveredView(model({ delivered: { at: AT - 90 * 24 * 60 * 60 * 1000, count: 7 } }))!;
+    expect(old).toContain('2026-09-27');
+    // Same count, different moment ⇒ the two lines are not identical, which is the
+    // whole property: without `at` they would be the same string.
+    expect(other).not.toBe(old);
+  });
+
   it('the record round-trips through the store, and a malformed one reads as absent rather than as zero', async () => {
     const mem = new Map<string, unknown>();
     const store = {
@@ -474,6 +486,9 @@ describe('W214 · a failing probe cannot erase the stage evidence', () => {
 describe('W214 · the backlog drains by itself when the host first connects', () => {
   let localValues: Record<string, unknown>;
   let host: SyntheticHost;
+  /** The listeners the **real** entry point registers, so a case can fire the wake-up itself. */
+  let alarmListeners: Array<(a: { name?: string }) => void>;
+  let messageListeners: Array<(m: unknown, s: unknown, r: (x: unknown) => void) => unknown>;
 
   /**
    * 🔴 The host is the suite's own `createSyntheticHost`, not a hand-rolled stub.
@@ -487,7 +502,7 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     runtime: {
       id: 'mock-extension-id',
       onStartup: { addListener() { /* the badge refresh on startup is not under test */ } },
-      onMessage: { addListener() { /* nothing registers a live listener here */ } },
+      onMessage: { addListener(fn: (m: unknown, s: unknown, r: (x: unknown) => void) => unknown) { messageListeners.push(fn); } },
       sendNativeMessage: (h: string, m: unknown) => host.sendNativeMessage(h, m),
     },
     action: {
@@ -495,7 +510,11 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
       async setBadgeBackgroundColor() {},
       async setTitle() {},
     },
-    alarms: { create() {}, clear: async () => true },
+    alarms: {
+      create() {},
+      clear: async () => true,
+      onAlarm: { addListener(fn: (a: { name?: string }) => void) { alarmListeners.push(fn); } },
+    },
     storage: {
       local: {
         async get(query: Record<string, unknown> | null) {
@@ -515,6 +534,8 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
     localValues = {};
     host = createSyntheticHost({ up: true });
+    alarmListeners = [];
+    messageListeners = [];
     const fake = browserLike();
     vi.stubGlobal('chrome', fake);
     vi.stubGlobal('browser', fake);
@@ -571,5 +592,210 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     expect(host.names().length).toBe(0);
     const ob = await import('../lib/outbox');
     expect(await ob.loadConnectDelivery(real)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // W214b · The drain the popup never sees (review, finding 1)
+  //
+  // The record used to be written from `hostConnectedDrain` alone, which only the
+  // popup's probe calls. The 5-minute outbox alarm and the post-enqueue drain
+  // empty the same spool, and when either of them gets there first the notice
+  // simply never appeared — "tell the user how much went out" silently did not
+  // happen, in exactly the flow the extension-only user is in.
+  // -------------------------------------------------------------------------
+
+  /** Two captures waiting, and a pause on record — which is what makes a drain a *connect*. */
+  async function backlogWithPause(): Promise<{ ob: typeof import('../lib/outbox'); store: ReturnType<typeof import('../lib/backfill/store')['browserLocalStore']> }> {
+    const ob = await import('../lib/outbox');
+    await ob.enqueue('chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json', '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}');
+    await ob.enqueue('chatgpt-bbbbbbbb-1111-2222-3333-444444444444.json', '{"sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}');
+    const store = (await import('../lib/backfill/store')).browserLocalStore();
+    // The helper had been recorded away — the record that tells the notice it is
+    // reporting a connect rather than an ordinary delivery.
+    const { setHostPause } = await import('../lib/host-status');
+    await setHostPause(store, { reason: 'host-unavailable', at: AT });
+    return { ob, store };
+  }
+
+  it('🔴 the 5-minute outbox alarm records the connect delivery too — the popup never has to open', async () => {
+    const { ob, store } = await backlogWithPause();
+    expect(await ob.loadConnectDelivery(store)).toBeNull();
+
+    const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
+    // `any`: the entry point's default export is the background definition, which
+    // the suite stubs `defineBackground` to make callable (the same shape the other
+    // wiring suites use).
+    const bg: any = await import('../entrypoints/background');
+    await bg.default();
+    for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
+    await bg.outboxAlarmSettled();
+
+    expect(host.names().length).toBe(2);
+    expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 2 });
+  });
+
+  it('🔴 the drain that follows a capture records it as well', async () => {
+    const { ob, store } = await backlogWithPause();
+
+    const bg: any = await import('../entrypoints/background');
+    await bg.default();
+    const sid = 'cccccccc-1111-2222-3333-444444444444';
+    const payload = {
+      url: `https://chatgpt.com/backend-api/conversation/${sid}`,
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ mapping: {}, current_node: 'n0', account_id: 'acct-1' }),
+      pageUrl: `https://chatgpt.com/c/${sid}`,
+      capturedAt: AT,
+    };
+    await new Promise<unknown>((resolve) => {
+      for (const fn of messageListeners) fn({ type: 'chat-captured', payload }, { id: 's' }, resolve);
+    });
+
+    // The two that were already waiting, plus the one this very capture added.
+    expect(host.names().length).toBe(3);
+    expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 3 });
+  });
+
+  it('🔴 no pause on record ⇒ an ordinary capture writes no notice (the gate keeps it from being universal noise)', async () => {
+    const ob = await import('../lib/outbox');
+    await ob.enqueue('chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json', '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}');
+    const store = (await import('../lib/backfill/store')).browserLocalStore();
+
+    const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
+    // `any`: the entry point's default export is the background definition, which
+    // the suite stubs `defineBackground` to make callable (the same shape the other
+    // wiring suites use).
+    const bg: any = await import('../entrypoints/background');
+    await bg.default();
+    for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
+    await bg.outboxAlarmSettled();
+
+    // It really was delivered…
+    expect(host.names().length).toBe(1);
+    // …and it is still not a connect: the helper never went away, so the permanent
+    // "delivered 1" line would have been noise on every install.
+    expect(await ob.loadConnectDelivery(store)).toBeNull();
+  });
+});
+
+// ===========================================================================
+// 10 · 🔴 The runtime tick reads the real spool (W214b review, the blocker)
+//
+// The gate was a sentence on the popup and nothing else: `isOutboxNearFull` was
+// supplied by entrypoints/popup/main.ts alone, so one screen said "the backfill
+// leg paused until it drains" while `tickBackfill` — the only runtime entry
+// point — kept fetching and delivering. The cases below drive **the tick itself**
+// against a real spool and never hand it a near-full predicate: a test that
+// injected one would assert the gate function, which was never the broken part.
+// ===========================================================================
+describe('W214b · an 80%-full spool stops the runtime tick, not just the popup', () => {
+  /**
+   * Put one entry into the **real** outbox with a `bytes` of its own.
+   *
+   * 🔴 `bytes` is the product's own accounting and the only thing `summary()`
+   *    adds up, so a case that needs "a spool that is 82% full" seeds that number
+   *    rather than 210 MiB of payload — the technique the browser spec uses for
+   *    the same reason (e2e/harness.ts `seedOutbox`). Nothing here is delivered.
+   */
+  /**
+   * 🔴 The tick and the spool are imported **inside** each case, on the module
+   *    instance `beforeEach` has just reset. A static import would hold the copy
+   *    whose outbox connection was opened against the previous case's IndexedDB
+   *    factory — so the seeded spool and the tick would be looking at two
+   *    different databases, and the case would pass or fail for the wrong reason.
+   */
+  const schedule = () => import('../lib/backfill/schedule');
+
+  async function seedSpool(bytes: number): Promise<void> {
+    const ob = await import('../lib/outbox');
+    // Let the product create its own schema first, so this helper cannot drift
+    // from the real stores and indexes.
+    await ob.summary();
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(ob.OUTBOX_DB_NAME, ob.OUTBOX_DB_VERSION);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(ob.OUTBOX_STORE, 'readwrite');
+        tx.objectStore(ob.OUTBOX_STORE).put({
+          sha256: 'a'.repeat(64),
+          name: 'chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json',
+          payload: '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}',
+          bytes,
+          enqueuedAt: AT - 1000,
+          attempts: 0,
+          lastError: null,
+          lastAttemptAt: null,
+          state: 'pending',
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  /** A store with the backfill switch already on, keyed by the module's own constant. */
+  async function tickStore() {
+    const key = (await schedule()).BACKFILL_ENABLED_KEY;
+    const mem = new Map<string, unknown>([[key, true]]);
+    return {
+      load: async (k: string) => mem.get(k) ?? null,
+      save: async (k: string, v: unknown) => void mem.set(k, v),
+      remove: async (k: string) => void mem.delete(k),
+      keys: async () => [...mem.keys()],
+    };
+  }
+
+  /** One tick, on the module instance the case has been setting up. */
+  async function runTick() {
+    const s = await schedule();
+    // The single-flight lock is module state; a previous case leaves it set if it
+    // returned early, and then this tick would answer 'already-running'.
+    s.resetTickLockForTest();
+    return await s.tickBackfill({
+      store: (await tickStore()) as never,
+      platform: 'chatgpt',
+      origin: 'https://chatgpt.com',
+      scope: 'default',
+    });
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as unknown as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
+  });
+
+  it('🔴 an 82%-full spool ⇒ the real tick is blocked, and it never asks to fetch', async () => {
+    await seedSpool(Math.ceil(OUTBOX_CAPACITY_BYTES * 0.82));
+    // 🔴 No `http` port and no injected predicate. Without the wiring this tick
+    //    walks straight past the gate and answers `no-http-port` — which is
+    //    exactly the failing result this case exists to catch.
+    const result = await runTick();
+    expect(result.ran).toBe(false);
+    expect(result.reason).toBe('outbox-near-full');
+  });
+
+  it('a spool below the line ⇒ the gate is not stuck on (the tick answers for the port instead)', async () => {
+    await seedSpool(Math.floor(OUTBOX_CAPACITY_BYTES * 0.79));
+    const result = await runTick();
+    expect(result.reason).not.toBe('outbox-near-full');
+  });
+
+  it('🔴 the probe itself: empty ⇒ no, 82% ⇒ yes, unreadable ⇒ no (an unknown is not a pause)', async () => {
+    expect(await (await schedule()).productionOutboxNearFull()).toBe(false);
+    await seedSpool(Math.ceil(OUTBOX_CAPACITY_BYTES * 0.82));
+    expect(await (await schedule()).productionOutboxNearFull()).toBe(true);
+    // 🔴 A context with no IndexedDB at all: `summary()` says `null` — "could not
+    //    be read" — and that must not become a pause, or archiving would stop for
+    //    a reason nobody can name (lib/outbox.ts's three-state rule).
+    vi.resetModules();
+    delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+    expect(await (await schedule()).productionOutboxNearFull()).toBe(false);
   });
 });

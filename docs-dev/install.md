@@ -406,11 +406,16 @@ version** — or the reason it could not, with the command that fixes it
 `apps/extension/entrypoints/background.ts:670-677`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
-own `nack` kind, e.g. `config` or `stage-unavailable`), the stage it last knew
-about, and the fix command with that path already filled in
-(`apps/extension/lib/ui-strings.ts:54-57`, `:110-126`). Nothing is delivered
-while this is the case: captures wait in the extension's outbox instead, and the
-toolbar badge shows how many (`apps/extension/lib/badge.ts:46-73`).
+own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
+depending on whether a `hello` has **ever** succeeded on this machine — the only
+evidence the extension can have that a CLI is installed here at all. Has one, and
+it prints the stage that `hello` reported with the `chat-stasher
+install-native-host --stage …` command already filled in with that path; never has
+one, and it prints the one-line installer instead, because telling a user to run a
+`chat-stasher …` command assumes the very thing that is missing
+(`apps/extension/lib/ui-strings.ts:54-60`, `:110-133`). Nothing is delivered while
+this is the case: captures wait in the extension's outbox instead, and the toolbar
+badge shows how many (`apps/extension/lib/badge.ts:46-73`).
 
 ### 3.3 If you never register the host: the export file
 
@@ -950,7 +955,7 @@ confirmed in the code, not a temporary disclaimer.
   (`apps/extension/lib/backfill/speed.ts:65`, `:92-136`;
   `apps/extension/lib/backfill/pace.ts:158-159`); *standard* draws 300–400 and
   fetches two (`apps/extension/lib/backfill/pace.ts:154-155`;
-  `apps/extension/lib/backfill/schedule.ts:72`); *faster* draws 600–800 and
+  `apps/extension/lib/backfill/schedule.ts:73`); *faster* draws 600–800 and
   fetches four. The gap between two requests is the same at all three: at least
   20 seconds plus a random 0–25 seconds between two bodies
   (`apps/extension/lib/backfill/pace.ts:121-132`), 2 plus 0–4 seconds between two
@@ -975,7 +980,7 @@ confirmed in the code, not a temporary disclaimer.
   the section above as *per install* every time it states a rate.
 
 - **Backfill is off by default.** The default is off
-  (`apps/extension/lib/backfill/schedule.ts:50`), and the source states the
+  (`apps/extension/lib/backfill/schedule.ts:51`), and the source states the
   reason for enabling it clearly: backfill uses your logged-in session to walk
   your whole account and fetch hundreds or thousands of conversations, so there
   must first be an explicit turn-on.
