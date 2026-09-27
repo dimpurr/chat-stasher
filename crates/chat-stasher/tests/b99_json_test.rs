@@ -453,7 +453,10 @@ fn overview_json_unopenable_repo_is_error_exit_3() {
 fn overview_json_unusable_config_writes_the_error_document() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let sb = sandbox();
-    let config_dir = sb.path().join("xdg-config/chat-stasher");
+    // Built component-by-component (not one literal with `/`) so the expected
+    // path is spelled in the platform's own separators — the same way
+    // `config::config_path()` folds it, which is the spelling the error names.
+    let config_dir = sb.path().join("xdg-config").join("chat-stasher");
     fs::create_dir_all(&config_dir).unwrap();
     let config = config_dir.join("config.toml");
     fs::write(&config, b"this is not valid TOML = [\n").unwrap();

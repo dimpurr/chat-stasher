@@ -27,6 +27,11 @@ import { endianness, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isSweepNotConcluded, type TabSweepTrace } from '../lib/backfill/alarm';
+// 🔴 W230 · Both read from the product rather than restated here: the settling
+// step below waits on the key `checkHost` writes and the timeout that bounds it.
+// A second copy would keep passing after either moved.
+import { HOST_STATUS_KEY } from '../lib/host-status';
+import { HELLO_PROBE_TIMEOUT_MS } from '../lib/native-host';
 import type { BrowserContext, Worker } from '@playwright/test';
 
 /** The unpacked build `pnpm e2e` produces (`wxt build -b chrome`). */
@@ -142,6 +147,30 @@ async function installSyntheticCoordinator(extension: Extension): Promise<void> 
  * indistinguishable from "nobody was there to ask". So a missing worker is
  * woken deliberately (opening the popup makes it ask background for its status)
  * rather than read as "nothing to report".
+ *
+ * 🔴 W230 · **Waking it this way writes, and the write outlives the page.** The
+ *    popup's boot asks background for `POPUP_STATUS_MESSAGE`, whose only
+ *    implementation is `hostStatusForPopup()` — and that is the one call site of
+ *    `checkHost`, which runs a `hello` probe and then records the conclusion in
+ *    `cs_native_host_status_v1` (`lib/host-status.ts:77-86`). `page.close()` below
+ *    does not cancel it: the handler is already running in the worker, and it
+ *    finishes after the page is gone.
+ *
+ *    So `launchExtension` used to return with a probe still in flight, free to
+ *    write `storage.local` at any later moment — including *after* a spec had
+ *    seeded that very key. The failure this caused was measured, not theorised:
+ *    `extension-only.spec.ts`'s "was connected, now broken" seeds a record whose
+ *    `lastKnownStage` is the only evidence a CLI exists on the machine, the
+ *    setup probe (which started when nothing was stored yet) landed its
+ *    stage-less failure record on top, and the popup then told a user with a
+ *    working CLI to install it. It reproduced only as a rare red in CI — the same
+ *    commit of `main` passed this job at 20:55 and failed it at 21:13 — because
+ *    whether the probe's write beats the spec's seed is a race, not a property.
+ *
+ *    `settleWokenPopup` closes it by the only means that is a property: the
+ *    fixture does not return until the probe has concluded, so no setup-time
+ *    write can still land afterwards. Nothing here is a sleep or a retry — the
+ *    signal is the product's own record of having concluded.
  */
 async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
   const running = context.serviceWorkers()[0];
@@ -155,11 +184,50 @@ async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
   try {
     await page.goto(`chrome-extension://${extensionId}/popup.html`).catch(() => undefined);
     const woken = await appeared;
-    if (woken) return woken;
+    const worker = woken ?? context.serviceWorkers()[0] ?? null;
+    if (worker) await settleWokenPopup(worker);
+    return worker;
   } finally {
     await page.close().catch(() => undefined);
   }
-  return context.serviceWorkers()[0] ?? null;
+}
+
+/**
+ * 🔴 W230 · Wait until the wake-up popup's host probe has recorded its
+ * conclusion, so the fixture hands the spec a worker with nothing in flight.
+ *
+ * The signal is the product's own: `checkHost` is the only writer of
+ * `HOST_STATUS_KEY` (`lib/host-status.ts:24`, and the only call site of
+ * `checkHost` is `hostStatusForPopup`), and `hostStatusForPopup` awaits
+ * `store.save` *before* it answers the popup — so the key appearing means the
+ * probe wrote and can no longer overwrite anything a spec seeds afterwards.
+ *
+ * The bound is `HELLO_PROBE_TIMEOUT_MS` plus slack: a probe against no host
+ * answers in milliseconds, but one against a host that accepts the connection
+ * and then says nothing is cut off at that timeout (`lib/native-host.ts:47`).
+ * Timing out proceeds rather than throws — a spec that needs the worker should
+ * not be failed by the settling step, and this can only be reached on the path
+ * that had to open a page at all.
+ */
+async function settleWokenPopup(worker: Worker): Promise<void> {
+  const deadline = Date.now() + HELLO_PROBE_TIMEOUT_MS + 1_000;
+  for (;;) {
+    // Self-contained for the same reason `READ_OUTBOX` is: Playwright serialises
+    // the function source, so it cannot close over `HOST_STATUS_KEY`.
+    const recorded = await worker
+      .evaluate(
+        async (key: string) => {
+          const got = await chrome.storage.local.get({ [key]: null } as never);
+          const value = (got as Record<string, unknown>)[key];
+          return value !== null && value !== undefined;
+        },
+        HOST_STATUS_KEY,
+      )
+      .catch(() => false);
+    if (recorded) return;
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
 }
 
 /**
