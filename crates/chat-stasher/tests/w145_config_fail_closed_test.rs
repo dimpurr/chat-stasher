@@ -459,11 +459,18 @@ fn a_file_credential_resolves_with_no_shell_environment() {
     let sandbox = tempfile::tempdir().unwrap();
     let secret = sandbox.path().join("r2-secret");
     fs::write(&secret, "resolved-without-env\n").unwrap();
+    // The reference goes into a TOML **basic** string, and on Windows the
+    // sandbox path is all backslashes — raw, that is not valid TOML, so the
+    // whole file would load through `recover_windows_paths` and
+    // `config_source` would report `file_after_windows_path_repair` instead of
+    // the `file` asserted below. Doubling the backslashes is the spelling the
+    // load-time warning itself recommends; on `/`-separated platforms the
+    // replace is the identity, so the fixture there is byte-for-byte unchanged.
+    let secret_ref = format!("file:{}", secret.display()).replace('\\', "\\\\");
     write_config(
         sandbox.path(),
         &format!(
-            "[destinations.d1]\nrepo = \"opendal:s3\"\n\n[destinations.d1.options]\naccess_key_id = \"file:{}\"\n",
-            secret.display()
+            "[destinations.d1]\nrepo = \"opendal:s3\"\n\n[destinations.d1.options]\naccess_key_id = \"{secret_ref}\"\n",
         ),
     );
     let out = isolated_env(sandbox.path(), &["status", "--json"]);
