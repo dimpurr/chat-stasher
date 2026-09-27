@@ -166,7 +166,7 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
       // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard'))
+      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard' || msg.type === 'status'))
           || (options.unsupportedCoordination && msg.type === 'coordination')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
@@ -196,6 +196,10 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
           held: isHeld,
           shard: isHeld ? `000001-${String(msg.session_id)}.jsonl` : null,
         };
+      }
+
+      if (msg.type === 'status') {
+        return { protocol: 1, type: 'status', ok: true, request_id: String(msg.request_id) };
       }
 
       if (msg.type === 'summary') {

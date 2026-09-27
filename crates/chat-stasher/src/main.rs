@@ -3015,6 +3015,7 @@ struct OverviewRead {
     labels: BTreeMap<String, Vec<identity::LabelRecord>>,
     writer_versions: BTreeMap<String, sidecar::WriterVersionRecord>,
     unreadable_writer_versions: BTreeSet<String>,
+    extension_installs: Vec<serde_json::Value>,
 }
 
 fn read_archive_writer_statuses(
@@ -3063,6 +3064,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         labels: BTreeMap::new(),
         writer_versions: BTreeMap::new(),
         unreadable_writer_versions: BTreeSet::new(),
+        extension_installs: Vec::new(),
     };
 
     for snap in newest {
@@ -3080,6 +3082,37 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
             .with_context(|| format!("host `{hostname}`: collect snapshot entries"))?;
         for (path, node) in &entries {
             if node.node_type != NodeType::File {
+                continue;
+            }
+            let status_filename = extension_status_filename(path);
+            if let Some(status_filename) = status_filename {
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf)
+                    .with_context(|| format!("host `{hostname}`: read extension status"))?;
+                let mut status: serde_json::Value =
+                    serde_json::from_slice(&buf).with_context(|| {
+                        format!("host `{hostname}`: malformed extension status JSON")
+                    })?;
+                let install_id = status.get("install_id").and_then(|v| v.as_str());
+                let filename_id = Path::new(status_filename)
+                    .file_stem()
+                    .and_then(std::ffi::OsStr::to_str);
+                if status.get("schema").and_then(|v| v.as_str())
+                    != Some("chat-stasher/ext-status@1")
+                    || install_id.is_none()
+                    || install_id != filename_id
+                    || status.get("machine").and_then(|v| v.as_str()) != Some(hostname.as_str())
+                    || status.get("reported_at").and_then(|v| v.as_str()).is_none()
+                {
+                    anyhow::bail!(
+                        "host `{hostname}`: extension status identity or schema mismatch"
+                    );
+                }
+                status["stale"] = serde_json::Value::Bool(overview::extension_status_is_stale(
+                    status["reported_at"].as_str(),
+                    chrono::Utc::now().timestamp(),
+                ));
+                out.extension_installs.push(status);
                 continue;
             }
             if let Some(machine) = sidecar::activity_index_machine(path) {
@@ -3143,6 +3176,20 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         }
     }
     Ok(out)
+}
+
+fn extension_status_filename(path: &Path) -> Option<&std::ffi::OsStr> {
+    // rustic's snapshot tree may retain the backed-up stage directory as a
+    // prefix, so locate the ext-status component instead of requiring it to
+    // be the first path component.
+    path.components()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|parts| {
+            (parts[0].as_os_str() == std::ffi::OsStr::new("ext-status")
+                && parts[1].as_os_str().to_string_lossy().ends_with(".json"))
+            .then_some(parts[1].as_os_str())
+        })
 }
 
 /// `overview` — draw the machine × harness activity overview of one destination
@@ -3246,6 +3293,7 @@ fn cmd_overview(
         labels,
         writer_versions,
         unreadable_writer_versions,
+        extension_installs,
     } = read;
     let writer_status = sidecar::writer_statuses(
         &snapshot_machines,
@@ -3284,7 +3332,7 @@ fn cmd_overview(
                     .earliest()
                     .map(|dt| dt.date_naive())
             };
-            overview::overview_summary_json(
+            let value = overview::overview_summary_json(
                 &rows,
                 &snapshot_times,
                 &missing,
@@ -3293,7 +3341,8 @@ fn cmd_overview(
                 exit_code,
                 today,
                 &day_of,
-            )
+            );
+            overview::with_extension_installs(value, extension_installs.clone())
         } else {
             let mut value = overview::overview_json_with_freshness(
                 &rows,
@@ -3311,7 +3360,7 @@ fn cmd_overview(
                     serde_json::json!(writer_status),
                 );
             }
-            value
+            overview::with_extension_installs(value, extension_installs)
         };
         println!("{}", json_string(&value));
         reap_remote(&cfg, keep_ssh_masters);
@@ -5846,7 +5895,7 @@ fn run_once_pass(
     // This guard used to refuse any shard-less stage: while readers looked only at the
     // newest snapshot per machine, an empty snapshot made the machine look as if it
     // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
-    // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
+    // only when the stage holds neither sealed shards nor machine metadata/status reports.
     let (has_content, changed) = match chat_stasher::metahash::evaluate_run_once_change(
         stage,
         &machine_name,
@@ -8258,6 +8307,24 @@ mod decision_surface_tests {
     use super::*;
     use clap::CommandFactory;
     use std::fs;
+
+    #[test]
+    fn archived_extension_status_matches_after_stage_prefix() {
+        assert_eq!(
+            extension_status_filename(Path::new("stage-root/ext-status/install-123.json")),
+            Some(std::ffi::OsStr::new("install-123.json"))
+        );
+        assert_eq!(
+            extension_status_filename(Path::new(
+                "/archive/machine/stage/ext-status/install-123.json"
+            )),
+            Some(std::ffi::OsStr::new("install-123.json"))
+        );
+        assert_eq!(
+            extension_status_filename(Path::new("stage-root/meta/machine.json")),
+            None
+        );
+    }
 
     #[test]
     fn search_text_modes_parse_and_scan_requires_text() {

@@ -1629,6 +1629,7 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
     match request.get("type").and_then(|value| value.as_str()) {
         Some("hello") => hello(echoed_id),
         Some("deliver") => deliver(request, echoed_id),
+        Some("status") => status_report(request, echoed_id),
         // §6.6 — the content question, answered from the stage (W50c).
         Some("has") => has(request, echoed_id),
         // EXT-3: host-persisted, machine-wide backfill arbitration.
@@ -1651,6 +1652,138 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
             echoed_id,
             NackKind::BadRequest,
             "request has no `type`".to_string(),
+        ),
+    }
+}
+
+/// Atomically replace one install's content-free latest status in the stage.
+fn status_report(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let parsed: serde_json::Value = request;
+    if !parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(valid_request_id)
+    {
+        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
+    }
+    let Some(status) = parsed.get("status").and_then(|v| v.as_object()) else {
+        return nack(request_id, NackKind::BadRequest, "missing status object");
+    };
+    let Some(install_id) = status.get("install_id").and_then(|v| v.as_str()) else {
+        return nack(request_id, NackKind::BadRequest, "missing install_id");
+    };
+    if install_id.len() != 36
+        || !install_id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+        || status
+            .get("browser")
+            .and_then(|v| v.as_str())
+            .is_none_or(|v| v.is_empty() || v.len() > 80)
+        || status
+            .get("profile_label")
+            .is_none_or(|v| !v.is_null() && !v.as_str().is_some_and(|s| s.len() <= 80))
+        || status
+            .get("extension_version")
+            .and_then(|v| v.as_str())
+            .is_none_or(|v| v.is_empty() || v.len() > 80)
+        || status
+            .get("reported_at")
+            .and_then(|v| v.as_str())
+            .is_none_or(|v| v.len() > 40 || chrono::DateTime::parse_from_rfc3339(v).is_err())
+        || status
+            .get("platforms")
+            .and_then(|v| v.as_array())
+            .is_none_or(|v| v.len() > 100)
+    {
+        return nack(request_id, NackKind::BadRequest, "malformed status fields");
+    }
+    if status.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "install_id"
+                | "browser"
+                | "profile_label"
+                | "extension_version"
+                | "reported_at"
+                | "platforms"
+        )
+    }) {
+        return nack(request_id, NackKind::BadRequest, "unknown status field");
+    }
+    for row in status["platforms"].as_array().expect("validated array") {
+        if row.get("platform").and_then(|v| v.as_str()).is_none()
+            || row
+                .get("captured_by_this_browser")
+                .and_then(|v| v.as_u64())
+                .is_none()
+            || row.get("pending").and_then(|v| v.as_u64()).is_none()
+            || row
+                .get("paused_reason")
+                .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(|s| s.len() <= 120))
+            || row
+                .get("account_fingerprint")
+                .is_some_and(|v| v.as_str().is_none_or(|s| !valid_sha256(s)))
+        {
+            return nack(
+                request_id,
+                NackKind::BadRequest,
+                "malformed platform status row",
+            );
+        }
+        if row.as_object().is_none_or(|o| {
+            o.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "platform"
+                        | "captured_by_this_browser"
+                        | "pending"
+                        | "paused_reason"
+                        | "account_fingerprint"
+                )
+            })
+        }) {
+            return nack(
+                request_id,
+                NackKind::BadRequest,
+                "unknown platform status field",
+            );
+        }
+    }
+    let Some(request_id) = parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return nack(request_id, NackKind::BadRequest, "missing request_id");
+    };
+    let (machine, stage) = match resolve_target() {
+        HostTarget::Ready { machine, stage } => (machine, stage),
+        HostTarget::Refused { kind, detail } => return nack(Some(request_id), kind, detail),
+    };
+    let dir = stage.join("ext-status");
+    let result = (|| -> anyhow::Result<()> {
+        fs::create_dir_all(&dir)?;
+        let mut value = parsed["status"].clone();
+        value["machine"] = serde_json::Value::String(machine);
+        value["schema"] = serde_json::Value::String("chat-stasher/ext-status@1".into());
+        let bytes = serde_json::to_vec(&value)?;
+        let target = dir.join(format!("{install_id}.json"));
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        use std::io::Write as _;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(&target).map_err(|e| e.error)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            serde_json::json!({"protocol":PROTOCOL,"type":"status","ok":true,"request_id":request_id})
+        }
+        Err(e) => nack(
+            Some(request_id),
+            NackKind::Io,
+            format!("cannot persist extension status: {e}"),
         ),
     }
 }

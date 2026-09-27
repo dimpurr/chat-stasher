@@ -42,6 +42,12 @@
     },
     {
       "$ref": "#/$defs/coordinationResponse"
+    },
+    {
+      "$ref": "#/$defs/statusRequest"
+    },
+    {
+      "$ref": "#/$defs/statusResponse"
     }
   ],
   "$defs": {
@@ -494,35 +500,106 @@
     },
     "coordinationRequest": {
       "type": "object",
-      "required": ["protocol", "type", "request_id", "mode", "platform", "install_id"],
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "mode",
+        "platform",
+        "install_id"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "coordination" },
-        "request_id": { "$ref": "#/$defs/requestId" },
-        "mode": { "enum": ["claim", "token", "release", "rate_limit"] },
-        "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "install_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "segment": { "enum": ["enumerate", "detail"] },
-        "status": { "enum": [403, 429] },
-        "retry_after_ms": { "type": "integer", "minimum": 0 }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "coordination"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "mode": {
+          "enum": [
+            "claim",
+            "token",
+            "release",
+            "rate_limit"
+          ]
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "install_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "segment": {
+          "enum": [
+            "enumerate",
+            "detail"
+          ]
+        },
+        "status": {
+          "enum": [
+            403,
+            429
+          ]
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "description": "Machine-wide backfill claim, request token, release or rate-limit report (nativehost-protocol.md §6.7)."
     },
     "coordinationResponse": {
       "type": "object",
-      "required": ["protocol", "type", "ok", "request_id", "granted", "active_installs", "gentle", "cooldown_until", "wait_ms"],
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "request_id",
+        "granted",
+        "active_installs",
+        "gentle",
+        "cooldown_until",
+        "wait_ms"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "$ref": "#/$defs/protocol" },
-        "type": { "const": "coordination" },
-        "ok": { "const": true },
-        "request_id": { "$ref": "#/$defs/requestId" },
-        "granted": { "type": "boolean" },
-        "active_installs": { "type": "integer", "minimum": 0 },
-        "gentle": { "type": "boolean" },
-        "cooldown_until": { "type": "integer" },
-        "wait_ms": { "type": "integer", "minimum": 0 }
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "coordination"
+        },
+        "ok": {
+          "const": true
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "granted": {
+          "type": "boolean"
+        },
+        "active_installs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gentle": {
+          "type": "boolean"
+        },
+        "cooldown_until": {
+          "type": "integer"
+        },
+        "wait_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "description": "Arbitration measurement and token grant (nativehost-protocol.md §6.7)."
     },
@@ -566,6 +643,54 @@
           "type": "string",
           "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}/\\?token=[0-9a-f]{64}$",
           "description": "Loopback only, with the per-launch token. This response is the only copy of the URL outside the dashboard process."
+        }
+      }
+    },
+    "statusRequest": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "request_id",
+        "status"
+      ],
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "status"
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "status": {
+          "type": "object"
+        }
+      },
+      "description": "A content-free per-install status snapshot; the host adds machine and schema fields."
+    },
+    "statusResponse": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "type",
+        "ok",
+        "request_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocol"
+        },
+        "type": {
+          "const": "status"
+        },
+        "ok": {
+          "const": true
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
         }
       }
     }

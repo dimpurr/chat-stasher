@@ -612,6 +612,52 @@ fn identity_bundle(
     )
 }
 
+#[test]
+fn status_reports_replace_per_install_without_merging() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let ids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ];
+    for (index, id) in ids.iter().enumerate() {
+        let request = json!({"protocol":1,"type":"status","request_id":format!("status-{index}"),"status":{
+            "install_id":id,"browser":"Chrome","profile_label":if index == 0 {"Personal"} else {"Work"},
+            "extension_version":"0.4.0","reported_at":"2026-09-27T12:00:00Z",
+            "platforms":[{"platform":"chatgpt","captured_by_this_browser":index+1,"pending":9-index,"paused_reason":null,"account_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+        }});
+        let output = fixture.chrome(&frame(&request));
+        assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+        let response = one_frame(&output.stdout);
+        assert_matches_schema(&response);
+        assert_eq!(response["type"], "status");
+        assert_eq!(response["request_id"], format!("status-{index}"));
+    }
+    let replacement = json!({"protocol":1,"type":"status","request_id":"status-refresh","status":{
+        "install_id":ids[0],"browser":"Chrome","profile_label":"Personal",
+        "extension_version":"0.4.1","reported_at":"2026-09-27T12:05:00Z",
+        "platforms":[{"platform":"chatgpt","captured_by_this_browser":99,"pending":1,"paused_reason":null}]
+    }});
+    let output = fixture.chrome(&frame(&replacement));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    assert_eq!(one_frame(&output.stdout)["type"], "status");
+    let status_dir = fixture.stage.join("ext-status");
+    for (index, id) in ids.iter().enumerate() {
+        let raw = fs::read(status_dir.join(format!("{id}.json"))).expect("status persisted");
+        let value: Value = serde_json::from_slice(&raw).expect("valid JSON status");
+        assert_eq!(value["schema"], "chat-stasher/ext-status@1");
+        assert_eq!(value["install_id"], *id);
+        assert_eq!(
+            value["platforms"][0]["pending"],
+            if index == 0 { 1 } else { 8 }
+        );
+        if index == 0 {
+            assert_eq!(value["platforms"][0]["captured_by_this_browser"], 99);
+        }
+        assert!(value.get("account_id").is_none());
+    }
+}
+
 /// W205c · D4, wire-level: a copied install (same `install_id`, different
 /// user-named profile label) must be refused in a way an extension can act on —
 /// `install-conflict` is item-scope and non-retryable, so the entry lands

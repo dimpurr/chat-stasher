@@ -28,7 +28,9 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { coordinate, deliver, has, isItemRejected, isValidDeliverName } from '../lib/native-host';
+import { coordinate, deliver, has, isItemRejected, isValidDeliverName, reportInstallStatus } from '../lib/native-host';
+import { readCoverageInputs } from '../lib/coverage-read';
+import { buildCoverage } from '../lib/coverage';
 import { recordLiveCapture } from '../lib/live-capture';
 import {
   captureFingerprint,
@@ -2857,6 +2859,33 @@ async function recordAlarmTick(
     schedule,
     ...(claudeScopeSource ? { claudeScopeSource } : {}),
   });
+  if (tabSweep && 'sweeping' in tabSweep && tabSweep.sweeping) return;
+  // Status reporting is best-effort and runs only after the tick's durable local trace.
+  // Scope labels and conversation identifiers are intentionally omitted; fingerprints
+  // are already salted per install and remain incomparable across installs.
+  try {
+    const identity = await getInstallIdentity();
+    const input = await readCoverageInputs(store, Date.now());
+    const report = buildCoverage({ ...input, install: { ...identity, profile_label: identity.profile_label ?? 'Unnamed profile' } });
+    const grouped = new Map<string, { platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>();
+    for (const row of report.rows) {
+      const fingerprint = row.accountLease?.value;
+      const key = `${row.platform}\u0000${fingerprint ?? ''}`;
+      const existing = grouped.get(key) ?? { platform: row.platform, captured_by_this_browser: 0, pending: 0, paused_reason: null, ...(fingerprint ? { account_fingerprint: fingerprint } : {}) };
+      existing.captured_by_this_browser += row.archived;
+      existing.pending += row.pending;
+      existing.paused_reason ??= row.halt?.reason ?? row.suspended?.reason ?? (row.state === 'halted' ? 'halted' : null);
+      grouped.set(key, existing);
+    }
+    const version = (globalThis as { chrome?: { runtime?: { getManifest?: () => { version?: string } } } }).chrome?.runtime?.getManifest?.().version ?? runningBuildId();
+    if (typeof version !== 'string' || version.length === 0) throw new Error('extension version unavailable');
+    await reportInstallStatus({
+      install_id: identity.install_id, browser: identity.browser, profile_label: identity.profile_label,
+      extension_version: version, reported_at: new Date().toISOString(), platforms: [...grouped.values()],
+    });
+  } catch (err) {
+    console.warn('[chat-stasher] install status report failed', (err as Error).message);
+  }
 }
 
 /**

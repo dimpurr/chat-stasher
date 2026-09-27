@@ -487,3 +487,30 @@ version is a new document section, never an edit to an existing one.
   `open_dashboard` response, and only after checking that it is
   `http://127.0.0.1:<port>/?token=<hex>`. A `nack`, a timeout, a malformed
   response or a URL that is not loopback opens nothing.
+
+### 6.7 `status` — replace this install's latest backfill report
+
+Request:
+
+```json
+{"protocol":1,"type":"status","request_id":"<request id>","status":{"install_id":"<UUID>","browser":"Chrome","profile_label":"Personal","extension_version":"<version>","reported_at":"<RFC3339>","platforms":[{"platform":"chatgpt","captured_by_this_browser":12,"pending":3,"paused_reason":null,"account_fingerprint":"<per-install salted SHA-256>"}]}}
+```
+
+The host writes one file atomically at `ext-status/<install_id>.json`, adding the
+local machine id and schema `chat-stasher/ext-status@1`. A later report from the
+same install replaces that file; reports from other installs have separate files.
+The `platforms` array contains no account ids or conversation identifiers.
+
+Successful response:
+
+```json
+{"protocol":1,"type":"status","ok":true,"request_id":"<same id>"}
+```
+A `nack` leaves the caller's status unconfirmed. Old hosts refuse the new message;
+extensions treat that as a failed report, never as a successful empty status.
+
+`overview --json` and `overview --json --summary` expose archived latest records
+as `installs[]`, each with `reported_at` and `stale`. Stale means the timestamp is
+invalid or more than 48 hours before the reader's current UTC time. The list is
+per install and pending counts are never added across installs. Archives written
+before this message simply have no `installs` records.
