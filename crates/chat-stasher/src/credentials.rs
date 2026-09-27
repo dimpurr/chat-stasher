@@ -26,15 +26,21 @@
 //! variable or keychain item) appears in an error, because a reference that a
 //! user mistyped may itself be a secret they pasted where a name belonged.
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
-/// The default keychain service for a `keychain:ACCOUNT` reference.
+/// The default keychain service for a `keychain:ACCOUNT` reference. Compiled
+/// only on macOS, the one platform where a keychain lookup can run at all.
+#[cfg(target_os = "macos")]
 pub const DEFAULT_KEYCHAIN_SERVICE: &str = "chat-stasher";
 
 /// Environment variable that overrides the `security` binary, so a test (or a
 /// wrapper) can point the lookup at a shim instead of the real keychain. Same
-/// shape as `CHAT_STASHER_LAUNCHCTL` / `CHAT_STASHER_SYSTEMCTL`.
+/// shape as `CHAT_STASHER_LAUNCHCTL` / `CHAT_STASHER_SYSTEMCTL`. Compiled only
+/// on macOS, like the lookup it steers.
+#[cfg(target_os = "macos")]
 pub const SECURITY_TOOL_ENV: &str = "CHAT_STASHER_SECURITY";
 
 /// What [`resolve`] found in an option value.
@@ -58,6 +64,14 @@ pub fn resolve(value: &str) -> Resolved {
         return resolve_env_file(rest);
     }
     if let Some(rest) = value.strip_prefix("keychain:") {
+        // The empty reference is refused here, before the platform split, so
+        // `keychain:` naming no account is the same syntax error on every
+        // platform rather than a macOS-only detail of the lookup.
+        if rest.is_empty() {
+            return Resolved::Missing(
+                "credential reference `keychain:` names no account".to_string(),
+            );
+        }
         return resolve_keychain(rest);
     }
     Resolved::NotReference
@@ -124,16 +138,18 @@ fn resolve_env_file(rest: &str) -> Resolved {
 /// `keychain:ACCOUNT` / `keychain:SERVICE:ACCOUNT` — read a generic-password
 /// item with the macOS `security` tool.
 ///
-/// Deliberately not behind a `cfg(target_os = "macos")`: on a platform with no
-/// `security` tool the lookup fails with a reason that names the tool, which is
-/// the same honest answer as a missing keychain item and keeps the branch
-/// testable by shimming the tool on `PATH`. Only the service and account are
-/// passed as arguments; the secret comes back on the tool's stdout and is not
-/// echoed anywhere.
+/// macOS only, and compiled only here: the Keychain and the `security` CLI
+/// that reads it exist on no other platform, so a lookup anywhere else could
+/// only fail — and until this split it failed as "the `security` tool could
+/// not be run", which reads like a broken local setup on a machine that
+/// cannot have the tool at all. Every other platform now refuses the form up
+/// front, before anything is looked up, through the `not(target_os = "macos")`
+/// arm below.
+///
+/// Only the service and account are passed as arguments; the secret comes back
+/// on the tool's stdout and is not echoed anywhere.
+#[cfg(target_os = "macos")]
 fn resolve_keychain(rest: &str) -> Resolved {
-    if rest.is_empty() {
-        return Resolved::Missing("credential reference `keychain:` names no account".to_string());
-    }
     let (service, account) = match rest.split_once(':') {
         Some((service, account)) if !service.is_empty() && !account.is_empty() => {
             (service.to_string(), account.to_string())
@@ -181,9 +197,36 @@ fn resolve_keychain(rest: &str) -> Resolved {
         },
         Ok(_) => Resolved::Missing(format!(
             "no keychain item service={service:?} account={account:?}; store one with \
-             `security add-generic-password -s {service} -a {account} -w`"
+             `security add-generic-password -s {service} -a {account} -w`",
         )),
     }
+}
+
+/// The other half of the platform split: a `keychain:` reference on an OS with
+/// no Keychain is refused before anything is looked up. An earlier revision
+/// ran the `security` tool on every platform and reported it missing where it
+/// did not exist — an answer indistinguishable from a broken macOS setup,
+/// asking the operator to fix a tool their OS cannot have — so the refusal is
+/// now stated as what it is: the form is not supported here. Fail-closed is
+/// unchanged; the option is still never silently emptied.
+#[cfg(not(target_os = "macos"))]
+fn resolve_keychain(rest: &str) -> Resolved {
+    Resolved::Missing(unsupported_keychain_platform_reason(rest))
+}
+
+/// The refusal wording a `keychain:` reference gets on a platform without a
+/// Keychain.
+///
+/// Compiled for tests on every platform (`cfg(any(test, …))`) so the wording
+/// can be asserted on macOS, where this repository develops; outside `test`
+/// it is reached only through the `not(target_os = "macos")` arm above.
+#[cfg(any(test, not(target_os = "macos")))]
+fn unsupported_keychain_platform_reason(rest: &str) -> String {
+    format!(
+        "credential reference `keychain:{rest}` is not supported on this operating \
+         system: the macOS keychain does not exist here; use `file:PATH` or \
+         `env-file:PATH:NAME` instead",
+    )
 }
 
 /// Strip exactly one trailing `\n` (and a `\r` before it), so a secret written
@@ -234,10 +277,13 @@ fn strip_quotes(value: &str) -> &str {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(target_os = "macos")]
     use std::sync::Mutex;
 
     /// `SECURITY_TOOL_ENV` is process-global and these tests run as threads of
-    /// one process, so the two that set it take turns.
+    /// one process, so the two that set it take turns. macOS only, like the
+    /// lookup the variable steers.
+    #[cfg(target_os = "macos")]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -296,9 +342,13 @@ mod tests {
     }
 
     /// The `security` tool is shimmed on the environment override, so the
-    /// keychain branch is exercised on any platform without touching a real
-    /// keychain (and never with a real secret).
+    /// keychain branch is exercised without touching a real keychain (and
+    /// never with a real secret). macOS only: the lookup this drives is
+    /// compiled only there, so the property "invokes the shim" does not exist
+    /// on any other platform — off macOS the form is refused before any tool
+    /// could be consulted, which the two tests below the macOS pair cover.
     #[test]
+    #[cfg(target_os = "macos")]
     fn keychain_reference_invokes_the_shim() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
@@ -324,7 +374,11 @@ mod tests {
         assert_eq!(result, Resolved::Value("keychain-secret".to_string()));
     }
 
+    /// The missing-item reason must name the service and the account. macOS
+    /// only, for the same reason as its sibling above: no other platform runs
+    /// the lookup that can find an item missing.
     #[test]
+    #[cfg(target_os = "macos")]
     fn keychain_reference_missing_item_names_service_and_account() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
@@ -350,5 +404,53 @@ mod tests {
             }
             other => panic!("expected Missing, got {other:?}"),
         }
+    }
+
+    /// `keychain:` with no account at all is a syntax error, decided in
+    /// `resolve` before the platform split, so it reads identically on every
+    /// platform — on macOS too, which is the platform this runs on here.
+    #[test]
+    fn keychain_reference_empty_names_no_account_on_every_platform() {
+        match resolve("keychain:") {
+            Resolved::Missing(why) => assert!(why.contains("names no account"), "{why}"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    /// The wording of the refusal `keychain:` references get off macOS. The
+    /// builder is compiled for tests on every platform, so this asserts the
+    /// message on macOS too — where the repository develops and where the
+    /// two lookup tests above run — instead of waiting for a Windows cell to
+    /// discover wording drift. It must stay distinguishable from the lookup
+    /// failures it replaced: not "no keychain item" (nothing was looked up)
+    /// and not a tool that "could not be run" (no tool was attempted).
+    #[test]
+    fn keychain_refusal_off_macos_is_worded_as_unsupported() {
+        let why = unsupported_keychain_platform_reason("chat-stasher:r2");
+        assert!(
+            why.contains("not supported on this operating system"),
+            "{why}"
+        );
+        assert!(
+            why.contains("`keychain:chat-stasher:r2`"),
+            "the reason must name the reference so the option using it can be found: {why}"
+        );
+        assert!(!why.contains("no keychain item"), "{why}");
+        assert!(!why.contains("could not be run"), "{why}");
+    }
+
+    /// The other side of the `cfg`: off macOS, `keychain:` resolves to the
+    /// platform refusal. This is the plumbing test for the wording test above
+    /// and the counterpart of the two macOS shim tests — the Linux and
+    /// Windows cells cannot run those, so this is the `keychain:` coverage
+    /// they get, and it asserts the correct behavior for the platform it
+    /// runs on rather than just compiling out.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn keychain_reference_off_macos_resolves_to_the_refusal() {
+        assert_eq!(
+            resolve("keychain:chat-stasher:r2"),
+            Resolved::Missing(unsupported_keychain_platform_reason("chat-stasher:r2"))
+        );
     }
 }
