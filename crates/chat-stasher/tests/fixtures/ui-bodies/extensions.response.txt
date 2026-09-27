@@ -4,7 +4,7 @@ content-type: text/html; charset=utf-8
 <!doctype html>
 <html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1">
-<title>chat-stasher · session claude-c~e58aa6</title>
+<title>chat-stasher · Extensions</title>
 <style>
 :root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--muted:#5c5c5c;--line:#d8d8d8;
 --head:#f4f4f4;--note-bg:#fffbe6;--note-line:#e6d98a;--warn-bg:#ffecec;--warn-line:#e0a0a0;
@@ -76,21 +76,26 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <a class=skip href="#content">Skip to content</a>
 <nav class=top aria-label="pages"><a href="/?token=golden-token" accesskey=1>overview</a> · <a href="/sessions?token=golden-token" accesskey=2>sessions</a> · <a href="/search?token=golden-token" accesskey=f>search</a> · <a href="/extensions?token=golden-token">Extensions</a></nav>
 <main id=content>
-<h1>Session <span class=mono>claude-c~e58aa6</span></h1>
-<p class=sub><a href="/?token=golden-token">← overview</a> · destination <b>dest-under-test</b></p>
-<div class=scroll><table>
-<tbody>
-<tr><th>machine</th><td class=mono>m-1</td></tr>
-<tr><th>source</th><td>claude-code</td></tr>
-<tr><th>label</th><td>no label recorded</td></tr>
-<tr><th>first message</th><td>2026-02-02 00:40 UTC</td></tr>
-<tr><th>last message</th><td>2026-02-02 00:43 UTC</td></tr>
-<tr><th>shards</th><td class=n>2</td></tr>
-<tr><th>bytes in archive</th><td class=n>100 B</td></tr>
-<tr><th>data blobs</th><td class=n>2</td></tr>
-<tr><th>archive snapshot time</th><td>2026-02-02 01:40 UTC</td></tr>
-</tbody></table></div>
-<div class=warn><b>Body not loaded.</b> Everything above came from archive metadata (snapshot + index + tree); no conversation byte has been fetched or decrypted.<br><br>Loading this session costs <b>100 B of shard data</b> across <b>2 shard(s)</b> made of <b>2 data blob(s)</b> — fetched from the destination and decrypted locally. Nothing is fetched until you ask.<br><br><a href="/reader?i=0&token=golden-token"><b>Open reader</b></a> · <a href="/content?i=0&token=golden-token" accesskey=r><b>show raw shards</b></a> · <a href="/export?i=0&fmt=jsonl&token=golden-token"><b>download .jsonl</b></a> <span class=sub>(100 B once, for whichever of the three you click)</span><br> The download is an attachment on this page's row: its bytes are exactly what <code>chat-stasher read</code> returns for this session, its name is the session's short id, and the digest <code>read</code> prints rides the response as <code>X-Checksum-Sha256</code>.</div>
+<h1>Extensions</h1>
+<p class=sub>Archived reports, grouped by machine, browser and profile. Counts belong to each install and are not combined.</p>
+<section><h2>Machine 1</h2>
+<article class=message><header><b>Arc</b> · Personal · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Arc</b> · Work · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Personal · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Work · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+</section>
+<section><h2>Machine 2</h2>
+<article class=message><header><b>Arc</b> · Personal · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Arc</b> · Work · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Personal · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Work · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+</section>
+<section><h2>Machine 3</h2>
+<article class=message><header><b>Arc</b> · Personal · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Arc</b> · Work · Machine 3 · <b class=stale>Stale</b></header><p>Last report: 2026-09-27T12:00:00Z · stale</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Personal · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<article class=message><header><b>Chrome</b> · Work · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+</section>
 </main>
 <footer>
 <p><b>Metadata tier.</b> This page was rendered from one archive-metadata read taken before the server started (snapshots + index + tree + the activity sidecar). The only conversation text it holds is each session's one-line label — at most 100 characters, recorded in the activity index, which rode that same metadata read. 0 session shard blob(s) were fetched by that read — a session's full conversation is fetched only when you click it and then click <i>load</i>, and the cost is shown before you do.</p>

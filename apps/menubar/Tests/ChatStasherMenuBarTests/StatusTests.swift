@@ -24,6 +24,31 @@ final class StatusTests: XCTestCase {
         XCTAssertEqual(value.severity, .error)
     }
 
+    func testExtensionSummaryCountsInstallRowsMachinesAndStaleReports() {
+        let installs = (0..<12).map { i in
+            ExtensionInstall(
+                installID: "demo-\(i)", machine: "Machine \(i / 4 + 1)",
+                browser: i % 4 < 2 ? "Chrome" : "Arc",
+                profileLabel: i % 2 == 0 ? "Personal" : "Work",
+                reportedAt: "2026-09-27T12:00:00Z", stale: i == 11,
+                platforms: [ExtensionPlatformStatus(platform: "chatgpt", capturedByThisBrowser: i, pending: 2, pausedReason: nil)]
+            )
+        }
+        XCTAssertEqual(extensionSummary(installs), "Extensions: 12 on 3 machines · 1 not reporting ▸")
+        let status = archiveStatus(
+            snapshot: ArchiveSnapshot(
+                summary: Summary(machines: 3, harnesses: 8, sessions: 12, unknownTimeSessions: 0, noConversationContentSessions: 0),
+                refreshedAt: now,
+                machines: [MachineFreshness(machine: "Machine 1", newestSnapshotUnix: Int64(now.timeIntervalSince1970), health: "healthy")],
+                days: [], usedConversationFallback: false,
+                sources: [], sourceDetails: [], destinations: 1,
+                extensionInstalls: installs
+            ), local: cleanLocal, failure: nil, now: now
+        )
+        XCTAssertEqual(status.severity, .warning)
+        XCTAssertTrue(status.sentence.contains("Arc · Work on Machine 3"))
+    }
+
     // ---- one test per classification class ----------------------------------
     // The kind is decided where the failure was observed (exit status, the
     // CLI documents' own kind fields, a decode verdict); the message is

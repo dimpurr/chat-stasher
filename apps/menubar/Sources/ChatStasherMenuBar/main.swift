@@ -51,11 +51,43 @@ private struct SummaryDocument: Decodable {
     let machines: [SummaryMachine]
     let sources: [SummarySource]
     let days: [SummaryDay]
+    let installs: [ExtensionInstall]?
     let error: String?
     enum CodingKeys: String, CodingKey {
-        case command, variant, totals, machines, sources, days, error
+        case command, variant, totals, machines, sources, days, installs, error
         case schemaVersion = "schema_version"
         case exitCode = "exit_code"
+    }
+}
+
+struct ExtensionPlatformStatus: Decodable, Identifiable {
+    let platform: String
+    let capturedByThisBrowser: Int
+    let pending: Int
+    let pausedReason: String?
+    var id: String { platform }
+    enum CodingKeys: String, CodingKey {
+        case platform, pending
+        case capturedByThisBrowser = "captured_by_this_browser"
+        case pausedReason = "paused_reason"
+    }
+}
+
+struct ExtensionInstall: Decodable, Identifiable {
+    let installID: String
+    let machine: String
+    let browser: String
+    let profileLabel: String?
+    let reportedAt: String
+    let stale: Bool
+    let platforms: [ExtensionPlatformStatus]
+    var id: String { installID }
+    var label: String { "\(browser) · \(profileLabel ?? "Unnamed profile")" }
+    enum CodingKeys: String, CodingKey {
+        case machine, browser, stale, platforms
+        case installID = "install_id"
+        case profileLabel = "profile_label"
+        case reportedAt = "reported_at"
     }
 }
 
@@ -230,6 +262,7 @@ struct ArchiveSnapshot {
     var sourceDetails: [SourceRow] = []
     var destinations: Int = 1
     var destinationName: String? = nil
+    var extensionInstalls: [ExtensionInstall] = []
 }
 
 struct SourceRow: Identifiable {
@@ -260,6 +293,7 @@ enum ArchiveStatus {
     case unreadable(String)
     case needsAttention(Int)
     case silent(String, Int)
+    case extensionStale(String)
     case healthy
     case waiting(Int)
     case localFailure(String)
@@ -277,7 +311,7 @@ enum ArchiveStatus {
     var severity: Severity {
         switch self {
         case .healthy: .healthy
-        case .needsAttention, .silent, .waiting, .sourceStopped, .setup, .offline: .warning
+        case .needsAttention, .silent, .extensionStale, .waiting, .sourceStopped, .setup, .offline: .warning
         case .destination(_, _, let severity): severity
         case .unreadable, .localFailure, .cliMissing, .cliTooOld, .credentialsUnavailable: .error
         }
@@ -288,6 +322,7 @@ enum ArchiveStatus {
         case .needsAttention(let count):
             count == 1 ? "1 machine needs attention" : "\(count) machines need attention"
         case .silent(let machine, let days): "\(machine) has been silent for \(days) days"
+        case .extensionStale(let install): "\(install) hasn't reported for more than 48 hours"
         case .healthy: "All saved"
         case .waiting(let count): "\(count) conversations waiting to upload"
         case .localFailure(let reason): reason
@@ -373,6 +408,9 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
                                         now: now) == .stopped
     }) {
         return .sourceStopped(stopped.label)
+    }
+    if let stale = snapshot.extensionInstalls.first(where: \.stale) {
+        return .extensionStale("\(stale.label) on \(stale.machine)")
     }
     return .healthy
 }
@@ -489,7 +527,7 @@ private final class ArchiveModel: ObservableObject {
                                        silenceThresholdOverrideDays: silenceThresholdOverrideDays)
             let isArchiveStatus: Bool
             switch status {
-            case .healthy, .needsAttention, .silent, .sourceStopped: isArchiveStatus = true
+            case .healthy, .needsAttention, .silent, .extensionStale, .sourceStopped: isArchiveStatus = true
             default: isArchiveStatus = false
             }
             if isArchiveStatus, let name = snapshot?.destinationName, (snapshot?.destinations ?? 1) > 1 {
@@ -580,17 +618,22 @@ private final class ArchiveModel: ObservableObject {
     }
 
     func openDashboard() {
-        openDashboard(harness: nil, destination: snapshot?.destinationName)
+        openDashboard(harness: nil, destination: snapshot?.destinationName, view: nil)
     }
 
-    func openDashboard(harness: String?, destination: String? = nil) {
-        guard dashboardProcess?.isRunning != true else {
+    func openExtensions() {
+        openDashboard(harness: nil, destination: snapshot?.destinationName, view: "extensions")
+    }
+
+    func openDashboard(harness: String?, destination: String? = nil, view: String? = nil) {
+        guard dashboardProcess?.isRunning != true || view != nil else {
             dashboardMessage = "Dashboard is already running."
             return
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["chat-stasher", "ui"]
+        if let view { process.arguments?.append(contentsOf: ["--view", view]) }
         if let harness { process.arguments?.append(contentsOf: ["--harness", harness]) }
         if let destination = dashboardDestination(
             environment: ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"], displayed: destination
@@ -660,11 +703,25 @@ private final class ArchiveModel: ObservableObject {
             SourceRow(id: name.lowercased(), label: name, count: [90, 54, 24, 16][index],
                       lastSavedUnix: Int64(now.timeIntervalSince1970) - 2 * 86_400, health: .healthy)
         }
+        let extensionInstalls = (0..<12).map { index in
+            ExtensionInstall(
+                installID: "demo-install-\(index)",
+                machine: ["Studio Mac", "Travel Mac", "Archive Mac"][index / 4],
+                browser: ["Chrome", "Arc"][index % 4 / 2],
+                profileLabel: ["Personal", "Work"][index % 2],
+                reportedAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(index == 11 ? -72 * 3_600 : -15 * 60)),
+                stale: index == 11,
+                platforms: [
+                    ExtensionPlatformStatus(platform: "chatgpt", capturedByThisBrowser: index + 1, pending: index % 3, pausedReason: index == 11 ? "rate-limit" : nil),
+                    ExtensionPlatformStatus(platform: "claude", capturedByThisBrowser: index + 2, pending: 0, pausedReason: nil),
+                ]
+            )
+        }
         let sources = coding + web
         snapshot = ArchiveSnapshot(
             summary: Summary(machines: 3, harnesses: 8, sessions: 1_284, unknownTimeSessions: 3, noConversationContentSessions: 0),
             refreshedAt: now, machines: machines, days: days, usedConversationFallback: false,
-            sources: sources, sourceDetails: sources, destinations: 1
+            sources: sources, sourceDetails: sources, destinations: 1, extensionInstalls: extensionInstalls
         )
         localSnapshot = LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
                                       cliVersion: "0.5.0-rc.2", cliNeedsUpdate: mode == "cli-old")
@@ -745,7 +802,7 @@ private final class ArchiveModel: ObservableObject {
                                   noConversationContentSessions: document.totals.noConversationContentSessions)
             return ArchiveSnapshot(summary: summary, refreshedAt: now, machines: machines,
                                             days: days, usedConversationFallback: false, sources: details, sourceDetails: details,
-                                            destinations: destinationCount)
+                                            destinations: destinationCount, extensionInstalls: document.installs ?? [])
         }
         // Anything that did not produce a snapshot is classified from the CLI's
         // own documents and exit status; the text is display-only.
@@ -813,7 +870,7 @@ private enum OverviewResult {
 func destinationStatusRank(_ status: ArchiveStatus) -> Int {
     switch status {
     case .healthy: 0
-    case .offline, .setup, .silent, .sourceStopped: 1
+    case .offline, .setup, .silent, .extensionStale, .sourceStopped: 1
     case .needsAttention, .waiting: 2
     case .localFailure, .unreadable, .cliMissing, .cliTooOld, .credentialsUnavailable: 3
     case .destination(_, _, let severity):
@@ -1110,8 +1167,11 @@ private struct ArchivePopover: View {
                         }
                     }
                     if group == "Web chats" {
-                        Text("Extension status: see each browser's extension")
-                            .font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 2)
+                        Button(action: model.openExtensions) {
+                            Text(extensionSummary(snapshot.extensionInstalls))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(snapshot.extensionInstalls.contains(where: \.stale) ? Color.yellow : Color.secondary)
+                        }.buttonStyle(.plain).padding(.top, 2)
                     }
                 }
             }
@@ -1231,6 +1291,13 @@ private struct ArchivePopover: View {
                 .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
         }.keyboardShortcut(KeyEquivalent(key), modifiers: .command).buttonStyle(.plain)
     }
+}
+
+func extensionSummary(_ installs: [ExtensionInstall]) -> String {
+    guard !installs.isEmpty else { return "Extensions: no reports in archive ▸" }
+    let machines = Set(installs.map(\.machine)).count
+    let stale = installs.filter(\.stale).count
+    return "Extensions: \(installs.count) on \(machines) machines · \(stale) not reporting ▸"
 }
 
 func attentionSentences(_ summary: Summary, sources: [SourceRow] = []) -> [String] {

@@ -109,6 +109,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+.stale{color:#8a5300}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
@@ -161,7 +162,8 @@ pub(super) fn head(title: &str, token: &str) -> String {
          <a class=skip href=\"#content\">Skip to content</a>\n\
          <nav class=top aria-label=\"pages\"><a href=\"/?token={t}\" accesskey=1>overview</a> · \
          <a href=\"/sessions?token={t}\" accesskey=2>sessions</a> · \
-         <a href=\"/search?token={t}\" accesskey=f>search</a></nav>\n\
+         <a href=\"/search?token={t}\" accesskey=f>search</a> · \
+         <a href=\"/extensions?token={t}\">Extensions</a></nav>\n\
          <main id=content>\n",
         title_ = esc(title),
         t = percent_encode(token),
