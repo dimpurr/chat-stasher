@@ -2405,7 +2405,7 @@ mod tests {
         let response = req("/extensions?token=t", &data, &NoContent);
         assert!(response.body.contains("<td class=n>Unknown</td>"));
         assert!(!response.body.contains("<td class=n>0</td>"));
-        assert!(response.body.contains("<td>Unknown</td>"));
+        assert!(response.body.contains("<td>—</td>"));
     }
 
     /// The route table, the 404 wording and the router are one list: every
