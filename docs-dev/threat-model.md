@@ -30,8 +30,8 @@ Understanding the roles below requires knowing the path the content takes.
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
-   (`apps/extension/lib/outbox.ts:318-386`;
-   `apps/extension/entrypoints/background.ts:340-357`).
+   (`apps/extension/lib/outbox.ts:363-432`;
+   `apps/extension/entrypoints/background.ts:343-360`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -107,7 +107,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:102-118`, `:363-432`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:230-233`). It sits there,
+   (`apps/extension/entrypoints/background.ts:233-236`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:434-449`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -331,7 +331,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:1189-1204`, `:1291-1307`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:211-213`). It never leaves your
+(`apps/extension/entrypoints/background.ts:214-216`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
@@ -362,7 +362,7 @@ account (`apps/extension/lib/backfill/account-lease.ts:141-197`,
 the other observation: one that names another account suspends every scope of
 that platform whose recorded fingerprint says something else, and starts the new
 account's own scope, while the suspended scope keeps everything it owed
-(`apps/extension/entrypoints/background.ts:1191-1247`, `:1318-1334`). Two limits
+(`apps/extension/entrypoints/background.ts:1299-1355`, `:1426-1442`). Two limits
 are worth stating rather than leaving to be discovered: a response that names
 **no** account is `incomparable` and changes nothing, so on a platform whose
 traffic rarely carries one the check cannot fire; and a scope that has never had
@@ -691,7 +691,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:70-153`;
-   `apps/extension/entrypoints/background.ts:1495-1555`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1603-1663`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:268-305`); a body
    response that admits it is incomplete is refused and listed as a failure
