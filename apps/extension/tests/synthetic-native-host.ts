@@ -45,12 +45,13 @@ export interface SyntheticHostOptions {
    */
   summary?: unknown;
   /**
-   * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack an older host
-   * sends. `has` belongs here because a host that predates §6.4 predates §6.6 too,
-   * and the fallback it must produce is the same one: every question it cannot
-   * answer reads as "not held" ⇒ deliver.
+   * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack for those
+   * unsupported capabilities. Arbitration remains available so the `has`
+   * fallback can be exercised while backfill stays leased.
    */
   unsupported?: boolean;
+  /** A host that predates EXT-3, for fail-closed backfill tests. */
+  unsupportedCoordination?: boolean;
   /**
    * Empty this host's stage while keeping its path and machine — the review's
    * finding, as a stub primitive: an archive that was replaced or restored where it
@@ -165,7 +166,8 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
       // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if (options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard' || msg.type === 'coordination')) {
+      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard'))
+          || (options.unsupportedCoordination && msg.type === 'coordination')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
           kind: 'bad-request', retryable: false,

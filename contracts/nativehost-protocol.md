@@ -404,9 +404,9 @@ sets a platform cooldown of at least 60 seconds and at least the supplied
 `Retry-After` duration (clamped to 30 days).
 
 An older host answers `bad-request` for the unknown `coordination` type. The
-extension reports coordination unavailable and retains its pre-EXT-3 local
-behavior. This protocol addition does not compare account fingerprints and
-cannot coordinate separate machines.
+extension reports coordination unavailable and pauses backfill until the host
+is updated. Live capture continues. This protocol addition does not compare
+account fingerprints and cannot coordinate separate machines.
 
 ## 7. Idempotency
 
