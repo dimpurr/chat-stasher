@@ -160,7 +160,7 @@ your user, it is the dominant risk in this document.
 | | |
 |---|---|
 | **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:239`). Loopback is not a security boundary. |
-| **Cannot see** | Anything, without the random token printed in the URL at launch. Every route checks it with a constant-time comparison before doing anything else, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:331`, `:246`). |
+| **Cannot see** | Anything, without the random token printed in the URL at launch. Every accepted GET route checks it with a constant-time comparison, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:343-376`, `:246`). |
 
 **Who can start it.** There are two ways, and both end in the same
 loopback-only, token-gated server:
@@ -559,9 +559,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6843-6939`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:6973-6977`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6815-6822`).
+  (`crates/chat-stasher/src/main.rs:6949-6956`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -572,7 +572,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:5168-5224`).
+  as many words (`crates/chat-stasher/src/main.rs:5202-5210`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -634,7 +634,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7476-7708`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7480-7722`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
