@@ -147,6 +147,8 @@ popup:
   install:
     unknown: 无法读取此浏览器实例身份。
     thisBrowser: "此浏览器：{browser} · {profile}"
+    oneOtherInstall: "另有 1 个扩展实例 — 查看看板"
+    otherInstalls: "另有 {count} 个扩展实例 — 查看看板"
     unnamed: 请为此配置文件命名
     profilePlaceholder: 为此浏览器配置文件命名
     save: 保存名称
@@ -618,6 +620,8 @@ failure:
 # ---------------------------------------------------------------------------
 coverage:
   thisBrowser: "此浏览器：{browser} · {profile}"
+  oneOtherInstall: "另有 1 个扩展实例 — 查看看板"
+  otherInstalls: "另有 {count} 个扩展实例 — 查看看板"
   installUnknown: 无法读取此浏览器实例身份。
   title: 回溯覆盖情况
   subtitleShort: "本浏览器自己的记录，读取时间 {when}。"

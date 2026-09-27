@@ -31,6 +31,7 @@ final class StatusTests: XCTestCase {
                 browser: i % 4 < 2 ? "Chrome" : "Arc",
                 profileLabel: i % 2 == 0 ? "Personal" : "Work",
                 reportedAt: "2026-09-27T12:00:00Z", stale: i == 11,
+                reportedDaily: i == 11,
                 platforms: [ExtensionPlatformStatus(platform: "chatgpt", capturedByThisBrowser: i, pending: 2, pausedReason: nil)]
             )
         }
@@ -47,6 +48,26 @@ final class StatusTests: XCTestCase {
         )
         XCTAssertEqual(status.severity, .warning)
         XCTAssertTrue(status.sentence.contains("Arc · Work on Machine 3"))
+    }
+
+    func testStaleInstallWithoutDailyHistoryDoesNotCreateWarningSentence() {
+        let install = ExtensionInstall(
+            installID: "old-record", machine: "Machine 1", browser: "Chrome",
+            profileLabel: "Personal", reportedAt: "2026-09-20T12:00:00Z", stale: true,
+            reportedDaily: nil,
+            platforms: []
+        )
+        let value = archiveStatus(
+            snapshot: ArchiveSnapshot(
+                summary: Summary(machines: 1, harnesses: 1, sessions: 12, unknownTimeSessions: 0, noConversationContentSessions: 0),
+                refreshedAt: now,
+                machines: [MachineFreshness(machine: "Machine 1", newestSnapshotUnix: Int64(now.timeIntervalSince1970), health: "healthy")],
+                days: [], usedConversationFallback: false,
+                sources: [], sourceDetails: [], destinations: 1, extensionInstalls: [install]
+            ), local: cleanLocal, failure: nil, now: now
+        )
+        XCTAssertEqual(value.severity, .healthy)
+        XCTAssertEqual(value.sentence, "All saved")
     }
 
     // ---- one test per classification class ----------------------------------

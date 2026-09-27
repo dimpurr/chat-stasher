@@ -87,7 +87,7 @@ export interface HelloOk {
 }
 
 // ---------------------------------------------------------------------------
-// §6.4 summary / §6.5 open_dashboard — the two read-only queries
+// §6.4 summary / §6.5 open_dashboard / §6.8 other_installs read-only queries
 // ---------------------------------------------------------------------------
 
 /**
@@ -928,6 +928,39 @@ export async function summary(options: { timeoutMs?: number } = {}): Promise<Sum
     };
   }
   return { ok: true, summary: classified.value as StageSummary };
+}
+
+export type OtherInstallCountResult = { ok: true; count: number } | { ok: false };
+
+function validateOtherInstallCount(value: Record<string, unknown>): { request_id: string; count: number } | string {
+  if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
+  if (value.type !== 'other_installs') return "type is not 'other_installs'";
+  const bad = keysOk(value, ['protocol', 'type', 'ok', 'request_id', 'count']);
+  if (bad) return bad;
+  if (value.ok !== true) return 'ok is not true';
+  if (typeof value.request_id !== 'string' || !REQUEST_ID_RE.test(value.request_id)) {
+    return 'request_id is invalid';
+  }
+  if (typeof value.count !== 'number' || !Number.isSafeInteger(value.count) || value.count < 0) {
+    return 'count is not a known non-negative integer';
+  }
+  return { request_id: value.request_id, count: value.count };
+}
+
+/** Read only the archive-wide number of other status records. A failure stays unknown. */
+export async function otherInstalls(installId: string, options: { timeoutMs?: number } = {}): Promise<OtherInstallCountResult> {
+  if (!/^[A-Fa-f0-9-]{36}$/.test(installId)) return { ok: false };
+  const requestId = newRequestId();
+  if (!requestId) return { ok: false };
+  const outcome = await sendOnce(
+    getRuntime(),
+    { protocol: PROTOCOL, type: 'other_installs', request_id: requestId, install_id: installId },
+    options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+  );
+  const classified = classify(outcome, (value) => validateOtherInstallCount(value));
+  if (!classified.ok) return { ok: false };
+  const answer = classified.value as { request_id: string; count: number };
+  return answer.request_id === requestId ? { ok: true, count: answer.count } : { ok: false };
 }
 
 /**

@@ -341,6 +341,9 @@ pub struct UiData {
     /// Per-install extension status records read from the archive snapshots.
     /// These are kept as records so their platform counts are never merged.
     pub extension_installs: Vec<serde_json::Value>,
+    /// The local machine id when already known. `None` avoids creating a new
+    /// identity just to render guidance for archived extension installs.
+    pub local_machine_id: Option<String>,
     /// False when the archive status scan did not finish; an empty list then
     /// must not be presented as proof that no install reports exist.
     pub extension_status_read: bool,
@@ -476,6 +479,7 @@ impl UiData {
             index_files_read: merged.index_files_read,
             now_unix,
             extension_installs: Vec::new(),
+            local_machine_id: None,
             extension_status_read: true,
         }
     }
@@ -2355,6 +2359,7 @@ mod tests {
     #[test]
     fn extensions_view_keeps_twelve_install_rows_separate_and_marks_one_stale() {
         let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
         data.extension_installs = (0..12)
             .map(|i| serde_json::json!({
                 "install_id": format!("synthetic-{i}"),
@@ -2376,6 +2381,10 @@ mod tests {
         assert_eq!(response.body.matches("chatgpt").count(), 12);
         assert!(response.body.contains("Machine 1"));
         assert!(response.body.contains("Machine 3"));
+        assert!(response.body.contains("This install is on this machine"));
+        assert!(response
+            .body
+            .contains("Open this browser profile on Machine 2."));
         assert!(!response.body.contains("Grand total"));
     }
 
@@ -5614,6 +5623,7 @@ mod golden {
         };
         let mut data = fixture::data();
         if target == "/extensions" {
+            data.local_machine_id = Some("Machine 1".to_string());
             data.extension_installs = (0..12)
                 .map(|i| serde_json::json!({
                     "install_id": format!("synthetic-{i}"),

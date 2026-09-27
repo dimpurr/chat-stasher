@@ -4,13 +4,14 @@
  * `lib/coverage.ts` is the model and reads nothing; this is what fills it in. The split is what makes "the
  * page never contacts a chat platform" checkable: everything that could reach outside this extension lives
  * on this side of the line, and there is nothing here that reaches outside it either — `storage.local`, the
- * backfill IndexedDB, and the host-pause record. No port, no tab, no `fetch`, no Native Messaging call.
+ * backfill IndexedDB, and the host-pause record. No port, no tab, no `fetch`, and no Native Messaging
+ * call is used for coverage details. The page wiring separately asks for EXT-7's count-only install line.
  *
- * 🔴 **Why the page does not ask the host for the archive's own counts.** ADR-028 §1 made the CLI's `ui`
+ * 🔴 **Why the page does not ask the host for archive coverage counts.** ADR-028 §1 made the CLI's `ui`
  *    the archive's truth and ADR-032 §2 kept that division. Reading the archive from here would mean a new
- *    Native Messaging request shape — a protocol change this ticket is not authorised to make — and it
- *    would put a *second* copy of the archive's numbers in front of the user, which is exactly the
- *    duplication ADR-028 exists to avoid. The page says what it knows and says which half it is.
+ *    Native Messaging request shape and it would put a *second* copy of archive coverage numbers in front
+ *    of the user. EXT-7 adds only the number of other extension status records; it does not change this
+ *    module's local-only coverage data or duplicate platform counts.
  *
  * ## What it reads, and what each source is for
  *

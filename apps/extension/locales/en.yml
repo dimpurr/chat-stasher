@@ -192,6 +192,8 @@ popup:
   install:
     unknown: This browser identity could not be read.
     thisBrowser: "This browser: {browser} · {profile}"
+    oneOtherInstall: "1 other install — see dashboard"
+    otherInstalls: "{count} other installs — see dashboard"
     unnamed: Name this profile
     profilePlaceholder: Name this browser profile
     save: Save name
@@ -935,6 +937,8 @@ failure:
 # ---------------------------------------------------------------------------
 coverage:
   thisBrowser: "This browser: {browser} · {profile}"
+  oneOtherInstall: "1 other install — see dashboard"
+  otherInstalls: "{count} other installs — see dashboard"
   installUnknown: This browser identity could not be read.
   title: Backfill coverage
   # W149 · One line under the title; the long read-only note moved behind the

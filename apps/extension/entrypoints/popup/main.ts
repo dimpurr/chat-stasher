@@ -53,6 +53,7 @@ import {
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
   POPUP_SAVE_INSTALL_LABEL_MESSAGE,
+  POPUP_OTHER_INSTALLS_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
   type PopupModel,
@@ -585,6 +586,8 @@ function paintOutboxBar(bar: PopupView['outboxBar']): void {
  * to answer (§2's 60 s budget), and it must not poll either.
  */
 let lastModel: PopupModel | null = null;
+let otherInstallCountFor: string | null = null;
+let otherInstallCountTask: Promise<number | null> | null = null;
 
 async function refresh(): Promise<void> {
   // A repaint keeps the summary this popup already has: it is fetched once per
@@ -623,6 +626,31 @@ function paintInstallIdentity(install: BackfillRuntimeStatus['install']): void {
   input.setAttribute('aria-label', t('popup.install.profilePlaceholder'));
   save.textContent = t('popup.install.save');
   row.hidden = Boolean(profile);
+  void paintOtherInstallCount(install.install_id);
+}
+
+async function readOtherInstallCount(installId: string): Promise<number | null> {
+  if (otherInstallCountFor !== installId) {
+    otherInstallCountFor = installId;
+    otherInstallCountTask = browser.runtime.sendMessage({ type: POPUP_OTHER_INSTALLS_MESSAGE })
+      .then((response) => typeof response?.count === 'number' && Number.isSafeInteger(response.count) && response.count >= 0
+        ? response.count : null)
+      .catch(() => null);
+  }
+  return otherInstallCountTask;
+}
+
+async function paintOtherInstallCount(installId: string): Promise<void> {
+  const row = document.getElementById('other-installs');
+  if (!row) return;
+  const count = await readOtherInstallCount(installId);
+  if (count === null || count === 0) {
+    row.hidden = true;
+    row.textContent = '';
+    return;
+  }
+  row.textContent = t(count === 1 ? 'popup.install.oneOtherInstall' : 'popup.install.otherInstalls', { count });
+  row.hidden = false;
 }
 
 async function saveInstallProfileLabel(): Promise<void> {

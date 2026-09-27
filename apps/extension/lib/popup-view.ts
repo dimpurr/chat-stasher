@@ -107,6 +107,7 @@ import * as ui from './ui-strings';
 export const POPUP_STATUS_MESSAGE = 'cs-backfill-status';
 export const POPUP_INSTALL_LABEL_MESSAGE = 'cs-install-label';
 export const POPUP_SAVE_INSTALL_LABEL_MESSAGE = 'cs-save-install-label';
+export const POPUP_OTHER_INSTALLS_MESSAGE = 'cs-other-installs';
 
 /**
  * 🔴 C33 · Popup → background: "backfill THIS platform, I am saying so".

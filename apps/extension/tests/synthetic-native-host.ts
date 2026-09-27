@@ -44,6 +44,8 @@ export interface SyntheticHostOptions {
    * covers every shape the extension must survive.
    */
   summary?: unknown;
+  /** Known archive-wide count returned by EXT-7's count-only query. */
+  otherInstallCount?: unknown;
   /**
    * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack for those
    * unsupported capabilities. Arbitration remains available so the `has`
@@ -166,7 +168,7 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
 
       // An older host answers §6.4/§6.5 messages with this, exactly as
       // `nativehost.rs` does for an unknown `type`.
-      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard' || msg.type === 'status'))
+      if ((options.unsupported && (msg.type === 'summary' || msg.type === 'open_dashboard' || msg.type === 'other_installs' || msg.type === 'status'))
           || (options.unsupportedCoordination && msg.type === 'coordination')) {
         return {
           protocol: 1, type: 'nack', request_id: null,
@@ -229,6 +231,15 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
           protocol: 1, type: 'open_dashboard', ok: true,
           url: options.dashboardUrl ?? SYNTHETIC_DASHBOARD_URL,
         };
+      }
+
+      if (msg.type === 'other_installs') {
+        return options.otherInstallCount !== undefined
+          ? options.otherInstallCount
+          : {
+              protocol: 1, type: 'other_installs', ok: true,
+              request_id: String(msg.request_id), count: 0,
+            };
       }
 
       if (msg.type === 'hello') {

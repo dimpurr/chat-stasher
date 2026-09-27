@@ -185,7 +185,37 @@ pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
             .get("reported_at")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("Unknown");
-        out.push_str(&format!("<article class=message><header><b>{}</b> · {} · {}{}</header><p>Last report: {}{}</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody>", esc(browser), esc(profile), esc(machine), if stale { " · <b class=stale>Stale</b>" } else { "" }, esc(reported), if stale { " · stale" } else { "" }));
+        out.push_str(&format!(
+            "<article class=message><header><b>{}</b> · {} · {}{}</header><p>Last report: {}{}</p>",
+            esc(browser),
+            esc(profile),
+            esc(machine),
+            if stale {
+                " · <b class=stale>Stale</b>"
+            } else {
+                ""
+            },
+            esc(reported),
+            if stale { " · stale" } else { "" }
+        ));
+        match (
+            data.local_machine_id.as_deref(),
+            install.get("machine").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(local), Some(machine_id)) if local == machine_id => {
+                out.push_str("<p>This install is on this machine. Switch to the named browser profile to open it.</p>");
+            }
+            (Some(_), Some(_)) => {
+                out.push_str(&format!(
+                    "<p>Open this browser profile on {}.</p>",
+                    esc(machine)
+                ));
+            }
+            _ => {
+                out.push_str("<p>The machine match is unavailable. Use the machine label above to find this profile.</p>");
+            }
+        }
+        out.push_str("<table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody>");
         let mut rows: BTreeMap<String, (Option<u64>, Option<u64>, Option<bool>)> = BTreeMap::new();
         if let Some(platforms) = install
             .get("platforms")

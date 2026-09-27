@@ -80,6 +80,7 @@ struct ExtensionInstall: Decodable, Identifiable {
     let profileLabel: String?
     let reportedAt: String
     let stale: Bool
+    let reportedDaily: Bool?
     let platforms: [ExtensionPlatformStatus]
     var id: String { installID }
     var label: String { "\(browser) · \(profileLabel ?? "Unnamed profile")" }
@@ -88,6 +89,7 @@ struct ExtensionInstall: Decodable, Identifiable {
         case installID = "install_id"
         case profileLabel = "profile_label"
         case reportedAt = "reported_at"
+        case reportedDaily = "reported_daily"
     }
 }
 
@@ -409,7 +411,7 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     }) {
         return .sourceStopped(stopped.label)
     }
-    if let stale = snapshot.extensionInstalls.first(where: \.stale) {
+    if let stale = snapshot.extensionInstalls.first(where: { $0.stale && $0.reportedDaily == true }) {
         return .extensionStale("\(stale.label) on \(stale.machine)")
     }
     return .healthy
@@ -711,6 +713,7 @@ private final class ArchiveModel: ObservableObject {
                 profileLabel: ["Personal", "Work"][index % 2],
                 reportedAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(index == 11 ? -72 * 3_600 : -15 * 60)),
                 stale: index == 11,
+                reportedDaily: index == 11,
                 platforms: [
                     ExtensionPlatformStatus(platform: "chatgpt", capturedByThisBrowser: index + 1, pending: index % 3, pausedReason: index == 11 ? "rate-limit" : nil),
                     ExtensionPlatformStatus(platform: "claude", capturedByThisBrowser: index + 2, pending: 0, pausedReason: nil),

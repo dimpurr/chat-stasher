@@ -518,6 +518,10 @@ The host writes one file atomically at `ext-status/<install_id>.json`, adding th
 local machine id and schema `chat-stasher/ext-status@1`. A later report from the
 same install replaces that file; reports from other installs have separate files.
 The `platforms` array contains no account ids or conversation identifiers.
+The host also retains a local `daily_report_streak` and `reported_daily` marker in
+that status record. The marker becomes true after at least three reports spaced
+18–30 hours apart and remains true thereafter; shorter intervals do not break
+the streak, while a gap over 30 hours resets the streak before it qualifies.
 
 Successful response:
 
@@ -528,7 +532,30 @@ A `nack` leaves the caller's status unconfirmed. Old hosts refuse the new messag
 extensions treat that as a failed report, never as a successful empty status.
 
 `overview --json` and `overview --json --summary` expose archived latest records
-as `installs[]`, each with `reported_at` and `stale`. Stale means the timestamp is
+as `installs[]`, each with `reported_at`, `stale`, and `reported_daily`. Stale means the timestamp is
 invalid or more than 48 hours before the reader's current UTC time. The list is
 per install and pending counts are never added across installs. Archives written
 before this message simply have no `installs` records.
+
+### 6.8 `other_installs` — count archived extension instances
+
+Request:
+
+```json
+{"protocol":1,"type":"other_installs","request_id":"<request id>","install_id":"<UUID>"}
+```
+
+The host reads the configured dashboard destination through `overview --json
+--summary`, counts its readable latest `installs[]` records, and excludes one
+record matching the caller's `install_id`. It returns only the count; no install
+ids or per-platform fields leave the host. The read is capped at 15 seconds and
+4 MiB of summary output. An incomplete or unreadable archive returns a `nack`,
+never a known zero.
+
+Successful response:
+
+```json
+{"protocol":1,"type":"other_installs","ok":true,"request_id":"<same id>","count":2}
+```
+
+The extension shows this count only when it is known and greater than zero.
