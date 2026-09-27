@@ -38,6 +38,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
+.stale{color:#8a5300}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
@@ -73,7 +74,7 @@ a.skip:focus{left:0}
 nav.top{font-size:.85rem;margin:0 0 1rem}
 </style></head><body>
 <a class=skip href="#content">Skip to content</a>
-<nav class=top aria-label="pages"><a href="/?token=golden-token" accesskey=1>overview</a> · <a href="/sessions?token=golden-token" accesskey=2>sessions</a> · <a href="/search?token=golden-token" accesskey=f>search</a></nav>
+<nav class=top aria-label="pages"><a href="/?token=golden-token" accesskey=1>overview</a> · <a href="/sessions?token=golden-token" accesskey=2>sessions</a> · <a href="/search?token=golden-token" accesskey=f>search</a> · <a href="/extensions?token=golden-token">Extensions</a></nav>
 <main id=content>
 <h1>Conversation <span class=mono>claude-c~e58aa6</span></h1>
 <p class=sub><a href="/session?i=0&token=golden-token">← session metadata</a> · <a href="/content?i=0&token=golden-token" accesskey=r>show raw shards</a> · destination <b>dest-under-test</b></p>

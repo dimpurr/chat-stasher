@@ -32,15 +32,14 @@
 //! `crates/chat-stasher/src/nativehost.rs` together"), so the host lives here
 //! rather than in a module of its own.
 //!
-//! Beyond `hello` and `deliver`, the host answers two **read-only queries**
-//! (§6.4 `summary`, §6.5 `open_dashboard`) and writes nothing for either. They
-//! live here because they are the same contract, and because the one thing
-//! they share with delivery is the property that matters: an unknown is
-//! reported as unknown. `summary` reads directory entries and shard mtimes —
-//! it never opens a shard, never decrypts the repository and never touches the
-//! network; the counts it reports are a scoped answer, not a scan of the
-//! archive. `open_dashboard` starts this same binary as `ui` and hands the
-//! per-launch URL to the calling extension only.
+//! Beyond `hello` and `deliver`, the host answers three **read-only queries**
+//! (§6.4 `summary`, §6.5 `open_dashboard`, §6.8 `other_installs`). These
+//! queries do not mutate the stage or archive. `summary` reads stage directory entries and shard
+//! mtimes; it never opens a shard, decrypts the repository or touches the
+//! network. `open_dashboard` starts this same binary as `ui` and hands the
+//! per-launch URL to the calling extension only. `other_installs` runs the
+//! existing archive overview, then returns one count without returning install
+//! ids or per-platform rows. Every failed read remains a failure, never a zero.
 //!
 //! The framing rules that decide the shape of everything below:
 //!
@@ -1737,6 +1736,7 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
             Ok(()) => open_dashboard(echoed_id),
             Err(detail) => nack(echoed_id, NackKind::BadRequest, detail),
         },
+        Some("other_installs") => other_installs(request, echoed_id),
         Some(other) => nack(
             echoed_id,
             NackKind::BadRequest,
@@ -1748,6 +1748,189 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
             "request has no `type`".to_string(),
         ),
     }
+}
+
+const OTHER_INSTALLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const OTHER_INSTALLS_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
+/// Read the configured archive through the existing overview implementation,
+/// then return only the count of status records other than this install. The
+/// child output and its per-platform fields never leave the host process.
+fn other_installs(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let Some(request_id) = request
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| valid_request_id(id))
+        .map(str::to_owned)
+    else {
+        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
+    };
+    let Some(install_id) = request
+        .get("install_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+    else {
+        return nack(
+            Some(request_id),
+            NackKind::BadRequest,
+            "malformed `install_id`",
+        );
+    };
+    let Some(object) = request.as_object() else {
+        return nack(
+            Some(request_id),
+            NackKind::BadRequest,
+            "request is not an object",
+        );
+    };
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "protocol" | "type" | "request_id" | "install_id"
+        )
+    }) {
+        return nack(
+            Some(request_id),
+            NackKind::BadRequest,
+            "unknown other_installs request field",
+        );
+    }
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(_) => {
+            return nack(
+                Some(request_id),
+                NackKind::Config,
+                "the configured archive could not be opened",
+            )
+        }
+    };
+    let destination = match dashboard_destination(&config) {
+        Ok(name) => name,
+        Err(_) => {
+            return nack(
+                Some(request_id),
+                NackKind::Config,
+                "no readable dashboard destination is configured",
+            )
+        }
+    };
+    let binary = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => {
+            return nack(
+                Some(request_id),
+                NackKind::Io,
+                "the archive reader could not be started",
+            )
+        }
+    };
+    let output = match run_overview_summary(&binary, &destination) {
+        Ok(output) => output,
+        Err(()) => {
+            return nack(
+                Some(request_id),
+                NackKind::Io,
+                "the archive status count could not be read",
+            )
+        }
+    };
+    let Some(count) = other_install_count(&output, install_id) else {
+        return nack(
+            Some(request_id),
+            NackKind::Io,
+            "the archive status count was incomplete",
+        );
+    };
+    serde_json::json!({
+        "protocol": PROTOCOL,
+        "type": "other_installs",
+        "ok": true,
+        "request_id": request_id,
+        "count": count,
+    })
+}
+
+fn run_overview_summary(binary: &Path, destination: &str) -> Result<Vec<u8>, ()> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(binary)
+        .args([
+            "overview",
+            "--destination",
+            destination,
+            "--json",
+            "--summary",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    let mut stdout = child.stdout.take().ok_or(())?;
+    let reader = std::thread::spawn(move || -> Result<Vec<u8>, ()> {
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let mut oversized = false;
+        loop {
+            let count = stdout.read(&mut buffer).map_err(|_| ())?;
+            if count == 0 {
+                return if oversized { Err(()) } else { Ok(bytes) };
+            }
+            if bytes.len().saturating_add(count) > OTHER_INSTALLS_OUTPUT_LIMIT {
+                oversized = true;
+            } else if !oversized {
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + OTHER_INSTALLS_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                drop(child.kill());
+                drop(child.wait());
+                drop(reader.join());
+                return Err(());
+            }
+        }
+    };
+    let bytes = reader.join().map_err(|_| ())??;
+    if !status.success() && status.code() != Some(1) {
+        return Err(());
+    }
+    Ok(bytes)
+}
+
+fn other_install_count(output: &[u8], current_install_id: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_slice(output).ok()?;
+    if value.get("command").and_then(serde_json::Value::as_str) != Some("overview")
+        || value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+        || value.get("variant").and_then(serde_json::Value::as_str) != Some("summary")
+    {
+        return None;
+    }
+    let installs = value.get("installs")?.as_array()?;
+    let mut skipped_current = false;
+    let mut count = 0u64;
+    for install in installs {
+        let id = install.get("install_id")?.as_str()?;
+        if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            return None;
+        }
+        if id == current_install_id && !skipped_current {
+            skipped_current = true;
+        } else {
+            count = count.checked_add(1)?;
+        }
+    }
+    Some(count)
 }
 
 /// Atomically replace one install's content-free latest status in the stage.
@@ -1858,11 +2041,23 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
     let dir = stage.join("ext-status");
     let result = (|| -> anyhow::Result<()> {
         fs::create_dir_all(&dir)?;
+        let target = dir.join(format!("{install_id}.json"));
+        let previous: serde_json::Value = fs::read(&target)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let (daily_streak, reported_daily) = daily_report_history(
+            &previous,
+            status["reported_at"]
+                .as_str()
+                .expect("validated reported_at"),
+        )?;
         let mut value = parsed["status"].clone();
         value["machine"] = serde_json::Value::String(machine);
         value["schema"] = serde_json::Value::String("chat-stasher/ext-status@1".into());
+        value["daily_report_streak"] = serde_json::Value::from(daily_streak);
+        value["reported_daily"] = serde_json::Value::Bool(reported_daily);
         let bytes = serde_json::to_vec(&value)?;
-        let target = dir.join(format!("{install_id}.json"));
         let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
         use std::io::Write as _;
         temp.write_all(&bytes)?;
@@ -1880,6 +2075,47 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             format!("cannot persist extension status: {e}"),
         ),
     }
+}
+
+/// Track whether an install has established daily reporting without treating
+/// multiple same-day status refreshes as separate days. Once established, the
+/// historical fact remains true even after the install goes silent.
+fn daily_report_history(
+    previous: &serde_json::Value,
+    current_reported_at: &str,
+) -> anyhow::Result<(u64, bool)> {
+    let current_at = chrono::DateTime::parse_from_rfc3339(current_reported_at)?.timestamp();
+    let previous_streak = previous
+        .get("daily_report_streak")
+        .and_then(serde_json::Value::as_u64)
+        // reason: Missing history contains no observed report samples.
+        .unwrap_or(0);
+    let was_daily = previous
+        .get("reported_daily")
+        .and_then(serde_json::Value::as_bool)
+        // reason: Missing history has not established daily reporting cadence.
+        .unwrap_or(false);
+    let previous_at = previous
+        .get("reported_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.timestamp());
+    Ok(match previous_at {
+        Some(previous_at) => {
+            let elapsed = current_at.saturating_sub(previous_at);
+            if (18 * 60 * 60..=30 * 60 * 60).contains(&elapsed) {
+                (
+                    previous_streak.saturating_add(1),
+                    was_daily || previous_streak >= 2,
+                )
+            } else if elapsed > 30 * 60 * 60 {
+                (1, was_daily)
+            } else {
+                (previous_streak.max(1), was_daily)
+            }
+        }
+        None => (1, was_daily),
+    })
 }
 
 /// `hello` — is the host there, and where does it write?
@@ -3009,6 +3245,72 @@ mod tests {
         assert!(validate_host_name(".leading").is_err());
         assert!(validate_host_name("trailing.").is_err());
         assert!(validate_host_name("double..dot").is_err());
+    }
+
+    #[test]
+    fn daily_report_history_needs_three_daily_samples_and_remembers_established_cadence() {
+        let first = serde_json::json!({"reported_at":"2026-09-24T12:00:00Z"});
+        let (streak, reported_daily) =
+            daily_report_history(&first, "2026-09-25T13:00:00Z").unwrap();
+        assert_eq!((streak, reported_daily), (1, false));
+
+        let second =
+            serde_json::json!({"reported_at":"2026-09-25T13:00:00Z", "daily_report_streak":1});
+        let (streak, reported_daily) =
+            daily_report_history(&second, "2026-09-26T12:00:00Z").unwrap();
+        assert_eq!((streak, reported_daily), (2, false));
+
+        let third =
+            serde_json::json!({"reported_at":"2026-09-26T12:00:00Z", "daily_report_streak":2});
+        let (streak, reported_daily) =
+            daily_report_history(&third, "2026-09-27T12:00:00Z").unwrap();
+        assert_eq!((streak, reported_daily), (3, true));
+
+        let same_day = serde_json::json!({"reported_at":"2026-09-27T12:00:00Z", "daily_report_streak":3, "reported_daily":true});
+        assert_eq!(
+            daily_report_history(&same_day, "2026-09-27T12:05:00Z").unwrap(),
+            (3, true)
+        );
+        let stale = serde_json::json!({"reported_at":"2026-09-27T12:05:00Z", "daily_report_streak":3, "reported_daily":true});
+        assert_eq!(
+            daily_report_history(&stale, "2026-09-30T12:05:00Z").unwrap(),
+            (1, true)
+        );
+    }
+
+    #[test]
+    fn other_install_count_excludes_one_matching_install_and_preserves_unknown() {
+        let current = "11111111-1111-4111-8111-111111111111";
+        let output = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "command": "overview",
+            "variant": "summary",
+            "installs": [
+                {"install_id": current},
+                {"install_id": "22222222-2222-4222-8222-222222222222"},
+                {"install_id": "33333333-3333-4333-8333-333333333333"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(other_install_count(&output, current), Some(2));
+
+        let no_other = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "command": "overview",
+            "variant": "summary",
+            "installs": [{"install_id": current}]
+        }))
+        .unwrap();
+        assert_eq!(other_install_count(&no_other, current), Some(0));
+
+        let incomplete = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "command": "overview",
+            "variant": "summary",
+            "installs": [{"install_id": "not-a-valid-install-id"}]
+        }))
+        .unwrap();
+        assert_eq!(other_install_count(&incomplete, current), None);
     }
 
     #[test]

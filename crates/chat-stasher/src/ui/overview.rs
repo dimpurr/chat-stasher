@@ -127,6 +127,172 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     out
 }
 
+/// Render archived extension reports one install at a time. Counts are grouped
+/// only within an install and platform; machine/browser/profile remain visible.
+pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
+    let mut out = head("chat-stasher · Extensions", token);
+    out.push_str("<h1>Extensions</h1>\n<p class=sub>Archived reports, grouped by machine, browser and profile. Counts belong to each install and are not combined.</p>\n");
+    if !data.extension_status_read {
+        out.push_str("<p class=message>Extension reports could not be read completely. The list may be incomplete.</p>\n");
+    } else if data.extension_installs.is_empty() {
+        out.push_str(
+            "<p>No extension status reports are present in the readable archive snapshots.</p>\n",
+        );
+    }
+    let mut installs = data.extension_installs.iter().collect::<Vec<_>>();
+    installs.sort_by_key(|value| {
+        (
+            value
+                .get("machine")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            value
+                .get("browser")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            value
+                .get("profile_label")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        )
+    });
+    let mut previous_machine = String::new();
+    for install in installs {
+        let machine = install
+            .get("machine")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unknown machine");
+        if machine != previous_machine {
+            if !previous_machine.is_empty() {
+                out.push_str("</section>\n");
+            }
+            out.push_str(&format!("<section><h2>{}</h2>\n", esc(machine)));
+            previous_machine = machine.to_string();
+        }
+        let browser = install
+            .get("browser")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unknown browser");
+        let profile = install
+            .get("profile_label")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unnamed profile");
+        let stale = install
+            .get("stale")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let reported = install
+            .get("reported_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unknown");
+        out.push_str(&format!(
+            "<article class=message><header><b>{}</b> · {} · {}{}</header><p>Last report: {}{}</p>",
+            esc(browser),
+            esc(profile),
+            esc(machine),
+            if stale {
+                " · <b class=stale>Stale</b>"
+            } else {
+                ""
+            },
+            esc(reported),
+            if stale { " · stale" } else { "" }
+        ));
+        match (
+            data.local_machine_id.as_deref(),
+            install.get("machine").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(local), Some(machine_id)) if local == machine_id => {
+                let install_id = install
+                    .get("install_id")
+                    .and_then(serde_json::Value::as_str);
+                if let Some(id) =
+                    install_id.filter(|id| data.extension_open_targets.contains_key(*id))
+                {
+                    out.push_str(&format!(
+                        "<p><a href=\"/open-extension?install={}&amp;token={}\">Open in {} · {}</a></p>",
+                        super::percent_encode(id),
+                        super::percent_encode(token),
+                        esc(browser),
+                        esc(profile),
+                    ));
+                } else {
+                    out.push_str("<p>This install is on this machine. An exact browser profile match is unavailable; open it from the named browser profile.</p>");
+                }
+            }
+            (Some(_), Some(_)) => {
+                out.push_str(&format!(
+                    "<p>Open this browser profile on {}.</p>",
+                    esc(machine)
+                ));
+            }
+            _ => {
+                out.push_str("<p>The machine match is unavailable. Use the machine label above to find this profile.</p>");
+            }
+        }
+        out.push_str("<table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody>");
+        let mut rows: BTreeMap<String, (Option<u64>, Option<u64>, Option<bool>)> = BTreeMap::new();
+        if let Some(platforms) = install
+            .get("platforms")
+            .and_then(serde_json::Value::as_array)
+        {
+            for row in platforms {
+                let Some(platform) = row.get("platform").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let entry =
+                    rows.entry(platform.to_string())
+                        .or_insert((Some(0), Some(0), Some(false)));
+                entry.0 = entry
+                    .0
+                    .zip(
+                        row.get("captured_by_this_browser")
+                            .and_then(serde_json::Value::as_u64),
+                    )
+                    .and_then(|(total, count)| total.checked_add(count));
+                entry.1 = entry
+                    .1
+                    .zip(row.get("pending").and_then(serde_json::Value::as_u64))
+                    .and_then(|(total, count)| total.checked_add(count));
+                let paused = row.get("paused_reason").and_then(|value| {
+                    if value.is_null() {
+                        Some(false)
+                    } else {
+                        value.as_str().map(|_| true)
+                    }
+                });
+                entry.2 = entry
+                    .2
+                    .zip(paused)
+                    .map(|(any_paused, current)| any_paused || current);
+            }
+        }
+        if rows.is_empty() {
+            out.push_str("<tr><td colspan=4>No platform status rows</td></tr>");
+        } else {
+            for (platform, (captured, pending, paused)) in rows {
+                let captured =
+                    captured.map_or_else(|| "Unknown".to_string(), |count| count.to_string());
+                let pending =
+                    pending.map_or_else(|| "Unknown".to_string(), |count| count.to_string());
+                let paused = match paused {
+                    Some(true) => "Paused",
+                    Some(false) => "—",
+                    None => "Unknown",
+                };
+                out.push_str(&format!("<tr><td>{}</td><td class=n>{captured}</td><td class=n>{pending}</td><td>{paused}</td></tr>", esc(&platform)));
+            }
+        }
+        out.push_str("</tbody></table></article>\n");
+    }
+    if !previous_machine.is_empty() {
+        out.push_str("</section>\n");
+    }
+    out.push_str(&footer(data));
+    out.push_str("</body></html>\n");
+    out
+}
+
 pub(super) fn count_by_machine<'a>(rows: &[&'a UiSession], machine: &str) -> (usize, u64) {
     let mut n = 0usize;
     let mut bytes = 0u64;

@@ -69,6 +69,7 @@ use crate::selector::{
 use crate::view::Response;
 
 pub(crate) mod export;
+pub mod extension_profile;
 pub(crate) mod facets;
 pub(crate) mod html;
 pub(crate) mod json;
@@ -338,6 +339,19 @@ pub struct UiData {
     /// The clock every age on the page is measured against, passed in rather
     /// than read, so the rendered page is a pure function of the data.
     pub now_unix: i64,
+    /// Per-install extension status records read from the archive snapshots.
+    /// These are kept as records so their platform counts are never merged.
+    pub extension_installs: Vec<serde_json::Value>,
+    /// Verified local browser targets keyed by install id. The browser profile
+    /// directory stays in process memory and is never written into the archive
+    /// or rendered into a URL.
+    pub extension_open_targets: BTreeMap<String, extension_profile::OpenTarget>,
+    /// The local machine id when already known. `None` avoids creating a new
+    /// identity just to render guidance for archived extension installs.
+    pub local_machine_id: Option<String>,
+    /// False when the archive status scan did not finish; an empty list then
+    /// must not be presented as proof that no install reports exist.
+    pub extension_status_read: bool,
 }
 
 impl UiData {
@@ -469,6 +483,10 @@ impl UiData {
             data_blobs_read: merged.data_blobs_read,
             index_files_read: merged.index_files_read,
             now_unix,
+            extension_installs: Vec::new(),
+            extension_open_targets: BTreeMap::new(),
+            local_machine_id: None,
+            extension_status_read: true,
         }
     }
 
@@ -1251,9 +1269,10 @@ fn esc_attr(s: &str) -> String {
 
 /// Route one request. `None` == no such route (the caller answers 404).
 ///
-/// Every branch below except `/content` is a pure function of `data`. The
-/// `content` handle is passed in — not fetched here — so a test can prove which
-/// routes reach the payload tier.
+/// Every branch below except `/content` and `/open-extension` is a pure
+/// function of `data`. `/content` alone reaches the payload tier; the
+/// open-action launches only the verified local browser profile carried in
+/// `data`. Both capabilities stay explicit so route tests can pin the boundary.
 pub fn handle(
     path: &str,
     params: &Query,
@@ -1268,6 +1287,30 @@ pub fn handle(
             "OK",
             overview::page_overview(data, token),
         )),
+        "/extensions" => Some(Response::html(
+            200,
+            "OK",
+            overview::page_extensions(data, token),
+        )),
+        "/open-extension" => {
+            let target =
+                param(params, "install").and_then(|id| data.extension_open_targets.get(id));
+            Some(match target {
+                Some(target) => match extension_profile::launch(target) {
+                    Ok(()) => {
+                        Response::text(200, "OK", "Opened the extension in its browser profile.\n")
+                    }
+                    Err(message) => {
+                        Response::text(503, "Service Unavailable", format!("{message}\n"))
+                    }
+                },
+                None => Response::text(
+                    409,
+                    "Conflict",
+                    "No verified local profile matches this install.\n",
+                ),
+            })
+        }
         "/sessions" => Some(sessions::list_page(params, token, data)),
         "/session" => Some(sessions::one_session_page(params, token, data)),
         "/content" => Some(sessions::content_page(params, token, data, content)),
@@ -1327,13 +1370,15 @@ pub(super) fn bad_index_response() -> Response {
 ///
 /// The one place the route table lives: `view::route` builds its 404 wording
 /// from this, and the router test proves [`handle`] answers each of them.
-pub const ROUTES: [&str; 10] = [
+pub const ROUTES: [&str; 12] = [
     "/",
     "/sessions",
     "/session",
     "/reader",
     "/content",
     "/search",
+    "/extensions",
+    "/open-extension",
     "/export",
     "/api/overview",
     "/api/sessions",
@@ -2336,6 +2381,102 @@ mod tests {
         assert!(html.contains(">identity</th>"), "{html}");
         assert!(html.contains("on 2 machines</span>"), "{html}");
         assert!(html.contains("account collision</span>"), "{html}");
+    }
+
+    #[test]
+    fn extensions_view_keeps_twelve_install_rows_separate_and_marks_one_stale() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = (0..12)
+            .map(|i| serde_json::json!({
+                "install_id": format!("synthetic-{i}"),
+                "machine": format!("Machine {}", i / 4 + 1),
+                "browser": if i % 4 < 2 { "Chrome" } else { "Arc" },
+                "profile_label": if i % 2 == 0 { "Personal" } else { "Work" },
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": i == 11,
+                "platforms": [
+                    { "platform": "chatgpt", "captured_by_this_browser": 4, "pending": 2, "paused_reason": null },
+                    { "platform": "claude", "captured_by_this_browser": 3, "pending": 1, "paused_reason": "retry-after" }
+                ]
+            }))
+            .collect();
+        let response = req("/extensions?token=t", &data, &NoContent);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.matches("<article class=message>").count(), 12);
+        assert_eq!(response.body.matches("<b class=stale>Stale</b>").count(), 1);
+        assert_eq!(response.body.matches("chatgpt").count(), 12);
+        assert!(response.body.contains("Machine 1"));
+        assert!(response.body.contains("Machine 3"));
+        assert!(response
+            .body
+            .contains("An exact browser profile match is unavailable"));
+        assert!(response
+            .body
+            .contains("Open this browser profile on Machine 2."));
+        assert!(!response.body.contains("Grand total"));
+    }
+
+    #[test]
+    fn extensions_view_links_only_a_verified_local_profile_to_open_action() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = vec![serde_json::json!({
+            "install_id": "synthetic-local",
+            "machine": "Machine 1",
+            "browser": "Arc",
+            "profile_label": "Work",
+            "reported_at": "2026-09-27T12:00:00Z",
+            "stale": false,
+            "platforms": []
+        })];
+        data.extension_open_targets.insert(
+            "synthetic-local".to_string(),
+            extension_profile::OpenTarget {
+                browser_id: "arc".to_string(),
+                profile_directory: "Profile 2".to_string(),
+            },
+        );
+        let response = req("/extensions?token=t", &data, &NoContent);
+        assert!(response.body.contains(
+            "<a href=\"/open-extension?install=synthetic-local&amp;token=t\">Open in Arc · Work</a>"
+        ));
+
+        data.extension_open_targets.clear();
+        let response = req("/extensions?token=t", &data, &NoContent);
+        assert!(response
+            .body
+            .contains("An exact browser profile match is unavailable"));
+        assert!(!response.body.contains("/open-extension?"));
+    }
+
+    #[test]
+    fn extensions_view_does_not_turn_an_incomplete_status_scan_into_an_empty_answer() {
+        let mut data = fixture::data();
+        data.extension_status_read = false;
+        let response = req("/extensions?token=t", &data, &NoContent);
+        assert!(response.body.contains("could not be read completely"));
+        assert!(!response
+            .body
+            .contains("No extension status reports are present"));
+    }
+
+    #[test]
+    fn extensions_view_keeps_missing_install_counts_unknown() {
+        let mut data = fixture::data();
+        data.extension_installs = vec![serde_json::json!({
+            "install_id": "synthetic-install",
+            "machine": "Machine 1",
+            "browser": "Chrome",
+            "profile_label": "Personal",
+            "reported_at": "2026-09-27T12:00:00Z",
+            "stale": false,
+            "platforms": [{ "platform": "chatgpt", "paused_reason": null }]
+        })];
+        let response = req("/extensions?token=t", &data, &NoContent);
+        assert!(response.body.contains("<td class=n>Unknown</td>"));
+        assert!(!response.body.contains("<td class=n>0</td>"));
+        assert!(response.body.contains("<td>—</td>"));
     }
 
     /// The route table, the 404 wording and the router are one list: every
@@ -5452,6 +5593,7 @@ mod golden {
 
     const CASES: &[(&str, &str, Source)] = &[
         ("overview", "/", Source::Counting),
+        ("extensions", "/extensions", Source::Counting),
         ("sessions", "/sessions", Source::Counting),
         (
             "sessions-machine",
@@ -5541,15 +5683,39 @@ mod golden {
             Source::Denied => &NoContent,
             Source::Conversation => &conversation,
         };
-        let response = handle(
-            path,
-            &params,
-            "golden-token",
-            &fixture::data(),
-            content,
-            &NoIndex,
-        )
-        .unwrap_or_else(|| panic!("`{target}` must be a known route"));
+        let mut data = fixture::data();
+        if target == "/extensions" {
+            data.local_machine_id = Some("Machine 1".to_string());
+            data.extension_installs = (0..12)
+                .map(|i| serde_json::json!({
+                    "install_id": format!("synthetic-{i}"),
+                    "machine": format!("Machine {}", i / 4 + 1),
+                    "browser": if i % 4 < 2 { "Chrome" } else { "Arc" },
+                    "profile_label": if i % 2 == 0 { "Personal" } else { "Work" },
+                    "reported_at": "2026-09-27T12:00:00Z",
+                    "stale": i == 11,
+                    "platforms": [
+                        { "platform": "chatgpt", "captured_by_this_browser": 4, "pending": 2, "paused_reason": null },
+                        { "platform": "claude", "captured_by_this_browser": 3, "pending": 1, "paused_reason": "retry-after" }
+                    ]
+                }))
+                .collect();
+            for i in 0..4 {
+                data.extension_open_targets.insert(
+                    format!("synthetic-{i}"),
+                    extension_profile::OpenTarget {
+                        browser_id: if i < 2 { "arc" } else { "chrome" }.to_string(),
+                        profile_directory: if i % 2 == 0 {
+                            "Default".to_string()
+                        } else {
+                            "Profile 2".to_string()
+                        },
+                    },
+                );
+            }
+        }
+        let response = handle(path, &params, "golden-token", &data, content, &NoIndex)
+            .unwrap_or_else(|| panic!("`{target}` must be a known route"));
         let mut out = format!(
             "status: {} {}\ncontent-type: {}\n",
             response.status, response.reason, response.content_type

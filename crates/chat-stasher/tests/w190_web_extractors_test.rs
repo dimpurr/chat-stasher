@@ -355,6 +355,10 @@ fn data_for(harness: &str) -> UiData {
         data_blobs_read: 1,
         index_files_read: 0,
         now_unix: 1_770_000_000,
+        extension_installs: Vec::new(),
+        extension_open_targets: Default::default(),
+        local_machine_id: None,
+        extension_status_read: true,
     }
 }
 

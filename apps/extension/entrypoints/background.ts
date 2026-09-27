@@ -33,7 +33,7 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { coordinate, deliver, has, isItemRejected, isValidDeliverName, reportInstallStatus } from '../lib/native-host';
+import { coordinate, deliver, has, isItemRejected, isValidDeliverName, otherInstalls, reportInstallStatus } from '../lib/native-host';
 import { readCoverageInputs } from '../lib/coverage-read';
 import { buildCoverage } from '../lib/coverage';
 import { recordLiveCapture } from '../lib/live-capture';
@@ -125,6 +125,7 @@ import {
   POPUP_START_BACKFILL_MESSAGE,
   POPUP_STATUS_MESSAGE,
   POPUP_INSTALL_LABEL_MESSAGE,
+  POPUP_OTHER_INSTALLS_MESSAGE,
   POPUP_SAVE_INSTALL_LABEL_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
@@ -3021,6 +3022,13 @@ export default defineBackground(() => {
       }
       if (message?.type === POPUP_INSTALL_LABEL_MESSAGE) {
         getInstallIdentity().then((install) => sendResponse({ install })).catch(() => sendResponse({ install: null }));
+        return true;
+      }
+      if (message?.type === POPUP_OTHER_INSTALLS_MESSAGE) {
+        getInstallIdentity()
+          .then((install) => otherInstalls(install.install_id))
+          .then((result) => sendResponse(result.ok ? { count: result.count } : { count: null }))
+          .catch(() => sendResponse({ count: null }));
         return true;
       }
       if (message?.type === POPUP_SAVE_INSTALL_LABEL_MESSAGE && typeof message.profile_label === 'string') {

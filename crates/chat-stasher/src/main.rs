@@ -112,6 +112,9 @@ struct UiArgs {
     /// a choice, not an accident, and the narration prints it back.
     #[arg(long, value_delimiter = ',')]
     destination: Vec<String>,
+    /// Open a named dashboard page after the server starts.
+    #[arg(long, value_parser = ["overview", "extensions"], default_value = "overview")]
+    view: String,
     /// Filters applied when the dashboard opens. Omit them to see the whole
     /// archive; every filter is also reachable as a link on the page.
     #[command(flatten)]
@@ -4292,6 +4295,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     }
     let UiArgs {
         destination,
+        view,
         filters,
         no_open,
         idle_timeout,
@@ -4476,6 +4480,13 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
                 continue;
             }
         };
+        // Read the same newest-snapshot status records used by `overview`.
+        // A failed status scan stays unknown in the dashboard, not an empty list.
+        let extension_status_read = read_overview_indexes(&cfg, &mk);
+        let (extension_installs, extension_status_read) = match extension_status_read {
+            Ok(read) => (read.extension_installs, true),
+            Err(_) => (Vec::new(), false),
+        };
         parts.push(UiDestination {
             label,
             cfg,
@@ -4484,6 +4495,8 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             mk: Some(mk),
             report: Some(report),
             unread_at_all: false,
+            extension_installs,
+            extension_status_read,
         });
     }
     // ssh masters are reaped before the server starts, not after: the serve loop
@@ -4579,7 +4592,18 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             },
         })
         .collect();
-    let data = chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
+    let mut data =
+        chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
+    data.local_machine_id = query_machine(&config, None);
+    data.extension_status_read = parts.iter().all(|part| part.extension_status_read);
+    data.extension_installs = parts
+        .iter()
+        .flat_map(|part| part.extension_installs.iter().cloned())
+        .collect();
+    data.extension_open_targets = chat_stasher::ui::extension_profile::discover(
+        &data.extension_installs,
+        data.local_machine_id.as_deref(),
+    );
     let in_view = chat_stasher::ui::select(&data.sessions, &data.launch);
     let listed = in_view.matched.len() + in_view.unplaced.len();
     let token = match chat_stasher::view::new_token() {
@@ -4612,7 +4636,12 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     } else {
         Duration::from_secs(idle_timeout)
     };
-    let url = format!("http://{addr}/?token={token}");
+    let page = if view == "extensions" {
+        "/extensions"
+    } else {
+        "/"
+    };
+    let url = format!("http://{addr}{page}?token={token}");
     say!("[ui] destination  : {}", data.destination_label);
     if let Some(how) = &default_from {
         say!("[ui] default      : {how}");
@@ -4761,6 +4790,8 @@ struct UiDestination {
     /// not open. Distinct from a report whose `unreadable` is non-empty — there
     /// the read happened and part of it failed.
     unread_at_all: bool,
+    extension_installs: Vec<serde_json::Value>,
+    extension_status_read: bool,
 }
 
 impl UiDestination {
@@ -4777,6 +4808,8 @@ impl UiDestination {
             mk: None,
             report: None,
             unread_at_all: true,
+            extension_installs: Vec::new(),
+            extension_status_read: false,
         }
     }
 }

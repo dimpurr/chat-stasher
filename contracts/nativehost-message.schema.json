@@ -32,6 +32,12 @@
       "$ref": "#/$defs/dashboardResponse"
     },
     {
+      "$ref": "#/$defs/otherInstallsRequest"
+    },
+    {
+      "$ref": "#/$defs/otherInstallsResponse"
+    },
+    {
       "$ref": "#/$defs/hasRequest"
     },
     {
@@ -656,6 +662,34 @@
           "description": "Loopback only, with the per-launch token. This response is the only copy of the URL outside the dashboard process."
         }
       }
+    },
+    "otherInstallsRequest": {
+      "type": "object",
+      "required": ["protocol", "type", "request_id", "install_id"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "other_installs" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "install_id": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9-]{36}$",
+          "description": "The caller's install identity; used only to exclude one matching status record from the count."
+        }
+      }
+    },
+    "otherInstallsResponse": {
+      "type": "object",
+      "required": ["protocol", "type", "ok", "request_id", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "other_installs" },
+        "ok": { "const": true },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "description": "The archive's readable latest per-install status row count excluding one matching local install. No install ids or platform details are returned."
     },
     "statusRequest": {
       "type": "object",

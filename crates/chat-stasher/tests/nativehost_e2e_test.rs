@@ -1140,6 +1140,23 @@ fn the_shapes_the_has_message_produces_match_the_committed_schema() {
     );
 }
 
+#[test]
+fn the_other_install_count_request_and_response_match_the_committed_schema() {
+    assert_matches_schema(&json!({
+        "protocol": 1,
+        "type": "other_installs",
+        "request_id": "other-count-1",
+        "install_id": "11111111-1111-4111-8111-111111111111"
+    }));
+    assert_matches_schema(&json!({
+        "protocol": 1,
+        "type": "other_installs",
+        "ok": true,
+        "request_id": "other-count-1",
+        "count": 2
+    }));
+}
+
 // -------------------------------------------------------------- bad requests
 
 #[test]

@@ -26,9 +26,9 @@
  *    content scripts and the alarm, and none of it is imported here — `lib/coverage-read.ts` is the only
  *    module that touches storage at all, and the model it feeds has no network code in it.
  *
- * 🔴 **It is not a native-messaging client either.** The archive's own view is `chat-stasher ui`
- *    (ADR-028 §1, ADR-032 §2). Asking the host for those numbers would put a second copy of them in front
- *    of the user and would need a protocol change this ticket is not authorised to make.
+ * EXT-7 · The page asks the background for one archive-wide install count. That message returns only a
+ *    count and never copies platform counts or archive rows into the coverage model. Coverage details
+ *    remain this browser's own records; archive detail stays in `chat-stasher ui`.
  *
  * 🔴 **The dismissed-alert set is memory only.** A dismissed callout stays hidden across the repaint a
  *    preset change causes, and dies with the page. This page is read-only apart from the preset, and a
@@ -42,7 +42,7 @@ import { readCoverageInputs } from '../../lib/coverage-read';
 import { coverageView, type CoverageAlert, type CoverageCardView } from '../../lib/coverage-view';
 import { barGeometry, monthLabel, monthsGeometry, ringDash, unknownTimeTotal } from '../../lib/coverage-charts';
 import { initUiLocale, t } from '../../lib/i18n';
-import { POPUP_INSTALL_LABEL_MESSAGE } from '../../lib/popup-view';
+import { POPUP_INSTALL_LABEL_MESSAGE, POPUP_OTHER_INSTALLS_MESSAGE } from '../../lib/popup-view';
 import { attachInstallIdentityToConsole } from '../../lib/install-identity';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -52,6 +52,7 @@ const BAR_WIDTH = 1000;
 const MONTHS_W = 320;
 const MONTHS_H = 52;
 const MONTHS_GAP = 6;
+let otherInstallCount: number | null | undefined;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -482,6 +483,16 @@ async function render(store: ReturnType<typeof browserLocalStore>, now: number):
     const response = await browser.runtime.sendMessage({ type: POPUP_INSTALL_LABEL_MESSAGE });
     install = response?.install ?? null;
   } catch { /* the coverage data remains readable when identity cannot be queried */ }
+  if (install && otherInstallCount === undefined) {
+    otherInstallCount = null;
+    void browser.runtime.sendMessage({ type: POPUP_OTHER_INSTALLS_MESSAGE })
+      .then((response) => {
+        otherInstallCount = typeof response?.count === 'number' && Number.isSafeInteger(response.count) && response.count >= 0
+          ? response.count : null;
+        paintOtherInstallCount();
+      })
+      .catch(() => { otherInstallCount = null; });
+  }
   const report = buildCoverage({
     ...inputs,
     ...(install ? { install: {
@@ -494,6 +505,7 @@ async function render(store: ReturnType<typeof browserLocalStore>, now: number):
   if (installLabel) installLabel.textContent = install
     ? t('coverage.thisBrowser', { browser: install.browser, profile: install.profile_label ?? t('popup.install.unnamed') })
     : t('coverage.installUnknown');
+  paintOtherInstallCount();
   if (install) attachInstallIdentityToConsole({
     ...install,
     profile_label: install.profile_label ?? 'Unnamed profile',
@@ -555,6 +567,17 @@ async function render(store: ReturnType<typeof browserLocalStore>, now: number):
 
   host.empty.textContent = view.empty ?? '';
   host.empty.hidden = view.empty === null;
+}
+
+function paintOtherInstallCount(): void {
+  const label = document.getElementById('other-installs');
+  if (label && otherInstallCount !== null && otherInstallCount !== undefined && otherInstallCount > 0) {
+    label.textContent = t(otherInstallCount === 1 ? 'coverage.oneOtherInstall' : 'coverage.otherInstalls', { count: otherInstallCount });
+    label.hidden = false;
+  } else if (label) {
+    label.hidden = true;
+    label.textContent = '';
+  }
 }
 
 async function applyPreset(store: ReturnType<typeof browserLocalStore>, preset: SpeedPreset): Promise<void> {
