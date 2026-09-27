@@ -39,6 +39,21 @@ white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
 .stale{color:#8a5300}
+/* EXT-7b (29-UI-DESIGN §8.1/§8.2): the install table's status dot. It is the
+   second reading of a state whose word is written beside it, so it carries no
+   meaning on its own — and it draws only colours already declared above. An
+   unreadable status is a hollow dot, not a green one: the absence of a reading
+   is not a reading. */
+.dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.35rem;
+background:var(--muted)}
+.dot.ok{background:var(--ok)}
+.dot.stale{background:#8a5300}
+.dot.paused{background:var(--bad)}
+.dot.unknown{background:transparent;border:1px solid var(--muted)}
+span.paused{color:var(--bad)}
+span.unknown{color:var(--muted)}
+.muted{color:var(--muted)}
+.h2note{color:var(--muted);font-size:.8rem;font-weight:400}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;

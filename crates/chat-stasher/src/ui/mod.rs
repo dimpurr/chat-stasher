@@ -1515,6 +1515,97 @@ pub(crate) mod fixture {
         UiData::from_report(&report(), "dest-under-test", Selector::default(), NOW)
     }
 
+    /// Twelve synthetic installs across three machines — the multi-install shape
+    /// the Extensions view exists for (`36-EXTENSION-TOPOLOGY.md` §1: one user is
+    /// several machines × several browsers × several profiles × several installs).
+    ///
+    /// The mix is deliberate, and it is the same list the byte-identity capture
+    /// renders, so a page that renders two of these states as one is caught by
+    /// the capture rather than by a reader: install 1 is paused on one platform,
+    /// install 5 has not reported for four days, and install 9's record carries
+    /// no status field at all — which is not `false` and is not "not paused".
+    ///
+    /// Each of the three is the index on its machine whose browser and profile
+    /// label sort *last* (`Chrome · Work` after every other pair), so the row
+    /// that needs a look is the one a page that forgot to sort would print at the
+    /// bottom. A fixture where the problem row happened to sort first anyway
+    /// would let the sort be deleted without a test going red — which is how the
+    /// first version of this fixture passed that mutation.
+    ///
+    /// `reported_at` is measured from [`NOW`], so the relative ages the page
+    /// prints are a property of the fixture rather than of when the suite ran.
+    pub fn extension_installs() -> Vec<serde_json::Value> {
+        let reported = |hours: i64| {
+            chrono::DateTime::from_timestamp(NOW - hours * 3600, 0)
+                .expect("NOW is a representable instant")
+                .to_rfc3339()
+        };
+        let mut installs = Vec::new();
+        for i in 0..12 {
+            let machine = i / 4 + 1;
+            let mut install = serde_json::json!({
+                "install_id": format!("synthetic-{i}"),
+                "machine": format!("Machine {machine}"),
+                "browser": if i % 4 < 2 { "Chrome" } else { "Arc" },
+                "profile_label": if i % 2 == 0 { "Personal" } else { "Work" },
+                "extension_version": "0.5.0",
+                "reported_at": reported(1 + (i % 3) as i64),
+                "stale": false,
+                "platforms": [
+                    { "platform": "chatgpt", "captured_by_this_browser": 4, "pending": 2, "paused_reason": null },
+                    { "platform": "claude", "captured_by_this_browser": 3, "pending": 1, "paused_reason": null }
+                ]
+            });
+            match i {
+                1 => {
+                    install["reported_at"] = reported(2).into();
+                    install["platforms"][1]["paused_reason"] = "retry-after".into();
+                }
+                5 => {
+                    install["reported_at"] = reported(100).into();
+                    install["stale"] = true.into();
+                }
+                9 => {
+                    install["reported_at"] = reported(5).into();
+                    let object = install.as_object_mut().expect("an install is an object");
+                    object.remove("stale");
+                    for row in install["platforms"].as_array_mut().expect("an array") {
+                        row.as_object_mut()
+                            .expect("a platform row")
+                            .remove("paused_reason");
+                    }
+                }
+                _ => {}
+            }
+            installs.push(install);
+        }
+        installs
+    }
+
+    /// Local launch targets for three of `extension_installs()`'s twelve: the
+    /// three reporting installs of the first machine. Install 1 — that machine's
+    /// paused one — has none, so the capture shows a row that is on this machine
+    /// and still has nothing to open, which is the state the guidance sentence
+    /// exists for.
+    pub fn extension_open_targets() -> BTreeMap<String, extension_profile::OpenTarget> {
+        [
+            (0, "arc", "Default"),
+            (2, "arc", "Profile 2"),
+            (3, "chrome", "Default"),
+        ]
+        .into_iter()
+        .map(|(i, browser_id, profile_directory)| {
+            (
+                format!("synthetic-{i}"),
+                extension_profile::OpenTarget {
+                    browser_id: browser_id.to_string(),
+                    profile_directory: profile_directory.to_string(),
+                },
+            )
+        })
+        .collect()
+    }
+
     /// A second destination's read: it holds **one** session `report()` also
     /// holds, and one session only it holds.
     ///
@@ -2383,38 +2474,165 @@ mod tests {
         assert!(html.contains("account collision</span>"), "{html}");
     }
 
+    /// EXT-7's premise in the shape EXT-7b renders it: twelve installs stay
+    /// twelve rows, each cell is the count of the install that reported it, and
+    /// the install that stopped is marked — and marked exactly once.
     #[test]
     fn extensions_view_keeps_twelve_install_rows_separate_and_marks_one_stale() {
         let mut data = fixture::data();
         data.local_machine_id = Some("Machine 1".to_string());
-        data.extension_installs = (0..12)
-            .map(|i| serde_json::json!({
-                "install_id": format!("synthetic-{i}"),
-                "machine": format!("Machine {}", i / 4 + 1),
-                "browser": if i % 4 < 2 { "Chrome" } else { "Arc" },
-                "profile_label": if i % 2 == 0 { "Personal" } else { "Work" },
-                "reported_at": "2026-09-27T12:00:00Z",
-                "stale": i == 11,
-                "platforms": [
-                    { "platform": "chatgpt", "captured_by_this_browser": 4, "pending": 2, "paused_reason": null },
-                    { "platform": "claude", "captured_by_this_browser": 3, "pending": 1, "paused_reason": "retry-after" }
-                ]
-            }))
-            .collect();
+        data.extension_installs = fixture::extension_installs();
         let response = req("/extensions?token=t", &data, &NoContent);
         assert_eq!(response.status, 200);
-        assert_eq!(response.body.matches("<article class=message>").count(), 12);
-        assert_eq!(response.body.matches("<b class=stale>Stale</b>").count(), 1);
-        assert_eq!(response.body.matches("chatgpt").count(), 12);
-        assert!(response.body.contains("Machine 1"));
-        assert!(response.body.contains("Machine 3"));
-        assert!(response
-            .body
-            .contains("An exact browser profile match is unavailable"));
-        assert!(response
-            .body
-            .contains("Open this browser profile on Machine 2."));
-        assert!(!response.body.contains("Grand total"));
+        let html = &response.body;
+        assert_eq!(html.matches("<tr class=\"install ").count(), 12, "{html}");
+        assert_eq!(
+            html.matches("<tr class=\"install stale\">").count(),
+            1,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<tr class=\"install paused\">").count(),
+            1,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<tr class=\"install unknown\">").count(),
+            1,
+            "{html}"
+        );
+        // Eleven installs report the same `4 · 2` on chatgpt; the twelfth could
+        // not be read. The twelve are never added up: 12 × 4 captured would be
+        // 48, and 11 × 4 + 3 the same way — neither total is anywhere on the
+        // page. (The claude column is one cell short of that: the paused install
+        // appends the pause word to its own cell, which is the point of it.)
+        assert_eq!(html.matches("<td class=n>4 · 2</td>").count(), 11, "{html}");
+        assert_eq!(html.matches("<td class=n>3 · 1</td>").count(), 10, "{html}");
+        assert!(!html.contains("48 · 24"), "{html}");
+        assert!(!html.contains("36 · 12"), "{html}");
+        // One table per machine, so one chatgpt column header each.
+        assert_eq!(html.matches(">chatgpt</th>").count(), 3, "{html}");
+        assert!(html.contains("Machine 1"));
+        assert!(html.contains("Machine 3"));
+        assert!(html.contains("An exact browser profile match is unavailable"));
+        assert!(html.contains("<p class=sub>These installs are on Machine 2; open them there.</p>"));
+        assert!(!html.contains("Grand total"));
+    }
+
+    /// A pause field that is *absent* is not "not paused", and it is not
+    /// outvoted by a readable `stale` flag: the install reads unknown until the
+    /// record says otherwise. (`paused_reason: null` is the report saying "not
+    /// paused" — a different statement, which does not become this one.)
+    #[test]
+    fn extensions_view_reads_an_absent_pause_field_as_unknown_not_as_running() {
+        let mut data = fixture::data();
+        data.extension_installs = vec![serde_json::json!({
+            "install_id": "synthetic-quiet",
+            "machine": "Machine 1",
+            "browser": "Chrome",
+            "profile_label": "Personal",
+            "reported_at": "2026-09-27T12:00:00Z",
+            "stale": false,
+            "platforms": [{ "platform": "chatgpt", "captured_by_this_browser": 1, "pending": 0 }]
+        })];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(html.contains("<tr class=\"install unknown\">"), "{html}");
+        assert!(
+            html.contains("<span class=\"dot unknown\"></span>Unknown"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td class=n>1 · 0 <span class=unknown>pause unknown</span></td>"),
+            "{html}"
+        );
+        assert!(html.contains("chatgpt pause state unknown"), "{html}");
+        assert!(!html.contains("Reporting"), "{html}");
+    }
+
+    /// The top line counts *installs* and says how many need a look. It is a
+    /// floor rather than a total when the status scan did not finish, because a
+    /// count taken off a partial read is not a measurement of the whole.
+    #[test]
+    fn extensions_summary_counts_installs_and_never_a_capture_total() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = fixture::extension_installs();
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(html.contains("12 installs on 3 machines"), "{html}");
+        assert!(
+            html.contains("· 1 stale · 1 paused · 1 with an unreadable status"),
+            "{html}"
+        );
+        // The captures behind those installs are not summed into the sentence:
+        // twelve installs at four and three captured each is 84, and the page
+        // never says it.
+        assert!(!html.contains("84"), "{html}");
+
+        data.extension_status_read = false;
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("At least 12 installs on 3 machines"),
+            "{html}"
+        );
+        assert!(
+            html.contains("each count is a floor, not a total"),
+            "{html}"
+        );
+    }
+
+    /// Problems come first, at both levels. A page whose stale install sits below
+    /// the fold is the page this one replaces.
+    #[test]
+    fn extensions_view_puts_the_install_that_stopped_first() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = fixture::extension_installs();
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        // The stale install is on machine 2, the paused one on machine 1 and the
+        // unreadable one on machine 3, so the machines lead in that order.
+        let order = ["Machine 2", "Machine 1", "Machine 3"].map(|machine| {
+            html.find(machine)
+                .unwrap_or_else(|| panic!("{machine}: {html}"))
+        });
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{html}");
+        // And within a machine the row that needs a look is the first row — here
+        // the very first row of the page, because its machine leads too.
+        assert_eq!(
+            html.find("<tr class=\"install "),
+            html.find("<tr class=\"install stale\">"),
+            "{html}"
+        );
+        // The local machine says so where the reader is looking.
+        assert!(
+            html.contains("<span class=h2note>· this machine</span>"),
+            "{html}"
+        );
+    }
+
+    /// What the table has no room for is collapsed, not dropped: the absolute
+    /// instant behind the relative one, the version the install reported, and why
+    /// a paused platform is paused.
+    #[test]
+    fn extensions_details_keep_the_absolute_time_the_version_and_the_reason() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = fixture::extension_installs();
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("<details><summary>Details for these 4 installs</summary>"),
+            "{html}"
+        );
+        assert!(html.contains("claude paused (retry-after)"), "{html}");
+        // The collapsed line carries the instant the row shows only as an age.
+        assert!(
+            html.contains(&format!(
+                "{} (2h ago)",
+                super::html::fmt_unix(fixture::NOW - 7200)
+            )),
+            "{html}"
+        );
+        // A record with no version field says so rather than showing a blank.
+        assert!(html.contains("extension 0.5.0"), "{html}");
     }
 
     #[test]
@@ -2461,22 +2679,52 @@ mod tests {
             .contains("No extension status reports are present"));
     }
 
+    /// Three states, three readings, and none of them a zero: a platform row
+    /// whose counts are absent is `Unknown`, a platform the install's report has
+    /// no row for at all is an em dash, and a readable status is neither.
     #[test]
     fn extensions_view_keeps_missing_install_counts_unknown() {
         let mut data = fixture::data();
-        data.extension_installs = vec![serde_json::json!({
-            "install_id": "synthetic-install",
-            "machine": "Machine 1",
-            "browser": "Chrome",
-            "profile_label": "Personal",
-            "reported_at": "2026-09-27T12:00:00Z",
-            "stale": false,
-            "platforms": [{ "platform": "chatgpt", "paused_reason": null }]
-        })];
-        let response = req("/extensions?token=t", &data, &NoContent);
-        assert!(response.body.contains("<td class=n>Unknown</td>"));
-        assert!(!response.body.contains("<td class=n>0</td>"));
-        assert!(response.body.contains("<td>—</td>"));
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "synthetic-install",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Personal",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": [{ "platform": "chatgpt", "paused_reason": null }]
+            }),
+            // The second install reports a platform the first has no row for, so
+            // the machine's table has a column the first row cannot fill.
+            serde_json::json!({
+                "install_id": "synthetic-other",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": [
+                    { "platform": "chatgpt", "paused_reason": null },
+                    { "platform": "claude", "paused_reason": null }
+                ]
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("<td class=n>Unknown · Unknown</td>"),
+            "{html}"
+        );
+        assert!(!html.contains(">0 · 0<"), "{html}");
+        assert!(html.contains("<td class=n>—</td>"), "{html}");
+        // A readable, not-paused status is not dressed as a problem, and it is
+        // not dressed as a clock either: this fixture's report is stamped ahead
+        // of the instant the ages are measured from, which is not an age.
+        assert!(
+            html.contains("<span class=\"dot ok\"></span>Reporting"),
+            "{html}"
+        );
+        assert!(html.contains("in the future"), "{html}");
     }
 
     /// The route table, the 404 wording and the router are one list: every
@@ -5686,33 +5934,8 @@ mod golden {
         let mut data = fixture::data();
         if target == "/extensions" {
             data.local_machine_id = Some("Machine 1".to_string());
-            data.extension_installs = (0..12)
-                .map(|i| serde_json::json!({
-                    "install_id": format!("synthetic-{i}"),
-                    "machine": format!("Machine {}", i / 4 + 1),
-                    "browser": if i % 4 < 2 { "Chrome" } else { "Arc" },
-                    "profile_label": if i % 2 == 0 { "Personal" } else { "Work" },
-                    "reported_at": "2026-09-27T12:00:00Z",
-                    "stale": i == 11,
-                    "platforms": [
-                        { "platform": "chatgpt", "captured_by_this_browser": 4, "pending": 2, "paused_reason": null },
-                        { "platform": "claude", "captured_by_this_browser": 3, "pending": 1, "paused_reason": "retry-after" }
-                    ]
-                }))
-                .collect();
-            for i in 0..4 {
-                data.extension_open_targets.insert(
-                    format!("synthetic-{i}"),
-                    extension_profile::OpenTarget {
-                        browser_id: if i < 2 { "arc" } else { "chrome" }.to_string(),
-                        profile_directory: if i % 2 == 0 {
-                            "Default".to_string()
-                        } else {
-                            "Profile 2".to_string()
-                        },
-                    },
-                );
-            }
+            data.extension_installs = fixture::extension_installs();
+            data.extension_open_targets = fixture::extension_open_targets();
         }
         let response = handle(path, &params, "golden-token", &data, content, &NoIndex)
             .unwrap_or_else(|| panic!("`{target}` must be a known route"));

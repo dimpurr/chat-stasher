@@ -39,6 +39,21 @@ white-space:nowrap;padding:.3rem .1rem;color:var(--muted)}
 .heat td.uk{text-align:center;color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
 .stale{color:#8a5300}
+/* EXT-7b (29-UI-DESIGN §8.1/§8.2): the install table's status dot. It is the
+   second reading of a state whose word is written beside it, so it carries no
+   meaning on its own — and it draws only colours already declared above. An
+   unreadable status is a hollow dot, not a green one: the absence of a reading
+   is not a reading. */
+.dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.35rem;
+background:var(--muted)}
+.dot.ok{background:var(--ok)}
+.dot.stale{background:#8a5300}
+.dot.paused{background:var(--bad)}
+.dot.unknown{background:transparent;border:1px solid var(--muted)}
+span.paused{color:var(--bad)}
+span.unknown{color:var(--muted)}
+.muted{color:var(--muted)}
+.h2note{color:var(--muted);font-size:.8rem;font-weight:400}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
@@ -77,24 +92,64 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <nav class=top aria-label="pages"><a href="/?token=golden-token" accesskey=1>overview</a> · <a href="/sessions?token=golden-token" accesskey=2>sessions</a> · <a href="/search?token=golden-token" accesskey=f>search</a> · <a href="/extensions?token=golden-token">Extensions</a></nav>
 <main id=content>
 <h1>Extensions</h1>
-<p class=sub>Archived reports, grouped by machine, browser and profile. Counts belong to each install and are not combined.</p>
-<section><h2>Machine 1</h2>
-<article class=message><header><b>Arc</b> · Personal · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><p><a href="/open-extension?install=synthetic-2&amp;token=golden-token">Open in Arc · Personal</a></p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Arc</b> · Work · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><p><a href="/open-extension?install=synthetic-3&amp;token=golden-token">Open in Arc · Work</a></p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Personal · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><p><a href="/open-extension?install=synthetic-0&amp;token=golden-token">Open in Chrome · Personal</a></p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Work · Machine 1</header><p>Last report: 2026-09-27T12:00:00Z</p><p><a href="/open-extension?install=synthetic-1&amp;token=golden-token">Open in Chrome · Work</a></p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-</section>
+<p class=sub>Archived reports, one row per install. One user is several machines × several browsers × several profiles, so each install is listed on its own and no count here is added across them.</p>
+<p class=sub>12 installs on 3 machines · 1 stale · 1 paused · 1 with an unreadable status</p>
 <section><h2>Machine 2</h2>
-<article class=message><header><b>Arc</b> · Personal · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 2.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Arc</b> · Work · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 2.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Personal · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 2.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Work · Machine 2</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 2.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<p class=sub>4 installs · 1 stale</p>
+<p class=sub>These installs are on Machine 2; open them there.</p>
+<div class=scroll><table>
+<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<tbody>
+<tr class="install stale"><td>Chrome · Work</td><td>4d ago</td><td><span class="dot stale"></span>Stale</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+</tbody></table></div>
+<details><summary>Details for these 4 installs</summary>
+<ul>
+<li><b>Chrome · Work</b> — last report 2026-01-28 22:40 UTC (4d ago) · extension 0.5.0</li>
+<li><b>Arc · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0</li>
+<li><b>Arc · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0</li>
+</ul></details>
+</section>
+<section><h2>Machine 1 <span class=h2note>· this machine</span></h2>
+<p class=sub>4 installs · 1 paused</p>
+<div class=scroll><table>
+<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th>open</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<tbody>
+<tr class="install paused"><td>Chrome · Work</td><td>2h ago</td><td><span class="dot paused"></span>Paused</td><td><span class=muted>no match</span></td><td class=n>4 · 2</td><td class=n>3 · 1 <span class=paused>paused</span></td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-2&amp;token=golden-token">Open in Arc · Personal</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-3&amp;token=golden-token">Open in Arc · Work</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-0&amp;token=golden-token">Open in Chrome · Personal</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+</tbody></table></div>
+<p class=sub>An exact browser profile match is unavailable for 1 of these 4 installs, so that row has no open action; open it from the named browser profile.</p>
+<details><summary>Details for these 4 installs</summary>
+<ul>
+<li><b>Chrome · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · claude paused (retry-after)</li>
+<li><b>Arc · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0</li>
+<li><b>Arc · Work</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0</li>
+</ul></details>
 </section>
 <section><h2>Machine 3</h2>
-<article class=message><header><b>Arc</b> · Personal · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 3.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Arc</b> · Work · Machine 3 · <b class=stale>Stale</b></header><p>Last report: 2026-09-27T12:00:00Z · stale</p><p>Open this browser profile on Machine 3.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Personal · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 3.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
-<article class=message><header><b>Chrome</b> · Work · Machine 3</header><p>Last report: 2026-09-27T12:00:00Z</p><p>Open this browser profile on Machine 3.</p><table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody><tr><td>chatgpt</td><td class=n>4</td><td class=n>2</td><td>—</td></tr><tr><td>claude</td><td class=n>3</td><td class=n>1</td><td>Paused</td></tr></tbody></table></article>
+<p class=sub>4 installs · 1 with an unreadable status</p>
+<p class=sub>These installs are on Machine 3; open them there.</p>
+<div class=scroll><table>
+<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<tbody>
+<tr class="install unknown"><td>Chrome · Work</td><td>5h ago</td><td><span class="dot unknown"></span>Unknown</td><td class=n>4 · 2 <span class=unknown>pause unknown</span></td><td class=n>3 · 1 <span class=unknown>pause unknown</span></td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+</tbody></table></div>
+<details><summary>Details for these 4 installs</summary>
+<ul>
+<li><b>Chrome · Work</b> — last report 2026-02-01 21:40 UTC (5h ago) · extension 0.5.0 · chatgpt pause state unknown · claude pause state unknown</li>
+<li><b>Arc · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0</li>
+<li><b>Arc · Work</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0</li>
+</ul></details>
 </section>
 </main>
 <footer>

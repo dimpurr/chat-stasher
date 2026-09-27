@@ -127,170 +127,543 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     out
 }
 
-/// Render archived extension reports one install at a time. Counts are grouped
-/// only within an install and platform; machine/browser/profile remain visible.
-pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
-    let mut out = head("chat-stasher · Extensions", token);
-    out.push_str("<h1>Extensions</h1>\n<p class=sub>Archived reports, grouped by machine, browser and profile. Counts belong to each install and are not combined.</p>\n");
-    if !data.extension_status_read {
-        out.push_str("<p class=message>Extension reports could not be read completely. The list may be incomplete.</p>\n");
-    } else if data.extension_installs.is_empty() {
-        out.push_str(
-            "<p>No extension status reports are present in the readable archive snapshots.</p>\n",
-        );
+// ---------------------------------------------------------- extensions page
+
+/// What a row calls an install whose record does not carry a field. Spelled out
+/// rather than left blank: an empty cell is how "we could not read it" gets
+/// read as "there was nothing there", and the two are not the same claim.
+const BROWSER_UNKNOWN: &str = "Unknown browser";
+const PROFILE_UNNAMED: &str = "Unnamed profile";
+const MACHINE_UNKNOWN: &str = "Machine unknown";
+
+/// `1`/`n` agreement. The page pluralizes two words and both follow the regular
+/// rule, so this stays a suffix rather than a table of irregulars.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
     }
-    let mut installs = data.extension_installs.iter().collect::<Vec<_>>();
-    installs.sort_by_key(|value| {
-        (
-            value
-                .get("machine")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-            value
-                .get("browser")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-            value
-                .get("profile_label")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-        )
-    });
-    let mut previous_machine = String::new();
-    for install in installs {
-        let machine = install
-            .get("machine")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Unknown machine");
-        if machine != previous_machine {
-            if !previous_machine.is_empty() {
-                out.push_str("</section>\n");
-            }
-            out.push_str(&format!("<section><h2>{}</h2>\n", esc(machine)));
-            previous_machine = machine.to_string();
+}
+
+/// What a row asks of its reader, worst first. The declaration order **is** the
+/// sort order — sorting by this enum is what puts the install that stopped
+/// above the ones that are reporting.
+///
+/// A stale install outranks a paused one, because a pause is the extension
+/// saying what it is doing and going quiet is it saying nothing; an unreadable
+/// status is placed with the two that need a look rather than among the healthy
+/// ones, because "we could not read it" is not "it is fine".
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Attention {
+    Stale,
+    Paused,
+    Unknown,
+    Reporting,
+}
+
+impl Attention {
+    /// The word beside the dot. `<b>Stale</b>` used to be a badge of its own;
+    /// it is now the row's status, which is the one place a reader looks.
+    fn word(self) -> &'static str {
+        match self {
+            Attention::Stale => "Stale",
+            Attention::Paused => "Paused",
+            Attention::Unknown => "Unknown",
+            Attention::Reporting => "Reporting",
         }
-        let browser = install
-            .get("browser")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Unknown browser");
-        let profile = install
-            .get("profile_label")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Unnamed profile");
-        let stale = install
-            .get("stale")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        let reported = install
-            .get("reported_at")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Unknown");
-        out.push_str(&format!(
-            "<article class=message><header><b>{}</b> · {} · {}{}</header><p>Last report: {}{}</p>",
-            esc(browser),
-            esc(profile),
-            esc(machine),
-            if stale {
-                " · <b class=stale>Stale</b>"
-            } else {
-                ""
-            },
-            esc(reported),
-            if stale { " · stale" } else { "" }
-        ));
-        match (
-            data.local_machine_id.as_deref(),
-            install.get("machine").and_then(serde_json::Value::as_str),
-        ) {
-            (Some(local), Some(machine_id)) if local == machine_id => {
-                let install_id = install
-                    .get("install_id")
-                    .and_then(serde_json::Value::as_str);
-                if let Some(id) =
-                    install_id.filter(|id| data.extension_open_targets.contains_key(*id))
-                {
-                    out.push_str(&format!(
-                        "<p><a href=\"/open-extension?install={}&amp;token={}\">Open in {} · {}</a></p>",
-                        super::percent_encode(id),
-                        super::percent_encode(token),
-                        esc(browser),
-                        esc(profile),
-                    ));
-                } else {
-                    out.push_str("<p>This install is on this machine. An exact browser profile match is unavailable; open it from the named browser profile.</p>");
-                }
-            }
-            (Some(_), Some(_)) => {
-                out.push_str(&format!(
-                    "<p>Open this browser profile on {}.</p>",
-                    esc(machine)
-                ));
-            }
-            _ => {
-                out.push_str("<p>The machine match is unavailable. Use the machine label above to find this profile.</p>");
-            }
+    }
+
+    /// The dot's modifier. A word always accompanies it — the dot is the second
+    /// reading of the status, never the only one.
+    fn dot(self) -> &'static str {
+        match self {
+            Attention::Stale => "stale",
+            Attention::Paused => "paused",
+            Attention::Unknown => "unknown",
+            Attention::Reporting => "ok",
         }
-        out.push_str("<table><thead><tr><th>Platform</th><th class=n>Captured by this browser</th><th class=n>Pending</th><th>Paused</th></tr></thead><tbody>");
-        let mut rows: BTreeMap<String, (Option<u64>, Option<u64>, Option<bool>)> = BTreeMap::new();
-        if let Some(platforms) = install
+    }
+}
+
+/// One platform's reading inside one install's report.
+struct PlatformCell {
+    captured: Option<u64>,
+    pending: Option<u64>,
+    /// `Some(reason)` when the row says this platform is paused.
+    paused: Option<String>,
+    /// True when the row carried no `paused_reason` key at all, so the pause
+    /// state is unknown. A `null` value is the report saying "not paused",
+    /// which is a different statement and is not folded into this one.
+    pause_unknown: bool,
+}
+
+/// One archived install, read once and rendered twice: as a row of its
+/// machine's table and as a line in that table's `<details>`.
+struct InstallView<'a> {
+    install_id: Option<&'a str>,
+    /// `None` when the record names no machine. It is kept as `None` rather
+    /// than defaulted to a label so the page can say which of the two it has.
+    machine: Option<&'a str>,
+    browser: Option<&'a str>,
+    profile: Option<&'a str>,
+    extension_version: Option<&'a str>,
+    reported_unix: Option<i64>,
+    platforms: BTreeMap<String, PlatformCell>,
+    attention: Attention,
+}
+
+impl<'a> InstallView<'a> {
+    fn of(install: &'a serde_json::Value) -> Self {
+        let mut platforms: BTreeMap<String, PlatformCell> = BTreeMap::new();
+        if let Some(rows) = install
             .get("platforms")
             .and_then(serde_json::Value::as_array)
         {
-            for row in platforms {
+            for row in rows {
                 let Some(platform) = row.get("platform").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
-                let entry =
-                    rows.entry(platform.to_string())
-                        .or_insert((Some(0), Some(0), Some(false)));
-                entry.0 = entry
-                    .0
+                let cell = platforms
+                    .entry(platform.to_owned())
+                    .or_insert(PlatformCell {
+                        captured: Some(0),
+                        pending: Some(0),
+                        paused: None,
+                        pause_unknown: false,
+                    });
+                // Two rows for one platform in one install are that install's
+                // own account rows, so folding them is a count of one install —
+                // not the cross-install sum the topology forbids. The fold
+                // starts at zero *for a row that exists*; an absent count
+                // stays absent, because `Some(0).zip(None)` is `None`.
+                cell.captured = cell
+                    .captured
                     .zip(
                         row.get("captured_by_this_browser")
                             .and_then(serde_json::Value::as_u64),
                     )
                     .and_then(|(total, count)| total.checked_add(count));
-                entry.1 = entry
-                    .1
+                cell.pending = cell
+                    .pending
                     .zip(row.get("pending").and_then(serde_json::Value::as_u64))
                     .and_then(|(total, count)| total.checked_add(count));
-                let paused = row.get("paused_reason").and_then(|value| {
-                    if value.is_null() {
-                        Some(false)
-                    } else {
-                        value.as_str().map(|_| true)
+                match row.get("paused_reason") {
+                    Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(reason)) => {
+                        cell.paused = Some(reason.clone());
                     }
-                });
-                entry.2 = entry
-                    .2
-                    .zip(paused)
-                    .map(|(any_paused, current)| any_paused || current);
+                    _ => cell.pause_unknown = true,
+                }
             }
         }
-        if rows.is_empty() {
-            out.push_str("<tr><td colspan=4>No platform status rows</td></tr>");
+        let attention = if platforms.values().any(|cell| cell.paused.is_some()) {
+            Attention::Paused
+        } else if platforms.values().any(|cell| cell.pause_unknown) {
+            Attention::Unknown
         } else {
-            for (platform, (captured, pending, paused)) in rows {
-                let captured =
-                    captured.map_or_else(|| "Unknown".to_string(), |count| count.to_string());
-                let pending =
-                    pending.map_or_else(|| "Unknown".to_string(), |count| count.to_string());
-                let paused = match paused {
-                    Some(true) => "Paused",
-                    Some(false) => "—",
-                    None => "Unknown",
-                };
-                out.push_str(&format!("<tr><td>{}</td><td class=n>{captured}</td><td class=n>{pending}</td><td>{paused}</td></tr>", esc(&platform)));
+            match install.get("stale").and_then(serde_json::Value::as_bool) {
+                Some(true) => Attention::Stale,
+                Some(false) => Attention::Reporting,
+                None => Attention::Unknown,
             }
+        };
+        InstallView {
+            install_id: install
+                .get("install_id")
+                .and_then(serde_json::Value::as_str),
+            machine: install.get("machine").and_then(serde_json::Value::as_str),
+            browser: install.get("browser").and_then(serde_json::Value::as_str),
+            profile: install
+                .get("profile_label")
+                .and_then(serde_json::Value::as_str),
+            extension_version: install
+                .get("extension_version")
+                .and_then(serde_json::Value::as_str),
+            reported_unix: install
+                .get("reported_at")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.timestamp()),
+            platforms,
+            attention,
         }
-        out.push_str("</tbody></table></article>\n");
     }
-    if !previous_machine.is_empty() {
+
+    fn label(&self) -> String {
+        format!(
+            "{} · {}",
+            esc(self.browser.unwrap_or(BROWSER_UNKNOWN)),
+            esc(self.profile.unwrap_or(PROFILE_UNNAMED))
+        )
+    }
+
+    /// One platform cell: this install's own `captured · pending`, plus the
+    /// pause word when that platform is paused. A platform this install's report
+    /// carries no row for is an em dash — absent, which is neither a zero nor an
+    /// unknown.
+    fn cell(&self, platform: &str) -> String {
+        let Some(cell) = self.platforms.get(platform) else {
+            return "<td class=n>—</td>".to_string();
+        };
+        let count = |value: Option<u64>| match value {
+            Some(n) => n.to_string(),
+            None => "Unknown".to_string(),
+        };
+        let mut out = format!(
+            "<td class=n>{} · {}",
+            count(cell.captured),
+            count(cell.pending)
+        );
+        if cell.paused.is_some() {
+            out.push_str(" <span class=paused>paused</span>");
+        } else if cell.pause_unknown {
+            out.push_str(" <span class=unknown>pause unknown</span>");
+        }
+        out.push_str("</td>");
+        out
+    }
+}
+
+/// Render archived extension reports as one summary sentence and one compact
+/// table per machine.
+///
+/// The shape is forced by the topology rather than by taste: one user is several
+/// machines × several browsers × several profiles × several installs
+/// (`36-EXTENSION-TOPOLOGY.md` §1), so a page that describes each install at
+/// length grows without bound and buries the one install that needs a look.
+/// Three rules the layout is built around:
+///
+/// · A count belongs to one install and is never added across installs. The
+///   summary counts *installs*, a platform cell is that install's own pair, and
+///   the collapsed lines carry the detail the table has no room for.
+/// · Stale, paused and unreadable are three states and read as three words.
+///   None of them is drawn as a zero, and the ones that need a look sort above
+///   the ones that do not, at both levels.
+/// · Only an install on *this* machine can be opened, and only through a browser
+///   profile this machine was verified to have (§4, principle 5). Every other
+///   install says which machine to open it on instead.
+pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
+    let mut out = head("chat-stasher · Extensions", token);
+    out.push_str(
+        "<h1>Extensions</h1>\n<p class=sub>Archived reports, one row per install. One user \
+         is several machines × several browsers × several profiles, so each install is \
+         listed on its own and no count here is added across them.</p>\n",
+    );
+    let views = data
+        .extension_installs
+        .iter()
+        .map(InstallView::of)
+        .collect::<Vec<_>>();
+    if !data.extension_status_read {
+        out.push_str(
+            "<p class=message>Extension reports could not be read completely. The list may \
+             be incomplete.</p>\n",
+        );
+    } else if views.is_empty() {
+        out.push_str(
+            "<p>No extension status reports are present in the readable archive snapshots.</p>\n",
+        );
+    }
+    if views.is_empty() {
+        out.push_str(&footer(data));
+        out.push_str("</body></html>\n");
+        return out;
+    }
+    out.push_str(&extension_summary(&views, data.extension_status_read));
+
+    // Grouped by machine. Rows sort by attention, and so do the machines: a
+    // reader who opens this page is looking for the install that stopped, and a
+    // stale install on machine 3 must not sit below the fold because machines
+    // are listed alphabetically.
+    let mut groups: BTreeMap<Option<&str>, Vec<&InstallView>> = BTreeMap::new();
+    for view in &views {
+        groups.entry(view.machine).or_default().push(view);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    for (_, rows) in groups.iter_mut() {
+        rows.sort_by(|a, b| {
+            a.attention
+                .cmp(&b.attention)
+                .then_with(|| a.browser.cmp(&b.browser))
+                .then_with(|| a.profile.cmp(&b.profile))
+        });
+    }
+    groups.sort_by(|(a, a_rows), (b, b_rows)| {
+        worst_attention(a_rows)
+            .cmp(&worst_attention(b_rows))
+            .then_with(|| {
+                a.unwrap_or(MACHINE_UNKNOWN)
+                    .cmp(b.unwrap_or(MACHINE_UNKNOWN))
+            })
+    });
+
+    let local = data.local_machine_id.as_deref();
+    for (machine, rows) in &groups {
+        let here = local.is_some() && local == *machine;
+        out.push_str(&format!(
+            "<section><h2>{}{}</h2>\n<p class=sub>{}</p>\n",
+            esc(machine.unwrap_or(MACHINE_UNKNOWN)),
+            if here {
+                " <span class=h2note>· this machine</span>"
+            } else {
+                ""
+            },
+            extension_counts(rows),
+        ));
+        out.push_str(&open_guidance(local, *machine));
+        out.push_str(&extension_table(rows, here, data, token));
+        out.push_str(&extension_details(rows, data.now_unix));
         out.push_str("</section>\n");
     }
     out.push_str(&footer(data));
     out.push_str("</body></html>\n");
     out
+}
+
+/// The worst state any of the machine's installs is in — the machine's own
+/// reason to be looked at.
+///
+/// A minimum over the rows rather than the attention of whichever row happens
+/// to be first: reading it off the first row would make the machine's rank a
+/// consequence of the row sort, so a change to one would silently redefine the
+/// other. (It did: a mutation that stopped sorting rows by attention left the
+/// machine order looking right for the wrong reason.)
+fn worst_attention(rows: &[&InstallView]) -> Option<Attention> {
+    rows.iter().map(|view| view.attention).min()
+}
+
+/// The one sentence at the top: how many installs, on how many machines, and
+/// how many of them need a look.
+///
+/// An incomplete read keeps its counts as floors — "at least N", and the clause
+/// that says so — because a count taken off a partial scan is not a total, and a
+/// page that shows one anyway is the collapse of "we do not know" into "we
+/// checked" that the whole tool exists to avoid.
+fn extension_summary(views: &[InstallView], complete: bool) -> String {
+    let machines = views
+        .iter()
+        .map(|view| view.machine)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let n = views.len();
+    format!(
+        "<p class=sub>{}{} install{} on {} machine{}{}{}</p>\n",
+        if complete { "" } else { "At least " },
+        n,
+        plural(n),
+        machines,
+        plural(machines),
+        attention_counts(views.iter().map(|view| view.attention)),
+        if complete {
+            ""
+        } else {
+            " · each count is a floor, not a total"
+        },
+    )
+}
+
+/// One machine's own line: how many installs it holds and how many need a look.
+/// Counts are of installs, never of captures — the same rule the page summary
+/// follows, applied one level down.
+fn extension_counts(rows: &[&InstallView]) -> String {
+    format!(
+        "{} install{}{}",
+        rows.len(),
+        plural(rows.len()),
+        attention_counts(rows.iter().map(|view| view.attention))
+    )
+}
+
+/// `· 1 stale · 2 paused` and so on, or the sentence that says there are none.
+/// A count of installs, and only of installs.
+fn attention_counts(attentions: impl Iterator<Item = Attention>) -> String {
+    let mut counts: BTreeMap<Attention, usize> = BTreeMap::new();
+    for attention in attentions {
+        *counts.entry(attention).or_insert(0) += 1;
+    }
+    let mut out = String::new();
+    for (attention, word) in [
+        (Attention::Stale, "stale"),
+        (Attention::Paused, "paused"),
+        (Attention::Unknown, "with an unreadable status"),
+    ] {
+        if let Some(n) = counts.get(&attention).copied().filter(|n| *n > 0) {
+            out.push_str(&format!(" · {n} {word}"));
+        }
+    }
+    if out.is_empty() {
+        out.push_str(" · none stale, paused or unreadable");
+    }
+    out
+}
+
+/// Who can be opened from here. Only this machine's installs get an action — the
+/// dashboard on machine A cannot open a profile in machine B's browser, and a
+/// control that looks like it can is worse than the sentence that says where to
+/// go instead (topology principle 5).
+///
+/// A paragraph of its own rather than a clause appended to the count line: it is
+/// about a different subject ("these installs are elsewhere") from the counts,
+/// and run together the two read as one claim about the same rows. The local
+/// machine gets nothing here, because its table carries the action instead.
+fn open_guidance(local: Option<&str>, machine: Option<&str>) -> String {
+    match (local, machine) {
+        (_, None) => {
+            "<p class=sub>The record names no machine, so these profiles cannot be opened \
+             from here.</p>\n"
+                .to_string()
+        }
+        (Some(local), Some(machine)) if local == machine => String::new(),
+        (Some(_), Some(machine)) => format!(
+            "<p class=sub>These installs are on {}; open them there.</p>\n",
+            esc(machine)
+        ),
+        (None, Some(_)) => {
+            "<p class=sub>This machine's own identity is unavailable, so no profile is \
+             offered to open.</p>\n"
+                .to_string()
+        }
+    }
+}
+
+/// The machine's install table: one row per install, one column per platform the
+/// machine has any install for.
+///
+/// The cell is that install's own pair and never a total, and the columns are
+/// what a reader compares *down* — which install stopped, and on which platform
+/// it is behind. `local` decides whether the open column exists at all, so a
+/// remote machine's table cannot show an action that would be a lie.
+fn extension_table(rows: &[&InstallView], local: bool, data: &UiData, token: &str) -> String {
+    let platforms = rows
+        .iter()
+        .flat_map(|view| view.platforms.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut out = String::from(
+        "<div class=scroll><table>\n<thead><tr><th>browser · profile</th><th>last report</th>\
+         <th>status</th>",
+    );
+    if local {
+        out.push_str("<th>open</th>");
+    }
+    for platform in &platforms {
+        out.push_str(&format!("<th class=n>{}</th>", esc(platform)));
+    }
+    out.push_str("</tr></thead>\n<tbody>\n");
+    let mut unmatched = 0usize;
+    for view in rows {
+        out.push_str(&format!(
+            "<tr class=\"install {}\"><td>{}</td><td>{}</td><td><span class=\"dot {}\"></span>{}</td>",
+            view.attention.dot(),
+            view.label(),
+            esc(&fmt_report_age(data.now_unix, view.reported_unix)),
+            view.attention.dot(),
+            view.attention.word(),
+        ));
+        if local {
+            match view
+                .install_id
+                .filter(|id| data.extension_open_targets.contains_key(*id))
+            {
+                Some(id) => out.push_str(&format!(
+                    "<td><a href=\"/open-extension?install={}&amp;token={}\">Open in {} · {}</a></td>",
+                    super::percent_encode(id),
+                    super::percent_encode(token),
+                    esc(view.browser.unwrap_or(BROWSER_UNKNOWN)),
+                    esc(view.profile.unwrap_or(PROFILE_UNNAMED)),
+                )),
+                None => {
+                    unmatched += 1;
+                    out.push_str("<td><span class=muted>no match</span></td>");
+                }
+            }
+        }
+        for platform in &platforms {
+            out.push_str(&view.cell(platform));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</tbody></table></div>\n");
+    if local && unmatched > 0 {
+        out.push_str(&format!(
+            "<p class=sub>An exact browser profile match is unavailable for {unmatched} of \
+             these {} installs, so {} no open action; open {} from the named browser \
+             profile.</p>\n",
+            rows.len(),
+            if unmatched == 1 {
+                "that row has"
+            } else {
+                "those rows have"
+            },
+            if unmatched == 1 { "it" } else { "them" },
+        ));
+    }
+    out
+}
+
+/// The rest of it, collapsed: the absolute instant behind the relative one, the
+/// extension version the install reported, and why a paused platform is paused.
+///
+/// A list rather than a second table, because a details block that repeats the
+/// table above it is the length this page exists to lose. The pause reasons live
+/// here and not in the cell: the cell has room for the word, the reason is what
+/// a reader opens the block for.
+fn extension_details(rows: &[&InstallView], now_unix: i64) -> String {
+    let mut out = format!(
+        "<details><summary>Details for these {} install{}</summary>\n<ul>\n",
+        rows.len(),
+        plural(rows.len())
+    );
+    for view in rows {
+        out.push_str(&format!("<li><b>{}</b> — last report ", view.label()));
+        match view.reported_unix {
+            Some(unix) => out.push_str(&format!(
+                "{} ({})",
+                esc(&fmt_unix(unix)),
+                esc(&fmt_report_age(now_unix, view.reported_unix))
+            )),
+            None => out.push_str("Unknown"),
+        }
+        match view.extension_version {
+            Some(version) => out.push_str(&format!(" · extension {}", esc(version))),
+            None => out.push_str(" · extension version not recorded"),
+        }
+        for (platform, cell) in &view.platforms {
+            if let Some(reason) = &cell.paused {
+                out.push_str(&format!(" · {} paused ({})", esc(platform), esc(reason)));
+            } else if cell.pause_unknown {
+                out.push_str(&format!(" · {} pause state unknown", esc(platform)));
+            }
+        }
+        out.push_str("</li>\n");
+    }
+    out.push_str("</ul></details>\n");
+    out
+}
+
+/// A report's age, finer than [`fmt_age`]: that one rounds anything under an
+/// hour to `0h ago`, and on a status table a literal zero in the "last report"
+/// column reads as "no reports", which is the one reading this page may not
+/// produce. Minutes are a measurement; the zero was not.
+fn fmt_report_age(now_unix: i64, reported_unix: Option<i64>) -> String {
+    let Some(reported_unix) = reported_unix else {
+        return "Unknown".to_string();
+    };
+    if reported_unix > now_unix {
+        // Machines' clocks disagree, and a report stamped ahead of this
+        // machine's clock is not an age at all. Clamping it to zero would be
+        // the same fabricated measurement as above.
+        return "in the future".to_string();
+    }
+    let secs = now_unix - reported_unix;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        fmt_age(secs)
+    }
 }
 
 pub(super) fn count_by_machine<'a>(rows: &[&'a UiSession], machine: &str) -> (usize, u64) {
