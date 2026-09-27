@@ -1116,11 +1116,15 @@ export function readClaudeOrgReply(reply: unknown, tabId: number): OrgResolution
   const rateLimitStatus = reply.rateLimitStatus === 403 || reply.rateLimitStatus === 429
     ? reply.rateLimitStatus
     : undefined;
+  const retryAfter = typeof reply.retryAfter === 'string' && reply.retryAfter.length <= 64
+    ? reply.retryAfter
+    : undefined;
   return {
     ok: false,
     halt,
     detail: typeof reply.detail === 'string' ? reply.detail : '',
     ...(rateLimitStatus ? { rateLimitStatus } : {}),
+    ...(retryAfter ? { retryAfter } : {}),
   };
 }
 
