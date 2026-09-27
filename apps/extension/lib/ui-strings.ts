@@ -28,10 +28,31 @@ import type { NackKind } from './native-host';
 export const STAGE_PLACEHOLDER = '<path-to-your-stage-dir>';
 
 /**
- * The one command that fixes both "host not installed" and "host has no stage".
- * §6.3 lists `config` with the instruction that its `detail` names the fix.
+ * 🔴 EXT-12 · The one-line installer. Built here as a JS constant, NOT through
+ * the catalog, because the catalog reserves the exact sequence ` | ` (space-pipe-
+ * space, `en.yml` header) for plural forms — so `…install.sh | sh` must never
+ * pass through a translated string or it would be parsed as one. It is fixed
+ * text + a fixed host, not something that localises.
  */
-export function fixCommand(stage: string | null | undefined): string {
+export const INSTALLER_URL = 'https://chatstasher.com/install.sh';
+export const INSTALLER_COMMAND = `curl -fsSL ${INSTALLER_URL} | sh`;
+
+/**
+ * The command that fixes "host not installed" / "host has no stage" (§6.3 lists
+ * `config` with the instruction that its `detail` names the fix).
+ *
+ * 🔴 EXT-12 · It may only be the `chat-stasher install-native-host --stage …`
+ * command when the CLI is **known to exist** on this machine — and the only
+ * evidence the extension can have of that is a `hello` having succeeded once
+ * (the CLI is what installs the native host). That evidence is carried by
+ * `HostStatusRecord.lastKnownStage`, which survives failures. So:
+ *  · `cliKnown` true ⇒ the CLI exists ⇒ `chat-stasher install-native-host --stage …`;
+ *  · `cliKnown` false (never connected) ⇒ never a `chat-stasher …` command —
+ *    the one-line installer is shown instead, so the very first step does not
+ *    assume a CLI the user may not have (topology principle 8).
+ */
+export function fixCommand(stage: string | null | undefined, cliKnown: boolean): string {
+  if (!cliKnown) return INSTALLER_COMMAND;
   return `chat-stasher install-native-host --stage ${stage && stage.length > 0 ? stage : STAGE_PLACEHOLDER}`;
 }
 
@@ -91,12 +112,17 @@ export function channelDisconnected(f: ChannelFacts): string {
     ? `${f.reason} (${f.kind})`
     : (f.reason ?? t('channel.reason.unknown'));
   const stage = f.lastKnownStage ?? null;
+  // 🔴 EXT-12 · A stage ever learned ⇔ the CLI is known to exist on this machine
+  //   (it installed the host). With none, the fix is the one-line installer, not
+  //   a `chat-stasher …` command — that would assume a CLI nothing has ever shown
+  //   to exist here (topology principle 8).
+  const cliKnown = stage !== null;
   return t('channel.disconnected.head', { why, at: stamp(f.at) })
     + (f.detail && f.detail.length > 0 ? t('channel.disconnected.detail', { detail: f.detail }) : '')
     + (stage
       ? t('channel.disconnected.stageKnown', { stage })
       : t('channel.disconnected.stageNever'))
-    + t('channel.disconnected.fix', { command: fixCommand(stage) });
+    + t('channel.disconnected.fix', { command: fixCommand(stage, cliKnown) });
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +180,75 @@ export function outboxLine(f: OutboxFacts): string {
 
 export function outboxUnreadable(): string {
   return t('outbox.unreadable');
+}
+
+// ---------------------------------------------------------------------------
+// EXT-12 · Extension-only state (no CLI / host known on this machine)
+// ---------------------------------------------------------------------------
+
+/** The persistent "this browser holds captures that are not a backup yet" title. */
+export function onlyInBrowserTitle(): string {
+  return t('extensionOnly.title');
+}
+
+/** The one-line installer, for the first-run card and its copy button. */
+export function installerCommand(): string {
+  return INSTALLER_COMMAND;
+}
+
+export function firstRunTitle(): string {
+  return t('firstRun.title');
+}
+
+export function firstRunBody(): string {
+  return t('firstRun.body');
+}
+
+export function firstRunWhyHelper(): string {
+  return t('firstRun.whyHelper');
+}
+
+export function firstRunWhatNow(): string {
+  return t('firstRun.whatNow');
+}
+
+export function firstRunInstallLabel(): string {
+  return t('firstRun.installLabel');
+}
+
+export function copyLabel(): string {
+  return t('common.copy');
+}
+
+export function copiedLabel(): string {
+  return t('common.copied');
+}
+
+export function exportNowLabel(): string {
+  return t('extensionOnly.exportNow');
+}
+
+/** 🔴 EXT-12 · Why the persistent notice is here: never-connected vs broken are two sentences. */
+export function onlyInBrowserReason(neverConnected: boolean): string {
+  return neverConnected ? t('extensionOnly.neverConnected') : t('extensionOnly.hostBroken');
+}
+
+/** The outbox usage-bar caption. The width is a render-side proportion, never a sentence here. */
+export function outboxBarLine(bytes: number, capacityBytes: number): string {
+  return t('outboxBar.line', { bytes: formatBytes(bytes), capacity: formatBytes(capacityBytes) });
+}
+
+export function outboxBarNearFull(): string {
+  return t('outboxBar.nearFull');
+}
+
+/** 🔴 EXT-12 · The red full notice. "Refuse new, never drop what is queued" is argued in outbox.ts §10. */
+export function outboxBarFull(): string {
+  return t('outboxBar.full');
+}
+
+export function deliveredNote(count: number): string {
+  return t('extensionOnly.delivered', { count });
 }
 
 // ---------------------------------------------------------------------------

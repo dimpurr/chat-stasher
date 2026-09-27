@@ -44,6 +44,32 @@
         display: block; margin: 8px 0; padding: 6px 12px;
         font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
       }
+      /* 🔴 EXT-12 · extension-only (no CLI / host known on this machine) surface. */
+      #delivered { margin: 4px 0; font-size: 12px; opacity: .9; white-space: pre-wrap;
+                   border-left: 3px solid #2f7d4f; padding-left: 8px; }
+      .notice-warn { margin: 8px 0; padding: 8px 10px;
+                     border-left: 3px solid #b7791f; background: rgba(183,121,31,.12); }
+      .notice-title { font-weight: 600; font-size: 12px; }
+      .notice-body { font-size: 12px; opacity: .92; margin-top: 2px; white-space: pre-wrap; }
+      #first-run { margin: 8px 0; padding: 8px 10px;
+                   border: 1px solid rgba(128,128,128,.4); border-radius: 6px; }
+      #first-run .card-title { font-weight: 600; font-size: 12px; }
+      #first-run p { font-size: 12px; margin: 4px 0; opacity: .92; white-space: pre-wrap; }
+      #first-run .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }
+      #first-run code { font-size: 11px; background: rgba(128,128,128,.12);
+                        padding: 2px 4px; border-radius: 4px; word-break: break-all; }
+      #copy-installer { font: inherit; font-size: 11px; padding: 3px 8px; cursor: pointer; }
+      #first-run-export { display: block; margin-top: 8px; padding: 6px 12px;
+                          font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+      #outbox-bar { margin: 8px 0; }
+      #outbox-bar-caption { font-size: 12px; }
+      .ob-track { height: 6px; border-radius: 3px; background: rgba(128,128,128,.25);
+                  overflow: hidden; margin: 3px 0; }
+      #outbox-bar-fill { display: block; height: 100%; background: #1d4ed8; width: 0; }
+      #outbox-bar-fill.near { background: #b7791f; }
+      #outbox-bar-fill.full { background: #c0392b; }
+      #outbox-bar-state { font-size: 12px; opacity: .92; white-space: pre-wrap; }
+      #outbox-bar-state.red { color: #c0392b; font-weight: 600; }
       #running { margin: 6px 0; }
       /* C32: this line now says several things in sequence (what is missing /
          what you have to do / why), and without preserving line breaks the three
@@ -168,10 +194,40 @@
     </div>
     <div id="status"></div>
     <div id="channel"></div>
+    <!-- 🔴 EXT-12 · "delivered N when the host connected". Quiet: it is a fact, not an alert.
+         Styled by id (`#delivered`); it carries no class, because a class no rule
+         defines is a claim about styling that nothing backs. -->
+    <div id="delivered" hidden></div>
+    <!-- 🔴 EXT-12 · The onboarding card for the never-connected / extension-only
+         state: what this is, why a local helper, the one-line installer, and the
+         export escape hatch. Hidden once the host has ever connected. -->
+    <div id="first-run" hidden>
+      <div id="first-run-title" class="card-title"></div>
+      <p id="first-run-body"></p>
+      <p id="first-run-why"></p>
+      <p id="first-run-whatnow"></p>
+      <div class="row">
+        <span id="first-run-install-label"></span>
+        <code id="first-run-command"></code>
+        <button type="button" id="copy-installer"></button>
+      </div>
+      <button type="button" id="first-run-export"></button>
+    </div>
+    <!-- 🔴 EXT-12 · The persistent "Only in this browser — not a backup yet" notice. -->
+    <div id="only-in-browser" class="notice-warn" hidden>
+      <div id="only-in-browser-title" class="notice-title"></div>
+      <div id="only-in-browser-reason" class="notice-body"></div>
+    </div>
     <!-- W2: backfill paused (host unreachable). The whole block is hidden when it is not paused. -->
     <div id="pause" hidden></div>
     <!-- W2: the outbox as it stands. Hidden when empty and not full. -->
     <div id="outbox" hidden></div>
+    <!-- 🔴 EXT-12 · The outbox usage bar. Shown while there is anything staged. -->
+    <div id="outbox-bar" hidden>
+      <div id="outbox-bar-caption"></div>
+      <div class="ob-track" role="img" id="outbox-bar-track"><i id="outbox-bar-fill"></i></div>
+      <div id="outbox-bar-state"></div>
+    </div>
     <!-- W2: the most recent export (always shown; it is a fact in itself). -->
     <div id="last-export"></div>
     <!-- W2: "export undelivered captures". Blob + <a download>, no downloads permission. -->

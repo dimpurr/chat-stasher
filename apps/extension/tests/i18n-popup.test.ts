@@ -49,7 +49,7 @@ function model(): PopupModel {
     },
     outbox: {
       pending: 3, rejected: 1, bytes: 1024 * 1024, capacityBytes: 256 * 1024 * 1024,
-      full: false,
+      full: false, nearFull: false,
       rejectedKinds: [{ kind: 'config', count: 1 }],
       rejectedSamples: [{ kind: 'config', detail: 'nack:config' }],
     },

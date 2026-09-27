@@ -53,12 +53,49 @@ export const OUTBOX_META_BYTES_KEY = 'bytes';
  */
 export const OUTBOX_CAPACITY_BYTES = 256 * 1024 * 1024;
 
+/**
+ * 🔴 EXT-12 · The near-full threshold. When the outbox (the live-capture spool)
+ * reaches this fraction of capacity it has, in effect, stopped draining: a
+ * healthy host would be taking items off as fast as they land. Backfill is the
+ * non-urgent producer (it can wait — it is history, not the conversation the
+ * user is looking at), so the backfill leg pauses above this line until the
+ * outbox drains again. One named constant, not a magic 0.8 at each call site.
+ */
+export const OUTBOX_NEAR_FULL_FRACTION = 0.8;
+
 /** Backoff for a retryable failure: 1 minute, doubling, capped at 1 hour. */
 export const RETRY_BASE_MS = 60_000;
 export const RETRY_MAX_MS = 3_600_000;
 
 /** Where the last export happened. Written by the popup, read by the popup. */
 export const LAST_EXPORT_KEY = 'cs_outbox_last_export_v1';
+
+/**
+ * 🔴 EXT-12 · The "the host connected and the backlog drained" record. Background
+ * writes the first drain that delivered >= 1 item on a host that was previously
+ * not connected; the popup reads it to say "delivered N". `at` lets the popup
+ * (or a future rendering) refuse to show a stale delivery as a fresh one.
+ */
+export const CONNECT_DELIVERY_KEY = 'cs_outbox_connect_delivery_v1';
+
+export interface ConnectDelivery {
+  at: number;
+  count: number;
+}
+
+export async function loadConnectDelivery(store: BackfillStore | null): Promise<ConnectDelivery | null> {
+  if (!store) return null;
+  const raw = await store.load(CONNECT_DELIVERY_KEY);
+  if (!raw || typeof raw !== 'object') return null;
+  const rec = raw as Partial<ConnectDelivery>;
+  if (typeof rec.at !== 'number' || typeof rec.count !== 'number') return null;
+  return { at: rec.at, count: rec.count };
+}
+
+export async function recordConnectDelivery(store: BackfillStore | null, rec: ConnectDelivery): Promise<void> {
+  if (!store) return;
+  await store.save(CONNECT_DELIVERY_KEY, rec);
+}
 
 export type EntryState = 'pending' | 'rejected';
 
@@ -95,6 +132,13 @@ export interface OutboxSummary {
   capacityBytes: number;
   /** True when nothing more can be accepted. Drives the alert badge. */
   full: boolean;
+  /**
+   * 🔴 EXT-12 · True at or above `OUTBOX_NEAR_FULL_FRACTION` of capacity. The
+   * signal the backfill gate reads to pause the non-urgent producer; `full`
+   * keeps its own meaning (nothing more can be accepted) and the two do not
+   * replace each other — near-full is the warning, full is the refusal.
+   */
+  nearFull: boolean;
 }
 
 export interface OutboxOptions {
@@ -281,6 +325,7 @@ export async function summary(options: OutboxOptions = {}): Promise<OutboxSummar
     bytes,
     capacityBytes,
     full: bytes >= capacityBytes,
+    nearFull: bytes >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION,
   };
 }
 
@@ -364,6 +409,7 @@ export async function enqueue(
         bytes: used,
         capacityBytes,
         full: true,
+        nearFull: used >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION,
       },
     };
   }

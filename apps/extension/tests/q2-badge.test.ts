@@ -63,12 +63,12 @@ async function enqueueOne(payload = '{"a":1}', name = 'chatgpt-a.json') {
 describe('Q2 · badgeFor (a pure function)', () => {
   it('an empty outbox ⇒ no badge (not 0, and not grey)', async () => {
     const { badgeFor } = await badgeModule();
-    expect(badgeFor({ pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false })).toBeNull();
+    expect(badgeFor({ pending: 0, rejected: 0, bytes: 0, capacityBytes: 100, full: false, nearFull: false })).toBeNull();
   });
 
   it('N waiting ⇒ the number N plus a waiting-coloured title', async () => {
     const { badgeFor, BADGE_COLOR_WAITING } = await badgeModule();
-    const plan = badgeFor({ pending: 3, rejected: 0, bytes: 10, capacityBytes: 100, full: false })!;
+    const plan = badgeFor({ pending: 3, rejected: 0, bytes: 10, capacityBytes: 100, full: false, nearFull: false })!;
     expect(plan.text).toBe('3');
     expect(plan.color).toBe(BADGE_COLOR_WAITING);
     expect(plan.title).toContain('3 capture(s) waiting');
@@ -77,7 +77,7 @@ describe('Q2 · badgeFor (a pure function)', () => {
 
   it('🔴 something rejected ⇒ the alert state outranks the number (a number reads as "making progress")', async () => {
     const { badgeFor, BADGE_ALERT_TEXT, BADGE_COLOR_ALERT } = await badgeModule();
-    const plan = badgeFor({ pending: 5, rejected: 2, bytes: 10, capacityBytes: 100, full: false })!;
+    const plan = badgeFor({ pending: 5, rejected: 2, bytes: 10, capacityBytes: 100, full: false, nearFull: false })!;
     expect(plan.text).toBe(BADGE_ALERT_TEXT);
     expect(plan.text).not.toBe('5');
     expect(plan.color).toBe(BADGE_COLOR_ALERT);
@@ -87,7 +87,7 @@ describe('Q2 · badgeFor (a pure function)', () => {
 
   it('🔴 the outbox is full ⇒ the alert state (even with 0 waiting: new captures are being refused)', async () => {
     const { badgeFor, BADGE_ALERT_TEXT } = await badgeModule();
-    const plan = badgeFor({ pending: 0, rejected: 0, bytes: 100, capacityBytes: 100, full: true })!;
+    const plan = badgeFor({ pending: 0, rejected: 0, bytes: 100, capacityBytes: 100, full: true, nearFull: true })!;
     expect(plan.text).toBe(BADGE_ALERT_TEXT);
     expect(plan.title).toContain('full');
   });

@@ -41,7 +41,9 @@ import {
   drainOutbox,
   enqueue,
   getEntry,
+  loadConnectDelivery,
   outboxApiPresent,
+  recordConnectDelivery,
   summary as outboxSummary,
   type EnqueueResult,
 } from '../lib/outbox';
@@ -668,11 +670,54 @@ export async function deliverBackfillItem(captured: CapturedFetch): Promise<{
  * the only way it is still visible the next time the popup opens.
  */
 export async function hostStatusForPopup(): Promise<HostStatusRecord | null> {
+  let status: HostStatusRecord | null;
   try {
-    return await checkHost(browserLocalStore(), { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
+    status = await checkHost(browserLocalStore(), { timeoutMs: HELLO_PROBE_TIMEOUT_MS });
   } catch (err) {
     console.warn('[chat-stasher] host check failed', (err as Error).message);
-    return await loadHostStatus(browserLocalStore());
+    status = await loadHostStatus(browserLocalStore());
+  }
+  // 🔴 EXT-12 · A `hello` that succeeds means the host (and therefore the CLI that
+  //    installs it) is present now. If there is a backlog waiting, deliver it at
+  //    once instead of waiting for the 5-minute outbox alarm, and record the
+  //    connected drain so the popup can say "delivered N".
+  if (status?.ok) {
+    void hostConnectedDrain(browserLocalStore());
+  }
+  return status;
+}
+
+/**
+ * 🔴 EXT-12 · "The host first connects → drain automatically → show 'delivered N'".
+ *
+ * Runs whenever a `hello` succeeds and the outbox holds pending work. It sends
+ * the backlog immediately (not on the next alarm), and records the first such
+ * drain's delivered count (`CONNECT_DELIVERY_KEY`) once — the popup reads that
+ * record for the delivered line. A subsequent popup-open drain with nothing
+ * pending writes nothing.
+ */
+export async function hostConnectedDrain(store: BackfillStore | null): Promise<void> {
+  if (!outboxApiPresent()) return;
+  try {
+    const s = await outboxSummary();
+    if (s === null || s.pending === 0) return;
+  } catch (err) {
+    console.warn('[chat-stasher] host-connect drain summary failed', (err as Error).message);
+    return;
+  }
+  const report = await drainSafely();
+  markOutboxDrain(report);
+  await refreshBadgeSafely();
+  await syncOutboxAlarmSafely();
+  if (report.delivered > 0) {
+    try {
+      const existing = await loadConnectDelivery(store);
+      if (!existing) {
+        await recordConnectDelivery(store, { at: Date.now(), count: report.delivered });
+      }
+    } catch (err) {
+      console.warn('[chat-stasher] host-connect delivery record failed', (err as Error).message);
+    }
   }
 }
 

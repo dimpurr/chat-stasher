@@ -65,6 +65,7 @@ import {
   buildExportFile,
   exportNonce,
   listEntries,
+  loadConnectDelivery,
   loadLastExport,
   recordExport,
   undeliveredEntries,
@@ -74,7 +75,7 @@ import { loadHostPause, loadHostStatus } from '../../lib/host-status';
 import { hookStatusOf, loadHookDecline } from '../../lib/hook-status';
 import { liveCaptureOf } from '../../lib/live-capture';
 import { currentReleaseChannel, isPlatformActiveInChannel } from '../../lib/contract';
-import { exportNoHistory, exportNoUniqueName, exportNothingQueued, exportUnreadable } from '../../lib/ui-strings';
+import { copiedLabel, exportNoHistory, exportNoUniqueName, exportNothingQueued, exportUnreadable, installerCommand } from '../../lib/ui-strings';
 import { initUiLocale, normalizeUiLocale, setUiLocale, t, type UiLocale } from '../../lib/i18n';
 import { attachInstallIdentityToConsole } from '../../lib/install-identity';
 
@@ -182,6 +183,11 @@ async function collect(): Promise<PopupModel> {
     hasStore: store !== null,
     isEnabled: () => enabled,
     isHostPaused: async () => hostPause !== null,
+    // 🔴 EXT-12 · The near-full outbox pauses backfill. The outbox is read above;
+    // an unreadable one is not near-full (we cannot say it is) — same rule the
+    // extension-only render follows for the same field.
+    isOutboxNearFull: async () =>
+      outbox !== null && outbox !== undefined && outbox.nearFull,
     hasHttp: runtime.transportWired,
     hasTargets: targets.length > 0,
   });
@@ -234,6 +240,8 @@ async function collect(): Promise<PopupModel> {
     outbox,
     hostPause,
     lastExport,
+    // 🔴 EXT-12 · The backlog-drained-on-connect record, for the "delivered N" notice.
+    delivered: await loadConnectDelivery(store),
   };
 }
 
@@ -493,6 +501,79 @@ function paint(view: PopupView): void {
       notes.appendChild(p);
     }
   }
+  paintExtensionOnly(view);
+}
+
+/**
+ * 🔴 EXT-12 · Paint the extension-only surface: the "delivered N" line, the
+ * persistent "Only in this browser — not a backup yet" notice, the onboarding
+ * first-run card with the one-line installer, and the outbox usage bar. Each
+ * element is hidden exactly when its view field is absent; nothing here invents
+ * a sentence the render layer did not already decide.
+ */
+function paintExtensionOnly(view: PopupView): void {
+  // Delivered on connect.
+  const delivered = document.getElementById('delivered');
+  if (delivered) {
+    delivered.textContent = view.delivered ?? '';
+    delivered.hidden = view.delivered === null;
+  }
+  // Persistent "only in this browser".
+  const notice = document.getElementById('only-in-browser');
+  if (notice) {
+    const title = document.getElementById('only-in-browser-title');
+    const reason = document.getElementById('only-in-browser-reason');
+    if (title) title.textContent = view.onlyInBrowser?.title ?? '';
+    if (reason) reason.textContent = view.onlyInBrowser?.reason ?? '';
+    notice.hidden = view.onlyInBrowser === null;
+  }
+  // First-run card.
+  const card = document.getElementById('first-run');
+  if (card) {
+    const set = (id: string, value: string) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    };
+    if (view.firstRun) {
+      set('first-run-title', view.firstRun.title);
+      set('first-run-body', view.firstRun.body);
+      set('first-run-why', view.firstRun.whyHelper);
+      set('first-run-whatnow', view.firstRun.whatNow);
+      set('first-run-install-label', view.firstRun.installLabel);
+      set('first-run-command', view.firstRun.command);
+      const copy = document.getElementById('copy-installer') as HTMLButtonElement | null;
+      if (copy) copy.textContent = view.firstRun.copy;
+      const ex = document.getElementById('first-run-export') as HTMLButtonElement | null;
+      if (ex) ex.textContent = view.firstRun.exportNow;
+    }
+    card.hidden = view.firstRun === null;
+  }
+  // Outbox usage bar.
+  paintOutboxBar(view.outboxBar);
+}
+
+/** 🔴 EXT-12 · The usage bar and its state line. The fill width is the pct the render layer computed. */
+function paintOutboxBar(bar: PopupView['outboxBar']): void {
+  const root = document.getElementById('outbox-bar');
+  if (!root) return;
+  if (!bar) {
+    root.hidden = true;
+    return;
+  }
+  const caption = document.getElementById('outbox-bar-caption');
+  if (caption) caption.textContent = bar.caption;
+  const fill = document.getElementById('outbox-bar-fill');
+  if (fill) {
+    fill.style.width = `${bar.pct}%`;
+    fill.classList.toggle('near', bar.nearFull);
+    fill.classList.toggle('full', bar.full);
+  }
+  const state = document.getElementById('outbox-bar-state');
+  if (state) {
+    state.textContent = bar.stateLine ?? '';
+    state.classList.toggle('red', bar.full);
+  }
+  root.hidden = false;
 }
 
 /**
@@ -768,6 +849,49 @@ document.getElementById('export-file')?.addEventListener('click', () => {
 document.getElementById('clear-failures')?.addEventListener('click', () => {
   void onClearFailures().catch((err) => {
     console.warn('[chat-stasher] popup clear-failures failed', (err as Error).message);
+    void refresh();
+  });
+});
+
+/**
+ * 🔴 EXT-12 · "Copy the one-line installer". The user click is the gesture, so
+ * `navigator.clipboard` is callable here. A context without a clipboard API
+ * falls back to a temporary textarea; if even that cannot write, the button
+ * simply does not claim it copied — nothing is invented.
+ */
+document.getElementById('copy-installer')?.addEventListener('click', async () => {
+  const button = document.getElementById('copy-installer') as HTMLButtonElement | null;
+  const command = installerCommand();
+  let ok = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(command);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = command;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch {
+      ok = false;
+    }
+  }
+  if (button) button.textContent = ok ? copiedLabel() : button.textContent;
+});
+
+/** 🔴 EXT-12 · The first-run card's "Export now" is the same exporter as the main button. */
+document.getElementById('first-run-export')?.addEventListener('click', () => {
+  void onExportUndelivered().catch((err) => {
+    console.warn('[chat-stasher] popup export failed', (err as Error).message);
     void refresh();
   });
 });

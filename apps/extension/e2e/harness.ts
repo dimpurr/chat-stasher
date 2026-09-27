@@ -549,6 +549,64 @@ export async function writeStorage(
 }
 
 /**
+ * Runs **inside the service worker**. Self-contained for the same reason
+ * `READ_OUTBOX` is: Playwright serialises the function source.
+ *
+ * 🔴 It creates the object stores on `onupgradeneeded` rather than opening the
+ *    database bare. `READ_OUTBOX` warns about the opposite hazard — a reader that
+ *    opens a database into existence and leaves it at version 1 with no stores,
+ *    after which the product's own upgrade never runs and the outbox is broken
+ *    for good. A *writer* has to open it read-write, so it must create exactly the
+ *    stores the product would, or it would be that hazard itself. The names and
+ *    the keyPath are the product's (`lib/outbox.ts`: `entries` keyed by `sha256`).
+ */
+const WRITE_OUTBOX = async (rows: unknown[]): Promise<void> => {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const open = indexedDB.open('chat-stasher-outbox', 1);
+    open.onupgradeneeded = () => {
+      const database = open.result;
+      if (!database.objectStoreNames.contains('entries')) {
+        database.createObjectStore('entries', { keyPath: 'sha256' });
+      }
+      if (!database.objectStoreNames.contains('meta')) {
+        database.createObjectStore('meta');
+      }
+    };
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(new Error('outbox seed: open failed'));
+    open.onblocked = () => reject(new Error('outbox seed: open blocked'));
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('entries', 'readwrite');
+      const store = tx.objectStore('entries');
+      for (const row of rows) store.put(row);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(new Error('outbox seed: write failed'));
+      tx.onabort = () => reject(new Error('outbox seed: write aborted'));
+    });
+  } finally {
+    db.close();
+  }
+};
+
+/**
+ * Seed the outbox with entries, so a spec can put the spool into a state it would
+ * otherwise take a real capture (and a real platform page) to reach.
+ *
+ * 🔴 `bytes` on each entry is the product's own byte accounting and the only thing
+ *    `summary()` reads (lib/outbox.ts:321 sums the rows' `bytes`), so a spec that
+ *    wants "a spool that is 82% full" seeds that number rather than megabytes of
+ *    payload. The payload only has to be well-formed enough for the code under
+ *    test; nothing here is delivered, because no host is installed.
+ */
+export async function seedOutbox(extension: Extension, rows: OutboxEntry[]): Promise<void> {
+  const worker = extension.context.serviceWorkers()[0];
+  if (!worker) throw new Error('outbox seed: no service worker is running, so nothing was seeded');
+  await worker.evaluate(WRITE_OUTBOX, rows as unknown[]);
+}
+
+/**
  * Poll the outbox until `settled` accepts what it sees, and return that reading.
  *
  * Returning the last reading rather than throwing on timeout is deliberate: the

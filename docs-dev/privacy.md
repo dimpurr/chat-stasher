@@ -129,7 +129,7 @@ the sentence.
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:35-38`,
-   `:318-386`). It does this *before* attempting any delivery, so a service
+   `:363-432`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
    (`apps/extension/entrypoints/background.ts:340-357`).
@@ -288,7 +288,7 @@ your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
 (`crates/chat-stasher/src/inbox.rs:823-833`, `:903-961`;
 `crates/chat-stasher/src/nativehost.rs:1203-1207`;
-`apps/extension/lib/outbox.ts:405-450`). The label is a name you typed, and it
+`apps/extension/lib/outbox.ts:451-496`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
 it nowhere but to your own host.
@@ -336,7 +336,7 @@ button: that writes one
 the name carries the producing install's short id and a per-export nonce, so
 two browser profiles exporting in the same second cannot overwrite each
 other's file), one undelivered bundle per line, into your browser's download
-directory (`apps/extension/lib/outbox.ts:487-568`). That file is an ordinary
+directory (`apps/extension/lib/outbox.ts:533-614`). That file is an ordinary
 download, so your browser keeps a download-history entry for it — just its name
 and timestamp, not its content. We do not delete it; `ingest` retires it to
 `consumed/` when it has consumed every line
@@ -510,7 +510,7 @@ The parties who *do* see something, stated plainly:
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:698`, `:559-576`; `apps/extension/lib/gemini-capture.ts:150-234` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271-345`; see `docs-dev/threat-model.md` |
-| **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:535-568` |
+| **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:581-614` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
 
@@ -734,7 +734,7 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:388-403`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** One outbox per install: it holds only what that profile's copy captured, and no other install can read or drain it. | Uninstall the extension **in that profile**, or clear its site data in your browser; there is no per-record delete button. Either one deletes that install's queue and leaves every other profile's alone. |
+| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:434-449`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** One outbox per install: it holds only what that profile's copy captured, and no other install can read or drain it. | Uninstall the extension **in that profile**, or clear its site data in your browser; there is no per-record delete button. Either one deletes that install's queue and leaves every other profile's alone. |
 | An export file you triggered | Until `ingest` consumes it, which moves it to `<inbox>/consumed/` once every line was sealed or found to be a duplicate (`crates/chat-stasher/src/inbox.rs:57-60`). | Delete it from your download directory with your file manager. |
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
@@ -768,7 +768,7 @@ all, so here are the ones that bear on your privacy. The full list is in
 
 **1. The plaintext window before delivery.** The extension writes each captured
 session as an ordinary, unencrypted record into its outbox database, inside your
-browser profile (`apps/extension/lib/outbox.ts:65-81`, `:318-386`). That record
+browser profile (`apps/extension/lib/outbox.ts:102-118`, `:363-432`). That record
 contains the conversation itself. It sits there, readable by anything running as
 your user, until the host acknowledges it — and a record the host refused stays
 until you uninstall. **We do not encrypt it, we do not restrict its permissions,

@@ -268,12 +268,47 @@ describe('W30 · the summary line states only what the host counted', () => {
     expect(view.notes.join('\n')).not.toContain('unknown');
   });
 
-  it('says the host is missing rather than showing an empty stage', () => {
+  // 🔴 EXT-12 · The wording of this state now depends on whether anything has ever
+  //    proved a CLI exists on this machine, so the model has to say which state it
+  //    means instead of leaving `nativeHost` off. A model with no host record is
+  //    "never connected", which is the *other* sentence — leaving it implicit here
+  //    would have made this test assert the wrong half by accident.
+  it('says the host is missing rather than showing an empty stage (a host that has answered before)', () => {
     const line = summaryLine(
-      model({ summary: { kind: 'failed', reason: 'send-failed', detail: 'not found', olderHost: false } }),
+      model({
+        nativeHost: { at: NOW, ok: false, reason: 'send-failed', lastKnownStage: '/Users/me/stage' },
+        summary: { kind: 'failed', reason: 'send-failed', detail: 'not found', olderHost: false },
+      }),
     );
     expect(line).toContain('no answer from the chat-stasher host');
     expect(line).not.toContain('0');
+  });
+
+  it('🔴 nothing has ever answered here ⇒ the same state, worded without a `chat-stasher …` command', () => {
+    const line = summaryLine(
+      model({
+        // Never connected: no `hello` has ever succeeded on this machine.
+        nativeHost: { at: NOW, ok: false, reason: 'send-failed', detail: 'not found' },
+        summary: { kind: 'failed', reason: 'send-failed', detail: 'not found', olderHost: false },
+      }),
+    );
+    console.log('[W30] host missing, never connected:', line);
+    expect(line).toContain('none has ever answered on this machine');
+    expect(line).toContain('one-line installer in this popup');
+    // The first step may not assume a CLI nothing has shown to exist.
+    expect(line).not.toContain('install-native-host');
+    expect(line).not.toContain('0');
+  });
+
+  it('🔴 the dashboard reason follows the same split as the summary line', () => {
+    const failed = { kind: 'failed', reason: 'send-failed', detail: 'not found', olderHost: false } as const;
+    const known = dashboardButton(
+      model({ nativeHost: { at: NOW, ok: false, reason: 'send-failed', lastKnownStage: '/Users/me/stage' }, summary: failed }),
+    );
+    const never = dashboardButton(model({ nativeHost: { at: NOW, ok: false, reason: 'send-failed' }, summary: failed }));
+    expect(known.reason).toContain('chat-stasher install-native-host');
+    expect(never.reason).toContain('one-line installer in this popup');
+    expect(never.reason).not.toContain('install-native-host');
   });
 
   it('says the installed host is older than this extension', () => {

@@ -95,6 +95,14 @@ export type TickReason =
    */
   | 'host-paused'
   /**
+   * 🔴 EXT-12 · The outbox (the live-capture spool) is at or above 80% of its
+   * 256 MiB cap, so the non-urgent backfill producer pauses until it drains. It
+   * is the same family as 'host-paused' (a congested delivery exit) but a
+   * *different* reason and must read as one: the host may be perfectly reachable
+   * here — the spool is simply not being taken down fast enough.
+   */
+  | 'outbox-near-full'
+  /**
    * 🔴 C30 · There are no backfill targets at all ⇒ we do not even know "where to
    * start from".
    * This is **not** a port problem: the channel may be perfectly connected (a
@@ -163,7 +171,7 @@ export interface TickResult {
  */
 export type TickBlockReason = Extract<
   TickReason,
-  'no-store' | 'disabled' | 'host-paused' | 'no-targets' | 'no-http-port'
+  'no-store' | 'disabled' | 'host-paused' | 'outbox-near-full' | 'no-targets' | 'no-http-port'
 >;
 
 /**
@@ -190,6 +198,15 @@ export async function tickBlockReason(gate: {
    * ask whether to send a request.
    */
   isHostPaused: () => boolean | Promise<boolean>;
+  /**
+   * 🔴 EXT-12 · Whether the outbox (the live-capture spool) is at or above 80% of
+   * capacity. A spool that full is one a healthy host would be draining, so the
+   * non-urgent producer — the backfill leg — pauses above this line rather than
+   * adding more demand on a delivery exit that is already congested.
+   * Omitted ⇒ treated as "not near-full" so existing call sites change nothing;
+   * the popup and the alarm path pass it explicitly.
+   */
+  isOutboxNearFull?: () => boolean | Promise<boolean>;
   hasHttp: boolean;
   /**
    * 🔴 C30 · Whether there are any **backfill targets**.
@@ -204,6 +221,10 @@ export async function tickBlockReason(gate: {
   if (!gate.hasStore) return 'no-store';
   if (!(await gate.isEnabled())) return 'disabled';
   if (await gate.isHostPaused()) return 'host-paused';
+  // 🔴 EXT-12 · The near-full spool comes right after the host pause: both are
+  //    conditions of the delivery exit, both say "the urgent producer has
+  //    priority", and neither asks about a request to a platform yet.
+  if (gate.isOutboxNearFull && (await gate.isOutboxNearFull())) return 'outbox-near-full';
   // 🔴 The order matches what runAlarmTick really does: read the registry for a
   //    target first, and only then build a channel. With no target we cannot even
   //    answer "which origin should the channel be built for", so this gate comes
