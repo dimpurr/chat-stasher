@@ -28,6 +28,27 @@ final class StatusTests: XCTestCase {
                        "CLI too old: needs ≥ 0.5.0-rc.2")
     }
 
+    func testArchiveReadFailureIsNotClassifiedAsSetup() {
+        let value = classifyFailure("Archive read failed: destination configuration could not be read")
+        XCTAssertEqual(value.sentence, "Can't read the archive")
+        XCTAssertEqual(value.severity, .error)
+    }
+
+    func testMissingCommandLineToolRemainsAnInstallCard() {
+        XCTAssertEqual(classifyFailure("Archive read failed: command-line tool is not on PATH").sentence,
+                       "Install the command-line tool")
+        XCTAssertTrue(isMissingCLIResponse(terminationStatus: 127, output: Data()))
+        XCTAssertFalse(isMissingCLIResponse(terminationStatus: 2, output: Data()))
+        XCTAssertFalse(isMissingCLIResponse(terminationStatus: 127, output: Data([0x7b, 0x7d])))
+    }
+
+    func testDashboardUsesDisplayedDestinationUnlessEnvironmentOverridesIt() {
+        XCTAssertEqual(dashboardDestination(environment: nil, displayed: "remote"), "remote")
+        XCTAssertEqual(dashboardDestination(environment: "", displayed: "remote"), "remote")
+        XCTAssertEqual(dashboardDestination(environment: "env-choice", displayed: "remote"), "env-choice")
+        XCTAssertNil(dashboardDestination(environment: nil, displayed: ""))
+    }
+
     func testLocalStatusWaitingFailureAndSourceStopHaveTheirOwnSentences() {
         let base = snapshot()
         XCTAssertEqual(archiveStatus(snapshot: base,

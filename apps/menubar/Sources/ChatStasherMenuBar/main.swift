@@ -328,14 +328,24 @@ func classifyFailure(_ failure: String) -> ArchiveStatus {
     if failure.localizedCaseInsensitiveContains("credential") || failure.localizedCaseInsensitiveContains("authentication") {
         return .credentialsUnavailable
     }
+    if failure.localizedCaseInsensitiveContains("PATH") || failure.localizedCaseInsensitiveContains("command-line tool") {
+        return .cliMissing
+    }
+    if failure.localizedCaseInsensitiveContains("Archive read failed:") { return .unreadable(failure) }
     if failure.localizedCaseInsensitiveContains("setup") || failure.localizedCaseInsensitiveContains("set up")
         || failure.localizedCaseInsensitiveContains("configuration") {
         return .setup("Set up chat-stasher")
     }
-    if failure.localizedCaseInsensitiveContains("PATH") || failure.localizedCaseInsensitiveContains("command-line tool") {
-        return .cliMissing
-    }
     return .unreadable(failure)
+}
+
+func isMissingCLIResponse(terminationStatus: Int32, output: Data) -> Bool {
+    terminationStatus == 127 && output.isEmpty
+}
+
+func dashboardDestination(environment: String?, displayed: String?) -> String? {
+    if let environment, !environment.isEmpty { return environment }
+    return displayed.flatMap { $0.isEmpty ? nil : $0 }
 }
 
 func machineNeedsAttention(_ machine: MachineFreshness, now: Date, silenceThresholdOverrideDays: Int? = nil) -> Bool {
@@ -469,10 +479,10 @@ private final class ArchiveModel: ObservableObject {
     }
 
     func openDashboard() {
-        openDashboard(harness: nil)
+        openDashboard(harness: nil, destination: snapshot?.destinationName)
     }
 
-    func openDashboard(harness: String?) {
+    func openDashboard(harness: String?, destination: String? = nil) {
         guard dashboardProcess?.isRunning != true else {
             dashboardMessage = "Dashboard is already running."
             return
@@ -481,7 +491,9 @@ private final class ArchiveModel: ObservableObject {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["chat-stasher", "ui"]
         if let harness { process.arguments?.append(contentsOf: ["--harness", harness]) }
-        if let destination = ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"], !destination.isEmpty {
+        if let destination = dashboardDestination(
+            environment: ProcessInfo.processInfo.environment["CHAT_STASHER_DESTINATION"], displayed: destination
+        ) {
             process.arguments?.append(contentsOf: ["--destination", destination])
         }
         process.standardOutput = FileHandle.nullDevice
@@ -579,7 +591,7 @@ private final class ArchiveModel: ObservableObject {
             if error is DecodingError {
                 return .failure("CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary and status --json.")
             }
-            return .failure("Install the command-line tool or check its configuration: \(error.localizedDescription)")
+            return .failure("Archive read failed: \(error.localizedDescription)")
         }
     }
 
@@ -596,6 +608,10 @@ private final class ArchiveModel: ObservableObject {
         try process.run()
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
+                throw NSError(domain: "ChatStasherCLI", code: 127,
+                              userInfo: [NSLocalizedDescriptionKey: "The command-line tool is not on PATH."])
+            }
             guard process.terminationStatus == 0 || process.terminationStatus == 1 else {
                 throw NSError(domain: "ChatStasherOverview", code: Int(process.terminationStatus),
                               userInfo: [NSLocalizedDescriptionKey: "Archive overview could not be read (exit code \(process.terminationStatus))."])
@@ -636,6 +652,10 @@ private final class ArchiveModel: ObservableObject {
         let output = Pipe(); process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
         let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+        if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
+            throw NSError(domain: "ChatStasherCLI", code: 127,
+                          userInfo: [NSLocalizedDescriptionKey: "The command-line tool is not on PATH."])
+        }
         guard process.terminationStatus == 0 || process.terminationStatus == 1 || process.terminationStatus == 3,
               let line = data.split(separator: 0x0A, maxSplits: 1).first,
               let document = try? JSONDecoder().decode(StatusDocument.self, from: Data(line)),
@@ -860,10 +880,9 @@ private struct ArchivePopover: View {
             action("Open dashboard", icon: "arrow.up.right.square", shortcut: "D", action: model.openDashboard)
             action("Refresh", icon: "arrow.clockwise", shortcut: "R", action: { model.refresh(force: true) })
             if let message = model.dashboardMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
-            Button { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) } label: {
-                Label("Settings…", systemImage: "gear")
-            }
-                .keyboardShortcut(",", modifiers: .command)
+            action("Settings…", icon: "gear", shortcut: ",", action: {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            })
             Divider()
             Button(action: model.checkForUpdates) {
                 Label(model.updateReady ? "Update ready, restart now?" : "Check for Updates…",
@@ -954,19 +973,19 @@ private struct ArchivePopover: View {
                         Text(group).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                         HStack(alignment: .top, spacing: 7) {
                             ForEach(sources) { source in
-                        let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
-                                                           now: snapshot.refreshedAt)
-                        Button { model.openDashboard(harness: source.id) } label: {
-                            VStack(spacing: 3) {
-                                Image(systemName: sourceSymbol(source))
-                                    .font(.system(size: 15)).frame(height: 19)
-                                Rectangle().fill(sourceStatusColor(health)).frame(height: 3)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .help(source.lastSavedUnix.map { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) } ?? "Saved time unavailable")
-                            .accessibilityLabel("\(source.label), \(health.accessibilityText), \(source.count.formatted()) conversations, saved \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
-                        }
-                        .buttonStyle(.plain)
+                                let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
+                                                                   now: snapshot.refreshedAt)
+                                Button { model.openDashboard(harness: source.id, destination: snapshot.destinationName) } label: {
+                                    VStack(spacing: 3) {
+                                        Image(systemName: sourceSymbol(source))
+                                            .font(.system(size: 15)).frame(height: 19)
+                                        Rectangle().fill(sourceStatusColor(health)).frame(height: 3)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .help(source.lastSavedUnix.map { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) } ?? "Saved time unavailable")
+                                    .accessibilityLabel("\(source.label), \(health.accessibilityText), \(source.count.formatted()) conversations, saved \(relativeTime(source.lastSavedUnix, now: snapshot.refreshedAt))")
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -980,7 +999,7 @@ private struct ArchivePopover: View {
                 ForEach(snapshot.sourceDetails) { source in
                     let health = displayedSourceHealth(source, overrideDays: model.silenceThresholdOverrideDays,
                                                        now: snapshot.refreshedAt)
-                    Button { model.openDashboard(harness: source.id) } label: {
+                    Button { model.openDashboard(harness: source.id, destination: snapshot.destinationName) } label: {
                         HStack(spacing: 6) {
                             Image(systemName: sourceSymbol(source)).frame(width: 15)
                             Image(systemName: sourceStatusSymbol(health)).foregroundStyle(sourceStatusColor(health))
