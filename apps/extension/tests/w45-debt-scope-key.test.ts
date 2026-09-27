@@ -496,7 +496,7 @@ describe('W45-5 · the popup reads both halves out', () => {
     expect(out).toContain('2026-09-19 04:00:00 UTC');
     expect(out).toContain('listed 7753 conversation id(s)');
     expect(out).toContain('held only 0');
-    expect(out).toContain('Nothing was deleted from your archive');
+    expect(out).toContain("Nothing was deleted from this browser's records");
   });
 
   it('a scope that was never re-listed says nothing about it', () => {

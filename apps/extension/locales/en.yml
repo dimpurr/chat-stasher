@@ -622,14 +622,15 @@ popup:
     # is gone as soon as the scope is re-listed — which is the point of the
     # repair, and exactly why it cannot be the only place this is said. This one
     # reads the header, so it survives, and it says the one cost the user would
-    # otherwise have to guess at: the ids are gone, so a conversation that had
-    # already been archived cannot be told from one that never was.
+    # otherwise have to guess at: the ids are gone, so a conversation this
+    # browser has already captured cannot be told from one that it never has.
     relisted: >-
       Backfill history for this platform: on {when} its progress record listed
-      {recorded} conversation id(s) and the stored debt set held only {held}. The
-      record of what had already been fetched could not be recovered, so the
-      conversation list was read again from the start and those conversations are
-      being worked through a second time. Nothing was deleted from your archive.
+      {recorded} conversation id(s) and this browser's debt list held only
+      {held}. The record of what had already been fetched could not be
+      recovered, so the conversation list was read again from the start and
+      those conversations are being worked through a second time. Nothing was
+      deleted from this browser's records.
     halted:
       unsupportedPlatform: >-
         This platform ({platform}) has no history backfill implemented, so this
