@@ -15,6 +15,7 @@
     "compile": "tsc --noEmit",
     "test": "node scripts/check-test-inventory.mjs",
     "e2e": "pnpm run build:dev && playwright test -c e2e/playwright.config.ts",
+    "e2e:multi": "cargo build --manifest-path ../../Cargo.toml -p chat-stasher --bin chat-stasher && pnpm run build:dev && playwright test -c e2e/playwright.multi.config.ts",
     "postinstall": "wxt prepare"
   },
   "devDependencies": {

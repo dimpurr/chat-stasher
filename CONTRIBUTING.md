@@ -184,6 +184,24 @@ are easy to break while making it pass:
   no `xvfb`. Removing that channel makes the whole suite fail at launch rather
   than silently test nothing.
 
+One spec goes further and needs a second toolchain, so it has a second command:
+
+```sh
+cd apps/extension && pnpm e2e:multi   # builds the native host, then runs one spec
+```
+
+`e2e/multi-install.spec.ts` drives two persistent profiles against **one real
+`chat-stasher` native host** — the binary, one process per request, over the
+frame format in `crates/chat-stasher/src/nativehost.rs` — so it needs
+`cargo build` as well as the browser. It is kept out of `pnpm e2e` rather than
+added to it, because a compiler is a much larger thing to require of the command
+someone runs for an extension-only change. `e2e/playwright.multi.config.ts` and
+`apps/extension/package.json` say the same thing from the other side, and CI runs
+it in its own job on the tiers that can afford a build. The harness starts the
+host itself and `e2e/harness.ts` (`NativeHost`) documents why the browser cannot
+— measured: Chromium resolves its native-messaging directory from the OS home,
+not from `$HOME` — and exactly which parts of that arrangement are still real.
+
 Every one of these must exit 0. They are the same checks CI runs, listed here
 so that a green local run means a green pull request; if this list and CI ever
 disagree, that is a bug in this document.
