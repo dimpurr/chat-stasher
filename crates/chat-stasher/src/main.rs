@@ -3084,7 +3084,8 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
             if node.node_type != NodeType::File {
                 continue;
             }
-            if path.starts_with("ext-status/") && path.ends_with(".json") {
+            let status_filename = extension_status_filename(path);
+            if let Some(status_filename) = status_filename {
                 let mut buf = Vec::new();
                 repo.dump(node, &mut buf)
                     .with_context(|| format!("host `{hostname}`: read extension status"))?;
@@ -3093,11 +3094,8 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
                         format!("host `{hostname}`: malformed extension status JSON")
                     })?;
                 let install_id = status.get("install_id").and_then(|v| v.as_str());
-                let filename_id = path
-                    .strip_prefix(Path::new("ext-status"))
-                    .ok()
-                    .filter(|relative| relative.components().count() == 1)
-                    .and_then(Path::file_stem)
+                let filename_id = Path::new(status_filename)
+                    .file_stem()
                     .and_then(std::ffi::OsStr::to_str);
                 if status.get("schema").and_then(|v| v.as_str())
                     != Some("chat-stasher/ext-status@1")
@@ -3178,6 +3176,20 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         }
     }
     Ok(out)
+}
+
+fn extension_status_filename(path: &Path) -> Option<&std::ffi::OsStr> {
+    // rustic's snapshot tree may retain the backed-up stage directory as a
+    // prefix, so locate the ext-status component instead of requiring it to
+    // be the first path component.
+    path.components()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|parts| {
+            (parts[0].as_os_str() == std::ffi::OsStr::new("ext-status")
+                && parts[1].as_os_str().to_string_lossy().ends_with(".json"))
+            .then_some(parts[1].as_os_str())
+        })
 }
 
 /// `overview` — draw the machine × harness activity overview of one destination
@@ -5883,7 +5895,7 @@ fn run_once_pass(
     // This guard used to refuse any shard-less stage: while readers looked only at the
     // newest snapshot per machine, an empty snapshot made the machine look as if it
     // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
-    // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
+    // only when the stage holds neither sealed shards nor machine metadata/status reports.
     let (has_content, changed) = match chat_stasher::metahash::evaluate_run_once_change(
         stage,
         &machine_name,
@@ -8295,6 +8307,24 @@ mod decision_surface_tests {
     use super::*;
     use clap::CommandFactory;
     use std::fs;
+
+    #[test]
+    fn archived_extension_status_matches_after_stage_prefix() {
+        assert_eq!(
+            extension_status_filename(Path::new("stage-root/ext-status/install-123.json")),
+            Some(std::ffi::OsStr::new("install-123.json"))
+        );
+        assert_eq!(
+            extension_status_filename(Path::new(
+                "/archive/machine/stage/ext-status/install-123.json"
+            )),
+            Some(std::ffi::OsStr::new("install-123.json"))
+        );
+        assert_eq!(
+            extension_status_filename(Path::new("stage-root/meta/machine.json")),
+            None
+        );
+    }
 
     #[test]
     fn search_text_modes_parse_and_scan_requires_text() {

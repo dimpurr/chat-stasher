@@ -1,9 +1,9 @@
-//! ADR-022: content-addressed hash tracking for metadata sidecars (`meta/<machine>/`).
+//! ADR-022: content-addressed hash tracking for stage metadata and extension status reports.
 //!
 //! Tracks changes to files in `<stage>/meta/<machine>/` (such as `machine.json`,
-//! `manifest-v1.jsonl`, `activity-v1.jsonl`, and `label-by-*.json`) so that changes
-//! to metadata trigger a snapshot push even when no new conversation shards were
-//! written.
+//! `manifest-v1.jsonl`, `activity-v1.jsonl`, and `label-by-*.json`), plus
+//! `<stage>/ext-status/`, so metadata and per-install status changes trigger a
+//! snapshot push even when no new conversation shards were written.
 //!
 //! Invariants (ADR-022):
 //! - Compares file *contents*, never mtimes: `activity-v1.jsonl` is rewritten
@@ -31,58 +31,48 @@ pub fn pushed_meta_record_path(state_dir: &Path, machine: &str) -> PathBuf {
     state_dir.join(format!("{PUSHED_META_PREFIX}{digest}.sha256"))
 }
 
-/// Count regular files under `<stage>/meta/<machine>/`, ignoring hidden/temp files.
+/// Count machine metadata and extension status files, ignoring hidden/temp files.
 pub fn count_meta_files(stage: &Path, machine: &str) -> anyhow::Result<usize> {
-    let meta_dir = stage.join(META_DIR).join(machine);
-    let entries = match fs::read_dir(&meta_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e).with_context(|| format!("read {}", meta_dir.display())),
-    };
-    let mut count = 0;
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        count += 1;
-    }
-    Ok(count)
+    Ok(stage_metadata_files(stage, machine)?.len())
 }
 
-/// Check if `<stage>/meta/<machine>/` has any non-hidden regular files.
+/// Check if this machine has any pushable metadata or extension status files.
 pub fn has_meta_files(stage: &Path, machine: &str) -> anyhow::Result<bool> {
     Ok(count_meta_files(stage, machine)? > 0)
 }
 
-/// Compute a deterministic SHA-256 digest over the names and contents of all
-/// non-hidden regular files in `<stage>/meta/<machine>/`.
-///
-/// Returns `Ok(None)` if `<stage>/meta/<machine>/` does not exist or contains no files.
-pub fn compute_meta_hash(stage: &Path, machine: &str) -> anyhow::Result<Option<String>> {
-    let meta_dir = stage.join(META_DIR).join(machine);
-    let entries = match fs::read_dir(&meta_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("read {}", meta_dir.display())),
-    };
-
+fn stage_metadata_files(stage: &Path, machine: &str) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
+    for (namespace, dir) in [
+        ("meta", stage.join(META_DIR).join(machine)),
+        ("ext-status", stage.join("ext-status")),
+    ] {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || (namespace == "ext-status" && !name.ends_with(".json")) {
+                continue;
+            }
+            files.push((format!("{namespace}/{name}"), entry.path()));
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        files.push((name, entry.path()));
     }
+    Ok(files)
+}
+
+/// Compute a deterministic SHA-256 digest over the names and contents of all
+/// non-hidden metadata files for this machine, including `ext-status/*.json`.
+///
+/// Returns `Ok(None)` if neither metadata directory contains a file.
+pub fn compute_meta_hash(stage: &Path, machine: &str) -> anyhow::Result<Option<String>> {
+    let mut files = stage_metadata_files(stage, machine)?;
 
     if files.is_empty() {
         return Ok(None);
@@ -302,5 +292,40 @@ mod tests {
         // 7. Change machine.json -> changed
         fs::write(meta_dir.join("machine.json"), "{\"name\":\"modified\"}").expect("write");
         assert!(check_meta_changed(&stage, machine, &state_dir).expect("check"));
+    }
+
+    #[test]
+    fn extension_status_alone_is_content_and_changes_trigger_push() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stage = dir.path().join("stage");
+        let state_dir = dir.path().join("state");
+        let machine = "mac-test";
+        let status_dir = stage.join("ext-status");
+        fs::create_dir_all(&status_dir).expect("create status dir");
+
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false).expect("empty"),
+            (false, false)
+        );
+        let status = status_dir.join("install.json");
+        fs::write(&status, r#"{"reported_at":"2026-09-27T00:00:00Z"}"#).expect("write");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false).expect("new status"),
+            (true, true)
+        );
+
+        save_pushed_meta_hash(&stage, machine, &state_dir).expect("record successful push");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false)
+                .expect("unchanged status"),
+            (true, false)
+        );
+
+        fs::write(&status, r#"{"reported_at":"2026-09-27T01:00:00Z"}"#).expect("update");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false)
+                .expect("changed status"),
+            (true, true)
+        );
     }
 }
