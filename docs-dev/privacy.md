@@ -620,6 +620,22 @@ storage is not another's; see
 [install.md → Install the browser extension](install.md#3-install-the-browser-extension)
 for what one install per profile means in full.
 
+**The extension itself cannot read the browser's profile list, and the dashboard
+does.** An extension knows which browser it is in but not which profile, let
+alone the name you gave that profile — so the "Open in …" action on the local
+dashboard, which has to turn a profile *name* into the directory the browser was
+launched with, reads that mapping from the two files the browser maintains
+itself: the browser's **Local State**, for the human-readable name of each
+profile, and each profile's **Preferences**, only to test whether this extension
+is installed in that profile
+(`crates/chat-stasher/src/ui/extension_profile.rs:146-177`). Three things out of
+those files are used — the profile's name, its directory name, and whether this
+extension is installed in it — and only to build one launch command: nothing
+read from either file is written back, sent to the host, or archived, and a name
+matching more than one profile, or a profile the extension is not installed in,
+resolves to nothing, so the row says no exact match was found instead of
+guessing.
+
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
 (`apps/extension/lib/contract.ts:926-945`, `:947-976`). A body over 16 MiB is not
