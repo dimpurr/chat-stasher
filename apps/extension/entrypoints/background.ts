@@ -766,15 +766,38 @@ async function pauseForCoordinationFailure(reason: string): Promise<void> {
   });
 }
 
+/** Hold the same machine-wide lease and enumeration token used by alarm discovery. */
+async function acquireClaudeOrganizationPermit(): Promise<(() => Promise<void>) | null> {
+  const platform = 'claude';
+  const install = await getInstallIdentity();
+  const claim = await coordinate({ mode: 'claim', platform, installId: install.install_id });
+  if (!claim.ok) {
+    await pauseForCoordinationFailure(claim.reason ?? 'unknown');
+    return null;
+  }
+  await rememberCoordinationAvailability(false);
+  if (!claim.granted) return null;
+  const token = await coordinate({ mode: 'token', platform, installId: install.install_id, segment: 'enumerate' });
+  if (!token.ok || !token.granted) {
+    await coordinate({ mode: 'release', platform, installId: install.install_id });
+    if (!token.ok) await pauseForCoordinationFailure(token.reason ?? 'unknown');
+    return null;
+  }
+  await rememberCoordinationAvailability(false);
+  return async () => {
+    await coordinate({ mode: 'release', platform, installId: install.install_id });
+  };
+}
+
 /** Share Claude organization-discovery refusals with every install on this machine. */
-async function reportClaudeOrganizationRateLimit(status: 403 | 429): Promise<boolean> {
+async function reportClaudeOrganizationRateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean> {
   const install = await getInstallIdentity();
   const report = await coordinate({
     mode: 'rate_limit',
     platform: 'claude',
     installId: install.install_id,
     status,
-    retryAfterMs: 0,
+    retryAfterMs: parseRetryAfterMs(retryAfter, Date.now(), 30 * 24 * 60 * 60 * 1000) ?? 0,
   });
   if (report.ok) return true;
   await pauseForCoordinationFailure(report.reason ?? 'Claude rate-limit report failed');
@@ -1710,7 +1733,7 @@ export async function registerBackfillTargetHere(): Promise<
   | {
     ok: false;
     reason: 'no-store' | 'no-live-transport' | 'origin-not-a-platform'
-      | 'org-ambiguous' | 'org-unresolved' | 'transport-error';
+      | 'org-ambiguous' | 'org-unresolved' | 'transport-error' | 'coordination-unavailable';
   }
 > {
   const store = browserLocalStore();
@@ -1722,18 +1745,24 @@ export async function registerBackfillTargetHere(): Promise<
   let scope = UNRESOLVED_SCOPE;
   const resolver = scopeResolverFor(platform);
   if (resolver) {
-    const resolved = (await resolver(live.tabId, origin)).resolved;
-    if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
-      await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus);
-    }
-    if (resolved.ok) {
-      scope = resolved.org;
-    } else {
-      await recordBackfillHalt(store, {
-        platform, scope, reason: resolved.halt, detail: resolved.detail,
-      });
-      await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
-      return { ok: false, reason: resolved.halt };
+    const releasePermit = await acquireClaudeOrganizationPermit();
+    if (releasePermit === null) return { ok: false, reason: 'coordination-unavailable' };
+    try {
+      const resolved = (await resolver(live.tabId, origin)).resolved;
+      if (!resolved.ok && resolved.rateLimitStatus !== undefined) {
+        await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus, resolved.retryAfter);
+      }
+      if (resolved.ok) {
+        scope = resolved.org;
+      } else {
+        await recordBackfillHalt(store, {
+          platform, scope, reason: resolved.halt, detail: resolved.detail,
+        });
+        await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
+        return { ok: false, reason: resolved.halt };
+      }
+    } finally {
+      await releasePermit();
     }
   }
   const target = { platform, origin, scope };
@@ -2093,7 +2122,7 @@ async function resolveScopeForTick(
   if (!resolved.ok) {
     const rateLimitShared = resolved.rateLimitStatus === undefined
       ? true
-      : await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus);
+      : await reportClaudeOrganizationRateLimit(resolved.rateLimitStatus, resolved.retryAfter);
     await recordBackfillHalt(store, {
       platform: target.platform, scope: UNRESOLVED_SCOPE, reason: resolved.halt, detail: resolved.detail,
     });
@@ -2291,24 +2320,7 @@ async function runAlarmTickBody(): Promise<TickResult> {
     const scopeResolution = await resolveScopeForTick(store, target, async () => {
       // Claude's organization fallback is a platform request too. Take the same
       // host lease and an enumeration permit before asking the page to issue it.
-      const install = await getInstallIdentity();
-      const claim = await coordinate({ mode: 'claim', platform: target.platform, installId: install.install_id });
-      if (!claim.ok && !claim.olderHost) {
-        await pauseForCoordinationFailure(claim.reason ?? 'unknown');
-        return null;
-      }
-      if (!claim.ok) return async () => {};
-      await rememberCoordinationAvailability(false);
-      const token = await coordinate({ mode: 'token', platform: target.platform, installId: install.install_id, segment: 'enumerate' });
-      if (!token.ok || !token.granted) {
-        await coordinate({ mode: 'release', platform: target.platform, installId: install.install_id });
-        if (!token.ok) await pauseForCoordinationFailure(token.reason ?? 'unknown');
-        return null;
-      }
-      await rememberCoordinationAvailability(false);
-      return async () => {
-        await coordinate({ mode: 'release', platform: target.platform, installId: install.install_id });
-      };
+      return acquireClaudeOrganizationPermit();
     });
     if (scopeResolution.coordinationBlocked) {
       schedule.skipped.push({ platform: target.platform, reason: 'waiting-retry' });

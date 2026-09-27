@@ -99,8 +99,11 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
       const reply = await serveBackfillFetch(`${deps.pageOrigin}${resolvePath}`, deps.pageOrigin, deps.fetchImpl);
       if (!reply.ok) throw new Error(`the organizations request did not complete: ${reply.error}`);
       if (reply.status < 200 || reply.status > 299) {
-        const error = new Error(`the organizations request answered HTTP ${reply.status}`) as Error & { status?: number };
-        if (reply.status === 403 || reply.status === 429) error.status = reply.status;
+        const error = new Error(`the organizations request answered HTTP ${reply.status}`) as Error & { status?: number; retryAfter?: string };
+        if (reply.status === 403 || reply.status === 429) {
+          error.status = reply.status;
+          if (typeof reply.retryAfter === 'string' && reply.retryAfter.length <= 64) error.retryAfter = reply.retryAfter;
+        }
         throw error;
       }
       return reply.text;
