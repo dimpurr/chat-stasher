@@ -580,7 +580,7 @@ fn presence_is_answered_only_where_a_source_names_the_data_directory() {
 /// exactly what drifts, so this pins them together:
 ///
 /// * a `supported` / `unverified` cell must equal [`Browser::support`] for the
-///   pair — a tier the code does not report is a promise the tool does not keep,
+///   pair: a tier the code does not report is a promise the tool does not keep,
 ///   and a promotion in the enum the docs do not follow is a silent change of
 ///   the published matrix;
 /// * a `no-native-build` cell must mean precisely *this build has no path for
