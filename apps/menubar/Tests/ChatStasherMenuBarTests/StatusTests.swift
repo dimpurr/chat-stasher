@@ -17,29 +17,129 @@ final class StatusTests: XCTestCase {
     }
 
     func testUnreadableArchiveIsRedAndExplainsReason() {
-        let value = archiveStatus(snapshot: nil, failure: "Archive read failed")
+        let value = archiveStatus(snapshot: nil,
+                                 failure: OverviewFailure(kind: .unreadable, message: "Archive read failed"))
         XCTAssertEqual(value.sentence, "Can't read the archive")
         XCTAssertEqual(value.explanation, "Archive read failed")
         XCTAssertEqual(value.severity, .error)
     }
 
-    func testFailureClassificationKeepsOldCliOnItsUpgradeCard() {
-        XCTAssertEqual(classifyFailure("This app requires chat-stasher ≥ 0.5.0-rc.2.").sentence,
+    // ---- one test per classification class ----------------------------------
+    // The kind is decided where the failure was observed (exit status, the
+    // CLI documents' own kind fields, a decode verdict); the message is
+    // display-only, so each test feeds a kind plus adversarial text.
+
+    func testCliTooOldClassStaysOnItsUpgradeCard() {
+        XCTAssertEqual(classifyFailure(OverviewFailure(
+            kind: .cliTooOld,
+            message: "This app requires chat-stasher ≥ 0.5.0-rc.2.")).sentence,
                        "CLI too old: needs ≥ 0.5.0-rc.2")
     }
 
-    func testArchiveReadFailureIsNotClassifiedAsSetup() {
-        let value = classifyFailure("Archive read failed: destination configuration could not be read")
-        XCTAssertEqual(value.sentence, "Can't read the archive")
-        XCTAssertEqual(value.severity, .error)
-    }
-
-    func testMissingCommandLineToolRemainsAnInstallCard() {
-        XCTAssertEqual(classifyFailure("Archive read failed: command-line tool is not on PATH").sentence,
+    func testMissingCliClassStaysOnTheInstallCardAndItsEvidenceIsStructural() {
+        XCTAssertEqual(classifyFailure(OverviewFailure(kind: .cliMissing, message: "")).sentence,
                        "Install the command-line tool")
+        // The class exists only because env exited 127 with empty stdout;
+        // no word in any message can create or erase it.
         XCTAssertTrue(isMissingCLIResponse(terminationStatus: 127, output: Data()))
         XCTAssertFalse(isMissingCLIResponse(terminationStatus: 2, output: Data()))
         XCTAssertFalse(isMissingCLIResponse(terminationStatus: 127, output: Data([0x7b, 0x7d])))
+    }
+
+    /// The solrev4 finding, as a regression: an archive read failure whose
+    /// text mentions a path — a shard path, a destination named
+    /// "backup-path", the word "path" in the CLI's own "it sets a path this
+    /// tool cannot resolve" — must stay on the unreadable card. Under the
+    /// old substring matching it was shown as "Install the command-line tool"
+    /// (see W210-OUT.md, the old-classify demo output).
+    func testArchiveReadFailureMentioningAPathIsNotReclassified() {
+        let solrev4 = classifyFailure(OverviewFailure(
+            kind: .unreadable,
+            message: "Can't read destination backup-path: the destination shard /Users/demo/stash/shards/000003.jsonl could not be read"))
+        XCTAssertEqual(solrev4.sentence, "Can't read the archive")
+        XCTAssertEqual(solrev4.severity, .error)
+
+        let corruption = classifyFailure(OverviewFailure(
+            kind: .unreadable,
+            message: "Archive read failed: config file /Users/demo/.config/chat-stasher/config.toml exists but cannot be used: it sets a path this tool cannot resolve: destinations.d1.repo"))
+        XCTAssertEqual(corruption.sentence, "Can't read the archive")
+        XCTAssertEqual(corruption.severity, .error)
+    }
+
+    func testSetupClassCarriesTheConfigExplanation() {
+        let value = classifyFailure(OverviewFailure(
+            kind: .setup,
+            message: "Set up chat-stasher in Terminal first. config file /Users/demo/.config/chat-stasher/config.toml exists but cannot be used: it sets a path this tool cannot resolve: destinations.d1.repo"))
+        XCTAssertEqual(value.sentence, "Set up chat-stasher")
+        XCTAssertEqual(value.explanation?.contains("destinations.d1.repo"), true)
+        XCTAssertEqual(value.explanation?.contains("it sets a path this tool cannot resolve"), true)
+        XCTAssertEqual(value.severity, .warning)
+    }
+
+    func testCredentialsClassGetsItsOwnCard() {
+        let value = classifyFailure(OverviewFailure(
+            kind: .credentials,
+            message: "Set up chat-stasher in Terminal first. destinations.d1.options.access_key_id: credential reference `file:/no/such/credential` could not be resolved"))
+        XCTAssertEqual(value.sentence, "Can't reach the destination: credentials aren't available to apps")
+        XCTAssertEqual(value.explanation, "Add credentials to chat-stasher's app-readable configuration.")
+        XCTAssertEqual(value.severity, .error)
+    }
+
+    // ---- the kinds from the CLI's own documents -------------------------------
+
+    private func errorDocument(_ json: String) throws -> OverviewErrorDocument {
+        try JSONDecoder().decode(OverviewErrorDocument.self, from: Data(json.utf8))
+    }
+
+    func testOverviewFailureUsesTheDocumentKindWhenPresent() throws {
+        let usage = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":2,"error":"name the destination to open (there is no default and no cross-destination merge)","error_kind":"usage"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 2, document: usage).kind, .setup)
+
+        let credentials = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"destinations.d1.options.access_key_id: credential file could not be read","error_kind":"credentials"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: credentials).kind, .credentials)
+
+        let config = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"config file exists but cannot be used","error_kind":"config"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: config).kind, .setup)
+
+        let key = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"the key could not be read","error_kind":"key"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: key).kind, .unreadable)
+
+        let read = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"cannot reach remote host","error_kind":"read"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: read).kind, .unreadable)
+        // The kind decides the class; the text is carried for display.
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: read).message,
+                       "cannot reach remote host")
+    }
+
+    func testOverviewFailureWithoutAKnownKindFallsBackToExitCodeSemantics() throws {
+        // An rc.2-era error document predates `error_kind`; the exit code the
+        // document itself declares decides, and the CLI's text is still shown.
+        let legacy = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"no master key"}"#)
+        let failure = classifyOverviewFailure(terminationStatus: 3, document: legacy)
+        XCTAssertEqual(failure.kind, .unreadable)
+        XCTAssertEqual(failure.message, "no master key")
+
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 2, document: nil).kind, .setup)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: nil).kind, .unreadable)
+        // Exit 0 with nothing the app can parse is a CLI predating --summary.
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 0, document: nil).kind, .cliTooOld)
+
+        // A slug this app does not know (a future CLI) goes to the exit code.
+        let future = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":3,"error":"…","error_kind":"future-kind"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: future).kind, .unreadable)
+
+        // A document that disagrees with the process it came from is not a
+        // classification; the exit status decides.
+        let lying = try errorDocument(#"{"schema_version":1,"command":"overview","exit_code":0,"error":"…","error_kind":"read"}"#)
+        XCTAssertEqual(classifyOverviewFailure(terminationStatus: 3, document: lying).kind, .unreadable)
+    }
+
+    func testStatusConfigKindSeparatesTheCredentialRefusalFromOtherConfigProblems() {
+        XCTAssertEqual(statusConfigFailureKind("credentials"), .credentials)
+        XCTAssertEqual(statusConfigFailureKind("unreadable"), .setup)
+        // A CLI older than `config_error_kind` omits it: the setup card it
+        // always was, not a guess from the message.
+        XCTAssertEqual(statusConfigFailureKind(nil), .setup)
     }
 
     func testDashboardUsesDisplayedDestinationUnlessEnvironmentOverridesIt() {
@@ -151,7 +251,9 @@ final class StatusTests: XCTestCase {
         let value = ArchiveStatus.offline
         XCTAssertEqual(value.sentence, "Offline · showing cached result")
         XCTAssertNotEqual(value.severity, .healthy)
-        XCTAssertNotEqual(archiveStatus(snapshot: cached, local: cleanLocal, failure: "network unavailable", now: now).sentence,
+        XCTAssertNotEqual(archiveStatus(snapshot: cached, local: cleanLocal,
+                                         failure: OverviewFailure(kind: .unreadable, message: "network unavailable"),
+                                         now: now).sentence,
                           "Offline · showing cached result")
     }
 

@@ -59,6 +59,26 @@ private struct SummaryDocument: Decodable {
     }
 }
 
+/// The `overview --json` failure document: the same top level as
+/// [`SummaryDocument`] plus `error_kind`, the CLI's machine-readable slug for
+/// which failure happened (`usage`, `config`, `credentials`, `key`, `read`).
+/// `errorKind` is optional on purpose: a CLI that predates the field still
+/// writes the document without it, and the exit code the document itself
+/// declares is the fallback classification.
+struct OverviewErrorDocument: Decodable {
+    let schemaVersion: Int
+    let command: String
+    let exitCode: Int
+    let error: String?
+    let errorKind: String?
+    enum CodingKeys: String, CodingKey {
+        case command, error
+        case schemaVersion = "schema_version"
+        case exitCode = "exit_code"
+        case errorKind = "error_kind"
+    }
+}
+
 private struct SummaryMachine: Decodable {
     let machine: String
     let display: String
@@ -92,6 +112,10 @@ private struct CountState: Decodable { let kind: String; let value: Int?; let wh
 private struct StatusDocument: Decodable {
     let schemaVersion: Int; let command: String; let exitCode: Int; let cliVersion: String?
     let configSource: String; let configError: String?
+    /// The machine-readable half of `config_error` ("credentials" for the
+    /// typed credential refusal, "unreadable" for any other unusable config);
+    /// absent from a CLI that predates the field.
+    let configErrorKind: String?
     let local: LocalStatus?; let scanner: ScannerStatus?
     enum CodingKeys: String, CodingKey {
         case command, local, scanner
@@ -100,6 +124,7 @@ private struct StatusDocument: Decodable {
         case cliVersion = "cli_version"
         case configSource = "config_source"
         case configError = "config_error"
+        case configErrorKind = "config_error_kind"
     }
 }
 private struct LocalStatus: Decodable {
@@ -239,7 +264,9 @@ enum ArchiveStatus {
     case waiting(Int)
     case localFailure(String)
     case sourceStopped(String)
-    case setup(String)
+    /// The setup card: a fixed sentence plus the CLI's own explanation, so a
+    /// config problem names itself instead of hiding behind generic wording.
+    case setup(String, String?)
     case cliMissing
     case cliTooOld
     case offline
@@ -263,7 +290,8 @@ enum ArchiveStatus {
         case .silent(let machine, let days): "\(machine) has been silent for \(days) days"
         case .healthy: "All saved"
         case .waiting(let count): "\(count) conversations waiting to upload"
-        case .localFailure(let reason), .setup(let reason): reason
+        case .localFailure(let reason): reason
+        case .setup(let sentence, _): sentence
         case .sourceStopped(let source): "\(source) stopped saving"
         case .cliMissing: "Install the command-line tool"
         case .cliTooOld: "CLI too old: needs ≥ 0.5.0-rc.2"
@@ -274,7 +302,8 @@ enum ArchiveStatus {
     }
     var explanation: String? {
         switch self {
-        case .unreadable(let reason), .localFailure(let reason), .setup(let reason): return reason
+        case .unreadable(let reason), .localFailure(let reason): return reason
+        case .setup(_, let explanation): return explanation
         case .destination(_, let sentence, _): return sentence
         case .cliMissing: return "Install chat-stasher from the project release page, then reopen this panel."
         case .cliTooOld: return "Use the command for your install: brew upgrade chat-stasher; npm install -g chat-stasher; or rerun the install script."
@@ -292,14 +321,40 @@ enum ArchiveStatus {
     }
 }
 
-func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: String?, now: Date = Date(), silenceThresholdOverrideDays: Int? = nil) -> ArchiveStatus {
-    guard let snapshot else { return .unreadable(failure ?? "The overview response was unavailable.") }
+/// The class of a failed refresh, decided where the failure was observed —
+/// the process exit status, the `error_kind` / `config_error_kind` the CLI's
+/// own documents declare, or a decode verdict. The message the CLI printed is
+/// display text; nothing ever matches on it.
+enum FailureKind: Equatable {
+    /// `env` exited 127 with empty stdout: the command-line tool is not there.
+    case cliMissing
+    /// The CLI answered, but not with this app's contracted documents.
+    case cliTooOld
+    /// The CLI reports this machine is not set up (its `status --json`
+    /// says the config could not be used, or `overview` refused with a
+    /// usage error — a stored destination the config no longer declares).
+    case setup
+    /// The CLI reports a credential reference a non-shell process cannot
+    /// resolve — the fail-closed `file:` / `env-file:` / `keychain:` case.
+    case credentials
+    /// The read did not finish, so nothing here is a count of anything.
+    case unreadable
+}
+
+/// One failed refresh: the structured class plus the message to display.
+struct OverviewFailure: Error {
+    let kind: FailureKind
+    let message: String
+}
+
+func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: OverviewFailure?, now: Date = Date(), silenceThresholdOverrideDays: Int? = nil) -> ArchiveStatus {
+    guard let snapshot else { return .unreadable(failure?.message ?? "The overview response was unavailable.") }
     guard let local else { return .localFailure("Can't confirm local backup status.") }
     if local.cliNeedsUpdate { return .cliTooOld }
     if let reason = local.reason { return .localFailure(reason) }
     guard let waiting = local.waitingToUpload else { return .localFailure("Can't confirm whether conversations are waiting to upload.") }
     if waiting > 0 { return .waiting(waiting) }
-    if local.scheduleInstalled != true { return .setup("Set up scheduled backups") }
+    if local.scheduleInstalled != true { return .setup("Set up scheduled backups", nil) }
     if local.lastRunFailed { return .localFailure("The last scheduled run failed.") }
     let attention = Set(snapshot.machines.filter {
         $0.health == "missing_index" || $0.health == "writer_behind"
@@ -322,21 +377,67 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     return .healthy
 }
 
-func classifyFailure(_ failure: String) -> ArchiveStatus {
-    if failure.localizedCaseInsensitiveContains("CLI too old")
-        || failure.localizedCaseInsensitiveContains("requires chat-stasher") { return .cliTooOld }
-    if failure.localizedCaseInsensitiveContains("credential") || failure.localizedCaseInsensitiveContains("authentication") {
-        return .credentialsUnavailable
+/// The card for a refresh that produced no snapshot. The class was decided
+/// where the failure was observed — the exit status, the CLI documents' own
+/// kind fields, or a decode verdict — so the message is only displayed here.
+/// Matching the prose back (an "Archive read failed" whose text happens to
+/// mention a path being shown as "Install the command-line tool") is what
+/// this replaces; with the kind in hand there is nothing to guess.
+func classifyFailure(_ failure: OverviewFailure) -> ArchiveStatus {
+    switch failure.kind {
+    case .cliMissing: .cliMissing
+    case .cliTooOld: .cliTooOld
+    case .setup: .setup("Set up chat-stasher", failure.message)
+    case .credentials: .credentialsUnavailable
+    case .unreadable: .unreadable(failure.message)
     }
-    if failure.localizedCaseInsensitiveContains("PATH") || failure.localizedCaseInsensitiveContains("command-line tool") {
-        return .cliMissing
+}
+
+/// Classify one finished `overview` run that produced no snapshot, from the
+/// structured facts alone: the CLI's failure document names the failure
+/// (`error_kind`), and a document from a CLI that predates the field — or no
+/// document at all — falls back to the exit status the document itself
+/// declares. The contract is exit 2 = usage error (a setup problem on this
+/// machine: the invocation named a destination the config does not declare),
+/// exit 3 = did not finish reading, and exit 0 with no summary document is a
+/// CLI that predates `overview --json --summary`. The `error` text is
+/// display-only. Pure so every arm is testable without spawning a process.
+func classifyOverviewFailure(terminationStatus: Int32, document: OverviewErrorDocument?) -> OverviewFailure {
+    let generic = "Archive overview could not be read (exit code \(terminationStatus))."
+    var message = generic
+    if let document, document.schemaVersion == 1, document.command == "overview",
+       document.exitCode == Int(terminationStatus) {
+        message = document.error ?? generic
+        switch document.errorKind {
+        case "usage", "config":
+            return OverviewFailure(kind: .setup, message: message)
+        case "credentials":
+            return OverviewFailure(kind: .credentials, message: message)
+        case "key", "read":
+            return OverviewFailure(kind: .unreadable, message: message)
+        default:
+            // A slug this app does not know: a future CLI's new kind. The
+            // exit code the document itself declares still decides.
+            break
+        }
     }
-    if failure.localizedCaseInsensitiveContains("Archive read failed:") { return .unreadable(failure) }
-    if failure.localizedCaseInsensitiveContains("setup") || failure.localizedCaseInsensitiveContains("set up")
-        || failure.localizedCaseInsensitiveContains("configuration") {
-        return .setup("Set up chat-stasher")
+    if terminationStatus == 0 {
+        return OverviewFailure(kind: .cliTooOld,
+                               message: "CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary.")
     }
-    return .unreadable(failure)
+    return terminationStatus == 2
+        ? OverviewFailure(kind: .setup, message: message)
+        : OverviewFailure(kind: .unreadable, message: message)
+}
+
+/// `status --json` names why its config could not be used in
+/// `config_error_kind`; the typed credential refusal is the machine-readable
+/// reason a menubar or scheduled context hits, and it gets its own card. A
+/// CLI that predates the field omits it, and the omission classifies as the
+/// setup card it always did — not as a count, and not as a guess from the
+/// message.
+func statusConfigFailureKind(_ configErrorKind: String?) -> FailureKind {
+    configErrorKind == "credentials" ? .credentials : .setup
 }
 
 func isMissingCLIResponse(terminationStatus: Int32, output: Data) -> Bool {
@@ -365,7 +466,7 @@ private final class UpdateDelegate: NSObject, SPUUpdaterDelegate {
 @MainActor
 private final class ArchiveModel: ObservableObject {
     @Published var snapshot: ArchiveSnapshot?
-    @Published var failure: String?
+    @Published var failure: OverviewFailure?
     @Published var isRefreshing = false
     @Published var updateReady = false
     @Published var dashboardMessage: String?
@@ -432,9 +533,9 @@ private final class ArchiveModel: ObservableObject {
                 self.failure = nil
                 self.offline = false
                 self.lastSuccessfulRefresh = Date()
-            case .failure(let reason):
+            case .failure(let failure):
                 self.offline = self.snapshot != nil
-                self.failure = reason
+                self.failure = failure
             }
         }
     }
@@ -513,13 +614,26 @@ private final class ArchiveModel: ObservableObject {
     private func loadDemo() {
         let mode = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--demo=") })?
             .split(separator: "=", maxSplits: 1).last.map(String.init) ?? "all-green"
-        if mode == "cli-missing" { snapshot = nil; failure = "Could not find chat-stasher on PATH."; return }
-        if mode == "cli-old" { snapshot = nil; failure = "This app requires chat-stasher ≥ 0.5.0-rc.2."; return }
-        if mode == "not-configured" { snapshot = nil; failure = "Set up chat-stasher in Terminal first."; return }
+        if mode == "cli-missing" {
+            snapshot = nil
+            failure = OverviewFailure(kind: .cliMissing, message: "Could not find chat-stasher on PATH.")
+            return
+        }
+        if mode == "cli-old" {
+            snapshot = nil
+            failure = OverviewFailure(kind: .cliTooOld, message: "This app requires chat-stasher ≥ 0.5.0-rc.2.")
+            return
+        }
+        if mode == "not-configured" {
+            snapshot = nil
+            failure = OverviewFailure(kind: .setup, message: "Set up chat-stasher in Terminal first.")
+            return
+        }
         if mode == "offline" { offline = true }
         guard mode != "unreadable" else {
             snapshot = nil
-            failure = "The archive overview could not be read (exit code 3)."
+            failure = OverviewFailure(kind: .unreadable,
+                                       message: "The archive overview could not be read (exit code 3).")
             return
         }
         let now = Date()
@@ -569,16 +683,18 @@ private final class ArchiveModel: ObservableObject {
                 let snapshot: ArchiveSnapshot
                 do {
                     snapshot = try readOverview(destination: destination, destinationCount: max(1, names.count))
-                } catch {
+                } catch let failure as OverviewFailure {
+                    // The class is already decided; only the wording gains
+                    // which destination could not be read.
                     let name = destination ?? "default destination"
-                    throw NSError(domain: "ChatStasherOverview", code: 3,
-                                  userInfo: [NSLocalizedDescriptionKey: "Can't read destination \(name): \(error.localizedDescription)"])
+                    throw OverviewFailure(kind: failure.kind, message: "Can't read destination \(name): \(failure.message)")
                 }
                 let status = archiveStatus(snapshot: snapshot, local: local, failure: nil)
                 candidates.append((destination, snapshot, destinationStatusRank(status)))
             }
             guard let chosen = candidates.max(by: { $0.2 < $1.2 }) else {
-                return .failure("Archive overview returned no destination result.")
+                return .failure(OverviewFailure(kind: .unreadable,
+                                                message: "Archive overview returned no destination result."))
             }
             var snapshot = chosen.1
             snapshot.destinationName = chosen.0
@@ -587,11 +703,11 @@ private final class ArchiveModel: ObservableObject {
                 cliVersion: local.cliVersion, cliNeedsUpdate: local.cliNeedsUpdate,
                 destinationCount: local.destinationCount, destinationNames: local.destinationNames)
             return .success(snapshot, localWithDestinations)
+        } catch let failure as OverviewFailure {
+            return .failure(failure)
         } catch {
-            if error is DecodingError {
-                return .failure("CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary and status --json.")
-            }
-            return .failure("Archive read failed: \(error.localizedDescription)")
+            return .failure(OverviewFailure(kind: .unreadable,
+                                            message: "Archive read failed: \(error.localizedDescription)"))
         }
     }
 
@@ -606,30 +722,17 @@ private final class ArchiveModel: ObservableObject {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
-                throw NSError(domain: "ChatStasherCLI", code: 127,
-                              userInfo: [NSLocalizedDescriptionKey: "The command-line tool is not on PATH."])
-            }
-            guard process.terminationStatus == 0 || process.terminationStatus == 1 else {
-                throw NSError(domain: "ChatStasherOverview", code: Int(process.terminationStatus),
-                              userInfo: [NSLocalizedDescriptionKey: "Archive overview could not be read (exit code \(process.terminationStatus))."])
-            }
-            guard let line = data.split(separator: 0x0A, maxSplits: 1).first else {
-                throw NSError(domain: "ChatStasherOverview", code: 3,
-                              userInfo: [NSLocalizedDescriptionKey: "Archive overview returned an empty response."])
-            }
-            let document = try JSONDecoder().decode(SummaryDocument.self, from: Data(line))
-            guard document.schemaVersion == 1, document.command == "overview", document.variant == "summary",
-                  document.exitCode == process.terminationStatus else {
-                throw NSError(domain: "ChatStasherOverview", code: 2,
-                              userInfo: [NSLocalizedDescriptionKey: "CLI too old: needs ≥ 0.5.0-rc.2 for overview --json --summary."])
-            }
-            guard document.exitCode == 0 else {
-                throw NSError(domain: "ChatStasherOverview", code: document.exitCode,
-                              userInfo: [NSLocalizedDescriptionKey: document.error ?? "Archive overview could not be read."])
-            }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
+            throw OverviewFailure(kind: .cliMissing,
+                                  message: "The command-line tool is not on PATH.")
+        }
+        let line = data.split(separator: 0x0A, maxSplits: 1).first
+        // A successful read is the summary document and exit 0 together.
+        if let line, let document = try? JSONDecoder().decode(SummaryDocument.self, from: Data(line)),
+           document.schemaVersion == 1, document.command == "overview", document.variant == "summary",
+           document.exitCode == process.terminationStatus, document.exitCode == 0 {
             let now = Date()
             let machines = document.machines.map { MachineFreshness(machine: $0.display, newestSnapshotUnix: $0.newestSnapshotUnix, health: $0.health, silenceAfterDays: $0.silenceAfterDays) }
             let days = document.days.compactMap { item -> DailyCount? in
@@ -643,6 +746,16 @@ private final class ArchiveModel: ObservableObject {
             return ArchiveSnapshot(summary: summary, refreshedAt: now, machines: machines,
                                             days: days, usedConversationFallback: false, sources: details, sourceDetails: details,
                                             destinations: destinationCount)
+        }
+        // Anything that did not produce a snapshot is classified from the CLI's
+        // own documents and exit status; the text is display-only.
+        let errorDocument = line.flatMap { try? JSONDecoder().decode(OverviewErrorDocument.self, from: Data($0)) }
+        if line == nil {
+            throw OverviewFailure(kind: classifyOverviewFailure(terminationStatus: process.terminationStatus,
+                                                                document: nil).kind,
+                                  message: "Archive overview returned an empty response.")
+        }
+        throw classifyOverviewFailure(terminationStatus: process.terminationStatus, document: errorDocument)
     }
 
     nonisolated private static func readStatus() throws -> LocalSnapshot {
@@ -653,17 +766,24 @@ private final class ArchiveModel: ObservableObject {
         try process.run()
         let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
         if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
-            throw NSError(domain: "ChatStasherCLI", code: 127,
-                          userInfo: [NSLocalizedDescriptionKey: "The command-line tool is not on PATH."])
+            throw OverviewFailure(kind: .cliMissing,
+                                  message: "The command-line tool is not on PATH.")
         }
         guard process.terminationStatus == 0 || process.terminationStatus == 1 || process.terminationStatus == 3,
               let line = data.split(separator: 0x0A, maxSplits: 1).first,
               let document = try? JSONDecoder().decode(StatusDocument.self, from: Data(line)),
               document.schemaVersion == 1, document.command == "status" else {
-            throw NSError(domain: "ChatStasherCLI", code: 2, userInfo: [NSLocalizedDescriptionKey: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json."])
+            throw OverviewFailure(kind: .cliTooOld,
+                                  message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
         }
         guard document.configSource != "unreadable", let local = document.local else {
-            throw NSError(domain: "ChatStasherSetup", code: 3, userInfo: [NSLocalizedDescriptionKey: "Set up chat-stasher in Terminal first. \(document.configError ?? "")"])
+            // The kind is the `config_error_kind` the document declares: the
+            // typed credential refusal is its own card; any other unusable
+            // config is the setup card it always was. A CLI predating the
+            // field omits it and still classifies as setup — never a guess
+            // from the message.
+            throw OverviewFailure(kind: statusConfigFailureKind(document.configErrorKind),
+                                  message: "Set up chat-stasher in Terminal first. \(document.configError ?? "")")
         }
         let count = local.stage?.waitingToUpload
         let reason: String?
@@ -687,7 +807,7 @@ private final class ArchiveModel: ObservableObject {
 
 private enum OverviewResult {
     case success(ArchiveSnapshot, LocalSnapshot)
-    case failure(String)
+    case failure(OverviewFailure)
 }
 
 func destinationStatusRank(_ status: ArchiveStatus) -> Int {
@@ -945,7 +1065,7 @@ private struct ArchivePopover: View {
     private var setupCard: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(model.status.sentence).font(.system(size: 14, weight: .semibold))
-            Text(model.status.explanation ?? model.failure ?? "")
+            Text(model.status.explanation ?? model.failure?.message ?? "")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if model.status.sentence == "Set up chat-stasher" {
                 Text("Run the setup command in Terminal.").font(.system(size: 11, design: .monospaced))

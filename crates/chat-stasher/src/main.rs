@@ -3163,7 +3163,11 @@ fn cmd_overview(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let config = match config_or_refuse("overview") {
+    let config = match if json {
+        config_or_refuse_json("overview")
+    } else {
+        config_or_refuse("overview")
+    } {
         Ok(config) => config,
         Err(code) => return code,
     };
@@ -3173,7 +3177,7 @@ fn cmd_overview(
         if json {
             println!(
                 "{}",
-                json_string(&overview::overview_error_json(2, msg.to_string()))
+                json_string(&overview::overview_error_json(2, msg.to_string(), "usage"))
             );
         }
         return ExitCode::from(2);
@@ -3194,7 +3198,10 @@ fn cmd_overview(
             eprintln!("overview: without the key nothing was read — this is not an empty result");
             reap_remote(&cfg, keep_ssh_masters);
             if json {
-                println!("{}", json_string(&overview::overview_error_json(3, msg)));
+                println!(
+                    "{}",
+                    json_string(&overview::overview_error_json(3, msg, "key"))
+                );
             }
             // Deliberately 3, not 1: a missing key means the archive was never
             // consulted, which belongs with "could not finish reading".
@@ -3212,7 +3219,10 @@ fn cmd_overview(
             );
             reap_remote(&cfg, keep_ssh_masters);
             if json {
-                println!("{}", json_string(&overview::overview_error_json(3, msg)));
+                println!(
+                    "{}",
+                    json_string(&overview::overview_error_json(3, msg, "read"))
+                );
             }
             // Deliberately 3, not 1: a failed read cannot claim "there is no
             // index"; 1 is reserved for a completed read that found none.
@@ -9884,6 +9894,24 @@ mod decision_surface_tests {
 /// command never finished: it never started. `2` would blame the command line,
 /// which is not what is wrong.
 fn config_or_refuse(command: &str) -> Result<Config, ExitCode> {
+    refuse_config(command, false)
+}
+
+/// [`config_or_refuse`] for the one caller whose `--json` contract still owes
+/// stdout a single parseable document on the refusing path: `overview` also
+/// writes the error document, whose `error_kind` separates a credential
+/// refusal ("credentials") from any other unusable config ("config"). Decided
+/// by the typed error (`config::CredentialRefused`), never by reading the
+/// refusal message back.
+fn config_or_refuse_json(command: &str) -> Result<Config, ExitCode> {
+    refuse_config(command, true)
+}
+
+/// The shared body of [`config_or_refuse`] and [`config_or_refuse_json`], so
+/// the two stderr lines exist in exactly one place — a second copy of a
+/// refusal message is how the shell and the JSON audiences drift apart.
+/// `error_document` adds the one stdout line the `--json` contract needs.
+fn refuse_config(command: &str, error_document: bool) -> Result<Config, ExitCode> {
     match Config::load() {
         Ok(config) => Ok(config),
         Err(e) => {
@@ -9892,6 +9920,17 @@ fn config_or_refuse(command: &str) -> Result<Config, ExitCode> {
                 "{command}: exit_code=3 — the command did not run, so nothing here is a statement \
                  about this machine's sessions, destinations or archive."
             );
+            if error_document {
+                let kind = if e.downcast_ref::<config::CredentialRefused>().is_some() {
+                    "credentials"
+                } else {
+                    "config"
+                };
+                println!(
+                    "{}",
+                    json_string(&overview::overview_error_json(3, format!("{e:#}"), kind))
+                );
+            }
             Err(ExitCode::from(3))
         }
     }
@@ -12925,7 +12964,19 @@ fn cmd_status(
         Err(e) => {
             let why = format!("{e:#}");
             if json {
-                println!("{}", status_json_config_error(&why));
+                // `config_error_kind` is the machine-readable half of
+                // `config_error`: "credentials" (a `file:` / `env-file:` /
+                // `keychain:` reference the process could not resolve — the
+                // refusal a menubar app or a scheduled run hits, and the typed
+                // `config::CredentialRefused` underneath it) vs "unreadable"
+                // for every other unusable config. Decided by the typed error,
+                // never by reading the prose back.
+                let kind = if e.downcast_ref::<config::CredentialRefused>().is_some() {
+                    "credentials"
+                } else {
+                    "unreadable"
+                };
+                println!("{}", status_json_config_error(&why, kind));
             }
             eprintln!("status: {why}");
             eprintln!(
@@ -13176,8 +13227,12 @@ fn json_string(value: &serde_json::Value) -> String {
 /// same two fields it uses for any other "could not look" (`scanner.kind` is
 /// `failed`, `why` is the config error) plus `config_error` and
 /// `config_source: "unreadable"`. Every count is then absent rather than `0` —
-/// the same rule the scanner object follows.
-fn status_json_config_error(why: &str) -> String {
+/// the same rule the scanner object follows. `config_error_kind` is the
+/// machine-readable half of `config_error` — "credentials" for the typed
+/// [`crate::config::CredentialRefused`] refusal, "unreadable" for any other
+/// unusable config — so a reader classifies the refusal structurally instead
+/// of matching the prose.
+fn status_json_config_error(why: &str, config_error_kind: &str) -> String {
     json_string(&serde_json::json!({
         "schema_version": 1,
         "command": "status",
@@ -13187,6 +13242,7 @@ fn status_json_config_error(why: &str) -> String {
         "exit_semantics": status_exit_semantics(3),
         "config_source": chat_stasher::config::ConfigSource::Unreadable.label(),
         "config_error": why,
+        "config_error_kind": config_error_kind,
         "scanner": { "kind": "failed", "why": why },
     }))
 }

@@ -554,15 +554,23 @@ pub fn overview_json_with_freshness(
 
 /// The `overview --json` object for a run that could not produce data at all
 /// (usage error exit 2, or unreadable archive exit 3). The `error` text is the
-/// same sentence `cmd_overview` prints to stderr; the object keeps stdout a
-/// single parseable JSON value even on the failure path.
-pub fn overview_error_json(exit_code: u8, error: String) -> serde_json::Value {
+/// same sentence `cmd_overview` prints to stderr; `error_kind` is the stable
+/// machine-readable slug of the failure, decided at the site that knows it —
+/// `usage`, `config`, `credentials` (a `file:` / `env-file:` / `keychain:`
+/// reference the process could not resolve), `key` (the master key could not
+/// be loaded) or `read` (the archive read itself failed) — so a reader like
+/// the menubar classifies on that, not on prose. An unknown slug is a newer
+/// CLI's kind; the reader still has `exit_code`, whose documented semantics
+/// (`2` usage error · `3` did not finish reading) are the fallback. The
+/// object keeps stdout a single parseable JSON value even on the failure path.
+pub fn overview_error_json(exit_code: u8, error: String, error_kind: &str) -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
         "command": "overview",
         "healthy": false,
         "exit_code": exit_code,
         "error": error,
+        "error_kind": error_kind,
     })
 }
 
@@ -1902,19 +1910,40 @@ mod tests {
     }
 
     /// The error shape (exit 2 / 3) carries the same fixed top-level keys plus
-    /// `error`; the schema-stability story is that `error` is where the
-    /// machine-readable reason lives, never on `sessions`.
+    /// `error` and `error_kind`; the schema-stability story is that the
+    /// machine-readable reason lives in those two, never on `sessions`. The
+    /// kind is what a reader like the menubar classifies on (see the function's
+    /// doc comment); the exit code is the fallback for a kind it does not know.
     #[test]
     fn overview_json_error_shape_is_stable() {
-        let v = overview_error_json(3, "no key".to_string());
+        let v = overview_error_json(3, "no key".to_string(), "key");
         let obj = v.as_object().expect("error json is an object");
         assert_eq!(
             obj.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["command", "error", "exit_code", "healthy", "schema_version"]
+            [
+                "command",
+                "error",
+                "error_kind",
+                "exit_code",
+                "healthy",
+                "schema_version"
+            ]
         );
         assert_eq!(v["exit_code"], serde_json::json!(3));
         assert_eq!(v["error"], serde_json::json!("no key"));
+        assert_eq!(v["error_kind"], serde_json::json!("key"));
         assert_eq!(v["healthy"], serde_json::json!(false));
+    }
+
+    /// Every kind (`usage` / `config` / `credentials` / `key` / `read`) passes
+    /// through verbatim — the classifier on the reading side is the presence
+    /// of the slug, so two failures must never collapse onto one slug.
+    #[test]
+    fn overview_json_error_kind_is_carried_verbatim() {
+        for kind in ["usage", "config", "credentials", "key", "read"] {
+            let v = overview_error_json(3, format!("{kind} failure"), kind);
+            assert_eq!(v["error_kind"], serde_json::json!(kind));
+        }
     }
 
     // ---- `overview --json --summary` ------------------------------------
