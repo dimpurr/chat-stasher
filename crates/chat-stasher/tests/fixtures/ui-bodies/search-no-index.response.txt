@@ -54,6 +54,12 @@ span.paused{color:var(--bad)}
 span.unknown{color:var(--muted)}
 .muted{color:var(--muted)}
 .h2note{color:var(--muted);font-size:.8rem;font-weight:400}
+/* W227 (29-UI-DESIGN §8.1): the second line of a column header — what the
+   numbers under it are. A real line of the header rather than a `title`, so a
+   reader who never hovers a cell still reads it; the header's own emphasis is
+   dropped so the label reads as the unit and not as a second column name.
+   Colours come from the variables above (§8.1: no new colours). */
+th .unit{display:block;font-weight:400;font-size:.78rem;color:var(--muted)}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;

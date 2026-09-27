@@ -136,6 +136,16 @@ const BROWSER_UNKNOWN: &str = "Unknown browser";
 const PROFILE_UNNAMED: &str = "Unnamed profile";
 const MACHINE_UNKNOWN: &str = "Machine unknown";
 
+/// What the two numbers in a platform column are. The column header is the one
+/// place a reader finds out which count is which, and a pair of bare integers
+/// says neither: `4 · 2` is as easily one ratio as two counts.
+const CAPTURED_PENDING: &str = "captured · pending";
+
+/// A platform the install's report carries no row for. Absent — which is neither
+/// a zero nor an unknown, and is told in words in the cell's `title` because the
+/// visible mark for it is an em dash.
+const CELL_NO_ROW: &str = "no row in the report from this install";
+
 /// `1`/`n` agreement. The page pluralizes two words and both follow the regular
 /// rule, so this stays a suffix rather than a table of irregulars.
 fn plural(n: usize) -> &'static str {
@@ -302,16 +312,27 @@ impl<'a> InstallView<'a> {
     /// pause word when that platform is paused. A platform this install's report
     /// carries no row for is an em dash — absent, which is neither a zero nor an
     /// unknown.
+    ///
+    /// The visible pair is two integers and a separator, and the column header
+    /// names them for a reader who can see it — so the cell carries the same
+    /// reading in its `title`, for the reader who cannot. It is the same three
+    /// parts either way (the platform, both counts, this install's pause state),
+    /// because a title that dropped one would describe a different cell from the
+    /// one it is attached to.
     fn cell(&self, platform: &str) -> String {
         let Some(cell) = self.platforms.get(platform) else {
-            return "<td class=n>—</td>".to_string();
+            return format!(
+                "<td class=n title=\"{}\">—</td>",
+                esc(&format!("{platform}: {CELL_NO_ROW}"))
+            );
         };
         let count = |value: Option<u64>| match value {
             Some(n) => n.to_string(),
             None => "Unknown".to_string(),
         };
         let mut out = format!(
-            "<td class=n>{} · {}",
+            "<td class=n title=\"{}\">{} · {}",
+            esc(&cell_title(platform, cell)),
             count(cell.captured),
             count(cell.pending)
         );
@@ -323,6 +344,32 @@ impl<'a> InstallView<'a> {
         out.push_str("</td>");
         out
     }
+}
+
+/// One cell's reading, in words, for a reader who cannot see the column it sits
+/// under (the `title` attribute: a tooltip on hover and the description a screen
+/// reader reads with the cell).
+///
+/// The counts are named one by one rather than printed as a pair, because they
+/// are the two different claims the column header exists to tell apart, and an
+/// omitted count stays the word `Unknown` rather than a blank — the same rule the
+/// visible cell follows.
+fn cell_title(platform: &str, cell: &PlatformCell) -> String {
+    let count = |value: Option<u64>, word: &str| match value {
+        Some(n) => format!("{word} {n}"),
+        None => format!("{word} unknown"),
+    };
+    let mut out = format!(
+        "{platform}: {}, {}",
+        count(cell.captured, "captured"),
+        count(cell.pending, "pending")
+    );
+    if let Some(reason) = &cell.paused {
+        out.push_str(&format!(", paused ({reason})"));
+    } else if cell.pause_unknown {
+        out.push_str(", pause unknown");
+    }
+    out
 }
 
 /// Render archived extension reports as one summary sentence and one compact
@@ -534,6 +581,12 @@ fn open_guidance(local: Option<&str>, machine: Option<&str>) -> String {
 /// what a reader compares *down* — which install stopped, and on which platform
 /// it is behind. `local` decides whether the open column exists at all, so a
 /// remote machine's table cannot show an action that would be a lie.
+///
+/// Every header is `scope=col` (§8.1), and a platform column carries the word
+/// for each of its two counts on a second line rather than in a `title` alone: a
+/// reader who never hovers any cell still has to be told what the pair is, and the
+/// label is emitted from *this* table's own platform set, so it is the same set of
+/// columns the reader is counting.
 fn extension_table(rows: &[&InstallView], local: bool, data: &UiData, token: &str) -> String {
     let platforms = rows
         .iter()
@@ -541,14 +594,23 @@ fn extension_table(rows: &[&InstallView], local: bool, data: &UiData, token: &st
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut out = String::from(
-        "<div class=scroll><table>\n<thead><tr><th>browser · profile</th><th>last report</th>\
-         <th>status</th>",
+        "<div class=scroll><table>\n<thead><tr><th scope=col>browser · profile</th>\
+         <th scope=col>last report</th><th scope=col>status</th>",
     );
     if local {
-        out.push_str("<th>open</th>");
+        out.push_str("<th scope=col>open</th>");
     }
     for platform in &platforms {
-        out.push_str(&format!("<th class=n>{}</th>", esc(platform)));
+        // The space before the span is the header's own separator, not layout:
+        // the span is a block, so the space collapses at the end of the first
+        // line, and what a screen reader reads is `chatgpt captured · pending`
+        // rather than the run-together name the two elements would otherwise
+        // compute to. It is one text either way — there is no second source to
+        // drift from the visible label.
+        out.push_str(&format!(
+            "<th class=n scope=col>{} <span class=unit>{CAPTURED_PENDING}</span></th>",
+            esc(platform)
+        ));
     }
     out.push_str("</tr></thead>\n<tbody>\n");
     let mut unmatched = 0usize;

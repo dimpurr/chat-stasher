@@ -2506,17 +2506,102 @@ mod tests {
         // 48, and 11 × 4 + 3 the same way — neither total is anywhere on the
         // page. (The claude column is one cell short of that: the paused install
         // appends the pause word to its own cell, which is the point of it.)
-        assert_eq!(html.matches("<td class=n>4 · 2</td>").count(), 11, "{html}");
-        assert_eq!(html.matches("<td class=n>3 · 1</td>").count(), 10, "{html}");
+        assert_eq!(html.matches(">4 · 2</td>").count(), 11, "{html}");
+        assert_eq!(html.matches(">3 · 1</td>").count(), 10, "{html}");
         assert!(!html.contains("48 · 24"), "{html}");
         assert!(!html.contains("36 · 12"), "{html}");
         // One table per machine, so one chatgpt column header each.
-        assert_eq!(html.matches(">chatgpt</th>").count(), 3, "{html}");
+        assert_eq!(
+            html.matches(">chatgpt <span class=unit>").count(),
+            3,
+            "{html}"
+        );
         assert!(html.contains("Machine 1"));
         assert!(html.contains("Machine 3"));
         assert!(html.contains("An exact browser profile match is unavailable"));
         assert!(html.contains("<p class=sub>These installs are on Machine 2; open them there.</p>"));
         assert!(!html.contains("Grand total"));
+    }
+
+    /// A platform column counts two things and said neither. The header names
+    /// them, and it does so from *that machine's* own platform set — so the
+    /// three machines' tables each carry the label, and a column read on its own
+    /// is a claim rather than two integers.
+    #[test]
+    fn extensions_platform_headers_name_both_counts() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = fixture::extension_installs();
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        let chatgpt =
+            "<th class=n scope=col>chatgpt <span class=unit>captured · pending</span></th>";
+        assert_eq!(html.matches(chatgpt).count(), 3, "{html}");
+        assert_eq!(
+            html.matches(
+                "<th class=n scope=col>claude <span class=unit>captured · pending</span></th>"
+            )
+            .count(),
+            3,
+            "{html}"
+        );
+        // The two pieces of the header are separate words: the space between
+        // them is what the accessible name of the column turns on, and without
+        // it the reading is the run-together `chatgptcaptured · pending`.
+        assert_eq!(
+            html.matches("<th class=n scope=col>chatgpt<span").count(),
+            0,
+            "{html}"
+        );
+        // Every column of the table, not only the counted ones, says it is a
+        // column: §8.1's rule is about the table, and a header with no scope is
+        // a header a screen reader reads as another cell.
+        assert_eq!(html.matches("<th class=n scope=col>").count(), 6, "{html}");
+        assert!(
+            html.contains("<th scope=col>browser · profile</th>"),
+            "{html}"
+        );
+        assert!(html.contains("<th scope=col>last report</th>"), "{html}");
+        assert!(html.contains("<th scope=col>status</th>"), "{html}");
+        assert!(html.contains("<th scope=col>open</th>"), "{html}");
+        // The label is not a substitution for the count: the cells still read
+        // `4 · 2` and the twelve are still never added up.
+        assert_eq!(html.matches(">4 · 2</td>").count(), 11, "{html}");
+    }
+
+    /// What a cell says about itself for a reader who cannot see the column it
+    /// sits under: the platform, each count with the word for what it counts,
+    /// and this install's own pause state. The visible `4 · 2` carries none of
+    /// that, and a title that dropped one of the three would describe a
+    /// different cell from the one it is attached to.
+    #[test]
+    fn extensions_cells_title_their_own_platform_and_both_counts() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = fixture::extension_installs();
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("<td class=n title=\"chatgpt: captured 4, pending 2\">4 · 2</td>"),
+            "{html}"
+        );
+        // The paused install's cell names the reason the details block carries.
+        assert!(
+            html.contains(
+                "<td class=n title=\"claude: captured 3, pending 1, paused (retry-after)\">\
+                 3 · 1 <span class=paused>paused</span></td>"
+            ),
+            "{html}"
+        );
+        // The record with no `paused_reason` key at all is not "not paused".
+        assert!(
+            html.contains("title=\"chatgpt: captured 4, pending 2, pause unknown\""),
+            "{html}"
+        );
+        // D6 · these counts are one install's own report relayed, so this page
+        // says `captured`. It may not say the archive layer's `saved` — the
+        // install cannot see the archive — and it may not say the phrase T6
+        // reserves for the extension's own surfaces.
+        assert!(!html.contains("saved 4"), "{html}");
+        assert!(!html.contains("captured by this browser"), "{html}");
     }
 
     /// A pause field that is *absent* is not "not paused", and it is not
@@ -2542,7 +2627,10 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<td class=n>1 · 0 <span class=unknown>pause unknown</span></td>"),
+            html.contains(
+                "<td class=n title=\"chatgpt: captured 1, pending 0, pause unknown\">\
+                 1 · 0 <span class=unknown>pause unknown</span></td>"
+            ),
             "{html}"
         );
         assert!(html.contains("chatgpt pause state unknown"), "{html}");
@@ -2712,11 +2800,22 @@ mod tests {
         ];
         let html = req("/extensions?token=t", &data, &NoContent).body;
         assert!(
-            html.contains("<td class=n>Unknown · Unknown</td>"),
+            html.contains(
+                "<td class=n title=\"chatgpt: captured unknown, pending unknown\">\
+                 Unknown · Unknown</td>"
+            ),
             "{html}"
         );
         assert!(!html.contains(">0 · 0<"), "{html}");
-        assert!(html.contains("<td class=n>—</td>"), "{html}");
+        // The two absences stay apart in the title as well: `captured unknown` is
+        // a count the report did not carry, the em dash is a row it does not
+        // have, and neither may be told with the other's sentence.
+        assert!(
+            html.contains(
+                "<td class=n title=\"claude: no row in the report from this install\">—</td>"
+            ),
+            "{html}"
+        );
         // A readable, not-paused status is not dressed as a problem, and it is
         // not dressed as a clock either: this fixture's report is stamped ahead
         // of the instant the ages are measured from, which is not an age.
