@@ -145,6 +145,7 @@ fn page_sessions(
         let ordered = sort_rows(&sel.matched, page.sort);
         let total = ordered.len();
         let window = page_window(&ordered, *page);
+        let columns = IdentityColumns::of(&ordered);
         out.push_str(&range_sentence(page, &ordered, window.len()));
         out.push_str(&list_nav(params, token, *page, total));
         if window.is_empty() {
@@ -160,10 +161,26 @@ fn page_sessions(
                 back = page_href("/sessions", &LIST_CARRY, params, token, 0),
             ));
         } else {
-            out.push_str(
-                "<div class=scroll><table>\n<thead><tr><th>machine</th><th>source</th>\
-                 <th>session (short)</th>",
-            );
+            out.push_str("<div class=scroll><table>\n<thead><tr><th>machine</th>");
+            // W219 · the two identity columns exist only where the rows this
+            // table is drawn from hold the fact they report, the same rule the
+            // destination column follows: a column whose every cell is empty is
+            // a column readers learn to skip, and it makes every row wider to
+            // say nothing.
+            if columns.on_machines {
+                out.push_str(
+                    "<th title=\"how many machines archived this conversation (W219); a \
+                     conversation is counted once wherever it appears\">on machines</th>",
+                );
+            }
+            if columns.collision {
+                out.push_str(
+                    "<th title=\"set when two account fingerprints were recorded under one \
+                     install salt for this archive id — the records are from different accounts \
+                     and were not merged\">identity</th>",
+                );
+            }
+            out.push_str("<th>source</th><th>session (short)</th>");
             // The destination column exists only where it carries information:
             // with one destination every cell would repeat the page header, and
             // a column that never varies is a column readers learn to skip —
@@ -180,7 +197,7 @@ fn page_sessions(
                  </tr></thead>\n<tbody>\n",
             );
             for s in window {
-                out.push_str(&list_row(s, token, data));
+                out.push_str(&list_row(s, token, data, columns));
             }
             out.push_str("</tbody></table></div>\n");
             // The legend goes with the table it explains: it names the marks
@@ -595,15 +612,44 @@ fn merged_label_coverage_note(sel: &Selection<'_>, data: &UiData) -> String {
         .collect()
 }
 
-fn list_row(s: &UiSession, token: &str, data: &UiData) -> String {
+/// W219 · which of the two conversation-identity columns this list draws.
+///
+/// Decided once per page from the rows the table is **drawn from** — the
+/// drill-down's matched set, which already has the launch filter applied — and
+/// deliberately not from the whole archive or from the window on screen.
+///
+/// Not the archive, because a column whose every cell is empty is a column
+/// readers learn to skip, and a launch filter that keeps only one-machine rows
+/// is exactly how an archive-wide gate renders one. Not the window either: the
+/// gate is read by the header and by every row, so making it depend on which
+/// page is showing would give one result set several different tables.
+#[derive(Debug, Clone, Copy)]
+struct IdentityColumns {
+    /// "on machines" — at least one row in the set was seen on more than one.
+    on_machines: bool,
+    /// "identity" — at least one row in the set provably collides.
+    collision: bool,
+}
+
+impl IdentityColumns {
+    /// `rows` is the set the table enumerates, all pages of it.
+    fn of(rows: &[&UiSession]) -> Self {
+        Self {
+            on_machines: rows.iter().any(|s| s.seen_on_machines > 1),
+            collision: rows.iter().any(|s| s.account_collision),
+        }
+    }
+}
+
+fn list_row(s: &UiSession, token: &str, data: &UiData, columns: IdentityColumns) -> String {
     let msgs = msgs_cell_html(s);
     let f = time_cell_html(s, s.first_unix);
     let l = time_cell_html(s, s.last_unix);
     format!(
-        "<tr><td class=mono>{m}</td><td>{h}</td>\
+        "<tr>{machine}<td>{h}</td>\
          <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{dest}{label}{msgs}\
          <td class=n>{sh}</td><td class=n>{b}</td>{f}{l}<td>{snap}</td></tr>\n",
-        m = esc(&s.machine),
+        machine = machine_cell_html(s, columns),
         h = esc(&s.source_label()),
         i = s.index,
         t = percent_encode(token),
@@ -617,6 +663,56 @@ fn list_row(s: &UiSession, token: &str, data: &UiData) -> String {
         l = l,
         snap = esc(&fmt_unix(s.archive_time_unix)),
     )
+}
+
+/// W219 · the machine cell: the machine this row was archived from, plus the
+/// two facts that belong to the row's **archive id** rather than to this
+/// machine — how many machines hold it, and whether two accounts provably share
+/// it.
+///
+/// The badge is the row's own copy of "seen on N machines", for the same reason
+/// the destination badge is: the block above the table explains the convention
+/// once, but a reader who scrolls straight to a row must still be able to see
+/// that this conversation exists elsewhere. It is a different badge from
+/// `×N backup` and deliberately reads differently — "on N machines", never
+/// "×N" — because the two count different things and one row can carry both.
+///
+/// A collision is a `warn` word, not a count: it is not a number of copies, it
+/// is the statement that this archive id was written by more than one account
+/// and that the rows were **not** merged.
+///
+/// Each column's cell is emitted under exactly the header's own condition, so a
+/// table can never shift a column between its header and its rows — an empty
+/// cell on a row that has nothing to add is the honest value, and the column
+/// itself is absent when no row in the table holds such a conversation at all.
+fn machine_cell_html(s: &UiSession, columns: IdentityColumns) -> String {
+    let mut out = format!("<td class=mono>{}</td>", esc(&s.machine));
+    if columns.on_machines {
+        out.push_str("<td class=mono>");
+        if s.seen_on_machines > 1 {
+            out.push_str(&format!(
+                "<span class=badge title=\"this archive id was seen on {} machines — one \
+                 conversation, {} archived copies, each machine's own row\">on {n} \
+                 machines</span>",
+                s.seen_on_machines,
+                s.seen_on_machines,
+                n = s.seen_on_machines,
+            ));
+        }
+        out.push_str("</td>");
+    }
+    if columns.collision {
+        out.push_str("<td class=mono>");
+        if s.account_collision {
+            out.push_str(
+                "<span class=badge title=\"two or more account fingerprints were recorded under \
+                 one install salt for this archive id — these records are from different \
+                 accounts and were NOT merged\">account collision</span>",
+            );
+        }
+        out.push_str("</td>");
+    }
+    out
 }
 
 /// The destination cell — rendered only where the destination column exists, so

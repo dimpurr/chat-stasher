@@ -137,6 +137,15 @@ pub struct SessionHit {
     pub title: SessionLabel,
     /// Capture-time provenance and the latest supplemental attribution.
     pub provenance: Option<ProjectProvenance>,
+    /// W219 · The comparable account keys this session's own records carry, from
+    /// its activity-index row. Empty means no comparable key was recorded — an
+    /// unknown account, or an index written before the field existed — which is
+    /// the only distinction the identity question needs.
+    ///
+    /// Carried so the dashboard can judge an archive id's account the same way
+    /// `overview` does, instead of inventing a second rule: one function,
+    /// [`crate::overview::conversation_identities`], decides both.
+    pub account_keys: Vec<crate::activity::AccountKey>,
 }
 
 /// The label state one session resolves to once its index row has been read
@@ -989,6 +998,10 @@ pub fn search_sessions(
 
         // ---- the activity sidecars, read before any verdict is reached -----
         let mut times: BTreeMap<(String, String), IndexedTime> = BTreeMap::new();
+        // W219 · the index row's comparable account keys, keyed the same way, so
+        // the verdict below can hand them to the row it builds.
+        let mut accounts: BTreeMap<(String, String), Vec<crate::activity::AccountKey>> =
+            BTreeMap::new();
         let mut machines_with_index: BTreeSet<String> = BTreeSet::new();
         for (machine, node) in &index_nodes {
             let mut buf = Vec::new();
@@ -1023,6 +1036,12 @@ pub fn search_sessions(
                             (row.machine.clone(), row.session_id.clone()),
                             indexed_time(&row),
                         );
+                        if !row.account_keys.is_empty() {
+                            accounts.insert(
+                                (row.machine.clone(), row.session_id.clone()),
+                                row.account_keys.clone(),
+                            );
+                        }
                     }
                     Err(e) => {
                         malformed += 1;
@@ -1065,6 +1084,21 @@ pub fn search_sessions(
             let harness = infer_harness(&session_id);
             let indexed = times.get(&(machine.clone(), session_id.clone()));
             let provenance = indexed.and_then(|row| row.provenance.clone());
+            // W219 · the row's comparable account keys. Read here, before
+            // `machine` / `session_id` are moved into the row below. An empty
+            // list is the honest value for "no comparable account key was
+            // recorded": no index row at all, an index predating the field, or
+            // an `account` envelope of `kind: unknown`. All three answer the
+            // one question this list serves — "can two records be compared?" —
+            // so folding them into one empty set loses nothing, and inventing
+            // a key would be the failure.
+            let account_keys = accounts
+                .get(&(machine.clone(), session_id.clone()))
+                .cloned()
+                // reason: see the block above — empty means "nothing to
+                // compare", which is the same answer for all three histories
+                // and never a claim that the accounts agree.
+                .unwrap_or_default();
             let (first_unix, last_unix, time_why, line_count, time_source) = match indexed {
                 Some(t) => (
                     t.first_unix,
@@ -1146,6 +1180,7 @@ pub fn search_sessions(
                     time_source,
                     title,
                     provenance,
+                    account_keys,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
                 Verdict::Unevaluated { dimension, why } => {
@@ -1218,6 +1253,7 @@ mod tests {
             },
             title: SessionLabel::NoLabelRecorded,
             provenance: None,
+            account_keys: Vec::new(),
         }
     }
 
@@ -1696,6 +1732,7 @@ mod tests {
                 time_source: ActivityTimeSource::Exact,
                 title: SessionLabel::NoLabelRecorded,
                 provenance: None,
+                account_keys: Vec::new(),
             }],
             unplaced: vec![UnplacedSession {
                 machine: "m-2".into(),
@@ -1778,6 +1815,7 @@ mod tests {
                         .into(),
                 },
                 provenance: None,
+                account_keys: Vec::new(),
             }],
             unplaced: Vec::new(),
             not_matched: 0,
@@ -1914,6 +1952,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            account_keys: Vec::new(),
         };
         let t = indexed_time(&row);
         assert_eq!(t.first_unix, None);
@@ -1939,6 +1978,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            account_keys: Vec::new(),
         };
         assert_eq!(
             indexed_time(&row).why.as_deref(),
@@ -1962,6 +2002,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            account_keys: Vec::new(),
         };
         let t = indexed_time(&row);
         assert_eq!(

@@ -618,8 +618,14 @@ check "overview exits 0" 0 "$rc"
 sed 's/^/[smoke]   | /' "$OVERVIEW_LOG"
 assert "overview lists this machine ($SMOKE_MACHINE)" \
   "$(grep -q "$SMOKE_MACHINE" "$OVERVIEW_LOG" && echo 0 || echo 1)"
-assert "overview sees one machine whose session total matches the stage" \
-  "$(grep -q "^machines 1 · harnesses .* · sessions $STAGE_SESSIONS " "$OVERVIEW_LOG" && echo 0 || echo 1)"
+# W219 · the headline's first count is conversations (distinct archive ids),
+# the parenthesised one is the per-machine row count. This stage is one
+# machine, so the two must be equal — which is exactly what makes this the
+# place to assert **both** numbers rather than either one alone: asserting
+# only the conversation count would pass a build that had stopped counting
+# rows, and asserting only the row count would pass the bug W219 fixed.
+assert "overview sees one machine, and its conversation and observation counts both match the stage" \
+  "$(grep -q "^machines 1 · harnesses .* · conversations $STAGE_SESSIONS (of $STAGE_SESSIONS observations*)" "$OVERVIEW_LOG" && echo 0 || echo 1)"
 
 # ------------------------------------------------------------------- step 7/8
 step "7/8 · schedule renders a systemd user unit (renders only; installs nothing)"

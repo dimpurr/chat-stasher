@@ -1231,8 +1231,24 @@ fn a_launch_filter_is_named_on_the_page() {
     assert!(html.contains("Filter in force"), "{html}");
     assert!(html.contains("mbp-a"), "{html}");
     assert!(
-        html.contains("sessions in view"),
+        // W219 · the headline counts conversations, not per-machine rows; the
+        // "in view" half is unchanged and is what this test is about.
+        html.contains("conversations in view"),
         "the headline must say it is a filtered count: {html}"
+    );
+    // …and the sentences under the headline count the same rows it does. This
+    // archive holds four conversations across three machines, two of them on
+    // `mbp-a`, and none of them recorded an account fingerprint, so the
+    // blind-spot sentence is the one on the page: a count taken from the whole
+    // inventory would put "4 conversation(s) in view" under a headline of 2
+    // (W219b — the two row sets in one paragraph are the defect, not the words).
+    assert!(
+        html.contains("none of the 2 conversation(s) in view"),
+        "the blind-spot sentence must count the rows in view: {html}"
+    );
+    assert!(
+        !html.contains("none of the 4 conversation(s) in view"),
+        "…and must not quote the archive-wide number as if it were theirs: {html}"
     );
     // …and the filter is still applied by the shared selector, so a drill-down
     // inside it is the same query `search` would answer.

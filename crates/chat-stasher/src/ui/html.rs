@@ -4,10 +4,12 @@
 //! and quoted attributes, unit-carrying byte/instant/age formats (never a bare
 //! ratio), and the three statements [`footer`] puts on every page.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::schedule::sh_single_quote;
 use crate::selector::Selector;
 
-use super::{percent_encode, DestinationState, UiData, UiSession, DAY};
+use super::{percent_encode, DestinationState, UiData, UiSession, DAY, NO_HARNESS};
 
 // ------------------------------------------------------------- html rendering
 
@@ -407,6 +409,105 @@ pub(super) fn merged_counts(data: &UiData) -> String {
         data.destinations.len(),
         verb = if doubled == 1 { "is" } else { "are" },
     )
+}
+
+/// W219 · the **machine** axis, next to [`merged_counts`]'s destination axis.
+///
+/// They are two different questions and the page says both rather than picking
+/// one: the destination badge answers "how many backup copies of this session",
+/// this one answers "how many machines hold this conversation". A conversation
+/// archived from a laptop and a desktop is one conversation for the count above,
+/// and this is where that reading is stated instead of left to be inferred.
+///
+/// The collision lines are always rendered, including at zero, because a zero
+/// collision count over conversations nobody could compare is a weaker claim
+/// than a zero over conversations that were compared — the second sentence is
+/// what makes the first one readable.
+pub(super) fn machine_axis_counts(data: &UiData) -> String {
+    let in_view = &data.sessions;
+    // One entry per **conversation**, not per row: every row of a conversation
+    // carries the same stamped verdict, so grouping by archive id first is what
+    // keeps a conversation archived on two machines from being named twice —
+    // the per-machine double-count this whole section exists to remove. The
+    // list below is built from this map, so it has one `<li>` per conversation
+    // however many machines hold it; the count printed over it is
+    // `data.account_collisions`, which is the same map's size (first row wins,
+    // and every row of an id carries the same verdict).
+    let mut conversations: BTreeMap<&str, &UiSession> = BTreeMap::new();
+    for s in in_view {
+        conversations.entry(s.session_id.as_str()).or_insert(s);
+    }
+    let machines: BTreeSet<&str> = in_view.iter().map(|s| s.machine.as_str()).collect();
+    let shared = data.conversations_on_multiple_machines;
+    let collisions: Vec<&UiSession> = conversations
+        .values()
+        .copied()
+        .filter(|s| s.account_collision)
+        .collect();
+
+    let mut out = format!(
+        "<p class=sub><b>across machines:</b> the {} conversation(s) counted above \
+         are {rows} row(s) over {} machine(s) — an archive id archived on more than one machine \
+         is one conversation and one row per machine. {shared} conversation(s) were seen on \
+         more than one machine and are counted once above.</p>\n",
+        data.conversations,
+        machines.len(),
+        rows = in_view.len(),
+    );
+    // Both readings below are over the rows in view, like every other number on
+    // this page — `data.conversations` and the blind spot it is measured against
+    // are the same row set, so the sentence cannot contradict the headline above
+    // it by quoting a conversation the filter left out.
+    let not_recorded = data.account_not_recorded_conversations;
+    if collisions.is_empty() {
+        let comparable = data.conversations - not_recorded;
+        out.push_str("<p class=sub><b>account collision:</b> ");
+        if comparable == 0 {
+            // "None detected" over a set that was never compared is the reading
+            // this sentence exists to refuse: it is a statement that no
+            // comparison was possible, not that one came back clean.
+            out.push_str(&format!(
+                "none <i>could</i> be detected — none of the {} conversation(s) in view \
+                 carried a comparable account fingerprint, so there was nothing to compare.</p>\n",
+                data.conversations,
+            ));
+        } else {
+            out.push_str(&format!(
+                "none detected in the {comparable} conversation(s) that carried a comparable \
+                 account fingerprint.",
+            ));
+            if not_recorded > 0 {
+                out.push_str(&format!(
+                    " {not_recorded} conversation(s) carried none at all (an unknown account is \
+                     not an account), so no comparison was possible for those.",
+                ));
+            }
+            out.push_str("</p>\n");
+        }
+        return out;
+    }
+    out.push_str(&format!(
+        "<div class=warn><b>Account collision.</b> {} conversation(s) in view hold two or more \
+         account fingerprints under one install salt: one archive id, written by more than one \
+         account. They are <i>not</i> the same conversation and were not merged — \
+         <code>chat-stasher overview</code> names each one.<ul>{}</ul></div>\n",
+        collisions.len(),
+        collisions
+            .iter()
+            .map(|s| format!(
+                "<li class=mono>{} / {}</li>",
+                esc(&s.short_id),
+                esc(&s.harness.clone().unwrap_or_else(|| NO_HARNESS.to_string()))
+            ))
+            .collect::<String>()
+    ));
+    if not_recorded > 0 {
+        out.push_str(&format!(
+            "<p class=sub>{not_recorded} conversation(s) carried no account fingerprint, so no \
+             comparison was possible for those.</p>\n"
+        ));
+    }
+    out
 }
 
 /// R9 (29-UI-DESIGN §3.1/§4.1): machines that hold sessions but no activity
