@@ -54,6 +54,12 @@ span.paused{color:var(--bad)}
 span.unknown{color:var(--muted)}
 .muted{color:var(--muted)}
 .h2note{color:var(--muted);font-size:.8rem;font-weight:400}
+/* W227 (29-UI-DESIGN §8.1): the second line of a column header — what the
+   numbers under it are. A real line of the header rather than a `title`, so a
+   reader who never hovers a cell still reads it; the header's own emphasis is
+   dropped so the label reads as the unit and not as a second column name.
+   Colours come from the variables above (§8.1: no new colours). */
+th .unit{display:block;font-weight:400;font-size:.78rem;color:var(--muted)}
 /* R10 (29-UI-DESIGN §1.2): the ×N-backup badge. Colour comes from the
    variables above — the badge is a word first and a colour second. */
 .badge{background:var(--head);border:1px solid var(--line);border-radius:3px;
@@ -98,12 +104,12 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <p class=sub>4 installs · 1 stale</p>
 <p class=sub>These installs are on Machine 2; open them there.</p>
 <div class=scroll><table>
-<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<thead><tr><th scope=col>browser · profile</th><th scope=col>last report</th><th scope=col>status</th><th class=n scope=col>chatgpt <span class=unit>captured · pending</span></th><th class=n scope=col>claude <span class=unit>captured · pending</span></th></tr></thead>
 <tbody>
-<tr class="install stale"><td>Chrome · Work</td><td>4d ago</td><td><span class="dot stale"></span>Stale</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Arc · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Arc · Work</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Chrome · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install stale"><td>Chrome · Work</td><td>4d ago</td><td><span class="dot stale"></span>Stale</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
 </tbody></table></div>
 <details><summary>Details for these 4 installs</summary>
 <ul>
@@ -116,12 +122,12 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <section><h2>Machine 1 <span class=h2note>· this machine</span></h2>
 <p class=sub>4 installs · 1 paused</p>
 <div class=scroll><table>
-<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th>open</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<thead><tr><th scope=col>browser · profile</th><th scope=col>last report</th><th scope=col>status</th><th scope=col>open</th><th class=n scope=col>chatgpt <span class=unit>captured · pending</span></th><th class=n scope=col>claude <span class=unit>captured · pending</span></th></tr></thead>
 <tbody>
-<tr class="install paused"><td>Chrome · Work</td><td>2h ago</td><td><span class="dot paused"></span>Paused</td><td><span class=muted>no match</span></td><td class=n>4 · 2</td><td class=n>3 · 1 <span class=paused>paused</span></td></tr>
-<tr class="install ok"><td>Arc · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-2&amp;token=golden-token">Open in Arc · Personal</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Arc · Work</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-3&amp;token=golden-token">Open in Arc · Work</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Chrome · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-0&amp;token=golden-token">Open in Chrome · Personal</a></td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install paused"><td>Chrome · Work</td><td>2h ago</td><td><span class="dot paused"></span>Paused</td><td><span class=muted>no match</span></td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1, paused (retry-after)">3 · 1 <span class=paused>paused</span></td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-2&amp;token=golden-token">Open in Arc · Personal</a></td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-3&amp;token=golden-token">Open in Arc · Work</a></td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>1h ago</td><td><span class="dot ok"></span>Reporting</td><td><a href="/open-extension?install=synthetic-0&amp;token=golden-token">Open in Chrome · Personal</a></td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
 </tbody></table></div>
 <p class=sub>An exact browser profile match is unavailable for 1 of these 4 installs, so that row has no open action; open it from the named browser profile.</p>
 <details><summary>Details for these 4 installs</summary>
@@ -136,12 +142,12 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <p class=sub>4 installs · 1 with an unreadable status</p>
 <p class=sub>These installs are on Machine 3; open them there.</p>
 <div class=scroll><table>
-<thead><tr><th>browser · profile</th><th>last report</th><th>status</th><th class=n>chatgpt</th><th class=n>claude</th></tr></thead>
+<thead><tr><th scope=col>browser · profile</th><th scope=col>last report</th><th scope=col>status</th><th class=n scope=col>chatgpt <span class=unit>captured · pending</span></th><th class=n scope=col>claude <span class=unit>captured · pending</span></th></tr></thead>
 <tbody>
-<tr class="install unknown"><td>Chrome · Work</td><td>5h ago</td><td><span class="dot unknown"></span>Unknown</td><td class=n>4 · 2 <span class=unknown>pause unknown</span></td><td class=n>3 · 1 <span class=unknown>pause unknown</span></td></tr>
-<tr class="install ok"><td>Arc · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Arc · Work</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
-<tr class="install ok"><td>Chrome · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n>4 · 2</td><td class=n>3 · 1</td></tr>
+<tr class="install unknown"><td>Chrome · Work</td><td>5h ago</td><td><span class="dot unknown"></span>Unknown</td><td class=n title="chatgpt: captured 4, pending 2, pause unknown">4 · 2 <span class=unknown>pause unknown</span></td><td class=n title="claude: captured 3, pending 1, pause unknown">3 · 1 <span class=unknown>pause unknown</span></td></tr>
+<tr class="install ok"><td>Arc · Personal</td><td>2h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Arc · Work</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
+<tr class="install ok"><td>Chrome · Personal</td><td>3h ago</td><td><span class="dot ok"></span>Reporting</td><td class=n title="chatgpt: captured 4, pending 2">4 · 2</td><td class=n title="claude: captured 3, pending 1">3 · 1</td></tr>
 </tbody></table></div>
 <details><summary>Details for these 4 installs</summary>
 <ul>
