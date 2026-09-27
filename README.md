@@ -148,7 +148,7 @@ The first line is the verdict, for example `[run-once] Healthy: last run 12 minu
 
 ## Support at a glance
 
-This table is generated from the registry that ships inside the CLI and from the extension's own platform list, so it cannot drift from what the tool actually scans. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the month of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made.
+These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the tool actually scans and registers. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the month of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made.
 
 <!-- support-matrix:short:start -->
 **5+ platforms.** Local AI coding tools and web chats, archived the same way.
@@ -176,6 +176,23 @@ This table is generated from the registry that ships inside the CLI and from the
 | Web | grok | supported | - |
 
 Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check.
+
+**Browsers.** Native host registration, per browser and per OS:
+
+| Browser | macOS | Linux | Windows |
+|---|---|---|---|
+| Chrome | supported | supported | supported |
+| Chromium | supported | supported | supported |
+| Edge | supported | supported | supported |
+| Brave | supported | supported | supported |
+| Arc | supported | no native build | supported |
+| Chrome Beta | unverified | unverified | unverified |
+| Chrome Canary | unverified | unverified | unverified |
+| Opera | unverified | unverified | unverified |
+| Vivaldi | unverified | unverified | unverified |
+| Firefox | supported | supported | supported |
+
+`supported` is the promised tier: the discovery path, and on Windows the registry key, is documented and `install-native-host` registers it. `unverified` is the best-effort tier: registration is attempted and reported, never promised. `no native build` means the browser itself ships no build for that OS, so there is nothing to register. Firefox is carried as supported outside these Chromium-family tiers, on paths from Mozilla's own documentation. One registration serves every profile of a browser on a machine; the extension itself still needs loading once per profile.
 <!-- support-matrix:short:end -->
 
 Two things the table cannot show:

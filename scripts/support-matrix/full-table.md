@@ -51,4 +51,41 @@
 | kimi | https://www.kimi.com | experimental | from-source | experimental |
 | grok | https://grok.com | stable | from-source | supported |
 
+### Browsers (native messaging host registration)
+
+| Browser | OS | Status | Source |
+|---|---|---|---|
+| Chrome | macOS | supported | https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging |
+| Chrome | Linux | supported | https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging |
+| Chrome | Windows | supported | https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging |
+| Chromium | macOS | supported | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chromium | Linux | supported | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chromium | Windows | supported | https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc |
+| Edge | macOS | supported | https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging |
+| Edge | Linux | supported | https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging |
+| Edge | Windows | supported | https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging |
+| Brave | macOS | supported | https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go |
+| Brave | Linux | supported | https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go |
+| Brave | Windows | supported | https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go |
+| Arc | macOS | supported | https://github.com/keepassxreboot/keepassxc-browser/issues/1793 |
+| Arc | Linux | no native build | https://arc.net/download |
+| Arc | Windows | supported | https://github.com/chauncygu/collection-claude-code-source-code/blob/main/original-source-code/src/utils/claudeInChrome/common.ts |
+| Chrome Beta | macOS | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chrome Beta | Linux | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chrome Beta | Windows | unverified | https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc |
+| Chrome Canary | macOS | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chrome Canary | Linux | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
+| Chrome Canary | Windows | unverified | https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc |
+| Opera | macOS | unverified | https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging |
+| Opera | Linux | unverified | https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging |
+| Opera | Windows | unverified | https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging |
+| Vivaldi | macOS | unverified | https://github.com/vergenzt/TabFS/blob/master/install.sh |
+| Vivaldi | Linux | unverified | https://github.com/vergenzt/TabFS/blob/master/install.sh |
+| Vivaldi | Windows | unverified | https://github.com/vergenzt/TabFS/blob/master/install.sh |
+| Firefox | macOS | supported | https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging |
+| Firefox | Linux | supported | https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging |
+| Firefox | Windows | supported | https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging |
+
 `supported` means the path or route has a source and the scanner/extension will act on it; `verified end-to-end` additionally means a real session was archived on a real machine and the date is recorded. `unascertained` cells are not scanned and are rendered as `not supported`.
+
+`supported` is the promised tier: the discovery path, and on Windows the registry key, is documented and `install-native-host` registers it. `unverified` is the best-effort tier: registration is attempted and reported, never promised. `no native build` means the browser itself ships no build for that OS, so there is nothing to register. Firefox is carried as supported outside these Chromium-family tiers, on paths from Mozilla's own documentation. One registration serves every profile of a browser on a machine; the extension itself still needs loading once per profile.

@@ -574,6 +574,95 @@ fn presence_is_answered_only_where_a_source_names_the_data_directory() {
     }
 }
 
+/// The registry's `browsers` section is the data the published support matrix
+/// renders from (`scripts/gen-support-matrix.py`), and this crate's `Browser`
+/// enum is what the binary actually registers. Two copies of one matrix are
+/// exactly what drifts, so this pins them together:
+///
+/// * a `supported` / `unverified` cell must equal [`Browser::support`] for the
+///   pair — a tier the code does not report is a promise the tool does not keep,
+///   and a promotion in the enum the docs do not follow is a silent change of
+///   the published matrix;
+/// * a `no-native-build` cell must mean precisely *this build has no path for
+///   the pair* ([`Browser::has_path`] false), so the published "there is
+///   nothing to register" stays tied to the reason it is true (the browser
+///   itself ships no build for that OS), never to a guess;
+/// * the row set and order must equal [`Browser::ALL`]: missing a row drops a
+///   browser out of the docs silently, an extra row documents a browser
+///   nothing registers, and the tier-grouped order is what readers compare
+///   across machines.
+#[test]
+fn the_registry_browsers_section_matches_this_build() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/harness-registry-v1.json"
+    ));
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).expect("the shipped registry must be valid JSON");
+    let browsers = parsed["browsers"]
+        .as_array()
+        .expect("the registry must carry a `browsers` section for the support matrix");
+
+    let row_ids: Vec<&str> = browsers
+        .iter()
+        .map(|b| b["id"].as_str().expect("a browser row needs a string `id`"))
+        .collect();
+    let enum_ids: Vec<&str> = Browser::ALL.iter().map(|b| b.id()).collect();
+    assert_eq!(
+        row_ids, enum_ids,
+        "the registry's browser rows and Browser::ALL must be the same browsers in the same \
+         tier-grouped order (\"supported and tested\" first, best-effort below)"
+    );
+
+    for row in browsers {
+        let id = row["id"]
+            .as_str()
+            .expect("a browser row needs a string `id`");
+        let browser = Browser::ALL
+            .iter()
+            .find(|b| b.id() == id)
+            .expect("checked against Browser::ALL above");
+        let tiers = row["tiers"]
+            .as_object()
+            .unwrap_or_else(|| panic!("browser `{id}` needs a `tiers` object"));
+        for platform in PLATFORMS {
+            let cell = &tiers[platform.id()];
+            let tier = cell["tier"].as_str().unwrap_or_else(|| {
+                panic!("{} x {}: the cell needs a string `tier`", id, platform.id())
+            });
+            match tier {
+                "supported" => assert_eq!(
+                    browser.support(platform),
+                    Some(Support::Supported),
+                    "{} x {}: the registry says supported, this build does not",
+                    id,
+                    platform.id()
+                ),
+                "unverified" => assert_eq!(
+                    browser.support(platform),
+                    Some(Support::Unverified),
+                    "{} x {}: the registry says unverified, this build does not",
+                    id,
+                    platform.id()
+                ),
+                "no-native-build" => assert!(
+                    !browser.has_path(platform),
+                    "{} x {}: the registry says no native build, but this build looks for the \
+                     host there; one of the two is wrong",
+                    id,
+                    platform.id()
+                ),
+                other => panic!(
+                    "{} x {}: unknown tier `{other}` in the registry; gen-support-matrix.py and \
+                     this test both need the vocabulary extended on purpose",
+                    id,
+                    platform.id()
+                ),
+            }
+        }
+    }
+}
+
 /// The manifest directory on Windows never follows the presence probe.
 ///
 /// The regression guard for a bug this change introduced and
@@ -581,7 +670,7 @@ fn presence_is_answered_only_where_a_source_names_the_data_directory() {
 /// giving four browsers a `profile_rel` on Windows made the path builder take
 /// the "per-browser discovery directory" branch, so every Windows manifest
 /// landed under `<root>\Google\Chrome\chat-stasher\…` — a path no registry
-/// value named and no browser would ever read, while the command reported
+/// value named and no browser would ever have read, while the command reported
 /// `wrote`.
 #[test]
 fn windows_manifests_live_in_our_own_directory_whatever_the_probe_says() {

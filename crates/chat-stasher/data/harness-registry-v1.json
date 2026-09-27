@@ -498,5 +498,122 @@
         "verification": "No public repository or documentation was read for this entry. The evidence is the implementation shipped inside the installed CLI bundle, which is not part of this repository and is version-pinned by <KIMI_CODE_HOME>/updates/latest.json (0.39.1). Treat it as measured-at-a-version, not as a citable public source."
       }
     }
+  ],
+  "browsers": [
+    {
+      "id": "chrome",
+      "display_name": "Chrome",
+      "source": "https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {"tier": "supported"},
+        "windows": {"tier": "supported"}
+      }
+    },
+    {
+      "id": "chromium",
+      "display_name": "Chromium",
+      "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {"tier": "supported"},
+        "windows": {
+          "tier": "supported",
+          "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
+        }
+      }
+    },
+    {
+      "id": "edge",
+      "display_name": "Edge",
+      "source": "https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {"tier": "supported"},
+        "windows": {"tier": "supported"}
+      }
+    },
+    {
+      "id": "brave",
+      "display_name": "Brave",
+      "source": "https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {"tier": "supported"},
+        "windows": {"tier": "supported"}
+      }
+    },
+    {
+      "id": "arc",
+      "display_name": "Arc",
+      "source": "https://github.com/keepassxreboot/keepassxc-browser/issues/1793",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {
+          "tier": "no-native-build",
+          "source": "https://arc.net/download"
+        },
+        "windows": {
+          "tier": "supported",
+          "source": "https://github.com/chauncygu/collection-claude-code-source-code/blob/main/original-source-code/src/utils/claudeInChrome/common.ts"
+        }
+      }
+    },
+    {
+      "id": "chrome-beta",
+      "display_name": "Chrome Beta",
+      "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
+      "tiers": {
+        "macos": {"tier": "unverified"},
+        "linux": {"tier": "unverified"},
+        "windows": {
+          "tier": "unverified",
+          "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
+        }
+      }
+    },
+    {
+      "id": "chrome-canary",
+      "display_name": "Chrome Canary",
+      "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
+      "tiers": {
+        "macos": {"tier": "unverified"},
+        "linux": {"tier": "unverified"},
+        "windows": {
+          "tier": "unverified",
+          "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
+        }
+      }
+    },
+    {
+      "id": "opera",
+      "display_name": "Opera",
+      "source": "https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging",
+      "tiers": {
+        "macos": {"tier": "unverified"},
+        "linux": {"tier": "unverified"},
+        "windows": {"tier": "unverified"}
+      }
+    },
+    {
+      "id": "vivaldi",
+      "display_name": "Vivaldi",
+      "source": "https://github.com/vergenzt/TabFS/blob/master/install.sh",
+      "tiers": {
+        "macos": {"tier": "unverified"},
+        "linux": {"tier": "unverified"},
+        "windows": {"tier": "unverified"}
+      }
+    },
+    {
+      "id": "firefox",
+      "display_name": "Firefox",
+      "source": "https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging",
+      "tiers": {
+        "macos": {"tier": "supported"},
+        "linux": {"tier": "supported"},
+        "windows": {"tier": "supported"}
+      }
+    }
   ]
 }
