@@ -13,6 +13,11 @@ import {
 } from '../lib/contract';
 import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
 import {
+  acquireSharedLease,
+  backfillLeaseKey,
+  type SharedLeaseState,
+} from '../lib/backfill/shared-lease';
+import {
   accountLeaseForScope,
   agreesWithLease,
   identityOf,
@@ -887,27 +892,15 @@ type BackfillLease = {
   release(): Promise<void>;
   gentle: boolean;
 };
-type SharedBackfillLease = { holders: number; ready: Promise<BackfillLease | null>; releasing?: Promise<void> };
-const backfillLeases = new Map<string, SharedBackfillLease>();
+const backfillLeases = new Map<string, SharedLeaseState<BackfillLease>>();
 
 /** The sole gateway for requests made by live, alarm, retry, resume and popup discovery. */
 async function acquireBackfillLease(platform: string, accountId?: string): Promise<BackfillLease | null> {
   const comparableAccountId = accountId && accountId !== 'default' && accountId !== UNRESOLVED_SCOPE
     ? accountId
     : undefined;
-  const previous = backfillLeases.get(platform);
-  if (previous?.releasing) {
-    await previous.releasing;
-    return acquireBackfillLease(platform);
-  }
-  if (previous) {
-    previous.holders += 1;
-    const lease = await previous.ready;
-    return lease ? { ...lease, release: releaseOnce(previous, lease.release) } : null;
-  }
-  const shared: SharedBackfillLease = { holders: 1, ready: Promise.resolve(null) };
-  backfillLeases.set(platform, shared);
-  shared.ready = (async (): Promise<BackfillLease | null> => {
+  const leaseKey = backfillLeaseKey(platform, comparableAccountId);
+  return acquireSharedLease(backfillLeases, leaseKey, async (): Promise<BackfillLease | null> => {
     const install = await getInstallIdentity();
     const installId = install.install_id;
     const claim = await coordinate({ mode: 'claim', platform, installId, accountId: comparableAccountId });
@@ -949,30 +942,7 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
         await coordinate({ mode: 'release', platform, installId, accountId: comparableAccountId });
       },
     };
-  })();
-  const lease = await shared.ready;
-  if (!lease) {
-    if (backfillLeases.get(platform) === shared) backfillLeases.delete(platform);
-    return null;
-  }
-  return { ...lease, release: releaseOnce(shared, lease.release) };
-}
-
-function releaseOnce(shared: SharedBackfillLease, hostRelease: () => Promise<void>): () => Promise<void> {
-  let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    shared.holders -= 1;
-    if (shared.holders === 0) {
-      shared.releasing = hostRelease().finally(() => {
-        for (const [platform, current] of backfillLeases) {
-          if (current === shared) backfillLeases.delete(platform);
-        }
-      });
-      await shared.releasing;
-    }
-  };
+  });
 }
 
 /** Share Claude organization-discovery refusals before the last holder releases. */
