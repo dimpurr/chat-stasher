@@ -831,6 +831,22 @@ export async function hello(options: { timeoutMs?: number } = {}): Promise<Hello
   return { ok: true, machine: res.machine, stage: res.stage, hostVersion: res.host_version };
 }
 
+/** Persist a content-free per-install backfill status snapshot in the local stage. */
+export async function reportInstallStatus(status: {
+  install_id: string;
+  browser: string;
+  profile_label: string | null;
+  extension_version: string;
+  reported_at: string;
+  platforms: Array<{ platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>;
+}): Promise<boolean> {
+  const requestId = newRequestId();
+  if (!requestId) return false;
+  const outcome = await sendOnce(getRuntime(), { protocol: PROTOCOL, type: 'status', request_id: requestId, status }, REQUEST_TIMEOUT_MS);
+  return classify(outcome, (value) => value.protocol === PROTOCOL && value.type === 'status'
+    && value.ok === true && value.request_id === requestId ? value : 'malformed status response', requestId).ok;
+}
+
 export interface CoordinationResult {
   ok: boolean;
   granted: boolean;

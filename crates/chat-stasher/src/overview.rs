@@ -324,6 +324,24 @@ pub fn machine_freshness_json(
 /// including today. The menubar draws exactly this many mini-bars.
 pub const SUMMARY_WINDOW_DAYS: usize = 30;
 
+/// A report is stale when its timestamp is unreadable or is more than 48 hours old.
+pub fn extension_status_is_stale(reported_at: Option<&str>, now_unix: i64) -> bool {
+    reported_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_none_or(|value| now_unix.saturating_sub(value.timestamp()) > 48 * 60 * 60)
+}
+
+/// Add archived per-install records without folding their counts together.
+pub fn with_extension_installs(
+    mut document: serde_json::Value,
+    installs: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(object) = document.as_object_mut() {
+        object.insert("installs".into(), serde_json::json!(installs));
+    }
+    document
+}
+
 /// One record per source (harness), ordered by name: its session count and the
 /// newest conversation time among its known-time sessions.
 ///
@@ -1291,6 +1309,27 @@ fn fmt_ymd((y, m, d): (i64, u32, u32)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_status_stale_uses_the_48_hour_boundary_and_preserves_unknown() {
+        let now = 1_790_000_000;
+        let fresh = chrono::DateTime::from_timestamp(now - 48 * 60 * 60, 0)
+            .expect("fixed timestamp")
+            .to_rfc3339();
+        let old = chrono::DateTime::from_timestamp(now - 48 * 60 * 60 - 1, 0)
+            .expect("fixed timestamp")
+            .to_rfc3339();
+        assert!(!extension_status_is_stale(Some(&fresh), now));
+        assert!(extension_status_is_stale(Some(&old), now));
+        assert!(extension_status_is_stale(None, now));
+        assert!(extension_status_is_stale(Some("invalid"), now));
+    }
+
+    #[test]
+    fn legacy_overview_without_extension_reports_has_an_empty_install_list() {
+        let document = with_extension_installs(serde_json::json!({"command":"overview"}), vec![]);
+        assert_eq!(document["installs"], serde_json::json!([]));
+    }
 
     fn row(
         id: &str,

@@ -3015,6 +3015,7 @@ struct OverviewRead {
     labels: BTreeMap<String, Vec<identity::LabelRecord>>,
     writer_versions: BTreeMap<String, sidecar::WriterVersionRecord>,
     unreadable_writer_versions: BTreeSet<String>,
+    extension_installs: Vec<serde_json::Value>,
 }
 
 fn read_archive_writer_statuses(
@@ -3063,6 +3064,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
         labels: BTreeMap::new(),
         writer_versions: BTreeMap::new(),
         unreadable_writer_versions: BTreeSet::new(),
+        extension_installs: Vec::new(),
     };
 
     for snap in newest {
@@ -3080,6 +3082,39 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
             .with_context(|| format!("host `{hostname}`: collect snapshot entries"))?;
         for (path, node) in &entries {
             if node.node_type != NodeType::File {
+                continue;
+            }
+            if path.starts_with("ext-status/") && path.ends_with(".json") {
+                let mut buf = Vec::new();
+                repo.dump(node, &mut buf)
+                    .with_context(|| format!("host `{hostname}`: read extension status"))?;
+                let mut status: serde_json::Value =
+                    serde_json::from_slice(&buf).with_context(|| {
+                        format!("host `{hostname}`: malformed extension status JSON")
+                    })?;
+                let install_id = status.get("install_id").and_then(|v| v.as_str());
+                let filename_id = path
+                    .strip_prefix(Path::new("ext-status"))
+                    .ok()
+                    .filter(|relative| relative.components().count() == 1)
+                    .and_then(Path::file_stem)
+                    .and_then(std::ffi::OsStr::to_str);
+                if status.get("schema").and_then(|v| v.as_str())
+                    != Some("chat-stasher/ext-status@1")
+                    || install_id.is_none()
+                    || install_id != filename_id
+                    || status.get("machine").and_then(|v| v.as_str()) != Some(hostname.as_str())
+                    || status.get("reported_at").and_then(|v| v.as_str()).is_none()
+                {
+                    anyhow::bail!(
+                        "host `{hostname}`: extension status identity or schema mismatch"
+                    );
+                }
+                status["stale"] = serde_json::Value::Bool(overview::extension_status_is_stale(
+                    status["reported_at"].as_str(),
+                    chrono::Utc::now().timestamp(),
+                ));
+                out.extension_installs.push(status);
                 continue;
             }
             if let Some(machine) = sidecar::activity_index_machine(path) {
@@ -3246,6 +3281,7 @@ fn cmd_overview(
         labels,
         writer_versions,
         unreadable_writer_versions,
+        extension_installs,
     } = read;
     let writer_status = sidecar::writer_statuses(
         &snapshot_machines,
@@ -3284,7 +3320,7 @@ fn cmd_overview(
                     .earliest()
                     .map(|dt| dt.date_naive())
             };
-            overview::overview_summary_json(
+            let value = overview::overview_summary_json(
                 &rows,
                 &snapshot_times,
                 &missing,
@@ -3293,7 +3329,8 @@ fn cmd_overview(
                 exit_code,
                 today,
                 &day_of,
-            )
+            );
+            overview::with_extension_installs(value, extension_installs.clone())
         } else {
             let mut value = overview::overview_json_with_freshness(
                 &rows,
@@ -3311,7 +3348,7 @@ fn cmd_overview(
                     serde_json::json!(writer_status),
                 );
             }
-            value
+            overview::with_extension_installs(value, extension_installs)
         };
         println!("{}", json_string(&value));
         reap_remote(&cfg, keep_ssh_masters);
