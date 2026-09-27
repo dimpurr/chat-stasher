@@ -85,11 +85,116 @@ final class StatusTests: XCTestCase {
     func testMissingCliClassStaysOnTheInstallCardAndItsEvidenceIsStructural() {
         XCTAssertEqual(classifyFailure(OverviewFailure(kind: .cliMissing, message: "")).sentence,
                        "Install the command-line tool")
-        // The class exists only because env exited 127 with empty stdout;
-        // no word in any message can create or erase it.
-        XCTAssertTrue(isMissingCLIResponse(terminationStatus: 127, output: Data()))
-        XCTAssertFalse(isMissingCLIResponse(terminationStatus: 2, output: Data()))
-        XCTAssertFalse(isMissingCLIResponse(terminationStatus: 127, output: Data([0x7b, 0x7d])))
+        // The class exists only because the up-front PATH resolution found
+        // nothing; no word in any message can create or erase it.
+        XCTAssertNil(cliOnPath("/no/such/dir:/also/none"))
+    }
+
+    func testCliOnPathReportsAnAbsolutePathForTheWorkingDirectoryComponents() throws {
+        // PATH's empty and `.` components mean the current directory, the same
+        // way execvp reads them. The app hands this answer to
+        // `Process.executableURL` and shows it in the About sheet as the
+        // binary's absolute location, so a relative `./chat-stasher` would
+        // both contradict that caption and name a file resolved against the
+        // app's own working directory rather than the one the PATH walk saw.
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cli-on-path-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bin = dir.appendingPathComponent("chat-stasher")
+        try "#!/bin/sh\nexit 0\n".write(to: bin, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.path)
+
+        let saved = FileManager.default.currentDirectoryPath
+        XCTAssertTrue(FileManager.default.changeCurrentDirectoryPath(dir.path))
+        defer { _ = FileManager.default.changeCurrentDirectoryPath(saved) }
+        let cwd = FileManager.default.currentDirectoryPath
+
+        // An empty component (a leading `:`), a bare `:`, and an explicit `.`
+        // all name the same directory.
+        // An empty component is the first element of `:/usr/bin` and the only
+        // element of a bare `:`; an explicit `.` names the same directory.
+        for path in [":/usr/bin", ":", ".:/usr/bin"] {
+            let found = cliOnPath(path)
+            XCTAssertEqual(found, cwd + "/chat-stasher", "PATH \(path.debugDescription)")
+            XCTAssertTrue(found?.hasPrefix("/") ?? false, "PATH \(path.debugDescription)")
+        }
+    }
+
+    func testHandshakeFiresWhenTheResolvedBinaryAnswers() {
+        // The success side of --resolve-cli: the found binary's path, the
+        // version it reported, and the panel's own floor verdict.
+        XCTAssertEqual(cliResolveLine(local: LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true,
+                                                           lastRunFailed: false, reason: nil,
+                                                           cliVersion: "0.5.0-rc.2", cliPath: "/opt/new/chat-stasher",
+                                                           cliNeedsUpdate: false),
+                                      failure: nil, resolvedPath: nil),
+                       "cli=/opt/new/chat-stasher version=0.5.0-rc.2 state=ok")
+        XCTAssertEqual(cliResolveLine(local: LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true,
+                                                           lastRunFailed: false, reason: nil,
+                                                           cliVersion: "0.4.0", cliPath: "/opt/old/chat-stasher",
+                                                           cliNeedsUpdate: true),
+                                      failure: nil, resolvedPath: nil),
+                       "cli=/opt/old/chat-stasher version=0.4.0 state=too-old")
+        // A binary that answered `status --json` without its cli_version is
+        // reported unknown, and the path the app actually used wins over the
+        // caller's re-resolve when both are available.
+        XCTAssertEqual(cliResolveLine(local: LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true,
+                                                           lastRunFailed: false, reason: nil,
+                                                           cliVersion: nil, cliPath: nil, cliNeedsUpdate: true),
+                                      failure: nil, resolvedPath: "/resolved/chat-stasher"),
+                       "cli=/resolved/chat-stasher version=unknown state=too-old")
+    }
+
+    func testHandshakeNamesEachFailureClassNotAMessage() {
+        // A missing CLI is `none`, an answer distinct from an unknown path.
+        XCTAssertEqual(cliResolveLine(local: nil, failure: OverviewFailure(kind: .cliMissing, message: ""),
+                                      resolvedPath: nil),
+                       "cli=none version=unknown state=cli-missing")
+        // A binary that resolves but does not speak this app's status
+        // document still gets named, with the class it produced.
+        XCTAssertEqual(cliResolveLine(local: nil, failure: OverviewFailure(kind: .cliTooOld, message: ""),
+                                      resolvedPath: "/opt/broken/chat-stasher"),
+                       "cli=/opt/broken/chat-stasher version=unknown state=no-status-document")
+        for (kind, token) in [(FailureKind.setup, "setup"), (.credentials, "credentials"),
+                              (.unreadable, "unreadable")] {
+            XCTAssertEqual(resolveCliStateToken(kind), token)
+        }
+        // The unclassified arm (the spawn itself threw) is unreadable, the
+        // same class the refresh path gives an error it cannot classify.
+        XCTAssertEqual(cliResolveLine(local: nil, failure: nil, resolvedPath: "/opt/x/chat-stasher"),
+                       "cli=/opt/x/chat-stasher version=unknown state=unreadable")
+    }
+
+    func testHandshakeKeepsTheVersionARefusingCliDeclared() {
+        // A CLI that answers with a refusal document instead of a local layer
+        // still declares `cli_version`, and "which CLI did the app find, and
+        // how old is it?" is answered just as much by a refusal as by a
+        // success. `unknown` means the document declared no version — it is
+        // not a stand-in for "we did not look".
+        XCTAssertEqual(cliResolveLine(local: nil,
+                                      failure: OverviewFailure(kind: .credentials, message: "",
+                                                               cliVersion: "0.5.0-rc.2"),
+                                      resolvedPath: "/opt/refusing/chat-stasher"),
+                       "cli=/opt/refusing/chat-stasher version=0.5.0-rc.2 state=credentials")
+        XCTAssertEqual(cliResolveLine(local: nil,
+                                      failure: OverviewFailure(kind: .setup, message: "",
+                                                               cliVersion: "0.5.0-rc.2"),
+                                      resolvedPath: "/opt/refusing/chat-stasher"),
+                       "cli=/opt/refusing/chat-stasher version=0.5.0-rc.2 state=setup")
+        // A 0.4.x document declares no version, so the too-old answer stays
+        // unknown — the absence is the finding.
+        XCTAssertEqual(cliResolveLine(local: nil,
+                                      failure: OverviewFailure(kind: .cliTooOld, message: ""),
+                                      resolvedPath: "/opt/old/chat-stasher"),
+                       "cli=/opt/old/chat-stasher version=unknown state=no-status-document")
+    }
+
+    func testAboutCaptionNamesTheFoundPathWhenKnown() {
+        XCTAssertEqual(cliHandshakeCaption(version: "0.5.0-rc.2", cliPath: "/opt/new/chat-stasher"),
+                       "CLI 0.5.0-rc.2 at /opt/new/chat-stasher")
+        XCTAssertEqual(cliHandshakeCaption(version: "0.4.0", cliPath: nil), "CLI 0.4.0")
+        XCTAssertEqual(cliHandshakeCaption(version: nil, cliPath: nil), "CLI unknown")
     }
 
     /// The solrev4 finding, as a regression: an archive read failure whose
@@ -186,6 +291,58 @@ final class StatusTests: XCTestCase {
         // A CLI older than `config_error_kind` omits it: the setup card it
         // always was, not a guess from the message.
         XCTAssertEqual(statusConfigFailureKind(nil), .setup)
+    }
+
+    func testPreContractStatusDocumentClassifiesAsTooOldNotSetup() {
+        // The shape a stale real-world CLI produces: 0.4.x `status --json`
+        // decodes (schema 1, command "status") but carries no `local`
+        // section and no `cli_version`. Finding this drove MEN-3: the app
+        // used to fall into the setup card, pointing the user at their
+        // config when the only fix was the upgrade.
+        let precontract = statusUnusableLocalFailure(configSource: "file", hasLocal: false,
+                                                     configErrorKind: nil, configError: nil)
+        XCTAssertEqual(precontract?.kind, .cliTooOld)
+        XCTAssertEqual(precontract?.message, "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
+
+        // A document declaring its own config unusable keeps the setup /
+        // credential classes, and the config's own explanation is carried.
+        // It carries no `local` section, because a CLI with no usable config
+        // never got far enough to describe this machine's local layer.
+        let setup = statusUnusableLocalFailure(configSource: "unreadable", hasLocal: false,
+                                               configErrorKind: nil, configError: "config could not be used")
+        XCTAssertEqual(setup?.kind, .setup)
+        XCTAssertEqual(setup?.message, "Set up chat-stasher in Terminal first. config could not be used")
+        // A contracted document with usable config is not a failure at all.
+        XCTAssertNil(statusUnusableLocalFailure(configSource: "file", hasLocal: true,
+                                                configErrorKind: nil, configError: nil))
+    }
+
+    func testCurrentCliConfigRefusalKeepsItsSetupAndCredentialClasses() {
+        // The shape the shipped CLI actually emits for a config it cannot use:
+        // `status_json_config_error` (crates/chat-stasher/src/main.rs) writes
+        // `config_source: "unreadable"` + `config_error_kind` + `cli_version`
+        // and exit code 3, and by design no `local` section at all — the
+        // refusal is exactly the case a menu bar app or a scheduled run hits.
+        // So the "no `local` section" test must come after the
+        // "declares its config unusable" test: reading them the other way
+        // relabels every credential refusal from an up-to-date CLI as "CLI
+        // too old" and sends the user to reinstall a CLI that is fine.
+        let credentials = "destination \"r2\": file:/run/secrets/r2 not readable"
+        XCTAssertEqual(statusUnusableLocalFailure(configSource: "unreadable", hasLocal: false,
+                                                  configErrorKind: "credentials",
+                                                  configError: credentials)?.kind,
+                       .credentials)
+        XCTAssertEqual(statusUnusableLocalFailure(configSource: "unreadable", hasLocal: false,
+                                                  configErrorKind: "unreadable",
+                                                  configError: "toml parse error")?.kind,
+                       .setup)
+        // And the shape whose absence of `local` really does mean "too old"
+        // is the other one: 0.4.x answered with `config_source` present but
+        // never `unreadable` — the variant arrived in 0.5.0-rc.1 — and with
+        // neither a `local` section nor a `cli_version`.
+        XCTAssertEqual(statusUnusableLocalFailure(configSource: "defaults_missing", hasLocal: false,
+                                                  configErrorKind: nil, configError: nil)?.kind,
+                       .cliTooOld)
     }
 
     func testDashboardUsesDisplayedDestinationUnlessEnvironmentOverridesIt() {
@@ -376,6 +533,69 @@ final class StatusTests: XCTestCase {
         let status = ArchiveStatus.destination("Remote archive", "Can't read the archive", .error)
         XCTAssertEqual(status.sentence, "Remote archive: Can't read the archive")
         XCTAssertEqual(status.severity, .error)
+    }
+
+    // ---- "which CLI does the app find" (the install-matrix resolver) --------
+
+    /// `cliOnPath` is the app-side half of the execvp PATH search that decides
+    /// which installed `chat-stasher` the version handshake reads. These tests
+    /// match what the shell's `env chat-stasher` would resolve, so the About
+    /// sheet's reported source and the process actually spawned agree.
+
+    private func makeFakeCLI(_ directory: String) -> String {
+        let path = directory + "/chat-stasher"
+        FileManager.default.createFile(
+            atPath: path,
+            contents: Data("#!/bin/sh\necho fake\n".utf8), attributes: nil)
+        var attrs = [FileAttributeKey: Any]()
+        attrs[.posixPermissions] = 0o755
+        try? FileManager.default.setAttributes(attrs, ofItemAtPath: path)
+        return path
+    }
+
+    private func makeTempDir() -> String {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("menubar-cli-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url.path
+    }
+
+    func testCliOnPathPrefersTheEarlierPATHComponent() throws {
+        let earlier = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: earlier) }
+        let later = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: later) }
+        XCTAssertEqual(makeFakeCLI(earlier), cliOnPath("\(earlier):\(later)"))
+        // Reversed order picks the other install, the way a stale CLI earlier
+        // on PATH wins over a newer one later on it.
+        XCTAssertEqual(makeFakeCLI(later), cliOnPath("\(later):\(earlier)"))
+    }
+
+    func testCliOnPathSkipsANonexecutableStubEarlierOnPath() throws {
+        let stub = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: stub) }
+        let real = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: real) }
+        // A stale but non-executable earlier PATH component must not shadow a
+        // real executable later on the path — execvp passes over it too.
+        let stubPath = stub + "/chat-stasher"
+        FileManager.default.createFile(atPath: stubPath, contents: Data("#!/bin/sh\n".utf8), attributes: nil)
+        var attrs = [FileAttributeKey: Any](); attrs[.posixPermissions] = 0o644
+        try FileManager.default.setAttributes(attrs, ofItemAtPath: stubPath)
+        XCTAssertEqual(makeFakeCLI(real), cliOnPath("\(stub):\(real)"))
+    }
+
+    func testCliOnPathTakesARealDirectoryNotJustAnyEntry() throws {
+        let dir = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        // A PATH component that is not a directory holds nothing to run, and
+        // an empty directory holds no chat-stasher.
+        let missing = dir + "/no-such-dir"
+        XCTAssertNil(cliOnPath("\(missing):\(dir)"))
+        XCTAssertNil(cliOnPath(nil))
+        XCTAssertNil(cliOnPath(""))
+    }
+
+    func testCliOnPathIgnoresATopLevelDirectoryNamedLikeTheCLI() throws {
+        // A directory literally named `chat-stasher` on PATH is not a binary.
+        let parent = makeTempDir(); defer { try? FileManager.default.removeItem(atPath: parent) }
+        try FileManager.default.createDirectory(atPath: parent + "/chat-stasher", withIntermediateDirectories: true)
+        XCTAssertNil(cliOnPath(parent))
     }
 
     func testOlderCLIUsesLatestKnownConversationAndKeepsUnknownAsUnknown() {

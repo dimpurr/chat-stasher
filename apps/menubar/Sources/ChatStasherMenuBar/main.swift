@@ -9,6 +9,18 @@ struct ChatStasherMenuBarApp: App {
     @NSApplicationDelegateAdaptor(DemoWindowDelegate.self) private var demoWindowDelegate
     @StateObject private var model = ArchiveModel()
 
+    init() {
+        // `--resolve-cli` is the headless acceptance mode: print the version
+        // handshake's report line (which CLI the app's PATH search found,
+        // its version, the too-old verdict) and exit before any GUI exists,
+        // so an install matrix can drive this exact binary on a machine
+        // with several CLIs installed (MEN-3).
+        if ProcessInfo.processInfo.arguments.contains("--resolve-cli") {
+            print(ArchiveModel.cliResolveReport())
+            exit(0)
+        }
+    }
+
     var body: some Scene {
         MenuBarExtra {
             ArchivePopover(model: model)
@@ -314,6 +326,10 @@ struct LocalSnapshot {
     let lastRunFailed: Bool
     let reason: String?
     var cliVersion: String? = nil
+    /// The absolute path of the `chat-stasher` binary this local state was
+    /// read from — the source the app found on PATH, distinct from the version
+    /// it reports, so "which CLI did it find" has a machine-checkable answer.
+    var cliPath: String? = nil
     var cliNeedsUpdate: Bool = false
     var destinationCount: Int? = nil
     var destinationNames: [String] = []
@@ -391,7 +407,8 @@ enum ArchiveStatus {
 /// own documents declare, or a decode verdict. The message the CLI printed is
 /// display text; nothing ever matches on it.
 enum FailureKind: Equatable {
-    /// `env` exited 127 with empty stdout: the command-line tool is not there.
+    /// No `chat-stasher` resolves on the app's PATH (`cliOnPath` found
+    /// nothing) — the same answer a failed `execvp` search gives.
     case cliMissing
     /// The CLI answered, but not with this app's contracted documents.
     case cliTooOld
@@ -410,6 +427,11 @@ enum FailureKind: Equatable {
 struct OverviewFailure: Error {
     let kind: FailureKind
     let message: String
+    /// The `cli_version` a `status --json` document declared before the app
+    /// rejected it, when it declared one. A CLI that refuses to answer — the
+    /// credential case — still says which version refused, and the handshake
+    /// report should not turn that known version into `unknown`.
+    var cliVersion: String? = nil
 }
 
 func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, failure: OverviewFailure?, now: Date = Date(), silenceThresholdOverrideDays: Int? = nil) -> ArchiveStatus {
@@ -508,8 +530,38 @@ func statusConfigFailureKind(_ configErrorKind: String?) -> FailureKind {
     configErrorKind == "credentials" ? .credentials : .setup
 }
 
-func isMissingCLIResponse(terminationStatus: Int32, output: Data) -> Bool {
-    terminationStatus == 127 && output.isEmpty
+/// The failure a decoded `status --json` document that yields no local
+/// snapshot represents. Two shapes reach here and the order of the two tests
+/// below is the entire difference between them.
+///
+/// A document that declares its own config unusable (`config_source:
+/// "unreadable"`, `config_error_kind` naming why) keeps the setup / credential
+/// class its `config_error_kind` names: the config is a thing on this machine
+/// the user can fix. The shipped CLI writes that document *instead of* a local
+/// layer — `status_json_config_error` in `crates/chat-stasher/src/main.rs` —
+/// so it is always the no-`local` shape too, and testing `hasLocal` first would
+/// relabel every credential refusal from an up-to-date CLI as "too old" and
+/// send the user to reinstall a CLI that is fine. Reading `"unreadable"` first
+/// costs the too-old state nothing either: the `ConfigSource` variant shipped
+/// in 0.5.0-rc.1, so no 0.4.x CLI can emit that word.
+///
+/// A document with no `local` section and no such declaration comes from a CLI
+/// that predates this app's contract — 0.4.x writes status without `local` and
+/// without `cli_version` — so the shape itself is the too-old state, never
+/// "set up chat-stasher": the missing section is inside that CLI, not in the
+/// machine's configuration, and the only fix is the upgrade the too-old card
+/// names. nil = usable as-is.
+func statusUnusableLocalFailure(configSource: String?, hasLocal: Bool,
+                                configErrorKind: String?, configError: String?) -> OverviewFailure? {
+    if configSource == "unreadable" {
+        return OverviewFailure(kind: statusConfigFailureKind(configErrorKind),
+                               message: "Set up chat-stasher in Terminal first. \(configError ?? "")")
+    }
+    guard hasLocal else {
+        return OverviewFailure(kind: .cliTooOld,
+                               message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
+    }
+    return nil
 }
 
 func dashboardDestination(environment: String?, displayed: String?) -> String? {
@@ -788,7 +840,7 @@ private final class ArchiveModel: ObservableObject {
             snapshot.destinationName = chosen.0
             let localWithDestinations = LocalSnapshot(waitingToUpload: local.waitingToUpload,
                 scheduleInstalled: local.scheduleInstalled, lastRunFailed: local.lastRunFailed, reason: local.reason,
-                cliVersion: local.cliVersion, cliNeedsUpdate: local.cliNeedsUpdate,
+                cliVersion: local.cliVersion, cliPath: local.cliPath, cliNeedsUpdate: local.cliNeedsUpdate,
                 destinationCount: local.destinationCount, destinationNames: local.destinationNames)
             return .success(snapshot, localWithDestinations)
         } catch let failure as OverviewFailure {
@@ -800,27 +852,17 @@ private final class ArchiveModel: ObservableObject {
     }
 
     nonisolated private static func readOverview(destination: String?, destinationCount: Int) throws -> ArchiveSnapshot {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["chat-stasher", "overview", "--json", "--summary"]
+        var arguments = ["overview", "--json", "--summary"]
         if let destination {
-            process.arguments?.append(contentsOf: ["--destination", destination])
+            arguments.append(contentsOf: ["--destination", destination])
         }
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
-            throw OverviewFailure(kind: .cliMissing,
-                                  message: "The command-line tool is not on PATH.")
-        }
+        let (_, data, terminationStatus) = try spawnCli(arguments,
+                                                        missingMessage: "The command-line tool is not on PATH.")
         let line = data.split(separator: 0x0A, maxSplits: 1).first
         // A successful read is the summary document and exit 0 together.
         if let line, let document = try? JSONDecoder().decode(SummaryDocument.self, from: Data(line)),
            document.schemaVersion == 1, document.command == "overview", document.variant == "summary",
-           document.exitCode == process.terminationStatus, document.exitCode == 0 {
+           document.exitCode == terminationStatus, document.exitCode == 0 {
             let now = Date()
             let machines = document.machines.map { MachineFreshness(machine: $0.display, newestSnapshotUnix: $0.newestSnapshotUnix, health: $0.health, silenceAfterDays: $0.silenceAfterDays) }
             let days = document.days.compactMap { item -> DailyCount? in
@@ -839,39 +881,64 @@ private final class ArchiveModel: ObservableObject {
         // own documents and exit status; the text is display-only.
         let errorDocument = line.flatMap { try? JSONDecoder().decode(OverviewErrorDocument.self, from: Data($0)) }
         if line == nil {
-            throw OverviewFailure(kind: classifyOverviewFailure(terminationStatus: process.terminationStatus,
+            throw OverviewFailure(kind: classifyOverviewFailure(terminationStatus: terminationStatus,
                                                                 document: nil).kind,
                                   message: "Archive overview returned an empty response.")
         }
-        throw classifyOverviewFailure(terminationStatus: process.terminationStatus, document: errorDocument)
+        throw classifyOverviewFailure(terminationStatus: terminationStatus, document: errorDocument)
     }
 
-    nonisolated private static func readStatus() throws -> LocalSnapshot {
+    /// Spawn the `chat-stasher` the app finds on its own PATH with `arguments`,
+    /// returning the resolved CLI path plus the finished process's output and
+    /// status. The path is resolved once, up front, by the same rule execvp
+    /// follows (`cliOnPath`), so the app runs the *same* binary it reports in
+    /// its version handshake — there is no separate "env's search" that could
+    /// find a different file than the About sheet names. If nothing resolves on
+    /// PATH, throws `.cliMissing`, the class the old `env`-exit-127 path
+    /// produced, so the missing-CLI card is unchanged.
+    nonisolated private static func spawnCli(
+        _ arguments: [String], missingMessage: String
+    ) throws -> (cli: String, data: Data, terminationStatus: Int32) {
+        let path = ProcessInfo.processInfo.environment["PATH"]
+        guard let cli = cliOnPath(path) else {
+            throw OverviewFailure(kind: .cliMissing, message: missingMessage)
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["chat-stasher", "status", "--json"]
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = arguments
         let output = Pipe(); process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
         let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-        if isMissingCLIResponse(terminationStatus: process.terminationStatus, output: data) {
-            throw OverviewFailure(kind: .cliMissing,
-                                  message: "The command-line tool is not on PATH.")
-        }
-        guard process.terminationStatus == 0 || process.terminationStatus == 1 || process.terminationStatus == 3,
+        return (cli, data, process.terminationStatus)
+    }
+
+    nonisolated private static func readStatus() throws -> LocalSnapshot {
+        let (cli, data, terminationStatus) = try spawnCli(
+            ["status", "--json"],
+            missingMessage: "The command-line tool is not on PATH.")
+        guard terminationStatus == 0 || terminationStatus == 1 || terminationStatus == 3,
               let line = data.split(separator: 0x0A, maxSplits: 1).first,
               let document = try? JSONDecoder().decode(StatusDocument.self, from: Data(line)),
               document.schemaVersion == 1, document.command == "status" else {
             throw OverviewFailure(kind: .cliTooOld,
                                   message: "CLI too old: needs ≥ 0.5.0-rc.2 for status --json.")
         }
-        guard document.configSource != "unreadable", let local = document.local else {
-            // The kind is the `config_error_kind` the document declares: the
-            // typed credential refusal is its own card; any other unusable
-            // config is the setup card it always was. A CLI predating the
-            // field omits it and still classifies as setup — never a guess
-            // from the message.
-            throw OverviewFailure(kind: statusConfigFailureKind(document.configErrorKind),
-                                  message: "Set up chat-stasher in Terminal first. \(document.configError ?? "")")
+        if var failure = statusUnusableLocalFailure(configSource: document.configSource,
+                                                    hasLocal: document.local != nil,
+                                                    configErrorKind: document.configErrorKind,
+                                                    configError: document.configError) {
+            // The refusal document names its own version; a report that the app
+            // found *this* CLI keeps it rather than calling it unknown.
+            failure.cliVersion = document.cliVersion
+            throw failure
+        }
+        // Both of statusUnusableLocalFailure's branches return non-nil when
+        // there is no local section — the unusable-config one and the too-old
+        // one — so a document without one was already thrown; this restates
+        // the invariant for the compiler and for a reader.
+        guard let local = document.local else {
+            throw OverviewFailure(kind: .unreadable,
+                                  message: "Status response carried no local section.")
         }
         let count = local.stage?.waitingToUpload
         let reason: String?
@@ -886,10 +953,27 @@ private final class ArchiveModel: ObservableObject {
                              lastRunFailed: local.lastRun?.kind == "known" && local.lastRun?.outcome == "error",
                              reason: reason ?? (waiting == nil ? "Local staged upload status is unknown." : nil),
                              cliVersion: version,
+                             cliPath: cli,
                              cliNeedsUpdate: version.map { !versionAtLeast($0, "0.5.0-rc.2") } ?? true,
                              destinationCount: local.destinationNames.isEmpty
                                 ? local.schedule?.units?.count : local.destinationNames.count,
                              destinationNames: local.destinationNames)
+    }
+
+    /// Run the same `status --json` handshake the panel runs and return the
+    /// `--resolve-cli` report line — the resolved CLI path, the version that
+    /// binary reported, and the panel's verdict about it. The path is
+    /// resolved once, up front, so a failure still names the binary that was
+    /// found; `cliResolveLine` holds the formatting and is unit-tested.
+    nonisolated static func cliResolveReport() -> String {
+        let resolved = cliOnPath(ProcessInfo.processInfo.environment["PATH"])
+        do {
+            return cliResolveLine(local: try readStatus(), failure: nil, resolvedPath: resolved)
+        } catch let failure as OverviewFailure {
+            return cliResolveLine(local: nil, failure: failure, resolvedPath: resolved)
+        } catch {
+            return cliResolveLine(local: nil, failure: nil, resolvedPath: resolved)
+        }
     }
 }
 
@@ -982,6 +1066,88 @@ private func sourceStatusSymbol(_ health: SourceHealth) -> String {
     case .unused: "circle"
     case .unknown: "questionmark.circle.fill"
     }
+}
+
+/// Resolve `name` to the first executable on the given PATH, the same way an
+/// `execvp` search does: split on `:` in order, and an empty component (as in
+/// `/usr/bin::/bin`) names the current directory, matching execvp's traversal.
+/// A component only matches when it names a real directory holding a regular,
+/// executable file of that name — a nonexecutable stub earlier on PATH is
+/// passed over so it can never shadow a real install later on it. Returns nil
+/// when nothing matches, the same answer the process would get from a failed
+/// PATH search. Pure, so "which CLI the app found" is a fact a caller can
+/// assert; `--resolve-cli` and the version handshake both read this.
+func cliOnPath(_ path: String?, name: String = "chat-stasher") -> String? {
+    guard let path, !path.contains("\0") else { return nil }
+    let components = path.split(separator: ":", omittingEmptySubsequences: false)
+    for component in components {
+        // An empty component, and a literal `.`, both mean the current
+        // directory — the same directory execvp would search. It is spelled
+        // out rather than returned as `./name` because this answer is what the
+        // app names in the About sheet as the found CLI's absolute location
+        // and what it hands to `Process.executableURL`, which resolves a
+        // relative path against the app's own working directory, not against
+        // the one the PATH walk looked in.
+        let dir = component.isEmpty || component == "."
+            ? FileManager.default.currentDirectoryPath
+            : String(component)
+        let slash = dir.hasSuffix("/") ? "" : "/"
+        let candidate = dir == "/" ? "/" + name : dir + slash + name
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: candidate, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+        return candidate
+    }
+    return nil
+}
+
+/// The one machine-checkable line the app prints for `--resolve-cli`: which
+/// `chat-stasher` binary its PATH search found, the version that binary
+/// reported, and the app's verdict about it — the About sheet's caption as a
+/// fact a script can assert, so the install matrix can ask the app itself
+/// (MEN-3). `local` is the successful `status --json` read and carries both
+/// the version and the resolved path it came from; when that read failed
+/// instead, `failure` names the class of failure and `resolvedPath` is what
+/// `cliOnPath` resolved before the failing run, so the report still names
+/// the found binary. An unclassified error (the spawn itself threw) is
+/// reported as `unreadable`, matching how the refresh path treats it.
+func cliResolveLine(local: LocalSnapshot?, failure: OverviewFailure?, resolvedPath: String?) -> String {
+    if let local {
+        return "cli=\(local.cliPath ?? resolvedPath ?? "unknown") version=\(local.cliVersion ?? "unknown") state=\(local.cliNeedsUpdate ? "too-old" : "ok")"
+    }
+    if let failure {
+        // Nothing was found is `none`, an answer distinct from finding a
+        // binary whose path somehow went missing. The version is whatever the
+        // failing document declared — a CLI that refused to answer still said
+        // which version it is — and `unknown` only when it declared none.
+        let path = failure.kind == .cliMissing ? "none" : (resolvedPath ?? "unknown")
+        return "cli=\(path) version=\(failure.cliVersion ?? "unknown") state=\(resolveCliStateToken(failure.kind))"
+    }
+    // The spawn itself threw (an error no path classified): the resolution
+    // still happened, so the binary that was found gets named.
+    return "cli=\(resolvedPath ?? "unknown") version=unknown state=unreadable"
+}
+
+/// The state word for a failed handshake, one per FailureKind, so the report
+/// names the class rather than a message that could say anything.
+func resolveCliStateToken(_ kind: FailureKind) -> String {
+    switch kind {
+    case .cliMissing: "cli-missing"
+    case .cliTooOld: "no-status-document"
+    case .setup: "setup"
+    case .credentials: "credentials"
+    case .unreadable: "unreadable"
+    }
+}
+
+/// The CLI half of the About sheet's caption: the version the found binary
+/// reported plus the absolute path it lives at, so "which CLI did the app
+/// find on this machine?" has the same answer in the UI as in the
+/// `--resolve-cli` line.
+func cliHandshakeCaption(version: String?, cliPath: String?) -> String {
+    let versionText = version ?? "unknown"
+    return cliPath.map { "CLI \(versionText) at \($0)" } ?? "CLI \(versionText)"
 }
 
 func versionAtLeast(_ actual: String, _ minimum: String) -> Bool {
@@ -1116,7 +1282,7 @@ private struct ArchivePopover: View {
             VStack(spacing: 8) {
                 Image(systemName: "archivebox.fill").font(.largeTitle).foregroundStyle(.tint)
                 Text("Chat Stasher").font(.headline)
-                Text("App \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.0") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1")) · CLI \(model.localSnapshot?.cliVersion ?? "unknown")")
+                Text("App \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.0") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1")) · \(cliHandshakeCaption(version: model.localSnapshot?.cliVersion, cliPath: model.localSnapshot?.cliPath))")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("GitHub", destination: URL(string: "https://github.com/dimpurr/chat-stasher")!)
                 Button("Done") { showingAbout = false }.keyboardShortcut(.defaultAction)

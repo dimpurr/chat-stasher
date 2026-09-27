@@ -19,6 +19,20 @@ open ".build/Chat Stasher Demo.app" --args --demo=all-green
 
 Run app status sentence tests with `swift test`. The CLI must be available on `PATH`. With multiple destinations, the app checks each configured destination and shows the one with the worst state; **Settings…** lets you select one destination instead. `CHAT_STASHER_DESTINATION` remains an optional launch-time override. The app refreshes when its popover opens or when **Refresh** is selected.
 
+`chat-stasher-menubar --resolve-cli` prints the version handshake headlessly — one
+line naming which CLI the app's PATH search found, the version that binary
+reported, and the app's verdict — and exits before any GUI exists. It exists so
+the install matrix can drive the real binary:
+
+```sh
+bash apps/menubar/scripts/install-matrix.sh
+```
+
+That script verifies the app against MEN-3's states — no CLI, the CLI installed
+by the real `scripts/install.sh` into a throwaway home, a stale older CLI
+earlier on PATH, and the older→newer upgrade — building throwaway CLIs of its
+own and never touching the real `~/.local/bin`.
+
 ## Release build
 
 `package-app.sh` above is the development path: it builds in debug, writes a
@@ -60,8 +74,8 @@ do, are in [`RELEASING.md`](../../RELEASING.md) under "The menu bar app".
 
 ## Read-only data contract
 
-The app consumes `chat-stasher overview --json --summary` and `chat-stasher status --json`, both schema version 1. It requires matching command names and matching process/payload exit codes, and CLI ≥ 0.5.0-rc.2. Missing fields or invalid JSON are treated as an unreadable response or an older CLI; an unknown count is never converted to zero. A failed refresh keeps the last successful archive result visible with an Offline label.
+The app consumes `chat-stasher overview --json --summary` and `chat-stasher status --json`, both schema version 1. It requires matching command names and matching process/payload exit codes, and CLI ≥ 0.5.0-rc.2. Missing fields or invalid JSON are treated as an unreadable response or an older CLI; a status document that decodes but carries neither a `local` section nor `config_source: "unreadable"` (the 0.4.x shape) is classified as an older CLI, never as a setup problem, because what it lacks is inside that CLI, not in the machine's config; a document that declares its own config unusable is classified from its `config_error_kind` instead, into the credential card or the setup card — the shape the CLI writes *instead of* a local section when it cannot read the config at all; an unknown count is never converted to zero. A failed refresh keeps the last successful archive result visible with an Offline label.
 
-The summary variant supplies per-machine newest snapshot time and health, per-source totals, active calendar days, cadence-derived silence thresholds and last-save timestamps, and 30 local days without sending every session row to the app. The local status supplies the scheduler, last run, staged sessions waiting to upload, configured destination names, and CLI version. With several destinations, the app reads each destination separately and never adds their conversation totals; Settings can show the worst status across all destinations or one named destination. Web chats always say `Extension status: see each browser's extension` until instance reports are present; install counts are never inferred from a browser profile or summed across machines. A source is considered regularly used after activity on three distinct calendar days; its own observed cadence determines when it is marked stopped. The popover shows compact per-source icons and status bars; source names and counts are in the collapsed **Show sources** list. Launch-at-login and silence-threshold controls live in **Settings…** (⌘,).
+The summary variant supplies per-machine newest snapshot time and health, per-source totals, active calendar days, cadence-derived silence thresholds and last-save timestamps, and 30 local days without sending every session row to the app. The local status supplies the scheduler, last run, staged sessions waiting to upload, configured destination names, CLI version, and the absolute path the app found that CLI at; the About sheet shows the version and that path, which is how "which CLI did the app find on this machine" has an answer when several are installed. With several destinations, the app reads each destination separately and never adds their conversation totals; Settings can show the worst status across all destinations or one named destination. Web chats always say `Extension status: see each browser's extension` until instance reports are present; install counts are never inferred from a browser profile or summed across machines. A source is considered regularly used after activity on three distinct calendar days; its own observed cadence determines when it is marked stopped. The popover shows compact per-source icons and status bars; source names and counts are in the collapsed **Show sources** list. Launch-at-login and silence-threshold controls live in **Settings…** (⌘,).
 
 Sparkle 2 checks the GitHub Releases appcast at `https://github.com/dimpurr/chat-stasher/releases/latest/download/appcast.xml`. The app bundle uses `SUFeedURL` and `SUPublicEDKey`; release signing and appcast generation belong to the release workflow.
