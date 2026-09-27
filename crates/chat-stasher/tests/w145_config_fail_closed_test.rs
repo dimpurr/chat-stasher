@@ -364,6 +364,10 @@ fn status_json_on_an_unusable_config_is_still_one_object() {
     assert_eq!(v["exit_code"], serde_json::json!(3));
     assert_eq!(v["healthy"], serde_json::json!(false));
     assert_eq!(v["config_source"], serde_json::json!("unreadable"));
+    assert_eq!(
+        v["config_error_kind"], serde_json::json!("unreadable"),
+        "only the typed credential refusal is 'credentials'; every other unusable config is 'unreadable': {v}"
+    );
     assert!(
         v["config_error"].is_string(),
         "the reason must be in the object: {v}"
@@ -449,6 +453,35 @@ fn an_unresolvable_credential_reference_stops_the_command_naming_the_option() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["exit_code"], serde_json::json!(3));
     assert_eq!(v["command"], serde_json::json!("status"));
+    // The machine-readable half of the reason: a `--json` reader classifies on
+    // this, never on the prose naming the option.
+    assert_eq!(
+        v["config_error_kind"],
+        serde_json::json!("credentials"),
+        "the menubar reads the kind, not the message: {v}"
+    );
+    assert_eq!(v["config_source"], serde_json::json!("unreadable"));
+
+    // `overview --json` refuses the same way and owes stdout one document on
+    // this path too — with the same kind, so both readers see one story.
+    let out = isolated_env(sandbox.path(), &["overview", "--json"]);
+    assert_eq!(
+        code(&out),
+        3,
+        "an unresolvable credential must stop overview too:\n{}",
+        combined(&out)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["exit_code"], serde_json::json!(3));
+    assert_eq!(v["error_kind"], serde_json::json!("credentials"));
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("destinations.d1.options.access_key_id"),
+        "the error document must name the option:\n{}",
+        v["error"]
+    );
 }
 
 /// The same reference, with the file present, resolves **with no environment

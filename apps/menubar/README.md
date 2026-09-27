@@ -1,6 +1,6 @@
 # Chat Stasher menu bar app
 
-A macOS 13+ SwiftUI `MenuBarExtra` app that reads `chat-stasher overview --json` and presents archive health, one conversation count, a 30-day chart, and per-machine freshness. The app does not open the archive itself. **Open dashboard** starts `chat-stasher ui`.
+A macOS 13+ SwiftUI `MenuBarExtra` app that reads `chat-stasher overview --json --summary` and `chat-stasher status --json`. It combines local upload/scheduler health with archive health, source freshness, one conversation count, a 30-day chart, and per-machine freshness. The app does not open the archive itself. **Open dashboard** starts `chat-stasher ui`.
 
 Build and package a local app bundle:
 
@@ -10,14 +10,14 @@ swift build
 open ".build/Chat Stasher.app"
 ```
 
-Build a demo bundle, then run any of the synthetic screenshot states with `--demo=all-green`, `--demo=silent`, or `--demo=unreadable`:
+Build a demo bundle, then run any of the synthetic screenshot states with `--demo=all-green`, `--demo=source-stopped`, `--demo=silent`, `--demo=offline`, `--demo=cli-missing`, `--demo=cli-old`, `--demo=not-configured`, or `--demo=unreadable`:
 
 ```sh
 ./package-app.sh --demo
 open ".build/Chat Stasher Demo.app" --args --demo=all-green
 ```
 
-Run app status sentence tests with `swift test`. The CLI must be available on `PATH`; set `CHAT_STASHER_DESTINATION` in the app launch environment if multiple destinations exist. The app refreshes when its popover opens or when **Refresh** is selected.
+Run app status sentence tests with `swift test`. The CLI must be available on `PATH`. With multiple destinations, the app checks each configured destination and shows the one with the worst state; **Settings…** lets you select one destination instead. `CHAT_STASHER_DESTINATION` remains an optional launch-time override. The app refreshes when its popover opens or when **Refresh** is selected.
 
 ## Release build
 
@@ -60,8 +60,8 @@ do, are in [`RELEASING.md`](../../RELEASING.md) under "The menu bar app".
 
 ## Read-only data contract
 
-The app consumes `chat-stasher overview --json` schema version 1. It requires `command == "overview"`, matching process and payload exit codes, and measured numeric summary fields. Missing fields, invalid JSON, unsupported schema versions, and exit codes 2 or 3 show the red unreadable state; an unknown count is never converted to zero.
+The app consumes `chat-stasher overview --json --summary` and `chat-stasher status --json`, both schema version 1. It requires matching command names and matching process/payload exit codes, and CLI ≥ 0.5.0-rc.2. Missing fields or invalid JSON are treated as an unreadable response or an older CLI; an unknown count is never converted to zero. A failed refresh keeps the last successful archive result visible with an Offline label.
 
-`machines.by_machine` supplies newest snapshot time and health when available. With an older CLI that omits this additive field, the app derives each machine's latest known conversation time from `sessions[].last_unix`, preserves machines with no known time, and says that it is showing conversation time rather than backup time. The 30-day chart groups known `sessions[].first_unix` values by local calendar day.
+The summary variant supplies per-machine newest snapshot time and health, per-source totals, active calendar days, cadence-derived silence thresholds and last-save timestamps, and 30 local days without sending every session row to the app. The local status supplies the scheduler, last run, staged sessions waiting to upload, configured destination names, and CLI version. With several destinations, the app reads each destination separately and never adds their conversation totals; Settings can show the worst status across all destinations or one named destination. Web chats always say `Extension status: see each browser's extension` until instance reports are present; install counts are never inferred from a browser profile or summed across machines. A source is considered regularly used after activity on three distinct calendar days; its own observed cadence determines when it is marked stopped. The popover shows compact per-source icons and status bars; source names and counts are in the collapsed **Show sources** list. Launch-at-login and silence-threshold controls live in **Settings…** (⌘,).
 
 Sparkle 2 checks the GitHub Releases appcast at `https://github.com/dimpurr/chat-stasher/releases/latest/download/appcast.xml`. The app bundle uses `SUFeedURL` and `SUPublicEDKey`; release signing and appcast generation belong to the release workflow.

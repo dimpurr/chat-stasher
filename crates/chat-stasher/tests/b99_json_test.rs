@@ -256,8 +256,8 @@ fn status_json_unreadable_run_state_is_unreadable() {
     assert!(v["run_state"]["why"].is_string());
 }
 
-/// Top-level field names of `status --json` are pinned. Bumping one is a
-/// breaking change for every tray-plugin script that parsed this object.
+/// Top-level field names of `status --json` are pinned. New additive fields
+/// are deliberate so tray apps can verify the CLI version they are reading.
 #[test]
 fn status_json_top_level_schema_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -269,6 +269,7 @@ fn status_json_top_level_schema_is_stable() {
     assert_eq!(
         keys,
         [
+            "cli_version",
             "command",
             "config_source",
             "exit_code",
@@ -377,6 +378,8 @@ fn doctor_json_prints_one_object_and_exit_0() {
 // ---------------------------------------------------------------------------
 
 /// Usage error (no destination, no repo): one JSON object on stdout, exit 2.
+/// `error_kind` is the machine-readable classification ("usage"), decided where
+/// the failure happened — a tray reader keys on it, never on the prose.
 #[test]
 fn overview_json_no_destination_is_error_exit_2() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -387,6 +390,7 @@ fn overview_json_no_destination_is_error_exit_2() {
     assert_eq!(v["command"], serde_json::json!("overview"));
     assert_eq!(v["exit_code"], serde_json::json!(2));
     assert_eq!(v["healthy"], serde_json::json!(false));
+    assert_eq!(v["error_kind"], serde_json::json!("usage"));
     assert!(v["error"].is_string());
 }
 
@@ -411,7 +415,8 @@ fn overview_summary_requires_json() {
 }
 
 /// Unreadable archive (missing key): one JSON object on stdout, exit 3. "Could
-/// not look" is `error`, not an empty `sessions` array that reads as "none".
+/// not look" is `error`, not an empty `sessions` array that reads as "none";
+/// `error_kind` says the key is what failed.
 #[test]
 fn overview_json_unopenable_repo_is_error_exit_3() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -431,9 +436,37 @@ fn overview_json_unopenable_repo_is_error_exit_3() {
     let v = json_stdout(&out);
     assert_eq!(v["exit_code"], serde_json::json!(3));
     assert_eq!(v["healthy"], serde_json::json!(false));
+    assert_eq!(v["error_kind"], serde_json::json!("key"));
     assert!(v["error"].is_string());
     assert!(
         v.get("sessions").is_none(),
         "an unreadable overview must not claim an empty sessions list"
+    );
+}
+
+/// A config file that exists but cannot be used refuses before any destination
+/// is named, and `--json` still owes stdout one object on that path — this was
+/// the one `overview` failure that printed nothing to stdout, leaving a tray
+/// reader with an exit status and no document. The object carries
+/// `error_kind: "config"` so the reader can tell it from a read failure.
+#[test]
+fn overview_json_unusable_config_writes_the_error_document() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = sandbox();
+    let config_dir = sb.path().join("xdg-config/chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    fs::write(&config, b"this is not valid TOML = [\n").unwrap();
+
+    let out = run(sb.path(), &["overview", "--json"]);
+    assert_exit(&out, 3);
+    let v = json_stdout(&out);
+    assert_eq!(v["command"], serde_json::json!("overview"));
+    assert_eq!(v["exit_code"], serde_json::json!(3));
+    assert_eq!(v["error_kind"], serde_json::json!("config"));
+    let error = v["error"].as_str().unwrap();
+    assert!(
+        error.contains(config.to_string_lossy().as_ref()),
+        "the error must name the file to fix: {error}"
     );
 }

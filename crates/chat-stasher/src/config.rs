@@ -907,7 +907,7 @@ fn expand_config_paths(cfg: &mut Config) -> anyhow::Result<()> {
     // would otherwise find the option quietly gone and the destination
     // unreachable for no stated reason.
     if let Err(reason) = resolve_option_credential_refs(cfg) {
-        return Err(unusable_config(&config_path(), reason));
+        return Err(CredentialRefused::new(&config_path(), reason).into());
     }
     Ok(())
 }
@@ -928,6 +928,35 @@ fn unusable_config(path: &Path, reason: String) -> anyhow::Error {
         path.display()
     )
 }
+
+/// A config refusal caused by a persistent credential reference that could not
+/// be resolved — the fail-closed case of [`resolve_option_credential_refs`].
+///
+/// The rendered message is identical to any other unusable config; the type
+/// exists so a `--json` caller can classify the refusal structurally (an
+/// `anyhow` downcast, never a word matched in the prose), the same rule ADR-023
+/// encodes with `RemoteErrorKind` slugs for remote failures: a menubar app that
+/// cannot reach a `keychain:` / `file:` / `env-file:` reference needs its own
+/// card, and it must not have to guess that from the sentence the CLI printed.
+#[derive(Debug)]
+pub struct CredentialRefused(String);
+
+impl CredentialRefused {
+    /// The refusal message: [`unusable_config`]'s own rendering, so the one
+    /// wording exists in exactly one place and this type cannot drift from
+    /// what any other unusable config prints.
+    fn new(path: &Path, reason: String) -> Self {
+        Self(format!("{:#}", unusable_config(path, reason)))
+    }
+}
+
+impl std::fmt::Display for CredentialRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CredentialRefused {}
 
 /// Replacement for an `env:NAME` option value, or the reason there is none.
 ///
@@ -1875,6 +1904,38 @@ mod tests {
         assert!(
             text.contains("could not be read"),
             "the error must name the missing credential: {text}"
+        );
+        // The refusal carries its own type, so a `--json` caller classifies it
+        // with a downcast instead of matching the prose. Its message is
+        // `unusable_config`'s own rendering — the same first line and the same
+        // hint, checked with a synthetic reason so the assertion does not
+        // depend on platform io error wording.
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_some(),
+            "a credential refusal must downcast to its own type"
+        );
+        let rendered = CredentialRefused::new(
+            &std::path::PathBuf::from("/no/such/config"),
+            "synthetic reason".to_string(),
+        )
+        .to_string();
+        assert!(
+            rendered.starts_with(
+                "config file /no/such/config exists but cannot be used: synthetic reason\nhint: fix that file"
+            ),
+            "the typed refusal must render exactly like any other unusable config: {rendered}"
+        );
+        let unresolvable = "[destinations.d1]\nrepo = \"~alice/repo\"\n";
+        let err = Config::from_text(unresolvable)
+            .expect_err("a path the tool cannot resolve must refuse the config");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("destinations.d1.repo"),
+            "the error must name the option: {text}"
+        );
+        assert!(
+            err.downcast_ref::<CredentialRefused>().is_none(),
+            "only the fail-closed credential refusal is typed; every other unusable config is not: {text}"
         );
 
         let lenient =
