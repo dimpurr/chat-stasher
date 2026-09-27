@@ -734,12 +734,48 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
     await openTab(81);
 
     const n = CAP;
-    const WAKES = 24;
-    /** Two fixed streams, so the property is not a statement about one lucky seed. */
-    // Seed 0 registers a newcomer before the first wake and that prepended row
-    // is served immediately; its before-tick baseline must make it observable.
-    const SEEDS = [0, 0x51eed, 0xbeef1];
-    for (const seed of SEEDS) {
+    /**
+     * 🔴 W223 · **A budget on wall-clock, not a coverage choice.** At the 24
+     *    wakes this loop used to run per seed it needed ~2.1 s on an idle dev
+     *    machine, and CI run 36300068026 (attempt 1, 2026-09-27) killed exactly
+     *    this test at vitest's default 5000 ms per-test budget — same file,
+     *    ~10.0 s on the runner where the idle machine needs ~4.2 s, i.e. an
+     *    inflation of roughly 2.4× under the suite's parallel load. A test
+     *    whose redness can depend on how busy the runner is is not testing
+     *    the rotation; the streams are seeded, so the only free variable is
+     *    the runner, and the wake counts are sized to take it out.
+     *
+     *    The sizing keeps two things at once:
+     *     · **Coverage.** `WAKES - n + 1` windows of length `n = CAP`
+     *       (`MAX_TARGET_ENTRIES`, 8) are checked per seed — 11 for the long
+     *       seed, 5 for each short one, 21 across the streams — and every
+     *       seed's fixed stream still rolls every mutation class at least
+     *       once inside its own wake count (the `ops.some(...)` assertions
+     *       below), so the churn the property feeds on is exercised, not
+     *       merely hoped for. Shortening trailing wakes does not touch what
+     *       any one wake does, and the served/ops sequences are seeded, so
+     *       the exact run stays reproducible.
+     *     · **The red on `835d4f1`, through this loop's own assertion.** On
+     *       the break, seed 0 starves its first row starting at wake 10, so
+     *       the window that catches it spans wakes 10–17: that seed must run
+     *       18 wakes or its `violations` list comes back empty on the break
+     *       and the red lands on a companion case instead of on the property
+     *       itself (verified red at 18, empty at 17).
+     *
+     *    12 wakes for the other two seeds hold the whole loop between ~1.0 s
+     *    and ~1.4 s on an idle dev machine (measured across ten isolated
+     *    runs — a fifth to a quarter of vitest's 5000 ms), so the ~2.4× CI
+     *    inflation that failed the run lands near ~3.4 s and still clears
+     *    the budget the old 24-per-seed shape died on.
+     */
+    const STREAMS: ReadonlyArray<readonly [number, number]> = [
+      [0, 18],
+      [0x51eed, 12],
+      [0xbeef1, 12],
+    ];
+    for (const [seed, WAKES] of STREAMS) {
+      // Seed 0 registers a newcomer before the first wake and that prepended row
+      // is served immediately; its before-tick baseline must make it observable.
       // 🔴 Each seed is an independent world: the previous seed's newcomers are
       //    still in the registry (their evictions were for-good, not for the next
       //    run), so re-seed, drop any stale cursor and boot a fresh worker.
