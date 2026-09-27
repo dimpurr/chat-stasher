@@ -26,7 +26,7 @@
  *    command without evidence, and never the installer when the CLI is known.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 
 import {
@@ -543,6 +543,17 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     vi.stubGlobal('defineContentScript', (cfg: unknown) => cfg);
   });
 
+  /**
+   * 🔴 The connect cases fake **only `Date`** (`RETRY_BASE_MS` is a real minute,
+   * and the backlog's second attempt is due exactly one backoff after the
+   * first). Nothing async depends on timers — fake-indexeddb and the synthetic
+   * host settle on microtasks — but leaks must not reach the other cases
+   * anyway (w27's pattern: restore in `afterEach`, unconditionally).
+   */
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('🔴 the backlog goes out at once, and the delivered count is recorded once', async () => {
     const ob = await import('../lib/outbox');
     await ob.enqueue('chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json', '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}');
@@ -595,31 +606,48 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
   });
 
   // -------------------------------------------------------------------------
-  // W214b · The drain the popup never sees (review, finding 1)
+  // W214b/W214c · The drain the popup never sees (review, findings 1 and 1′)
   //
-  // The record used to be written from `hostConnectedDrain` alone, which only the
-  // popup's probe calls. The 5-minute outbox alarm and the post-enqueue drain
-  // empty the same spool, and when either of them gets there first the notice
-  // simply never appeared — "tell the user how much went out" silently did not
-  // happen, in exactly the flow the extension-only user is in.
+  // Round 1: only `hostConnectedDrain` wrote the record, and only the popup's
+  // probe calls it, so when the 5-minute outbox alarm or the capture's own drain
+  // emptied the spool first, the notice never appeared.
+  //
+  // Round 2 (W214c): that fix's pause-record gate is unreachable in the
+  // extension-only default — the pause's only production writer is the backfill
+  // leg, which never runs with the switch off — and the tests below hand-wrote
+  // one to pass. Every case now earns its evidence from the real machinery:
+  // the failed attempts are recorded by the drain itself against a missing
+  // helper, and the one pause-leg case has its record written by
+  // `deliverBackfillItem`, the production writer, never by the test.
   // -------------------------------------------------------------------------
 
-  /** Two captures waiting, and a pause on record — which is what makes a drain a *connect*. */
-  async function backlogWithPause(): Promise<{ ob: typeof import('../lib/outbox'); store: ReturnType<typeof import('../lib/backfill/store')['browserLocalStore']> }> {
+  /**
+   * The narrative every connect case starts from, built entirely by real
+   * machinery: the helper is away (the missing-manifest way a machine without
+   * the CLI behaves), two captures queue up, and the outbox alarm's real drain
+   * really tries to send and really fails. Those failures land on the entries'
+   * own never-reset `attempts` ledger — the testimony the notice reads — and the
+   * backoff a failure arms means the clock must step past `RETRY_BASE_MS`
+   * (`lib/outbox.ts`) before the next drain can retry, the way the minutes of
+   * the real alarm's story do.
+   *
+   * 🔴 Nothing here is hand-written: if the away-drain no longer records the
+   *    failures, or the ledger stops being part of the delivered report, the
+   *    assertions in this helper are the first thing to go red.
+   */
+  async function backlogWhileHelperAway(): Promise<{
+    ob: typeof import('../lib/outbox');
+    store: ReturnType<typeof import('../lib/backfill/store')['browserLocalStore']>;
+    bg: any;
+  }> {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(AT);
+    host = createSyntheticHost({ up: false });
+
     const ob = await import('../lib/outbox');
     await ob.enqueue('chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json', '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}');
     await ob.enqueue('chatgpt-bbbbbbbb-1111-2222-3333-444444444444.json', '{"sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}');
     const store = (await import('../lib/backfill/store')).browserLocalStore();
-    // The helper had been recorded away — the record that tells the notice it is
-    // reporting a connect rather than an ordinary delivery.
-    const { setHostPause } = await import('../lib/host-status');
-    await setHostPause(store, { reason: 'host-unavailable', at: AT });
-    return { ob, store };
-  }
-
-  it('🔴 the 5-minute outbox alarm records the connect delivery too — the popup never has to open', async () => {
-    const { ob, store } = await backlogWithPause();
-    expect(await ob.loadConnectDelivery(store)).toBeNull();
 
     const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
     // `any`: the entry point's default export is the background definition, which
@@ -630,15 +658,40 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
     await bg.outboxAlarmSettled();
 
+    // The drain really failed, and the ledger it leaves behind is the evidence.
+    // Not one of these bytes was written by the test. Note the honest shape of
+    // that ledger: a retryable failure ends the run on purpose (§10 — every
+    // remaining entry would burn its own timeout learning the same fact), so
+    // the away-drain's mark is on **one** entry; the other is still untouched,
+    // exactly as the real no-helper minutes leave it.
+    const entries = await ob.undeliveredEntries();
+    expect(entries).not.toBeNull();
+    expect(entries!.length).toBe(2);
+    expect(entries!.filter((e) => e.attempts > 0 && e.lastError === 'send-failed')).toHaveLength(1);
+    expect(entries!.filter((e) => e.attempts === 0)).toHaveLength(1);
+    expect(host.names().length).toBe(0);
+
+    // The helper is installed, and the minutes pass the way they do in reality.
+    host = createSyntheticHost({ up: true });
+    vi.setSystemTime(AT + ob.RETRY_BASE_MS);
+    return { ob, store, bg };
+  }
+
+  it('🔴 the 5-minute outbox alarm records the connect delivery too — the popup never has to open', async () => {
+    const { ob, store, bg } = await backlogWhileHelperAway();
+    expect(await ob.loadConnectDelivery(store)).toBeNull();
+
+    const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
+    for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
+    await bg.outboxAlarmSettled();
+
     expect(host.names().length).toBe(2);
     expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 2 });
   });
 
   it('🔴 the drain that follows a capture records it as well', async () => {
-    const { ob, store } = await backlogWithPause();
+    const { ob, store, bg } = await backlogWhileHelperAway();
 
-    const bg: any = await import('../entrypoints/background');
-    await bg.default();
     const sid = 'cccccccc-1111-2222-3333-444444444444';
     const payload = {
       url: `https://chatgpt.com/backend-api/conversation/${sid}`,
@@ -652,12 +705,73 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
       for (const fn of messageListeners) fn({ type: 'chat-captured', payload }, { id: 's' }, resolve);
     });
 
-    // The two that were already waiting, plus the one this very capture added.
+    // The two that were already waiting, plus the one this very capture added —
+    // the same drain carries all three out.
     expect(host.names().length).toBe(3);
     expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 3 });
   });
 
-  it('🔴 no pause on record ⇒ an ordinary capture writes no notice (the gate keeps it from being universal noise)', async () => {
+  it('🔴 the backfill tick drains the outbox first, and records before its own resume can forget why', async () => {
+    const { ob, store, bg } = await backlogWhileHelperAway();
+
+    // No target is registered and the switch is off, so this tick serves no
+    // backfill leg at all — but it still sends the outbox before any gate, and
+    // that drain is the moment the notice exists for. The review's third flow:
+    // the jittered 5–10-minute tick can beat the outbox alarm's next period.
+    await bg.runAlarmTick();
+
+    expect(host.names().length).toBe(2);
+    expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 2 });
+  });
+
+  it('🔴 the pause the backfill leg itself writes still counts — produced by the real writer, not the test', async () => {
+    // The pause leg of the gate, with evidence this case cannot get anywhere
+    // else: the entry delivered below has never failed an attempt (no drain
+    // ran while the helper was away), so only the pause record can carry the
+    // "the helper was away" fact — and it is written by `deliverBackfillItem`,
+    // the one writer production has, not by this test.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(AT);
+    host = createSyntheticHost({ up: false });
+
+    const bg: any = await import('../entrypoints/background');
+    await bg.default();
+    const sid = 'dddddddd-1111-2222-3333-444444444444';
+    const captured = {
+      url: `https://chatgpt.com/backend-api/conversation/${sid}`,
+      method: 'GET',
+      status: 200,
+      text: JSON.stringify({ mapping: {}, current_node: 'n0', account_id: 'acct-1' }),
+      pageUrl: `https://chatgpt.com/c/${sid}`,
+      capturedAt: AT,
+    };
+    const verdict = await bg.deliverBackfillItem(captured);
+    expect(verdict).toEqual({ saved: false, reason: 'host-unavailable', retryLater: true });
+
+    const { loadHostPause } = await import('../lib/host-status');
+    const store = (await import('../lib/backfill/store')).browserLocalStore();
+    expect(await loadHostPause(store)).not.toBeNull();
+
+    // A capture whose ledger is clean — no drain ran while the helper was away —
+    // so this case passes on the pause's say-so or it does not pass at all.
+    const ob = await import('../lib/outbox');
+    await ob.enqueue('chatgpt-eeeeeeee-1111-2222-3333-444444444444.json', '{"sessionId":"eeeeeeee-1111-2222-3333-444444444444"}');
+    const queue = await ob.undeliveredEntries();
+    expect(queue![0]!.attempts).toBe(0);
+
+    host = createSyntheticHost({ up: true });
+    const { OUTBOX_ALARM_NAME } = await import('../lib/outbox-alarm');
+    for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
+    await bg.outboxAlarmSettled();
+
+    expect(host.names().length).toBe(1);
+    expect(await ob.loadConnectDelivery(store)).toEqual({ at: expect.any(Number), count: 1 });
+  });
+
+  it('🔴 no failed attempt and no pause ⇒ an ordinary capture writes no notice (the gate keeps it from being universal noise)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(AT);
+
     const ob = await import('../lib/outbox');
     await ob.enqueue('chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json', '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}');
     const store = (await import('../lib/backfill/store')).browserLocalStore();
@@ -671,10 +785,14 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     for (const fn of alarmListeners) fn({ name: OUTBOX_ALARM_NAME });
     await bg.outboxAlarmSettled();
 
-    // It really was delivered…
+    // It really was delivered — on its first attempt, with the helper there all
+    // along…
     expect(host.names().length).toBe(1);
-    // …and it is still not a connect: the helper never went away, so the permanent
-    // "delivered 1" line would have been noise on every install.
+    const queue = await ob.undeliveredEntries();
+    expect(queue).toHaveLength(0);
+    // …and it is still not a connect: the helper never went away, so no ledger
+    // entry and no pause is on record, and the permanent "delivered 1" line
+    // would have been noise on every install.
     expect(await ob.loadConnectDelivery(store)).toBeNull();
   });
 });

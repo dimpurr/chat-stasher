@@ -672,6 +672,15 @@ export type DrainStop =
 export interface DrainReport {
   attempted: number;
   delivered: number;
+  /**
+   * 🔴 EXT-12c · Delivered entries that had already failed an attempt before the
+   * one that succeeded — the entry's own `attempts` ledger, which only a real
+   * failed delivery ever writes (and never resets). A drain that delivers such
+   * an entry is, by the outbox's own earlier testimony, delivering to an exit
+   * that was unreachable while the entry waited; `delivered` minus this number
+   * are the first-attempt ones, and the two must not be worded as each other.
+   */
+  deliveredRetried: number;
   rejected: number;
   /** Entries skipped because their backoff had not elapsed. */
   waiting: number;
@@ -719,6 +728,7 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
   const report: DrainReport = {
     attempted: 0,
     delivered: 0,
+    deliveredRetried: 0,
     rejected: 0,
     waiting: 0,
     stoppedBy: 'idle',
@@ -760,6 +770,12 @@ async function runDrain(options: DrainOptions): Promise<DrainReport> {
       // 🔴 The only place an entry is ever removed.
       await markDelivered(entry.sha256);
       report.delivered += 1;
+      // 🔴 EXT-12c · Read from the entry as it was dequeued, before this
+      //    attempt's outcome touched anything: `attempts` counts *earlier*
+      //    failures and never resets, so this is the ledger's own statement
+      //    that the send which succeeded was a retry — not a guess from the
+      //    clock or the caller.
+      if (entry.attempts > 0) report.deliveredRetried += 1;
       continue;
     }
 
