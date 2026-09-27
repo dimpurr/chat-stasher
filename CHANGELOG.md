@@ -4,6 +4,353 @@ Version numbers here are the CLI's, and they match the `vX.Y.Z` git tags. The
 browser extension has its own version and ships on its own schedule; see
 [`RELEASING.md`](RELEASING.md) for what a release contains.
 
+## Unreleased
+
+Everything below has merged since `v0.5.0-rc.2` and is in no released artifact
+yet. The CLI, the browser extension and a new macOS menu bar app all move; the
+version numbers each carries are decided when a release is cut.
+
+### CLI
+
+#### Added
+
+- **Search inside conversation text.** `chat-stasher index build` builds a
+  local full-text index for one named destination in the operating system's
+  cache directory, `index check` re-reads and validates that index without
+  contacting the archive, and `index clear` deletes it. The index matches
+  literal substrings from three characters up, including in scripts whose words
+  carry no spaces, so a four-character Han query works like an English
+  one; one- and two-character queries are refused as too short for the index
+  rather than answered with nothing to find. `search --text <query>` uses the
+  index: the search reports whether the index covered every session the
+  filters selected, and while any session was not covered, the run lists those
+  rather than counting them as "no match", and the exit code says the answer
+  is unproven rather than nothing matched. `search --text <query> --scan` reads the
+  selected conversations instead and matches case-insensitively, which answers
+  the one- and two-character queries the index cannot, at the cost of reading
+  archived content.
+- **A search page in the dashboard.** `/search` runs a query over the same
+  index, as a plain GET form with no script, paged under the same contract as
+  the session list. Each hit carries an excerpt that links into the reader at
+  the message the index places the match in. A search that finds nothing says
+  which of the states that is before it shows the zero: no index yet, with the
+  command that builds one; an index that could not be read, with the repair;
+  coverage short of the sessions in view; a read that did not finish; a query
+  too short to evaluate; or filters no indexed document satisfied. What the
+  JSON search reports for the same state is chosen by the same function, so
+  the page and the machine reading the API cannot disagree.
+- **One dashboard across several destinations.** `ui --destination a,b`, or
+  `--destination all`, serves one merged dashboard: every destination named is
+  read once, a session several of them hold is listed once with a badge saying
+  how many copies exist, and both numbers stay visible, distinct sessions
+  beside raw copies. Where two copies of a session disagree, the destination
+  named first supplies the row, so the order you name them in is a choice and
+  the page prints it back. The export command the sessions page prints for the
+  sessions in view is refused under a merged view, because export always names
+  one destination; every page a merged view can reach prints both session
+  counts.
+- **Getting a conversation out from the browser.** Each session page offers a
+  download whose bytes are exactly what `read` returns for that session, and
+  the export command the sessions page prints, ready to copy, quotes every
+  value for the shell, so a path or filter value containing a space pastes as
+  itself.
+- **The session list grew handles for large archives.** The list is sorted and
+  paged by the server, newest, by first or last message time, or by size, and
+  every slice of it is a URL you can keep. Each row shows its label with the
+  message count and the time state beside it, and sources group by what they
+  are, web chats, coding agents, or an honest bucket for ids this build does
+  not classify, with a facet bar over the groups.
+- **Keyboard use of the dashboard, on every page.** Every page now opens with
+  the same affordances: a skip link as the first tab stop that shows only when
+  focused, a pages bar with one key each for overview, sessions and search,
+  keys on the pager and on the reader's message windows for walking without a
+  mouse, the footer naming every key where it works, and a focus ring that
+  appears only for keyboard focus.
+- **The reader renders the shapes the archive actually holds.** opencode,
+  cursor and kimi-code sessions render as conversations. Each was routed
+  before to a generic shape no capture path writes or to another harness's
+  line format, so every such session rendered zero messages. Web bodies render
+  on their active branch: a Claude conversation renders the chain of message
+  parents up from the recorded leaf, a body whose leaf cannot be walked is
+  shown in its own order and labelled as a branch nobody could pick rather
+  than guessed, and a body with no parent links renders flat. A web platform
+  whose conversation is a plain array renders that array's own messages
+  instead of one unreadable bundle. A web session adopts the label its own
+  body carries, ChatGPT's title or Claude's name, instead of none. A harness
+  this build has no reader for gets the honest "raw view only" page, and
+  nothing anywhere counts a record that was not rendered as if it had been.
+- **Two steps of `setup` that were descriptive stubs are real.** The remote
+  destination step asks which kind you want (SFTP, or an S3-compatible service
+  such as R2), takes credentials by naming the environment variables that hold
+  them, because no flag of this command ever takes a secret as its value,
+  writes the one `[destinations.<name>]` block, and initializes that
+  destination the way `dest-init` does. For a remote host nobody on this
+  machine has met before it stops there: the first connection waits until you
+  have compared the server's key out of band, exactly like the manual flow.
+  The scheduler step installs the per-destination scheduler unit when you pass
+  `--install-schedule`, and the completion summary reports the scheduler's own
+  next run, or says plainly which jobs have no such answer to give: an
+  interval unit and a not-yet-armed timer both do not, and a cadence is never
+  printed as a timestamp. Non-TTY runs do the same work from named flags and
+  print one JSON object, including anything that was missing.
+- **Extension installs answer for themselves.** Each install of the browser
+  extension reports through the host, at the end of each backfill tick, its
+  browser, the profile label you gave it, the extension version, and per
+  platform how much it captured and how much it still owes, with the pause
+  reasons in words. The report carries counts and labels, never conversation
+  titles or text. The host keeps those reports in the stage, so they ride
+  ordinary archive pushes, and any machine's dashboard can therefore show
+  every install's last report, not only this machine's.
+- **An Extensions page in the dashboard.** `ui --view extensions` lists the
+  archived reports above, one row per install, grouped by machine and sorted
+  so the install that stopped reporting sits at the top rather than behind an
+  alphabetical machine list. Each platform column carries the pair the counts
+  are, labelled on the column header: captured by that install's own report,
+  and still owed by it, never summed across installs or machines. A platform
+  the report has no row for stays digitless and its label says so in words
+  rather than reading as zero, a count the report omitted reads as unknown,
+  and a paused platform names its reason. Only an
+  install on this machine gets an open button, and it opens only through a
+  browser profile this machine verified exists there and carries the
+  extension; every other install says which machine to open it on. The open
+  command is built by reading the browser's own local profile files to turn
+  the label into a directory, and the privacy document names those files and
+  states that nothing they contain is written back, sent to the host, or
+  archived. A machine whose reports could not be read in full says so beside
+  the list.
+- **The native host registers every supported browser.** `install-native-host`
+  now registers, per browser and per OS, the full set the support table
+  names: Chrome, Chromium, Edge, Brave and Arc are supported and tested,
+  Firefox carries its own manifest layout, and Chrome Beta, Chrome Canary,
+  Opera and Vivaldi are registered best effort and marked unverified. On
+  Windows a registry key is written only where one was actually located,
+  never invented: a browser whose key is unknown is reported as written but
+  not discoverable, rather than registered in a place nothing reads. A pair
+  with no discovery path on the platform, Arc on Linux, which has no native
+  build, is its own state in `doctor`, distinct from "you have not registered
+  it", and the setup wizard's note about the extension
+  now says to load it in every browser profile you chat in. The browser
+  support table, one cell per browser and OS, is re-derived from the same
+  registry the installer uses, so the README cannot promise a registration
+  the tool refused to attempt.
+- **Two JSON surfaces a menu bar or a script can poll.** `overview --json
+  --summary` returns one aggregate, per-machine and per-source records and the
+  last 30 local days, with no per-session array. `status --json` gains a
+  `local` layer: whether the scheduler unit files are on disk, the most recent
+  run, and how many staged sessions are still waiting to upload, and every
+  count in it is an explicit known or unknown, never a silent zero.
+  Destination credentials accept three more spellings, `file:PATH`,
+  `env-file:PATH:NAME` and `keychain:ACCOUNT`, which resolve without a login
+  shell, the situation a scheduled run and the menu bar app are in, and fail
+  closed naming the missing credential rather than silently omitting the
+  option; `env:NAME` keeps its documented lenient behaviour.
+
+#### Changed
+
+- **Conversation counts count conversations.** A conversation archived on a
+  laptop and a desktop under one id was counted twice, by `overview`'s
+  headline, by the dashboard's stat tile and by the host's summary count, and
+  those are one conversation observed twice. All three now say one, and where
+  both numbers matter both stay visible: distinct conversations beside raw
+  copies. `overview` also reports outright when one archive id carries records
+  written by two different accounts, but only where the fingerprints one
+  install itself recorded can be compared, because per-install salting makes
+  another install's fingerprints incomparable, and it publishes the size of
+  that blind spot rather than folding it into the collision count.
+
+#### Fixed
+
+- **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
+  other OS it is refused up front, with the reason that the macOS keychain
+  does not exist there, instead of trying to run a tool that cannot be
+  present and reporting a local setup that looks broken. Fail-closed is
+  unchanged on any platform: the reference is refused, never silently
+  emptied, and `file:`, `env-file:` and `env:` keep working.
+
+#### Security
+
+- **The activity index redacts the Windows profile directory too.** The
+  redaction replaced `$HOME` with `~` only, and Windows normally leaves
+  `$HOME` unset, so an error it emitted could print a path under your user
+  folder. Both spellings the environment declares are now redacted, on every
+  platform.
+
+### Browser extension
+
+#### Added
+
+- **The extension without any CLI is a supported state, not a breakage.** The
+  popup now shows a first-run card: what this is, why the half that writes
+  files has to be a separate program on this machine, a one-line installer
+  with a copy button, and an export button for captures not delivered. A
+  persistent notice states the plain fact of that state: what it has exists
+  only in this browser and is not a backup yet. "Never connected" and "was
+  connected and stopped answering" are two different sentences, the first
+  teaching the installer, the second pointing at the last stage the host was
+  known to write and the repair command spelled with it. The popup probes on
+  every open, and no failure to answer is read as proof the CLI is missing.
+  Only a reply that succeeded at some point makes the popup offer a
+  `chat-stasher` command. The gauge of the waiting area explains itself:
+  at 80 percent the non-urgent backfill leg pauses, at 100 percent new
+  captures are refused as before, and in both cases not one queued capture is
+  dropped; an area that cannot be read is stated as unreadable rather than
+  drawn as empty. When a CLI turns up later the backlog drains by itself and
+  the popup says how many were delivered, on the evidence of a drain that
+  actually emptied something rather than the mere fact that a host answered.
+- **Every install has an identity and a name.** The extension generates an id
+  on its first run in a profile and shows itself as "This browser: <browser> ·
+  <profile>". Browser APIs expose no profile name, so the popup asks you to
+  name the profile, and a profile that has not been named yet sends a name
+  that says so, as a placeholder rather than an identity claim. Every capture
+  bundle, coverage report, status report and export below carries the
+  identity, so two installs of the same account can finally be told apart
+  after the fact. When the identity store cannot be read, a capture is
+  refused rather than sent with an invented identity, and the popup and
+  console name the failure.
+- **Export files name their install.** The undelivered-captures export file
+  is named with the export time, the first characters of the install id and
+  a per-export nonce, so two profiles exporting into the same downloads
+  folder in the same second no longer write the same file. The bundles in it
+  now carry the content fingerprint inside them: after `ingest` the host can
+  still answer `has` for those conversations, and the same bytes delivered
+  later are recognized rather than archived a second time. Exports written
+  before this change import unchanged.
+
+#### Changed
+
+- **Backfill is coordinated per machine.** Platform leases, request pacing
+  and rate-limit cooldowns are now shared across every extension install on
+  the machine, through the native host: when more than one install backfills
+  the same platform the host runs one at a time and the rest stay paused for
+  it, and a 429 that one install received stops that platform for all of
+  them, honouring `Retry-After`; the shared lookups Claude backfill makes
+  before it can ask for a list ride the same coordination. None of this
+  crosses machines, and there is no server between any of them. A CLI old
+  enough not to arbitrate cannot run one of these shared windows, so
+  backfill does not run and the coverage page says to update chat-stasher to
+  enable it, while live capture never pauses.
+- **The leases are per account, and the account itself never travels.** A
+  fingerprint one install records is deliberately incomparable to another
+  install's, so coordination compares a key derived locally from the
+  machine's masterkey instead. The same account signed into several installs
+  coordinates as one account, two different accounts each hold their own
+  window for a platform, and only the derived key ever reaches the host.
+- **A backfill no longer files another account's conversations.** A run
+  records the account it starts under and checks every list page and body
+  against it, halting before anything is enqueued or settled if the answer
+  names a different account. A live capture that shows a different account
+  suspends every other scope of that platform whose recorded account
+  disagrees, and a suspended scope keeps everything it owes until its account
+  is seen again. An account the traffic does not name is never treated as a
+  switch: a scope with nothing comparable recorded stays untouched instead
+  of accused. The coverage page names which account a scope ran for, or that
+  none was ever recorded, and the suspended state promises neither a countdown
+  nor permanence.
+- **ChatGPT conversations keep their project, with room to say it is
+  unknown.** A capture that cannot tell which project a conversation belongs
+  to records that explicitly as unknown instead of recording it as nothing,
+  and a later observation can supply the effective project as a separate
+  attribution, with its source and when it was seen, without rewriting the
+  capture. `search --json`, `overview --json` and the dashboard's session API
+  carry those states, and "nothing was recorded" is never printed as
+  "recorded as unknown". A page cannot author these claims: project names and
+  workspace ids are metadata the backfill leg records, in plaintext inside
+  this machine's archive, as the privacy document states.
+- **The popup's words match what it can know.** The extension's own tallies
+  are worded as captured by this browser, because that is all this install can
+  see; what a push has saved is the archive's fact and no longer borrows the
+  extension's words for it. The note about a platform's own list disagreeing
+  with what this install still owed says whose records were compared: this
+  browser's. The two counts are never mixed and never added together.
+
+#### Security
+
+- **Copied profiles are refused, and told how to fix themselves.** Every
+  sealed record on the machine now carries the producing install's browser
+  and profile label. A profile copy that delivers the same install id under a
+  different browser, or under a profile name that differs from the one its
+  user actually gave it, is refused with a non-retryable instruction to
+  regenerate its identity, and while it keeps that id its captures stay
+  queued rather than merging into the original's records. Naming a profile
+  after captures made under no name remains the normal first-run flow and is
+  never read as a conflict. What this catches is deliberately bounded, and the
+  bound is honest: two copies that keep the identical browser and identical
+  profile name are not distinguishable without a server, and the comparison
+  only works inside this machine's stage.
+
+### Menu bar (macOS)
+
+A menu bar app joins the CLI and the extension. It ships as its own notarized
+disk image with its own release steps, outside the CLI's asset set, carries no
+version of its own (following the CLI's), and reads only the two JSON
+surfaces described under CLI above, never the archive itself. It needs the CLI
+on `PATH`, and macOS 13 or newer.
+
+#### Added
+
+- **Archive status in the menu bar.** The app shows overall archive health,
+  one conversation count, and it counts conversations, never a sum of
+  destination copies or machine profiles, per-machine freshness, the
+  per-source list
+  behind a Show sources row, and a 30-day activity strip. A source counts as
+  in use after activity on three distinct days, and the threshold that calls
+  it stopped comes from its own observed cadence. Open dashboard starts
+  `chat-stasher ui`. A failed refresh keeps the last good result visible with
+  an Offline label, and an unknown count stays unknown on screen, never a
+  zero.
+- **Destination choice in Settings.** With several destinations configured,
+  the app checks each one and shows the worst state by default; Settings can
+  pin it to one named destination instead, a launch-time environment
+  override still wins, and the destinations' conversation counts are never
+  added together.
+- **It names the CLI it found.** The app resolves the binary the way a
+  `PATH` search does and runs that same file every time, and the About sheet
+  names the absolute path and the version. Its states are distinct: no CLI
+  found; a CLI too old to answer, which is an upgrade instruction; a current
+  CLI whose config cannot be used, which is the credential or setup card,
+  not an upgrade that would change nothing; and a failing read, which keeps
+  the last good result. A headless one-line handshake exists for scripting
+  the same check, and Settings also holds launch-at-login and silence
+  thresholds.
+- **Signing and notarization from one script.** The script builds in release,
+  signs every executable it finds with the Hardened Runtime and a secure
+  timestamp, verifies the result, submits the disk image to Apple's notary
+  service, and staples and validates the ticket. It refuses rather than
+  improvising when the Developer ID certificate or the notary credentials are
+  absent, and a self-check command answers ready, missing, or could not
+  tell, which is its own answer and not a pass.
+
+### Repository and release tooling
+
+Nothing here is in the shipped binary.
+
+- The README was rewritten for the person installing the tool, and the first
+  reader-facing pages were added under docs/ covering the first archive, each
+  platform, destinations, and privacy and security. The engineering documents
+  moved under docs-dev/, and a check now resolves every link between the
+  project's own Markdown files, including the fragment on each link, so a
+  moved file or a renamed heading fails a gate instead of rendering silently.
+- Two registry steps the `0.5.0-rc.2` run tripped over are fixed. The crates
+  registry's documented data-access refusal (HTTP 403) is no longer read as
+  "that version is not published", which was the misread that could publish
+  over an existing version, and npm's `latest` dist-tag is now compared
+  numerically, so `0.9.0` cannot be restored over `0.10.0`. `latest` may be
+  moved onto a release candidate only before the package's first stable
+  release.
+- The extension's end-to-end suite grows with what it protects. A Perplexity
+  capture spec drives a real browser against a fake Perplexity that answers
+  where the site's origin usually does, requires one bundle to reach the
+  waiting area, and counts every request that tried to leave the machine,
+  asserting none did. The privacy document's backfill summary now counts
+  Perplexity among the platforms whose conversation text it can recover, with
+  the long-conversation caveat the others carry. A second suite runs two
+  extension installs, in two persistent browser profiles, against one real
+  native host binary, so the multi-install story is tested by the same
+  program the delivery path uses.
+- A guide for coding agents working in this repository was added at its root,
+  and its install path is the setup wizard, so an agent's first archive and
+  its checks are the ones a person would run.
+
 ## 0.5.0-rc.2 — 2026-09-25
 
 A release candidate for `0.5.0`, cut so that these exact artifacts can be
