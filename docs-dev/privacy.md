@@ -97,15 +97,15 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:659`, `:698`, `:559-576`). Only responses
+   (`apps/extension/lib/page-hook.ts:663`, `:702`, `:563-580`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:315-768`, `:947-976`).
+   (`apps/extension/lib/contract.ts:317-770`, `:949-978`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
-   page, on the same origin (`apps/extension/lib/page-hook.ts:679-684`;
-   `apps/extension/entrypoints/dw-bridge.content.ts:613-639`). That request —
+   page, on the same origin (`apps/extension/lib/page-hook.ts:683-688`;
+   `apps/extension/entrypoints/dw-bridge.content.ts:626-652`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
    ChatGPT's own `/api/auth/session` on the same origin
@@ -126,7 +126,7 @@ the sentence.
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
    conversations” (`apps/extension/lib/platform-auth.ts:268-305`,
-   `apps/extension/entrypoints/dw-bridge.content.ts:450-456`).
+   `apps/extension/entrypoints/dw-bridge.content.ts:463-469`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:35-38`,
@@ -228,8 +228,8 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:698`, `:559-576`; the extra request and the
-  token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:613-639`,
+  (`apps/extension/lib/page-hook.ts:702`, `:563-580`; the extra request and the
+  token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:626-652`,
   `apps/extension/lib/platform-auth.ts:47`, `:90-105`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
   [section 4](#4-who-your-data-is-shared-with).
@@ -264,11 +264,11 @@ is, the conversation itself (`apps/extension/entrypoints/background.ts:241-244`;
 and not an email, but a keyed digest of the platform's account/org id, computed
 in the extension with a random per-install salt
 (`apps/extension/lib/account-fingerprint.ts:298-317`;
-`apps/extension/lib/contract.ts:1103-1112`). Its purpose is to make two accounts
+`apps/extension/lib/contract.ts:1105-1114`). Its purpose is to make two accounts
 distinguishable in your archive; unlike the identity, it cannot be turned back
 into the account id, and when no account id is available the bundle says so
 explicitly rather than carrying a value
-(`apps/extension/lib/contract.ts:1068-1076`).
+(`apps/extension/lib/contract.ts:1070-1078`).
 
 W218 adds a second, cross-install key for account-scoped host arbitration. The
 extension keeps the raw platform account id as a separate local outbox field
@@ -334,7 +334,7 @@ the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
 — a capture payload carrying provenance is rejected outright
-(`apps/extension/lib/contract.ts:967-968`) — and, like the account fingerprint,
+(`apps/extension/lib/contract.ts:969-970`) — and, like the account fingerprint,
 these values are written into your own archive and are not transmitted anywhere
 by this extension.
 
@@ -372,16 +372,16 @@ What is kept there:
 | Key | What it holds | Citation |
 |---|---|---|
 | `cs_backfill_enabled_v1` | Whether you turned the history-backfill feature on | `apps/extension/lib/backfill/schedule.ts:40` |
-| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for. 🔴 The target registry is a bounded cache (eight rows): registering a ninth target evicts the seat that has waited longest — an organization row can be the one that leaves — and an eviction follows the same rule as any dropped row: the row leaves *together with* its `cs_backfill_v2:<platform>:<scope>` header, so an evicted scope leaves nothing behind that a lost registry row would otherwise leave hidden; the host archive is untouched and that account's next capture registers it again. 🔴 W54b · Every eviction is also **written down durably**: removing the header leaves a *gap*, not a trace, so each evicted seat is recorded in `cs_backfill_evicted_v1` (next row) at the moment the registration takes it — no eviction is silent, and the record is what the popup reads beside the registry state. | `apps/extension/lib/backfill/alarm.ts:220`; `apps/extension/lib/backfill/alarm.ts:820-859`; `apps/extension/lib/backfill/tab-port.ts:170` |
+| `cs_backfill_targets_v1`, `cs_backfill_tabs_v1` | Which site/tab the backfill timer should wake up for. 🔴 The target registry is a bounded cache (eight rows): registering a ninth target evicts the seat that has waited longest — an organization row can be the one that leaves — and an eviction follows the same rule as any dropped row: the row leaves *together with* its `cs_backfill_v2:<platform>:<scope>` header, so an evicted scope leaves nothing behind that a lost registry row would otherwise leave hidden; the host archive is untouched and that account's next capture registers it again. 🔴 W54b · Every eviction is also **written down durably**: removing the header leaves a *gap*, not a trace, so each evicted seat is recorded in `cs_backfill_evicted_v1` (next row) at the moment the registration takes it — no eviction is silent, and the record is what the popup reads beside the registry state. | `apps/extension/lib/backfill/alarm.ts:220`; `apps/extension/lib/backfill/alarm.ts:820-859`; `apps/extension/lib/backfill/tab-port.ts:174` |
 | `cs_backfill_evicted_v1` | The registry's **eviction record**: one entry per seat the eight-row cap has pushed off — the evicted row's platform, its account/organization scope, the reason code (`registry-cap` in this build), and when the evicting registration happened — newest first, bounded at 16 entries, with the number of records that bound has itself pushed off kept as a count on the record (never a silent truncation). 🔴 Only cap evictions enter it: the deliberate collapse of a non-organization row (the Claude bullet below) is written nowhere near it, because such a row's scope can be a leftover conversation *title* — user content this on-screen record must not start storing. The popup shows it beside the registry state it already reads, kept to the platforms this build serves; unreadable bytes refuse rather than fabricate. Metadata only: ids, reason codes, timestamps; no conversation text or bodies. | `apps/extension/lib/backfill/alarm.ts:870-1035`; `apps/extension/lib/popup-view.ts:1022-1041` |
-| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, the record that a platform's id list had to be read again, and — while a stored stop is being re-decided — which build has already spent that one re-decision (a version string and a timestamp, nothing else). Since W128 step 2 it also carries this scope's **account lease** — the same irreversible fingerprint described above, plus the opaque id of the salt it was computed with and which mechanism read the id — and, when the scope was stopped because the responses were coming from a different account, the suspended record that holds it until its own account is seen again; both carry fingerprints and never an account id (`apps/extension/lib/backfill/types.ts:1696-1706`, `:1820-1840`). The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/debt-store.ts:27-36`; `apps/extension/lib/backfill/debt-store.ts:109-128` |
+| `cs_backfill_v2:<platform>:<scope>` | The backfill progress header: list cursor, counters, daily count, halt record, the record that a platform's id list had to be read again, and — while a stored stop is being re-decided — which build has already spent that one re-decision (a version string and a timestamp, nothing else). Since W128 step 2 it also carries this scope's **account lease** — the same irreversible fingerprint described above, plus the opaque id of the salt it was computed with and which mechanism read the id — and, when the scope was stopped because the responses were coming from a different account, the suspended record that holds it until its own account is seen again; both carry fingerprints and never an account id (`apps/extension/lib/backfill/types.ts:1702-1712`, `:1850-1870`). The **conversation/session ids** themselves (archived and still pending) are kept one record per id in a second IndexedDB database, `chat-stasher-backfill` (object store `debts_by_platform`), so settling one conversation does not rewrite the whole list. 🔴 Each id record is keyed by **platform, account scope and id together**: the platform is part of the key because two platforms can share one scope string, and a key without it let one platform's ordinary ledger write delete another's ids. An older `cs_backfill_v1:<platform>:<scope>` record is migrated once and removed only after the new layout has been written and read back. Ids written before the platform became part of the key sit in the older `debts` store in the same database until the platform that owns them can be established from the rest of your storage; a row whose platform cannot be established is left there, uncounted and undeleted. | `apps/extension/lib/backfill/debt-store.ts:27-36`; `apps/extension/lib/backfill/debt-store.ts:111-130` |
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:88-112` |
 | `cs_ext_coordination_unavailable_v1` | A Boolean popup note recording whether this profile's most recent backfill tick found coordination unavailable. It is true when the host cannot answer EXT-3 and false after a successful coordination claim; a tick without a request channel preserves the prior result. It stores no platform, account, or conversation data. | `apps/extension/entrypoints/background.ts:870-879` |
 | `extension-coordination.sqlite3` in the native host's local state directory | Machine-local backfill coordination metadata: platform ids, install ids, masterkey-derived HMAC account keys when available, last-seen and lease/cooldown/request timestamps, and a per-day detail-request count. It contains no raw account id, conversation id, title, or message content. Install sightings older than 30 days are pruned when coordination runs. | `crates/chat-stasher/src/nativehost.rs:1397-1417` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:70-71`, `:623-647` |
-| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:50`, `:153-188`; `apps/extension/lib/contract.ts:1095-1099` |
-| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1553-1655`, `:1658-1737`; `apps/extension/entrypoints/background.ts:2772-2842`, `:2772-2842` |
-| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-155`, `:289-418`; `apps/extension/entrypoints/background.ts:3126-3200`, `:3126-3200` |
+| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:50`, `:153-188`; `apps/extension/lib/contract.ts:1097-1101` |
+| `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1553-1655`, `:1658-1737`; `apps/extension/entrypoints/background.ts:2845-2910`, `:2828-2898` |
+| `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-155`, `:289-418`; `apps/extension/entrypoints/background.ts:3187-3256`, `:3182-3256` |
 | `cs_last_delivered_v1` | One entry per conversation this profile has delivered: the delivery name it went out under, and the **content fingerprint** of the response — a SHA-256 over the response body with that platform's known volatile fields removed, so two views of one unchanged conversation share it. Nothing else: no URL, no title, no account, no conversation text, and — since W50c — no stage or machine id either, because where a copy went is answered by the host from its own archive rather than remembered here. 🔴 Its only use is to decide whether asking the host is worth a round trip (`has`, "What the host answers back" above). It cannot by itself mark a conversation archived: the extension asks the `chat-stasher` binary still, and only a positive answer from the stage the host is writing to now is acted on. Up to 2000 entries, oldest forgotten first — an entry that has been forgotten costs one delivery of a conversation the archive may already hold, never a skipped one. | `apps/extension/lib/recapture.ts:46`, `:103`, `:274-304`, `:342-354` |
 | `cs_live_capture_v1:<platform>` | When a live capture from that platform was last **confirmed to be in your archive**, and how many are **on record as newly stored** — one record per platform. It exists because nothing else said when a live capture had last arrived: `cs_last_delivered_v1` (above) maps a delivery name to the fingerprint of the response it stored and carries no time at all, so "did a capture arrive at time T" was a gap in the record. It is written at the one place the live leg decides a capture was **stored**, so a capture that was merely queued, rejected or refused leaves no record. 🔴 Its two fields change for different reasons, and the popup names both: the **time** moves for every arrival that was stored, including one whose whole content the archive already held (the page re-sent a conversation it had already sent — ChatGPT does this on every view), because that still measures the page-to-archive path; the **count** rises only for an arrival that was **newly** stored, so four views of one conversation are not four stored conversations. Nothing else is in it: a platform id, a timestamp and a count. 🔴 A platform with **no record** is not a platform with zero captures: no writer creates a row out of nothing — a row exists only where a capture reached the archive — so the popup reads an absent record as "nothing has been recorded here", a gap in the record, and never as "no capture arrived". A `count` of `0` *inside* a row is not that absence and is not rounded up either: it says nothing new is on record there, beside a time that says a capture did arrive. | `apps/extension/lib/live-capture.ts:149-151`, `:273-308`; `apps/extension/entrypoints/background.ts:319-321`, `:340,416` |
 | `cs_install_identity_v1` | This browser profile's own identity for the extension: a random UUID minted the first time this profile captures (from the browser's own crypto random, written down only after a write-and-read-back confirms it), the detected browser family — `Edge`, `Brave`, `Opera`, `Firefox`, `Vivaldi`, `Arc`, `Chrome`, or `Chromium`, a name read from the navigator and nothing else — and the profile label you typed in the popup, `null` until you name it and then trimmed and cut at 80 characters. No history is kept: writing the UUID is a one-time act, and a rename overwrites the label in place. 🔴 A profile whose storage or random source cannot be used **refuses to capture** rather than inventing a per-session identity, and a stored record this build cannot read is refused rather than replaced — both keep "which install produced this" answered by exactly one stable id, never by a guess. Its values leave this browser profile only inside a capture bundle, whose destinations are section 3a and 3c above and below. | `apps/extension/lib/install-identity.ts:1-2`, `:23-33`, `:49-79`, `:81-91`; `apps/extension/entrypoints/background.ts:216-220` |
@@ -411,24 +411,35 @@ Three things in that table deserve to be called out rather than buried:
   by titles or ids) is withheld and shown as a marker, so the shape stays legible
   without the text. The structure is capped in both depth and the number of keys
   named per object
-  (`apps/extension/lib/backfill/enumerate.ts:1384-1452`).
-- The `<scope>` part of that key is your **account identifier on that platform**
-  when the extension could find one in a response body (a user id, an email
-  address, or a handle), and the literal string `default` when it could not
-  (`apps/extension/entrypoints/background.ts:1900-1943` — the identity itself is
-  read by `apps/extension/lib/contract.ts:1291-1307`; the `default` fallback is on
-  the `||` at `apps/extension/entrypoints/background.ts:1943`). It is used to
+  (`apps/extension/lib/backfill/enumerate.ts:1476-1544`).
+- For platforms that use response-body identity extraction, the `<scope>` part
+  of that key is your **account identifier on that platform** when the extension
+  could find one (a user id, an email address, or a handle), and the literal
+  string `default` when it could not (`apps/extension/entrypoints/background.ts:1948-1991`;
+  the identity itself is read by `apps/extension/lib/contract.ts:1293-1309`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
-  transmitted anywhere by this extension. Note that the backfill leg started by
-  pressing the popup button records `default` for a platform whose account
-  identifier the extension cannot read at all. For a platform whose requests are
+  transmitted anywhere by this extension. For platforms that use this identity
+  path, the backfill leg started by pressing the popup button records `default`
+  when it cannot read an account identifier. For a platform whose requests are
   addressed by an account scope, the popup's own start now **asks the page** which
   one it is using (see the claude.ai bullet below) and records that; only when the
   answer cannot be obtained does the row keep `default`, together with the named
   reason it could not be obtained
-  (`apps/extension/entrypoints/background.ts:1586-1646`, `:1852-1892`).
+  (`apps/extension/entrypoints/background.ts:1598-1658`).
+- **ChatGPT is workspace-scoped.** The extension uses the `ChatGPT-Account-Id`
+  header observed on that page's outgoing requests; it does not infer the
+  workspace from conversation content. Main, archived, project-discovery, and
+  per-project conversation enumeration have separate resumable cursors in the
+  workspace ledger. If the workspace is unresolved or ambiguous, the extension
+  records that named refusal and issues no list request; it does not mark the
+  unknown workspace empty (`apps/extension/lib/backfill/chatgpt-workspace.ts:1-25`;
+  `apps/extension/entrypoints/background.ts:2018-2030`;
+  `apps/extension/lib/backfill/engine.ts:1835-1850`;
+  `apps/extension/lib/backfill/types.ts:1717-1734`;
+  `apps/extension/lib/backfill/enumerate.ts:313-383`;
+  `apps/extension/lib/backfill/engine.ts:2474-2501`).
 - **On claude.ai the scope is not read from a response body: it is the
   organization the page's own requests are addressed to**, and that value is
   required in every request path on that platform while appearing in no page URL
@@ -445,7 +456,7 @@ Three things in that table deserve to be called out rather than buried:
   start button for that platform, and on a wake-up whose recorded scope is not an
   organization yet. A page that is simply open and idle is asked nothing
   (`apps/extension/lib/backfill/claude-page.ts:70-153`;
-  `apps/extension/lib/backfill/tab-port.ts:1145-1162`). A 403 or 429 from that
+  `apps/extension/lib/backfill/tab-port.ts:1178-1195`). A 403 or 429 from that
   request is reported to the machine-local host, which stores a platform cooldown
   shared by installs on that machine; if the report fails, this profile pauses
   backfill locally (`apps/extension/entrypoints/background.ts:750-762,
@@ -455,7 +466,7 @@ Three things in that table deserve to be called out rather than buried:
   are never probed one by one, and once **this build** has recorded that answer
   the page is not asked again on every wake-up — the answer is already known
   (`apps/extension/lib/backfill/claude-org.ts:217-271`;
-  `apps/extension/entrypoints/background.ts:1586-1646`). A record an **earlier**
+  `apps/extension/entrypoints/background.ts:1598-1658`). A record an **earlier**
   build left is re-asked once, and only once: a recorded judgement is that
   build's, not this one's, and a refusal that repeats is written back naming the
   build that saw it. 🔴 "Once" is enforced rather than intended: the attempt is
@@ -464,14 +475,14 @@ Three things in that table deserve to be called out rather than buried:
   build. The sentinel
   `default` — "the identifier could not be told" — is refused outright for this
   platform rather than written into a path segment where it would address an
-  organization that does not exist (`apps/extension/lib/backfill/engine.ts:1838-1850`).
+  organization that does not exist (`apps/extension/lib/backfill/engine.ts:1913-1925`).
   🔴 **The organization a backfill is started with is the one it keeps.** The
   scope is written into the platform's progress record and the target registry
   when the backfill is registered, and no later request re-reads it from the page
   — so switching organizations on claude.ai, or having claude.ai open in two tabs
   at once, does not move a backfill that is already running: it keeps writing
   under the organization it started with
-  (`apps/extension/entrypoints/background.ts:2164-2267`). A backfill for a *second*
+  (`apps/extension/entrypoints/background.ts:2237-2338`). A backfill for a *second*
   organization starts by opening a conversation in it and using the extension
   there, which registers that organization as its own target with its own
   progress record — the two runs then advance independently, each under its own
@@ -483,11 +494,11 @@ Three things in that table deserve to be called out rather than buried:
   capture whose path segment is not an organization id, and a wake-up whose
   recorded scope is a title asks the page rather than substituting the title into
   a request (`apps/extension/lib/backfill/claude-org.ts:110-136`;
-  `apps/extension/entrypoints/background.ts:1201-1231`). Collapsing a title cannot
+  `apps/extension/entrypoints/background.ts:1213-1243`). Collapsing a title cannot
   put the unresolved sentinel in front of a live organization — the alarm would
   otherwise halt on `'default'` and never tick the organization
   (`apps/extension/lib/backfill/alarm.ts:1113-1215`;
-  `apps/extension/entrypoints/background.ts:2164-2267`). The host archive is
+  `apps/extension/entrypoints/background.ts:2237-2338`). The host archive is
   append-only and is not touched. The **local** ledger header at
   `cs_backfill_v2:<platform>:<scope>` is a different fact: a run opens it before
   any request, so a title tick has already written `halted` / `failures` /
@@ -523,7 +534,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:698`, `:559-576`; `apps/extension/lib/gemini-capture.ts:150-234` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:702`, `:563-580`; `apps/extension/lib/gemini-capture.ts:150-234` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:271-345`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:588-621` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -532,13 +543,13 @@ The parties who *do* see something, stated plainly:
 One further disclosure about the optional **backfill** feature, which walks your
 conversation history to archive older chats. When you turn it on, it issues
 additional requests to the chat platform, from your own logged-in session
-(`apps/extension/lib/backfill/engine.ts:2571-2589`). That produces a request pattern
+(`apps/extension/lib/backfill/engine.ts:2775-2793`). That produces a request pattern
 the platform can see and which does not look like a human reading their history.
 **We have not investigated** whether any platform's terms of service prohibit
 this, or whether it triggers rate-limiting. Backfill is off unless you enable it
 (`apps/extension/lib/backfill/schedule.ts:40`), and with no HTTP port wired the
 code refuses to fetch at all rather than defaulting to a live one
-(`apps/extension/lib/backfill/engine.ts:147-150`).
+(`apps/extension/lib/backfill/engine.ts:157-160`).
 
 Which platforms actually see those extra requests, stated exactly:
 **ChatGPT** and **DeepSeek** (conversation list *and* each conversation's
@@ -558,8 +569,8 @@ part; passive capture is a different leg and sends no request of its own, it
 reads the response the page fetches for the conversation you have open). On **Claude** it is a conversation list, one body request per
 conversation, and — only when neither the page's own requests nor the cookie has
 named the organization — **one** `GET /api/organizations`.
-(`apps/extension/lib/backfill/enumerate.ts:4667-4698`;
-`apps/extension/lib/backfill/engine.ts:2659-2732`.) The
+(`apps/extension/lib/backfill/enumerate.ts:4764-4795`;
+`apps/extension/lib/backfill/engine.ts:2864-2937`.) The
 practical reading for you: enabling backfill on Perplexity now produces list
 traffic *and* one body request per conversation the platform can see, and the
 conversations are backed up only as completely as the body endpoint returns — a
@@ -569,19 +580,19 @@ DeepSeek it produces list traffic *and* one body request per conversation, and o
 Grok two (a skeleton call and a content call — a request pattern the platform is
 more likely to notice, although both are the same two calls grok.com's own page
 makes when you open a conversation, separated by a 2-5 second pause,
-`apps/extension/lib/backfill/enumerate.ts:3090`), and on Kimi one body request —
+`apps/extension/lib/backfill/enumerate.ts:3187`), and on Kimi one body request —
 the same call its own page makes when you open a conversation, carrying the page's
-own token as described above (`apps/extension/lib/backfill/enumerate.ts:3238-3300`).
+own token as described above (`apps/extension/lib/backfill/enumerate.ts:3335-3397`).
 On Claude it is a conversation list and one body request per conversation — the
 same call claude.ai's own page makes when you open a past conversation — plus, at
 most once for as long as the organization stays unresolved, the organization-list
 request described above
-(`apps/extension/lib/backfill/enumerate.ts:3818-3830`).
+(`apps/extension/lib/backfill/enumerate.ts:3915-3927`).
 On Gemini, one conversation costs as many requests as it has pages: the leg
 follows the continuation token until the response says there is no more, waiting
 1-3 seconds between pages, and it refuses (and lists as a failure) a conversation
 that would need more than 20
-(`apps/extension/lib/backfill/enumerate.ts:3725-3853`; `apps/extension/lib/backfill/engine.ts:2688-2728`).
+(`apps/extension/lib/backfill/enumerate.ts:3822-3950`; `apps/extension/lib/backfill/engine.ts:2893-2933`).
 Its **passive capture** sends requests too, on the same route: a conversation you
 open is fetched from its first page and followed to the end, one request for the
 first page plus one per remaining page (`apps/extension/lib/gemini-capture.ts:150-234`).
@@ -595,16 +606,16 @@ oldest turns while looking complete.
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:318`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:367`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:436`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:453`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:495`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:562`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:685`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:320`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:369`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:438`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:455`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:497`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:564`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:687`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:775-810`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:777-812`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -639,12 +650,12 @@ guessing.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:926-945`, `:947-976`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:928-947`, `:949-978`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:831`; `apps/extension/lib/page-hook.ts:374`). No shipped
+(`apps/extension/lib/contract.ts:833`; `apps/extension/lib/page-hook.ts:378`). No shipped
 platform row reads WebSocket frames; every row sets that switch to `false`
-explicitly (`apps/extension/lib/contract.ts:363`, `:432`, `:449`, `:491`, `:550`,
-`:678`, `:766`).
+explicitly (`apps/extension/lib/contract.ts:359-365,428-434,437-451,481-493,
+548-552,675-680,758-768`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
@@ -672,9 +683,10 @@ tier of that list is easy to misread:
 
 | Platform | What backfill does when you enable it |
 |---|---|
-| **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:4719-4743`). All six are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2843-2870`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:2688-2728`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:268-305`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:2910-2923`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:3201-3262`). |
-| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:2956-2967`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2300-2344`). Implemented, **not yet observed completing a backfill in a real browser**. |
-| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:3856-3862`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, and the extension walks the active branch from its newest message back to the branch root. A parent the response does not carry (the shared tree-root id every real body omits, measured 2026-09-24) is accepted as that root only when the body's own shape corroborates it — one shared absent parent, and a root at the foot of the message `index` counter; a body with a missing middle or a dropped prefix, a body whose newest message is absent, or one whose parent links form a cycle is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:4103-4181`; `apps/extension/lib/backfill/engine.ts:2974-2986`). Whether a **long** conversation is capped server-side is not established by any source; a body so capped is refused unless it also rewrote the survivor to index 0 and the shared id, which no measurement shows. |
+| **ChatGPT** | Main conversations, archived conversations, project discovery, and each project's conversations use separate cursors inside a workspace-scoped ledger; each page is requested through the current tab (`apps/extension/lib/backfill/types.ts:1717-1734`; `apps/extension/lib/backfill/enumerate.ts:313-383`; `apps/extension/lib/backfill/engine.ts:2474-2501`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. Workspace attribution comes from the page's outgoing request header; if the workspace is unknown or ambiguous, enumeration stops with a named refusal and no list request (`apps/extension/entrypoints/background.ts:2018-2030`; `apps/extension/lib/backfill/engine.ts:1835-1850`). |
+| **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:4816-4840`). All five are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2940-2967`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:2893-2933`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:268-305`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:3093-3127`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:3298-3359`). |
+| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:3053-3064`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2392-2436`). Implemented, **not yet observed completing a backfill in a real browser**. |
+| **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:3953-3959`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, and the extension walks the active branch from its newest message back to the branch root. A parent the response does not carry (the shared tree-root id every real body omits, measured 2026-09-24) is accepted as that root only when the body's own shape corroborates it — one shared absent parent, and a root at the foot of the message `index` counter; a body with a missing middle or a dropped prefix, a body whose newest message is absent, or one whose parent links form a cycle is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:4200-4278`; `apps/extension/lib/backfill/engine.ts:3170-3190`). Whether a **long** conversation is capped server-side is not established by any source; a body so capped is refused unless it also rewrote the survivor to index 0 and the shared id, which no measurement shows. |
 
 We state this in a privacy policy because the failure mode is a privacy
 expectation, not just a feature gap: a user who believes their Perplexity
@@ -688,23 +700,23 @@ have not checked a genuinely long conversation against any of them. Kimi is the
 one where that case is at least refused out loud: a body response that says it
 holds only part of a conversation is not archived and is listed as a failure,
 so a long Kimi conversation is missing from your archive rather than silently
-half-there (`apps/extension/lib/backfill/engine.ts:2910-2923`). Grok
+half-there (`apps/extension/lib/backfill/engine.ts:3093-3127`). Grok
 carries a second caveat of its own: where the sources for its list cursor
 disagree, the extension does **not** pick one — a page that repeats what was
 already listed stops the leg and says the response shape changed, rather than
 being read as "you have no more conversations"
-(`apps/extension/lib/backfill/engine.ts:2069-2187`). And because no source says
+(`apps/extension/lib/backfill/engine.ts:2144-2262`). And because no source says
 whether Grok returns a conversation's responses in a stable order, re-opening an
 unchanged Grok conversation is more likely than on other platforms to deliver
 another copy of it: an extra copy in your archive, never a lost one.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
-the same capture decision above (`apps/extension/lib/page-hook.ts:356-396`).
+the same capture decision above (`apps/extension/lib/page-hook.ts:360-400`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`apps/extension/lib/page-hook.ts:507-512`); a binary XHR body (arraybuffer,
-blob, document) is never read and only prints a console warning (`:513-516`,
-`:254-261`). `EventSource` streams are never read either — the hook only warns
-that one was used (`apps/extension/lib/page-hook.ts:547-566`).
+(`apps/extension/lib/page-hook.ts:511-516`); a binary XHR body (arraybuffer,
+blob, document) is never read and only prints a console warning (`:517-520`,
+`:258-265`). `EventSource` streams are never read either — the hook only warns
+that one was used (`apps/extension/lib/page-hook.ts:551-570`).
 
 ## 6. What each permission is for
 

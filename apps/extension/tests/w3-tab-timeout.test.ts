@@ -183,15 +183,18 @@ const detailAttempts: string[] = [];
  */
 function halfDeadPort() {
   return tabHttpPort(1, async (_id, msg) => {
-    const m = msg as { url: string };
-    if (new URL(m.url).pathname === LIST_PATH) {
+    const m = msg as { type?: string; url?: string };
+    if (m.type === 'cs-backfill-chatgpt-workspace') {
+      return { ok: true, workspace: 'acct-fixture-1', observed: true };
+    }
+    if (m.url && new URL(m.url).pathname === LIST_PATH) {
       return {
         ok: true,
         status: 200,
         text: JSON.stringify({ items: IDS.map((id) => ({ id })), total: IDS.length }),
       };
     }
-    detailAttempts.push(m.url);
+    detailAttempts.push(m.url ?? '');
     return new Promise(() => { /* never settles */ });
   }, 50);
 }
@@ -395,8 +398,11 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     await saveHeader(st, state);
     detailAttempts.length = 0;
     mod.configureBackfillTransport(tabHttpPort(1, async (_id, msg) => {
-      const m = msg as { url: string };
-      if (new URL(m.url).pathname === LIST_PATH) {
+      const m = msg as { type?: string; url?: string };
+      if (m.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, workspace: 'acct-fixture-1', observed: true };
+      }
+      if (m.url && new URL(m.url).pathname === LIST_PATH) {
         return { ok: true, status: 200, text: JSON.stringify({ items: [], total: 0 }) };
       }
       return { ok: true, status: 200, text: JSON.stringify({ mapping: {}, current_node: 'n0' }) };

@@ -1455,6 +1455,12 @@ export interface BackfillState {
   /** The conversation total the API gave directly; null when it did not. */
   totalKnown: number | null;
   totalSource: TotalSource;
+  /** Independent ChatGPT source cursors, held inside this workspace's ledger. */
+  chatgptEnumeration?: ChatGptEnumerationState;
+  /** Source facts travel with debt records; missing entries remain unknown. */
+  chatgptDebtProvenance?: Record<string, ChatGptDebtProvenance>;
+  /** In-memory rows whose source facts must commit with the next debt transaction. */
+  chatgptProvenanceDirty?: Set<string>;
   /**
    * The enumeration cursor: offset + whether enumeration is done.
    *
@@ -1708,6 +1714,25 @@ export interface BackfillState {
   halted: HaltRecord | null;
 }
 
+export type ChatGptSource = 'main' | 'archived' | 'project';
+export interface ChatGptDebtProvenance {
+  source: ChatGptSource;
+  project: { id: string; name: string } | null | 'unknown';
+  archived: boolean;
+}
+export interface ChatGptProjectCursor {
+  id: string;
+  name: string;
+  cursor: string | null;
+  complete: boolean;
+  listed: number;
+}
+export interface ChatGptEnumerationState {
+  archived: { offset: number; complete: boolean; listed: number; lastPageIds?: string[] };
+  projects: { discoveryCursor: number | null; discoveryComplete: boolean; entries: ChatGptProjectCursor[] };
+  counts: Record<ChatGptSource, { listed: number; complete: boolean }>;
+}
+
 export function initialState(platform: string, scope: string): BackfillState {
   return {
     v: BACKFILL_STATE_VERSION,
@@ -1715,6 +1740,11 @@ export function initialState(platform: string, scope: string): BackfillState {
     scope,
     totalKnown: null,
     totalSource: 'unknown',
+    ...(platform === 'chatgpt' ? { chatgptEnumeration: {
+      archived: { offset: 0, complete: false, listed: 0 },
+      projects: { discoveryCursor: null, discoveryComplete: false, entries: [] },
+      counts: { main: { listed: 0, complete: false }, archived: { listed: 0, complete: false }, project: { listed: 0, complete: false } },
+    }, chatgptDebtProvenance: {}, chatgptProvenanceDirty: new Set<string>() } : {}),
     enumCursor: { offset: 0, complete: false },
     pending: [],
     archived: [],
@@ -1845,6 +1875,8 @@ export interface BackfillHeader {
   scope: string;
   totalKnown: number | null;
   totalSource: TotalSource;
+  /** Independent ChatGPT source cursors for this workspace, optional for older headers. */
+  chatgptEnumeration?: ChatGptEnumerationState;
   /** W124b · Same meaning and same compatibility rule as `BackfillState.enumCursor.pageFingerprints`. */
   enumCursor: { offset: number; complete: boolean; cursor?: number | null; token?: string | null; truncated?: EnumTruncation; pageFingerprints?: string[] };
   /** How many debts were still owed when this header was written. */
@@ -1896,6 +1928,7 @@ export function headerOf(state: BackfillState): BackfillHeader {
     scope: state.scope,
     totalKnown: state.totalKnown,
     totalSource: state.totalSource,
+    chatgptEnumeration: state.chatgptEnumeration,
     enumCursor: state.enumCursor,
     pendingCount: state.pending.length,
     archivedCount: state.archived.length,
@@ -1922,13 +1955,21 @@ export function headerOf(state: BackfillState): BackfillHeader {
  * whose counts disagree with the debt store is a header written before a crash,
  * and the store is the one that knows.
  */
-export function stateFrom(header: BackfillHeader, pending: string[], archived: string[]): BackfillState {
+export function stateFrom(
+  header: BackfillHeader,
+  pending: string[],
+  archived: string[],
+  chatgptDebtProvenance?: Map<string, ChatGptDebtProvenance>,
+): BackfillState {
   return {
     v: BACKFILL_STATE_VERSION,
     platform: header.platform,
     scope: header.scope,
     totalKnown: header.totalKnown,
     totalSource: header.totalSource,
+    chatgptEnumeration: header.chatgptEnumeration,
+    chatgptDebtProvenance: chatgptDebtProvenance ? Object.fromEntries(chatgptDebtProvenance) : {},
+    chatgptProvenanceDirty: new Set<string>(),
     enumCursor: header.enumCursor,
     pending,
     archived,
@@ -2053,7 +2094,26 @@ export function isHeader(value: unknown): value is BackfillHeader {
     && !Array.isArray(h.archived)
     && typeof h.enumCursor === 'object'
     && h.enumCursor !== null
+    && (h.chatgptEnumeration === undefined || isChatGptEnumeration(h.chatgptEnumeration))
   );
+}
+
+function isChatGptEnumeration(value: unknown): value is ChatGptEnumerationState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, any>;
+  const archive = row.archived;
+  const projects = row.projects;
+  const counts = row.counts;
+  const countOk = (entry: any) => !!entry && Number.isInteger(entry.listed) && entry.listed >= 0 && typeof entry.complete === 'boolean';
+  return !!archive && Number.isInteger(archive.offset) && archive.offset >= 0 && countOk(archive)
+    && (archive.lastPageIds === undefined || (Array.isArray(archive.lastPageIds)
+      && archive.lastPageIds.every((id: unknown) => typeof id === 'string')))
+    && !!projects && (projects.discoveryCursor === null || (Number.isInteger(projects.discoveryCursor) && projects.discoveryCursor >= 0))
+    && typeof projects.discoveryComplete === 'boolean' && Array.isArray(projects.entries)
+    && projects.entries.every((entry: any) => entry && typeof entry.id === 'string' && typeof entry.name === 'string'
+      && (entry.cursor === null || typeof entry.cursor === 'string') && typeof entry.complete === 'boolean'
+      && Number.isInteger(entry.listed) && entry.listed >= 0)
+    && !!counts && countOk(counts.main) && countOk(counts.archived) && countOk(counts.project);
 }
 
 /**

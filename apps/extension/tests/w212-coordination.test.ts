@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { coordinate, PROTOCOL } from '../lib/native-host';
 import { backfillPlansForCoordination, coordinationSegmentForRequest } from '../lib/backfill/coordination';
 import { withI18n } from './i18n-harness';
+import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 
 let requests: Array<Record<string, unknown>>;
 let response: unknown;
@@ -45,6 +46,11 @@ describe('EXT-3 native-host coordination', () => {
       const requests: Array<{ url: string; segment: 'enumerate' | 'detail' }> = [
         { url: materializeScope(plan.listUrl(origin, 0, 20)), segment: 'enumerate' },
       ];
+      for (const route of plan.listAuxPaths ?? []) {
+        const path = route.prefix ? `${route.path}opaque-project/conversations` : route.path;
+        const query = route.requiredQueryKeys?.map((key) => `${key}=${route.selector?.key === key ? route.selector.value : '0'}`).join('&') ?? '';
+        requests.push({ url: `${origin}${path}${query ? `?${query}` : ''}`, segment: 'enumerate' });
+      }
       if (plan.listCursorUrl) {
         requests.push({ url: materializeScope(plan.listCursorUrl(origin, 0, 20)), segment: 'enumerate' });
       }
@@ -68,6 +74,14 @@ describe('EXT-3 native-host coordination', () => {
           .toBe(request.segment);
       }
     }
+  });
+
+  it('classifies the ChatGPT project discovery and per-project routes', () => {
+    expect(coordinationSegmentForRequest('chatgpt',
+      'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0')).toBe('enumerate');
+    const projectRoute = CHATGPT_PLAN.listAuxPaths!.find((route) => route.prefix)!;
+    expect(coordinationSegmentForRequest('chatgpt',
+      `https://chatgpt.com${projectRoute.path}opaque-project/conversations?limit=50&cursor=opaque-cursor`)).toBe('enumerate');
   });
 
   it('fails closed for a URL outside its platform request plan', () => {

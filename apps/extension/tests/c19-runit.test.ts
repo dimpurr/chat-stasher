@@ -194,7 +194,7 @@ async function stateOf(): Promise<BackfillState> {
   const { browserLocalStore } = await import('../lib/backfill/store');
   const st = browserLocalStore();
   if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
-  return await loadState(st, 'chatgpt', 'acct-fixture-1');
+  return await loadState(st, 'chatgpt', 'chatgpt:acct-fixture-1');
 }
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];
@@ -268,6 +268,9 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
+      if ((message as { type?: string })?.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, workspace: 'acct-fixture-1', observed: true };
+      }
       const pending = handleBackfillMessage(message, origin, syntheticPageFetch as any);
       if (!pending) return undefined;
       return await pending;

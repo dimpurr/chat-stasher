@@ -1,5 +1,6 @@
 import {
   CAPTURE_MESSAGE,
+  CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
   GEMINI_AT_KEY,
   GEMINI_BL_KEY,
   GEMINI_ORIGIN,
@@ -52,6 +53,8 @@ export interface PageHookOptions {
   maxRawBytes: number;
   /** Page message carrying only a conversation id whose paged window the page loaded. */
   conversationSeenMessage: string;
+  /** Page message carrying only a workspace id from ChatGPT-Account-Id. */
+  chatgptWorkspaceObservedMessage: string;
   /**
    * 🔴 W43 · Page message name for "this hook could not install a patch, or a
    * patch it installed is no longer in effect" (see `lib/hook-status.ts`).
@@ -125,6 +128,7 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
   })),
   maxRawBytes: MAX_RAW_BYTES,
   conversationSeenMessage: CONVERSATION_SEEN_MESSAGE,
+  chatgptWorkspaceObservedMessage: CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
   hookReportMessage: HOOK_REPORT_MESSAGE,
   hookReportReasons: {
     didNotTake: HOOK_REASON_DID_NOT_TAKE,
@@ -703,6 +707,30 @@ export function installPageFetchHook(options: PageHookOptions): void {
   };
 
   const hookedFetch: typeof window.fetch = async (input, init) => {
+    try {
+      const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const parsed = new URL(rawUrl, baseUrl);
+      const platform = getPlatform(parsed.href);
+      if (platform?.id === 'chatgpt' && parsed.origin === pageOrigin) {
+        const initHeaders = init?.headers;
+        const headers = initHeaders === undefined && typeof input !== 'string' && !(input instanceof URL)
+          ? input.headers
+          : initHeaders;
+        let accountId: string | null = null;
+        if (typeof Headers !== 'undefined' && headers instanceof Headers) accountId = headers.get('ChatGPT-Account-Id');
+        else if (Array.isArray(headers)) {
+          const row = headers.find((entry) => Array.isArray(entry) && String(entry[0]).toLowerCase() === 'chatgpt-account-id');
+          if (row) accountId = String(row[1]);
+        } else if (headers && typeof headers === 'object') {
+          const key = Object.keys(headers).find((name) => name.toLowerCase() === 'chatgpt-account-id');
+          const value = key ? (headers as Record<string, unknown>)[key] : null;
+          if (typeof value === 'string') accountId = value;
+        }
+        if (accountId?.trim()) post({ type: options.chatgptWorkspaceObservedMessage, accountId: accountId.trim() });
+      }
+    } catch {
+      // Workspace observation is metadata only and must not affect the page request.
+    }
     const response = await originalFetch(input, init);
     let inputMethod = 'GET';
     if (typeof input !== 'string' && 'method' in input && typeof input.method === 'string') {

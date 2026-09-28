@@ -660,6 +660,14 @@ popup:
         This leg stopped before requesting anything because it could not tell
         which Claude organization this account is using. Open a Claude
         conversation once, and it will find your organization.
+      workspaceAmbiguous: >-
+        This leg stopped before requesting anything because the page showed more
+        than one ChatGPT workspace. Open a conversation in the workspace you want
+        archived, then start backfill again.
+      workspaceUnresolved: >-
+        This leg stopped before requesting anything because this page has not
+        shown which ChatGPT workspace to archive. Open a ChatGPT conversation
+        once, then start backfill again.
       # 🔴 W61 · DeepSeek answers a refused request with HTTP **200** and puts the
       # failure in the envelope, so this is the one stop on this leg that no status
       # could have shown. Its own sentence, and NOT the `other` fallback: `other`

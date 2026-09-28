@@ -994,7 +994,16 @@ async function coordinatedTick(
   }
   const lease = await acquireBackfillLease(platform, accountId);
   if (!lease) return { ran: false, reason: 'host-paused', report: null };
+  const expectedWorkspace = platform === 'chatgpt' && accountId?.startsWith('chatgpt:')
+    && !accountId.includes('!workspace-') ? accountId.slice('chatgpt:'.length) : null;
   const coordinatedHttp: HttpPort = async (url, init) => {
+    if (expectedWorkspace !== null && http.chatgptWorkspace) {
+      const workspace = await http.chatgptWorkspace();
+      if (!workspace.ok || workspace.observed !== true) {
+        throw new Error(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved');
+      }
+      if (workspace.workspace !== expectedWorkspace) throw new Error('scope-mismatch');
+    }
     const segment = coordinationSegmentForRequest(platform, url);
     const response = await lease.request(segment, () => http(url, init));
     if (response.status === 403 || response.status === 429) {
@@ -1003,6 +1012,9 @@ async function coordinatedTick(
     }
     return response;
   };
+  if (expectedWorkspace !== null && http.chatgptWorkspace) {
+    coordinatedHttp.chatgptWorkspace = http.chatgptWorkspace;
+  }
   try {
     return await run(coordinatedHttp, lease.gentle);
   } finally {
@@ -1795,6 +1807,23 @@ async function tickIdleReason(
   // The list must be finished, or the run would still issue list requests first
   // (`engine.ts:1504-1510`): a capped scope that has pages left to read is not idle.
   if (!raw.enumCursor.complete && raw.enumCursor.truncated === undefined) return null;
+  // ChatGPT auxiliary pages do not spend body quota. When no ordinary debt is
+  // left (or every remaining debt is already parked as empty), let their own
+  // cursors advance before treating the scope as idle. Ordinary pending bodies
+  // still make a capped scope skippable so another platform can use this wake.
+  if (platform === 'chatgpt') {
+    const workspaceScoped = scope.startsWith('chatgpt:') && !scope.includes('!workspace-')
+      && scope !== 'chatgpt:default';
+    const enumeration = raw.chatgptEnumeration;
+    const hasAuxiliaryPage = enumeration === undefined
+      || enumeration.archived?.complete !== true
+      || (workspaceScoped && (enumeration.projects?.discoveryComplete !== true
+        || (enumeration.projects?.entries ?? []).some((entry) => !entry.complete)));
+    const parkedCount = raw.parkedEmpty?.length ?? 0;
+    const noRunnableDebt = raw.pendingCount === 0
+      || (raw.pendingCount > 0 && parkedCount >= raw.pendingCount);
+    if (hasAuxiliaryPage && noRunnableDebt) return null;
+  }
   if (raw.detailToday.day !== dayKeyOf(now)) return null;
   const cap = Math.min(raw.detailToday.cap ?? maxPerDay, maxPerDay);
   return raw.detailToday.count >= cap ? 'daily-cap' : null;
@@ -1863,7 +1892,26 @@ export async function registerBackfillTargetHere(): Promise<
   if (!live.wired) return { ok: false, reason: 'no-live-transport' };
   if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
   const { platform, origin } = live.target;
-  let scope = UNRESOLVED_SCOPE;
+  let scope = platform === 'chatgpt' ? 'chatgpt:!workspace-unresolved' : UNRESOLVED_SCOPE;
+  if (platform === 'chatgpt') {
+    const tabs = tabsApi();
+    const pageHttp = live.tabId === null || !tabs ? undefined : tabHttpPort(live.tabId, tabs.sendMessage);
+    let resolved: import('../lib/backfill/chatgpt-workspace').ChatGptWorkspaceResolution | undefined;
+    try { resolved = await pageHttp?.chatgptWorkspace?.(); } catch { /* unresolved is recorded below */ }
+    if (!resolved?.ok || resolved.observed !== true) {
+      const reason = resolved?.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved';
+      scope = reason === 'org-ambiguous' ? 'chatgpt:!workspace-ambiguous' : 'chatgpt:!workspace-unresolved';
+      await recordBackfillHalt(store, {
+        platform, scope, reason,
+        detail: reason === 'org-ambiguous'
+          ? 'ChatGPT workspace identity was ambiguous on the active page; no list request was issued'
+          : 'ChatGPT workspace identity was not observed on the active page; no list request was issued',
+      });
+      await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
+      return { ok: false, reason };
+    }
+    scope = `chatgpt:${resolved.workspace}`;
+  }
   const resolver = scopeResolverFor(platform);
   if (resolver) {
     const lease = await acquireBackfillLease(platform);
@@ -1899,6 +1947,7 @@ export function backfillTickSettled(): Promise<unknown> {
 /** Derive a backfill target from one real capture. Returns null when it cannot be derived (no guessing). */
 export function backfillTargetFor(
   captured: CapturedFetch,
+  chatgptWorkspace?: string,
 ): { platform: string; origin: string; scope: string } | null {
   const row = findPlatformForUrl(captured.url)
     ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
@@ -1912,6 +1961,10 @@ export function backfillTargetFor(
     } catch { /* not a valid URL ⇒ try the next candidate */ }
   }
   if (!origin) return null;
+  if (row.id === 'chatgpt') {
+    // A workspace key exists only when this page positively exposed its request header.
+    return { platform: row.id, origin, scope: chatgptWorkspace ? `chatgpt:${chatgptWorkspace}` : 'chatgpt:!workspace-unresolved' };
+  }
   /**
    * 🔴 W31 · **A plan whose paths carry the scope takes it from the page's own
    * request, and only from there.**
@@ -1952,8 +2005,29 @@ export async function kickBackfill(
   captured: CapturedFetch,
   senderTabId?: number,
 ): Promise<TickResult | null> {
-  const target = backfillTargetFor(captured);
+  let target = backfillTargetFor(captured);
   if (!target) return null;
+  let http = await resolveHttpPort(target.origin, senderTabId);
+  // The explicit transport override is an in-process test seam, not a browser
+  // page. Keep its synthetic account fixtures on their historical isolated key;
+  // the shipped tab port below must provide page-observed workspace evidence.
+  if (target.platform === 'chatgpt' && backfillTransport && !http?.chatgptWorkspace) {
+    const identity = extractIdentity(captured.text, extractSessionId(captured.url, captured.text, captured.pageUrl));
+    target = { ...target, scope: identity.value || 'default' };
+  }
+  if (target.platform === 'chatgpt' && (http?.chatgptWorkspace || !backfillTransport)) {
+    let workspace: string | undefined;
+    try {
+      const observed = await http?.chatgptWorkspace?.();
+      if (observed?.ok) workspace = observed.workspace;
+      else if (observed?.reason === 'workspace-ambiguous') {
+        target = { ...target, scope: 'chatgpt:!workspace-ambiguous' };
+      }
+    } catch {
+      // The workspace refusal below records that this page supplied no usable evidence.
+    }
+    if (workspace) target = backfillTargetFor(captured, workspace)!;
+  }
   const store = browserLocalStore();
   // Useful when the alarm wakes: record this target the user really did use, so
   // there is nothing to guess later. A failed write still lets this tick run —
@@ -1980,7 +2054,6 @@ export async function kickBackfill(
    * record cannot disagree about which account this capture came from.
    */
   await applyAccountObservationForCapture(store, target.platform, captured);
-  const http = await resolveHttpPort(target.origin, senderTabId);
   const result = await coordinatedTick(target.platform, target.scope, http, async (coordinated, gentle) => tickBackfill({
     ...target,
     store,

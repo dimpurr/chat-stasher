@@ -75,6 +75,9 @@ function makeServer(opts: ServerOpts) {
     calls.push(url);
     const u = new URL(url);
     if (u.pathname === '/backend-api/conversations') {
+      if (u.searchParams.get('is_archived') === 'true') {
+        return { status: 200, text: JSON.stringify({ items: [] }) };
+      }
       const offset = Number(u.searchParams.get('offset') ?? '0');
       const page = Math.floor(offset / opts.pageSize);
       const slice = opts.ids.slice(offset, offset + opts.pageSize);
@@ -85,6 +88,12 @@ function makeServer(opts: ServerOpts) {
       const body: Record<string, unknown> = { items };
       if (opts.total !== null) body.total = opts.total;
       return { status: 200, text: JSON.stringify(body) };
+    }
+    if (u.pathname === '/backend-api/gizmos/snorlax/sidebar') {
+      return { status: 200, text: JSON.stringify({ items: [], cursor: null }) };
+    }
+    if (u.pathname.startsWith('/backend-api/gizmos/') && u.pathname.endsWith('/conversations')) {
+      return { status: 200, text: JSON.stringify({ items: [], cursor: null }) };
     }
     // Body fetch: it must hit chatgpt's responseShape (mapping + current_node).
     const id = decodeURIComponent(u.pathname.replace('/backend-api/conversation/', ''));
@@ -278,7 +287,8 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     //    at all — tick 4 reads no page (which is why `complete` is checked on the
     //    state after tick 3, and again below after tick 4).
     expect((await stateOf()).enumCursor.complete).toBe(true);
-    const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
+    const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations')
+      && new URL(u).searchParams.get('is_archived') !== 'true');
     // 3 in total, over 4 ticks: offset=0, offset=2, the confirming empty page at
     // offset=4, and nothing at all on tick 4.
     expect(allListUrls.map((u) => new URL(u).searchParams.get('offset'))).toEqual(['0', '2', '4']);
@@ -647,10 +657,34 @@ describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing whil
      */
     expect(traces[1]!.enumerate).toEqual([0]);
     expect(traces[1]!.detail).toEqual([20_000, 20_000]);
-    // Ticks 3 and 4 have no page and no body left to read.
-    for (const t of traces.slice(2)) expect(t.enumerate).toEqual([]);
+    /**
+     * 🔴 W233 · Which cursor reads on ticks 2-4 here, stated rather than inferred
+     *    from the wait numbers. This case enumerates 4 ids with `pageSize: 4`, so
+     *    tick 1's first page already holds the whole list and tick 2's request is
+     *    the `offset=4` one — the **empty page**, which is W10's only stopping
+     *    signal. The main cursor therefore completes at tick 2, and not, as the
+     *    Task 1 case (where `pageSize: 2` puts the empty page on tick 3) would
+     *    suggest, at tick 3.
+     *
+     *    Tick 3 is therefore already the **archived** cursor's first page, not
+     *    another main-list page: ADR-031's auxiliary cursor takes its one page per
+     *    tick once the main list is complete, and this page comes back empty, so
+     *    the archived cursor completes on its own observed empty page. Its wait is
+     *    0 for exactly the reason tick 2's was — see the W10 note above — the gate
+     *    measures from the persisted anchor, and tick 2's two body fetches already
+     *    carried the clock 40,000 ms past it, so there is nothing left to make up.
+     */
+    expect(traces[2]!.enumerate).toEqual([0]);
+    expect(server.calls.filter((u) => new URL(u).searchParams.get('is_archived') === 'true').length).toBe(1);
+    // Tick 4 has no page left: main and archived are both complete, and a legacy
+    // scope (`acct-fixture-1`, no workspace id in it) has no project routes at
+    // all, so the auxiliary gate finds no source to read.
+    expect(traces[3]!.enumerate).toEqual([]);
     for (const t of traces.slice(2)) expect(t.detail).toEqual([]);
-    // All 4 bodies were still fetched; they are just spread over 60 seconds (3 intervals × 20 seconds).
+    // All 4 bodies were still fetched; they are just spread over 60 seconds
+    // (3 intervals × 20 seconds). Every wait in this case is on the body segment
+    // — neither list page ever needed one (see the W10 note above for the second,
+    // and tick 3's page is read after those 40 seconds have already elapsed).
     expect(detailCalls(server.calls).length).toBe(4);
     expect(fakeNow - 1_700_000_000_000).toBe(60_000);
   });

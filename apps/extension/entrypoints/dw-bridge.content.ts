@@ -1,5 +1,6 @@
 import {
   CONTENT_MATCHES,
+  CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
   PLATFORMS,
   MAIN_FALLBACK_TIMEOUT_MS,
   MAIN_PROBE_MESSAGE,
@@ -27,6 +28,8 @@ import {
 } from '../lib/backfill/tab-port';
 import { installTabHello } from '../lib/backfill/tab-hello';
 import { backfillPlanFor } from '../lib/backfill/enumerate';
+import { observeChatGptAccountId, resolveChatGptWorkspace, type ChatGptWorkspaceObservation } from '../lib/backfill/chatgpt-workspace';
+import { CHATGPT_WORKSPACE_REQUEST_MESSAGE } from '../lib/backfill/tab-port';
 import { createClaudePageScope } from '../lib/backfill/claude-page';
 import {
   chatgptDetailUrlFor,
@@ -81,6 +84,7 @@ export default defineContentScript({
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
+    let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { accountIds: [] };
     let fallbackInjectionAttempted = false;
     let fallbackScriptAppended = false;
     let fallbackVerificationRequested = false;
@@ -228,6 +232,15 @@ export default defineContentScript({
 
     const onMessage = (event: MessageEvent<unknown>): void => {
       if (!isPageMessage(event)) return;
+
+      if (event.data && typeof event.data === 'object'
+        && (event.data as { type?: unknown }).type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
+        const accountId = (event.data as { accountId?: unknown }).accountId;
+        if (typeof accountId === 'string') {
+          chatGptWorkspaceObservation = observeChatGptAccountId(chatGptWorkspaceObservation, accountId);
+        }
+        return;
+      }
 
       if (isMainReadyMessage(event.data) && event.data.token === probeToken) {
         // 🔴 This answer **is** the verification, and it is why no inline script
@@ -662,6 +675,11 @@ export default defineContentScript({
     //    frame would answer one `tabs.sendMessage` several times over.
     if (isTopFrame()) browser.runtime.onMessage.addListener(
       (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
+        if (message && typeof message === 'object'
+          && (message as { type?: unknown }).type === CHATGPT_WORKSPACE_REQUEST_MESSAGE) {
+          sendResponse(resolveChatGptWorkspace(chatGptWorkspaceObservation));
+          return false;
+        }
         // 🔴 W31c · The organization question, asked **before** the fetch channel
         //    below only because it is a different kind of thing: it carries no URL
         //    and no body, and its answer is a decision. Both paths return null for a

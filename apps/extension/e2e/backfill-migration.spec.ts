@@ -155,25 +155,15 @@ async function serveChatgpt(ext: Extension): Promise<{ api: string[]; list: stri
 const TICK_ALARM = 'cs-backfill-tick';
 
 /**
- * Poll `storage.local` until the migration has reached its **terminal layout**:
- * the v2 header exists **and** the pre-W18 key has been removed.
- *
- * 🔴 W67(b) · Waiting for the header alone samples a state the code is never
- *    required to be finished in. `migrate` writes the header
- *    (`lib/backfill/ledger.ts:811`) and removes the legacy key only afterwards,
- *    as its **last** step (`:829`: "Step 5 is the only deletion in this file").
- *    Polling on the header and then asserting the key is gone is a race against
- *    that step; on a loaded machine it was measured failing 3 times in 100
- *    repeats. The waiter waits for the step the assertion is about, and the
- *    bounded timeout is what keeps it an assertion — a product that never removes
- *    the key still fails after the wait rather than hanging forever.
+ * The capture kicks the backfill asynchronously, so wait for its named workspace
+ * refusal before reading the storage snapshot. The bounded wait turns a missing
+ * refusal into an assertion instead of silently observing the pre-tick state.
  */
-async function waitForMigratedLayout(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+async function waitForWorkspaceRefusal(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const all = await readStorage(ext, null);
-    const header = all[HEADER_KEY];
-    if (header && typeof header === 'object' && !(LEGACY_KEY in all)) return all;
+    if (Object.keys(all).some((key) => key.includes('workspace-unresolved'))) return all;
     if (Date.now() >= deadline) return all;
     await new Promise((resolve) => { setTimeout(resolve, 100); });
   }
@@ -188,7 +178,7 @@ async function loadFixturePage(ext: Extension): Promise<Page> {
   return page;
 }
 
-test('a real tick carries a pre-W18 record over: ids in the debt database, header at v2, old key gone', async ({ ext }) => {
+test('a real tick leaves unscoped legacy debts untouched when the workspace is unknown', async ({ ext }) => {
   /**
    * 🔴 W88 · A per-test budget, on top of the config's 90 s, for machine load only.
    *
@@ -209,47 +199,26 @@ test('a real tick carries a pre-W18 record over: ids in the debt database, heade
     [LEGACY_KEY]: legacyRecord(),
   });
 
-  // A real capture on a real platform page. The live leg stores it in the outbox
-  // and, fire-and-forget, kicks the backfill leg — which is the tick under test.
+  // A real capture on a real platform page. It has no ChatGPT-Account-Id header,
+  // so the backfill leg must name the unresolved workspace and leave the old
+  // shared/default ledger untouched.
   await loadFixturePage(ext);
   await waitForOutbox(ext, (rows) => rows.length >= 1);
 
-  // 🔴 W67(b) · Wait for the migration's **terminal** layout, not the header:
-  //    the header is written before the legacy key is removed (`ledger.ts:811`
-  //    then `:829`), so reading on the header alone races the removal the very
-  //    next assertion is about. Measured on main: 3/100 repeats failed here.
-  const all = await waitForMigratedLayout(ext);
+  const all = await waitForWorkspaceRefusal(ext);
+  expect(all[LEGACY_KEY]).toEqual(legacyRecord());
+  const unresolvedKey = Object.keys(all).find((key) =>
+    key.includes('workspace-unresolved'));
+  expect(unresolvedKey, Object.keys(all).join(' | ')).toBeTruthy();
+  const header = all[unresolvedKey!] as Record<string, unknown>;
+  expect(header.halted).toMatchObject({ reason: 'org-unresolved' });
+  expect((header.enumCursor as Record<string, unknown>).complete).toBe(false);
+  expect((header.pendingCount as number) + (header.archivedCount as number)).toBe(0);
 
-  // 1 · The old key is gone — and it could only be removed by the migration's
-  //     last step, which runs after the ids were written *and read back*.
-  expect(Object.keys(all)).not.toContain(LEGACY_KEY);
-
-  // 2 · The header is at the v2 key, is a header (no id arrays), and carries the
-  //     old record's own numbers: the migration must not invent progress.
-  const header = all[HEADER_KEY] as Record<string, unknown>;
-  expect(header).toBeTruthy();
-  expect(header.v).toBe(2);
-  expect(header.platform).toBe('chatgpt');
-  expect(header.scope).toBe(SCOPE);
-  expect(header.pendingCount).toBe(PENDING.length);
-  expect(header.archivedCount).toBe(ARCHIVED.length);
-  expect(Array.isArray(header.pending)).toBe(false);
-  expect(Array.isArray(header.archived)).toBe(false);
-
-  // 3 · The ids really are in the debt database, exactly once each, in order.
-  const rows = await readDebtRows(ext);
-  const mine = rows.filter((row) => row.platform === PLATFORM && row.scope === SCOPE);
-  expect(mine.filter((row) => row.state === 'pending').map((row) => row.id)).toEqual(PENDING);
-  expect(new Set(mine.filter((row) => row.state === 'archived').map((row) => row.id)))
-    .toEqual(new Set(ARCHIVED));
-
-  // 4 · The database the acceptance found missing is the one the migration wrote.
-  expect(await listDatabases(ext)).toContain(BACKFILL_DB_NAME);
-
-  // 5 · The tick was a real one: the page's own request went out and was served.
-  //     (The leg's own requests are paced by design — `DEFAULT_PACE` — so this
-  //     spec asserts the migration, not the fetch schedule.)
+  // The page's own request was served, but unknown workspace evidence must stop
+  // before any list request or transfer of the unscoped debt set.
   expect(api).toEqual([CHATGPT_API_PATH]);
+  expect(list).toEqual([]);
 });
 
 test('a record this build cannot read is left untouched, and the alarm tick says why it did nothing', async ({ ext }) => {
@@ -299,16 +268,19 @@ test('a record this build cannot read is left untouched, and the alarm tick says
   // And the refusal really refused: nothing written, nothing moved, nothing sent.
   expect(all[LEGACY_KEY]).toEqual(unreadable);
   expect(Object.keys(all)).not.toContain(HEADER_KEY);
-  expect(await listDatabases(ext)).not.toContain(BACKFILL_DB_NAME);
+  // The unresolved-workspace refusal can create its own named header, but the
+  // unreadable legacy default is not imported into that unrelated scope.
+  expect(await listDatabases(ext)).toContain(BACKFILL_DB_NAME);
+  const rows = await readDebtRows(ext);
+  expect(rows.filter((row) => row.platform === PLATFORM && row.scope === SCOPE)).toEqual([]);
   expect(escaped).toEqual([]);
 });
 
 test('with no platform tab open at all, the layout still moves: the migration does not wait for a fetch', async ({ ext }) => {
   // 🔴 The state the acceptance was in for days, and the reason this case exists:
   //    every tick blocked at 'no-http-port' because no platform page was open. The
-  //    migration used to be reachable only from a run that was about to make a
-  //    request, so in exactly this state the user's v1 record was never carried
-  //    over — no v2 key, no debt database, and nothing anywhere saying so.
+  //    migration carries the existing default-scope debt set forward without
+  //    running enumeration or treating the unresolved workspace as empty.
   //
   //    No page is opened in this case. The tick is expected to be *blocked*; what
   //    it must not be is silent about the storage layout.
@@ -353,7 +325,8 @@ test('with no platform tab open at all, the layout still moves: the migration do
   //    reintroduce reading the tick while it is still running.
   expect(isSweepNotConcluded(tick.tabSweep as TabSweepTrace | null)).toBe(false);
 
-  // And the storage layout moved anyway.
+  // The existing default-scope migration carries recorded debts forward; it does
+  // not make an enumeration complete or send any request without workspace proof.
   expect(all[HEADER_KEY]).toBeTruthy();
   expect(Object.keys(all)).not.toContain(LEGACY_KEY);
   const rows = await readDebtRows(ext);

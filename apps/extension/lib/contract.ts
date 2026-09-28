@@ -5,6 +5,8 @@
 
 /** Message names used by the page-world hook and the isolated bridge. */
 export const CAPTURE_MESSAGE = '__chat_stasher_capture__';
+/** Metadata-only page signal: the request workspace header observed by this page. */
+export const CHATGPT_WORKSPACE_OBSERVED_MESSAGE = '__chat_stasher_chatgpt_workspace_observed__';
 export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
 export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
 /**
