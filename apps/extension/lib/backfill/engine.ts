@@ -2474,7 +2474,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   // ChatGPT's archived list, project discovery list, and each project list own
   // separate persisted cursors. One auxiliary page fits only after the main list
   // is complete, and it consumes the same list-page budget and pacer.
-  if (opts.platform === 'chatgpt' && state.enumCursor.complete && state.pending.length === 0
+  if (opts.platform === 'chatgpt' && state.enumCursor.complete
     && listPagesFetched < listPagesThisTick) {
     const enumeration = state.chatgptEnumeration!;
     const project = enumeration.projects.entries.find((entry) => !entry.complete);
@@ -2508,6 +2508,26 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           { retryAfterMs: retryAfterMsFor(response, clock.now()) });
       }
 
+      // A request-time workspace check cannot protect the ledger from a switch
+      // while the request is in flight. Re-read the page's observed workspace
+      // before accepting IDs from any auxiliary source.
+      if (http.chatgptWorkspace) {
+        let workspace: Awaited<ReturnType<NonNullable<HttpPort['chatgptWorkspace']>>>;
+        try {
+          workspace = await http.chatgptWorkspace();
+        } catch {
+          return halt('org-unresolved', `ChatGPT ${source} response refused: the observed workspace could not be read`);
+        }
+        const expectedWorkspace = chatGptWorkspaceOfScope(opts.scope);
+        if (!workspace.ok || workspace.observed !== true) {
+          return halt(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved',
+            `ChatGPT ${source} response refused: the observed workspace is not established`);
+        }
+        if (expectedWorkspace !== null && workspace.workspace !== expectedWorkspace) {
+          return halt('scope-mismatch', `ChatGPT ${source} response refused: the observed workspace changed during the request`);
+        }
+      }
+
       let ids: string[] = [];
       if (source === 'archived') {
         const parsed = parseConversationListPage(response.text);
@@ -2522,7 +2542,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         enumeration.counts.archived.listed += ids.length;
         enumeration.archived.offset += ids.length;
         enumeration.archived.complete = ids.length === 0;
-        for (const id of ids) mergeChatGptProvenance(state, id, { source: 'archived', project: null, archived: true });
+        for (const id of ids) mergeChatGptProvenance(state, id, { source: 'archived', project: 'unknown', archived: true });
       } else if (source === 'project-discovery') {
         const parsed = parseChatGptProjectPage(response.text);
         if (!parsed.ok) return halt('shape-changed', `ChatGPT project discovery malformed: ${parsed.detail}`);

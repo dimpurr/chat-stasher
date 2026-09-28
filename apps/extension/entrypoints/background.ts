@@ -1012,6 +1012,9 @@ async function coordinatedTick(
     }
     return response;
   };
+  if (platform === 'chatgpt' && http.chatgptWorkspace) {
+    coordinatedHttp.chatgptWorkspace = http.chatgptWorkspace;
+  }
   try {
     return await run(coordinatedHttp, lease.gentle);
   } finally {

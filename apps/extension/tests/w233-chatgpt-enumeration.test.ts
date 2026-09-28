@@ -9,6 +9,7 @@ import {
 import { initialState, headerOf, isHeader, stateFrom } from '../lib/backfill/types';
 import { memoryStore } from '../lib/backfill/store';
 import { runBackfill } from '../lib/backfill/engine';
+import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 import {
   chatGptAccountIdFromRequest,
   observeChatGptAccountId,
@@ -138,7 +139,7 @@ describe('W233 ChatGPT enumeration', () => {
     });
     expect(state.chatgptDebtProvenance).toMatchObject({
       'opaque-main': { source: 'main', project: 'unknown', archived: false },
-      'opaque-archived': { source: 'archived', project: null, archived: true },
+      'opaque-archived': { source: 'archived', project: 'unknown', archived: true },
       'opaque-project-1': {
         source: 'project', project: { id: 'opaque-project', name: 'Synthetic project' }, archived: false,
       },
@@ -160,5 +161,74 @@ describe('W233 ChatGPT enumeration', () => {
       archived: { listed: 0, complete: false },
       project: { listed: 0, complete: false },
     });
+  });
+
+  it('refuses auxiliary IDs when the observed workspace changes during the request', async () => {
+    let workspace = 'opaque-workspace';
+    const calls: string[] = [];
+    const http = Object.assign(async (url: string) => {
+      calls.push(url);
+      if (new URL(url).searchParams.get('is_archived') === 'true') {
+        workspace = 'other-workspace';
+        return { status: 200, text: JSON.stringify({ items: [{ id: 'foreign-archived' }] }) };
+      }
+      return { status: 200, text: JSON.stringify({ items: [] }) };
+    }, {
+      chatgptWorkspace: async () => ({ ok: true as const, workspace, observed: true as const }),
+    });
+    const options = {
+      platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'chatgpt:opaque-workspace',
+      store: memoryStore(), http,
+      clock: { now: () => 1, sleep: async () => {} },
+    } as const;
+    await runBackfill(options);
+    const report = await runBackfill(options);
+
+    expect(calls.map((url) => new URL(url).searchParams.get('is_archived') === 'true' ? 'archived' : 'main'))
+      .toEqual(['main', 'archived']);
+    expect(report.halted?.reason).toBe('scope-mismatch');
+    expect(report.state.pending).not.toContain('foreign-archived');
+    expect(report.state.chatgptDebtProvenance?.['foreign-archived']).toBeUndefined();
+    expect(report.state.chatgptEnumeration?.archived.complete).toBe(false);
+  });
+
+  it('continues auxiliary enumeration while a main-list debt is parked empty', async () => {
+    const calls: string[] = [];
+    const store = memoryStore();
+    const http = async (url: string) => {
+      calls.push(url);
+      const parsed = new URL(url);
+      if (parsed.pathname === '/backend-api/conversations') {
+        if (parsed.searchParams.get('is_archived') === 'true') {
+          return { status: 200, text: JSON.stringify({ items: [{ id: 'archived-while-parked' }] }) };
+        }
+        return { status: 200, text: JSON.stringify({ items: parsed.searchParams.get('offset') === '0' ? [{ id: 'parked-main' }] : [] }) };
+      }
+      if (parsed.pathname === '/backend-api/conversation/parked-main') {
+        return { status: 200, text: JSON.stringify({ mapping: {}, current_node: 'empty-parked-main' }) };
+      }
+      throw new Error('unexpected synthetic route');
+    };
+    const plan = {
+      ...CHATGPT_PLAN,
+      parseDetailPage: (text: string) => text.includes('empty-')
+        ? { ok: true as const, outcome: 'detail-empty-unverified' as const }
+        : { ok: true as const, outcome: 'non-empty' as const },
+    };
+    const options = {
+      platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'chatgpt:opaque-workspace',
+      store, http, plans: () => plan,
+      clock: { now: () => 1, sleep: async () => {} },
+    } as const;
+
+    const first = await runBackfill(options);
+    expect(first.state.parkedEmpty).toContain('parked-main');
+    await runBackfill(options);
+    const third = await runBackfill(options);
+
+    expect(calls.map((url) => [new URL(url).pathname, new URL(url).search]).join('|'))
+      .toContain('is_archived=true');
+    expect(third.state.pending).toContain('parked-main');
+    expect(third.state.pending).toContain('archived-while-parked');
   });
 });
