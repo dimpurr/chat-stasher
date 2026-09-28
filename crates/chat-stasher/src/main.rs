@@ -8518,6 +8518,7 @@ mod decision_surface_tests {
             &[],
             2,
             None,
+            None,
         ))
         .expect("the setup payload is one JSON object");
         assert_eq!(value["command"], "setup");
@@ -8586,6 +8587,7 @@ mod decision_surface_tests {
             &[],
             2,
             Some(&why),
+            None,
         ))
         .expect("the setup payload is one JSON object");
 
@@ -10319,6 +10321,7 @@ fn cmd_setup(
                     // not the masterkey/remote pre-pass refusal this field
                     // renders specially.
                     None,
+                    None,
                 )
             );
         }
@@ -10358,7 +10361,37 @@ fn cmd_setup(
             }
         }
         if !premissing.is_empty() {
-            let why = setup_refused_before_save_why(&premissing);
+            // WIZ-1 has one deliberate exception to "exit 2 writes nothing":
+            // when the *only* parameter owed is the masterkey declaration, the
+            // wizard still refuses the run, but it first creates the local
+            // repository and its masterkey — the minimum a human needs in front
+            // of them to copy the key off this disk — and stops before the
+            // archive pass, the remote step and the scheduler. Re-running with
+            // the declaration then continues. If anything else is missing too,
+            // rule 1 wins and nothing is written at all.
+            let only_masterkey_declaration_owed =
+                premissing.len() == 1 && premissing[0] == "masterkey_saved_elsewhere";
+            // The key path to offer, when the bootstrap actually put one on the
+            // disk. It is `None` for rule 1 (nothing was written) and for a
+            // bootstrap that failed, and in both cases the refusal falls back to
+            // the masterkey object's ordinary never-attempted shape.
+            //
+            // A failed bootstrap is reported through the refusal's own reason
+            // rather than on stderr: this path prints nothing but its JSON, so
+            // stdout is the only channel a caller sees. The reason says the
+            // preparation failed without claiming to know whether the key file
+            // landed — the key is persisted before the repository is
+            // initialized, so a failure in the second half leaves a key on the
+            // disk, and "nothing was written" would be a guess. What it does
+            // claim is that no snapshot was archived, which is true of every
+            // path that reaches here.
+            let (why, created_key) = match only_masterkey_declaration_owed {
+                false => (setup_refused_before_save_why(&premissing), None),
+                true => match setup_create_repo_and_key(&config) {
+                    Ok(path) => (setup_refused_awaiting_declaration_why(), Some(path)),
+                    Err(error) => (setup_refused_bootstrap_failed_why(&error), None),
+                },
+            };
             println!(
                 "{}",
                 setup_json_payload(
@@ -10380,15 +10413,11 @@ fn cmd_setup(
                     &SetupRemoteReport {
                         name: destination.clone(),
                         kind: None,
-                        config: SetupDestinationConfig::NotWritten {
-                            why: format!("a required parameter was missing: {why}"),
-                        },
+                        config: SetupDestinationConfig::NotWritten { why: why.clone() },
                         reach: SetupReach::NotAttempted { why: why.clone() },
                         trust: SetupTrust::NotRequired,
                         dest_init: SetupDestinationInit::NotRun { why: why.clone() },
-                        credentials: SetupRemoteCredentials::NotChecked {
-                            why: format!("a required parameter was missing: {why}"),
-                        },
+                        credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
                     },
                     Err(&why),
                     &premissing,
@@ -10396,6 +10425,7 @@ fn cmd_setup(
                     &[],
                     2,
                     Some(&why),
+                    created_key.as_deref(),
                 )
             );
             return ExitCode::from(2);
@@ -10776,6 +10806,7 @@ fn cmd_setup(
             // its own failure in `local`, so the payload renders the observed
             // states rather than a pre-pass refusal.
             None,
+            None,
         )
     );
     ExitCode::from(exit_code)
@@ -10863,6 +10894,37 @@ fn setup_refused_before_save_why(missing: &[&'static str]) -> String {
         "required parameter(s) missing ({}), so the local first save was refused \
          before it ran and nothing was written",
         missing.join(", ")
+    )
+}
+
+/// The reason for the one deliberate exception to "exit 2 writes nothing": the
+/// WIZ-1 masterkey bootstrap. Here the *only* owed parameter was
+/// `--masterkey-saved-elsewhere`, so the wizard created the local repository
+/// and its masterkey — the minimum for the user to copy the key — and then
+/// stopped before the archive pass, the remote step and the scheduler. The
+/// payload that carries this reason offers the key file's `path`, which is the
+/// whole point of the run.
+fn setup_refused_awaiting_declaration_why() -> String {
+    "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+     the local repository and its masterkey for you to copy elsewhere, then stopped \
+     before the archive pass, the remote step and the scheduler; re-run the same command \
+     with --masterkey-saved-elsewhere to continue"
+        .to_string()
+}
+
+/// The same refusal when the bootstrap itself could not run.
+///
+/// Deliberately silent about how far it got: the key is persisted before the
+/// repository is initialized, so a failure in the second half leaves a key file
+/// on the disk. Saying "nothing was written" would be a guess, and this project
+/// does not report a guess as a measurement. What is certain here is that no
+/// snapshot was archived — the archive pass is after every line of the
+/// bootstrap — so that, and only that, is what this sentence claims.
+fn setup_refused_bootstrap_failed_why(error: &str) -> String {
+    format!(
+        "the only missing parameter was --masterkey-saved-elsewhere, and preparing the local \
+         repository and masterkey for you to copy failed ({error}), so nothing was archived and \
+         the run stopped; fix that and re-run"
     )
 }
 
@@ -11250,6 +11312,34 @@ fn setup_local_repository_exists(config: &Config) -> Result<bool, String> {
     BackupStore::for_metadata_query(setup_local_store(config))
         .repository_exists()
         .map_err(|error| format!("{error:#}"))
+}
+
+/// The WIZ-1 masterkey bootstrap: create the local repository and its
+/// masterkey and return the key's path — the minimum a human needs in front of
+/// them to copy the key off this disk.
+///
+/// Deliberately **not** the archive pass. This is the one side effect the
+/// "exit 2 writes nothing" rule carves out for a non-TTY run whose *only* owed
+/// parameter is `--masterkey-saved-elsewhere`: the declaration is a human step
+/// that needs the key to already exist, so the wizard creates just enough for
+/// the user to do that, and stops — no snapshots are archived, no remote is
+/// configured, no scheduler is installed.
+///
+/// Re-runs of the repository subset of the push path: the key is persisted
+/// first (so the repository is never initialized under a key that is not on the
+/// disk), then the repository itself is initialized if it does not exist.
+/// `open_or_init` writes nothing when the repository is already there, and
+/// `masterkey` loads the existing key without touching it, so a bootstrap on a
+/// machine that already archived is a clean no-op. The machine name is
+/// irrelevant to init (it only sets the snapshot `host`, and no snapshot is
+/// created), so the same metadata-query store the existence probe uses is fine.
+fn setup_create_repo_and_key(config: &Config) -> Result<std::path::PathBuf, String> {
+    let cfg = setup_local_store(config);
+    let (mk, _) = masterkey(&cfg).map_err(|error| format!("{error:#}"))?;
+    BackupStore::for_metadata_query(cfg.clone())
+        .open_or_init(&mk)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(cfg.key_file)
 }
 
 /// The local first save: two `run-once` passes, then what they left behind.
@@ -13139,10 +13229,18 @@ fn setup_schedule_json(
 /// `local_refused_why` is `Some(why)` only when the local first save was
 /// *refused before it ran* — a required parameter was missing on a non-TTY
 /// invocation, so the wizard stopped before creating an archive that the missing
-/// parameter was asked to guard. Nothing was written. The `why` is carried into
-/// the `chain`, `runs`, `masterkey` and `steps` arm renderings that would
-/// otherwise fall back to the "no stage was given" or "absent" claims, which
-/// would read as measurements a refused run never made.
+/// parameter was asked to guard. The `why` is carried into the `chain`, `runs`,
+/// `masterkey` and `steps` arm renderings that would otherwise fall back to the
+/// "no stage was given" or "absent" claims, which would read as measurements a
+/// refused run never made.
+///
+/// `masterkey_created_path` is `Some` only for the one exception to "exit 2
+/// writes nothing": the WIZ-1 masterkey bootstrap, where the *sole* owed
+/// parameter was `--masterkey-saved-elsewhere`. The wizard created the key so
+/// the human can copy it, so the masterkey object carries its real `path` even
+/// though the run is still a refusal and no archive pass happened. It is `None`
+/// for every ordinary refusal (and every non-refusal), which renders the master
+/// key as never-attempted with no path to offer.
 #[allow(clippy::too_many_arguments)]
 fn setup_json_payload(
     scan: serde_json::Value,
@@ -13159,6 +13257,7 @@ fn setup_json_payload(
     unread: &[&'static str],
     exit_code: u8,
     local_refused_why: Option<&str>,
+    masterkey_created_path: Option<&Path>,
 ) -> String {
     let save = local.map(|local| &local.save);
     let declared = !missing.contains(&"masterkey_saved_elsewhere");
@@ -13250,15 +13349,30 @@ fn setup_json_payload(
         "chain": chain,
         "runs": runs,
         "masterkey": if refused {
-            // The declaration state is a report of the flag, and the `why`
-            // carries the refusal. The run never created or opened an archive,
-            // so there is no `path` and no `absent` verdict.
-            serde_json::json!({
-                "kind": "not_attempted",
-                "why": local_refused_why,
-                "declaration": if declared { "declared" } else { "not_declared" },
-                "declaration_is_verified": false,
-            })
+            if let Some(path) = masterkey_created_path {
+                // Only the WIZ-1 masterkey bootstrap gets here: the wizard
+                // created the key for the human to copy, so it has a real path
+                // to offer even though the run is still a refusal and the
+                // declaration is still owed. The declaration is a report of the
+                // flag — `declaration_is_verified: false` — never a claim that
+                // a copy exists.
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "declaration": if declared { "declared" } else { "not_declared" },
+                    "declaration_is_verified": false,
+                })
+            } else {
+                // An ordinary refusal. The declaration state is a report of the
+                // flag, and the `why` carries the reason. The run never created
+                // or opened an archive, so there is no `path` and no `absent`
+                // verdict.
+                serde_json::json!({
+                    "kind": "not_attempted",
+                    "why": local_refused_why,
+                    "declaration": if declared { "declared" } else { "not_declared" },
+                    "declaration_is_verified": false,
+                })
+            }
         } else {
             match (save, local) {
                 (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
