@@ -1,0 +1,324 @@
+# Command reference
+
+<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, and the setup wizard's destination and scheduler steps. -->
+
+Every `chat-stasher` command, its purpose, its main flags and its exit codes. This page is a map. The authority for your installed version is always:
+
+```sh
+chat-stasher --help
+chat-stasher <command> --help
+```
+
+## Commands at a glance
+
+| Command | What it does | Changes anything? |
+|---|---|---|
+| [`init`](#init) | Writes a commented config file, if none exists | Config (new file only) |
+| [`setup`](#setup) | First-run wizard: first archive, key, destination, timer | Yes |
+| [`doctor`](#doctor) | Is anything on this machine deleting its history? | No |
+| [`run-once`](#run-once) | One archive pass: collect, then push if changed | Stage, archive |
+| [`schedule`](#schedule) | Renders, installs or removes the hourly timer | Timer files (with `install` / `uninstall`) |
+| [`status`](#status) | Is the timer working? What does the scanner find? | No |
+| [`dest-init`](#dest-init) | Seeds a new destination with this machine's history | Stage, destination |
+| [`verify`](#verify) | Proves an archive is intact | No |
+| [`ui`](#ui) | Opens the local dashboard | No |
+| [`search`](#search) | Finds sessions by machine, tool, date or text | No |
+| [`export`](#export) | Writes selected sessions out as files | Files in `--out` |
+| [`read`](#read) | Prints one session | No |
+| [`overview`](#overview) | Machine × tool activity matrix, in the terminal or as JSON | No |
+| [`index`](#index) | Builds, checks or deletes the local full-text index | Local index |
+| [`cache`](#cache) | Shows or clears the local body cache | Local cache (`clear`) |
+| [`reclaim-stage`](#reclaim-stage) | Removes staged copies every destination proves it holds | Stage (with `--apply`) |
+| [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
+| [`ingest`](#ingest) | Archives an extension export file | Stage |
+
+Lower-level commands, used by the ones above or for repair, are listed under [Plumbing](#plumbing).
+
+## Conventions
+
+### Flags most commands share
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | The stage folder. Never created for you by the browser host. |
+| `--destination <name>` | A `[destinations.<name>]` from the config. **Required once any destination is declared**; there is no default. `ui` is the one exception, see below. |
+| `--repo <path>` | Use this archive directly, instead of a named destination. |
+| `--key-file <path>` | The key file for `--repo`. |
+| `--option key=value` | A backend option, repeatable. Never put credentials here: command lines end up in logs and shell history. |
+| `--connections <n>` | Concurrency cap. Default 4, maximum 10. |
+| `--machine <id>` | The machine partition. Default: `machine` in the config, else this machine's identity. |
+| `--keep-ssh-masters` | Leave SSH connection masters open after the command. |
+| `--json` | One JSON object on stdout, and nothing else there. |
+
+### Exit codes
+
+The same four codes are used everywhere a command answers a question about the archive:
+
+| Code | Meaning |
+|---|---|
+| `0` | Answered completely. |
+| `1` | Read everything, and the answer is "nothing" (for `status`: not healthy). |
+| `2` | Usage error. Nothing was done. |
+| `3` | Could not finish reading. Any "0" in the output is unproven. |
+
+Exceptions are listed per command. `ui` never exits `1`.
+
+### JSON output
+
+`doctor`, `status`, `setup`, `overview` and `search` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
+
+### Where output goes
+
+| Command | Report on |
+|---|---|
+| `status` | **stderr**. `status | head` hides the exit code. `--json` puts the object on stdout. |
+| `ui` | stdout: the URL. A closed pipe does not stop the dashboard. |
+| everything else | stdout, with errors on stderr |
+
+## Getting started
+
+### `init`
+
+Writes `~/.config/chat-stasher/config.toml`, with every setting explained in comments. Does nothing if the file exists. See [config.md](config.md).
+
+### `setup`
+
+The first-run wizard: [setup.md](setup.md).
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | Stage folder. Required when not interactive. |
+| `--masterkey-saved-elsewhere` | The person declares they have a copy of the key. Not verified. |
+| `--destination <name>` | Configure or verify this destination. Omit to skip the remote step. |
+| `--remote sftp\|s3` | Which recipe to write for a new destination. |
+| `--remote-endpoint`, `--remote-user`, `--remote-ssh-key`, `--remote-bucket`, `--remote-region`, `--remote-root` | The destination's values. `--remote-region` defaults to `auto`. |
+| `--remote-access-key-id-env <VAR>`, `--remote-secret-key-env <VAR>` | The **names** of the variables that hold the S3 credentials. |
+| `--trust-host` | The person declares they checked the SFTP fingerprint. |
+| `--install-schedule` / `--uninstall-schedule` | Install or remove the timers after setup. |
+| `--json` | One JSON object. Always on when not attached to a terminal. |
+
+Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. [setup.md](setup.md#for-scripts-and-agents) has the details.
+
+### `doctor`
+
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), the browser host registration, and local cache sizes. Prints paths, counts, sizes and dates, never conversation text.
+
+| Flag | Meaning |
+|---|---|
+| `--json` | One JSON object. |
+
+## Archiving
+
+### `run-once`
+
+One pass: collect new session data into the stage, then push to the archive if anything changed.
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | Required. |
+| `--destination <name>` | Required once destinations are declared. |
+| `--verify` | Run the cheap structure check (`verify --level l1`) afterwards. |
+| `--shard-bucket-cap <n>` | Sealed shards per bucket. Default 20. |
+
+Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error. Safe to run again at any time.
+
+### `schedule`
+
+Renders the hourly timer, or installs and removes it. See [schedule.md](schedule.md).
+
+| Form | Effect |
+|---|---|
+| `schedule --stage <dir>` | Prints the timer. Changes nothing. |
+| `schedule --stage <dir> --output <path>` | Writes the timer file and prints the command that loads it. Loads nothing. |
+| `schedule install --stage <dir>` | Writes and loads the timer. One per declared destination, unless `--destination` narrows it. |
+| `schedule uninstall` | Stops and removes the timers for the declared (or named) destinations. |
+
+| Flag | Meaning |
+|---|---|
+| `--format launchd\|systemd` | Default `launchd`. Pass `systemd` on Linux. |
+| `--unit run-once\|reclaim-stage` | The hourly archive (default), or the weekly stage clean-up. |
+| `--destination <name>` | Repeatable. Not valid with `--unit reclaim-stage`. |
+| `--binary <path>` | The binary the timer runs. Paths under `target/` are refused. |
+| `--verify` | Add the structure check after each pass. |
+
+The interval is `backup_interval_secs` from the config.
+
+### `status`
+
+Is the scheduled archive working? The first line is the verdict, read from the record the last pass left:
+
+| Verdict | Exit |
+|---|---|
+| `Healthy: last run … ago, took … ms, archived … shard(s), …` | `0` |
+| `Last run failed: the <step> step errored …` | `1` |
+| `No run has ever been recorded` | `1` |
+| `No run for … (threshold …)`: nothing for more than 4 intervals, and at least 1 hour | `1` |
+
+`3` means the scan itself did not complete.
+
+| Flag | Meaning |
+|---|---|
+| `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
+| `--json` | One JSON object, including a `local` section: the timer units installed, the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. |
+| `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
+
+### `dest-init`
+
+Seeds a new destination, once. It re-collects this machine's sessions from their sources, copies in what other destinations still hold for this machine that the machine no longer has, and pushes the result. It covers **this machine's** part of the archive only. See [destinations.md](destinations.md).
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>`, `--stage <dir>` | Required (or `--repo` instead of a name). |
+| `--from <name>` | Compare against only these destinations. Repeatable. Default: every other declared one. |
+| `--trust-host` | Record an SFTP server's key in `~/.ssh/known_hosts`, after printing its fingerprint. Never implied. |
+
+A source destination that cannot be read makes the result incomplete, reported as such, with a non-zero exit. A new SFTP host stops the command with exit `3` until you pass `--trust-host`.
+
+### `verify`
+
+| `--level` | Checks | Cost |
+|---|---|---|
+| `l1` | Archive structure | Cheap. Reads no conversation data. |
+| `l2` | Content: downloads and re-hashes every pack | Downloads the whole archive |
+| `l3` | Every staged session against the archive: shard count, bytes, SHA-256 | Needs `--stage` |
+| `all` (default) | All three | |
+
+### `reclaim-stage`
+
+Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it.
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | Required. |
+| `--apply` | Actually remove. Without it, a dry run that removes nothing. |
+
+Exit codes: `0` reclaimable or reclaimed · `1` blocked, nothing removed · `2` usage error.
+
+## Getting your conversations back
+
+### `ui`
+
+A dashboard on `127.0.0.1`, on a port the system picks, with a random token in the URL. It serves GET requests only and closes after 5 idle minutes. Pages: an overview (totals, machine × source matrix, weekly heatmap, drill-down), session lists, a reader that decrypts one session on request, `/search` over the [local index](#index), a download of one session as a file, and **Extensions** (one row per browser install, grouped by machine).
+
+| Flag | Meaning |
+|---|---|
+| `--destination <names>` | One name, several (`a,b`), or `all`. Several are merged into one view: a session held by more than one destination is listed once, with a badge, and the first destination named wins where copies differ. |
+| `--view overview\|extensions` | The page to open first. |
+| `--session`, `--machine`, `--harness`, `--day`, `--since`, `--until` | Start with a filter applied. Same meaning as in `search`. |
+| `--no-open` | Print the URL without opening a browser. |
+| `--idle-timeout <s>` | Default 300. `0` never idles out. |
+
+**Which destination it opens.** An explicit `--destination` or `--repo` always wins. Otherwise: the only declared destination, if there is one; with several, the one set as `destination` under `[native_host]`; with several and none set, it lists them and exits `2`.
+
+`--repo`, `--key-file` and `--option` are refused with more than one destination.
+
+Exit codes: `0` served, including an honest empty page for an empty archive · `3` could not read the archive in full (or no key) · `2` usage error. Never `1`.
+
+`view` is a deprecated alias for `ui`.
+
+### `search`
+
+Finds sessions in **one** destination, always named.
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>` | Required (or `--repo`). |
+| `--session <prefix>` | Session id prefix. |
+| `--machine <id>` | One machine partition. |
+| `--harness <ids>` | Comma-separated tool ids, for example `claude-code,codex`. |
+| `--day`, `--since`, `--until` | Local calendar days, `YYYY-MM-DD`. Filters on the **conversation's own dates**, not on when it was backed up. |
+| `--text <query>` | Search conversation text in the [local index](#index). Three characters or more. |
+| `--scan` | With `--text`: read the selected conversations and match case-insensitively instead. Answers short queries, and downloads what it reads. |
+| `--cost` | Also report what reading the matched sessions in full would cost. |
+| `--json` | One object: matched, not matched, and could-not-be-placed groups. |
+
+Without `--text`, search reads metadata only and never downloads a conversation. A session whose dates are unknown is listed separately, never dropped. While any remain and a date filter is active, "0 matched" exits `3`, not `1`.
+
+### `export`
+
+Writes exactly the sessions `search` selects for the same flags, as `<out>/<machine>/<tool>/<session-id>.jsonl` in each tool's own format, plus a checksummed `<out>/manifest.json`.
+
+| Flag | Meaning |
+|---|---|
+| `--out <dir>` | Required. Must be empty or absent, unless `--force`. Nothing is ever deleted. |
+| filters | As in `search`. |
+| `--turns all\|user` | `user` keeps only the person's own messages, where the tool's format makes that certain. Elsewhere every line is written, and the manifest says so. |
+| `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
+| `--dry-run` | Print the plan and its cost. Writes nothing. |
+
+Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error.
+
+### `read`
+
+Prints one session (`--session <id>`) and its SHA-256. `--all-machines` instead reports, for every machine's newest snapshot, each session's id, shard count, length and digest, without content.
+
+### `overview`
+
+The machine × tool activity matrix and heatmap for one destination, in the terminal. A machine with no activity index is listed as "index missing", never dropped.
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>` | Required (or `--repo`). |
+| `--width <n>` | Terminal width. Default 100. |
+| `--json` | The full document. |
+| `--json --summary` | Totals, one record per machine and per tool, and the last 30 local days. No per-session list. |
+
+Exit codes: `0` rendered · `1` read in full, no activity index anywhere · `3` could not read in full · `2` usage error.
+
+### `index`
+
+The local full-text index behind `/search` and `search --text`. It is **plaintext**, kept in this machine's cache folder, one per destination, and never uploaded. See [privacy-security.md](privacy-security.md).
+
+| Subcommand | Effect |
+|---|---|
+| `index build --destination <name>` | Reads sessions that changed since the last build and updates the index. |
+| `index check --destination <name>` | Validates the index and counts what it holds, without contacting the archive. |
+| `index clear --destination <name>` | Deletes that destination's index. |
+
+### `cache`
+
+The body cache: encrypted copies of conversations you have opened, so the next read is fast. Nothing in it is decrypted, and deleting it only costs speed.
+
+| Form | Effect |
+|---|---|
+| `cache` | Prints the location, the quota and what it holds. |
+| `cache clear` | Deletes every cached entry. Never touches an archive, a destination or a key. |
+
+## Browser extension
+
+### `install-native-host`
+
+Registers this binary as the host the extension delivers to, for every browser found on this machine (or those named). One registration serves every profile of each browser.
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | The stage the host writes to. Must exist. Recorded as `[native_host] stage`. |
+| `--browser <name>` | Repeatable: `chrome`, `chromium`, `edge`, `brave`, `arc`, `chrome-beta`, `chrome-canary`, `opera`, `vivaldi`, `firefox`. Default: every browser whose data folder exists. |
+| `--uninstall` | Removes exactly the files this command writes, for every browser (or those named). |
+
+Prints every path it writes, skips or removes. Running it twice is harmless.
+
+Exit codes: `0` at least one registration in place (or removal finished) · `3` no known browser found, nothing written · `1` an action failed · `2` usage error.
+
+### `ingest`
+
+Archives extension export files, the ones the popup saves when you export undelivered captures, into the stage. The same bytes are never archived twice.
+
+| Flag | Meaning |
+|---|---|
+| `--inbox <dir>` | The folder holding the export files. Processed files move to `<inbox>/consumed/`. |
+| `--stage <dir>` | The stage. |
+
+## Plumbing
+
+These run inside `run-once`, `dest-init` and the browser host, or repair specific things. You rarely need them directly.
+
+| Command | Purpose |
+|---|---|
+| `collect` | Reads new session data from each tool into the stage. Exits `3` when a tool has sessions this build cannot archive. |
+| `push` | Moves sealed stage data into the archive. |
+| `seal` | Seals one file already inside the stage. Refuses any tool whose files are unsafe to rename. |
+| `activity-index` | Rebuilds the per-machine activity index. `--rebuild --destination <name>` repairs it inside an archive by appending a new snapshot. |
+| `machine-declare` | Records this machine's display name (default: its host name). |
+| `machine-label` | Names a machine that can no longer name itself, such as a sold laptop. |
+| `native-host` | The host process the browser starts. `--self-test` prints one line of JSON and exits. |

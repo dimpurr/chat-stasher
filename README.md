@@ -200,6 +200,8 @@ Two things the table cannot show:
 - A tool's sessions may live somewhere else on your machine. Point `[harness_roots]` in the config at the right path and the scanner looks there instead. A path that does not exist is reported as *unknown*, never as "0 sessions".
 - When backfill gets back an incomplete conversation, it records a failure. It never stores the partial copy as if it were whole. A tab that was open before the extension was installed or updated is not captured until you reload it; the popup tells you when this applies.
 
+[docs/support.md](docs/support.md) has the full tables: every operating system, the session path each tool is looked for at with the confidence behind it, and the destination each backend maps to.
+
 ## Where the archive lives
 
 | Destination | Status | Best for |
@@ -282,15 +284,13 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 - **No `restore` command.** Sessions come out with `read` and `export`, but nothing writes them back into a tool.
 - **The extension is not in a store**, and backfill is not yet verified end to end on any platform.
 - **No prebuilt Linux or Windows binary in a stable release yet**; they arrive with 0.5.0.
-- **Search covers only what the local index holds, and only the dashboard can use it.** The index is a separate cache built by an explicit command; anything it has not read is unsearchable until you rebuild it, and the search page says which sessions that is. There is no command-line twin yet (`search --text`), and no linear scan mode for the one- and two-character queries the index cannot answer.
+- **Text search covers only what you have indexed.** The full-text index is a separate plaintext cache that you build with an explicit command, and it is what text search reads: the archive itself is never the search target, so a stale index answers from the sessions it saw last time until you rebuild it. That answer can come from the terminal (`search --text`, or `--scan` to read the conversations themselves) or from the dashboard's search page, and both say how much of the destination the index covers rather than reporting an unindexed session as "no match".
 
 ## Roadmap
 
 - Cloudflare R2 as the documented default remote.
 - A small macOS menubar app showing how fresh each backup is.
-- Platform and date facets on the search page, and a command-line `search --text`.
-
-Sessions are in the dashboard's search results because the index holds the text SQLite can match on; the archive itself is never the search target, so a stale index shows stale matches until it is rebuilt.
+- Platform and date facets on the search page.
 - A per-platform coverage page in the extension (next extension release), and store listings.
 
 ## Documentation
@@ -298,10 +298,16 @@ Sessions are in the dashboard's search results because the index holds the text 
 | I want to… | Start here |
 |---|---|
 | Get my first archive working | [docs/start.md](docs/start.md) |
+| Do the first run as one wizard | [docs/setup.md](docs/setup.md) |
+| Keep it running every hour | [docs/schedule.md](docs/schedule.md) |
 | Install on my system, update or uninstall | [docs/install.md](docs/install.md) |
 | Set up R2, SFTP or another disk | [docs/destinations.md](docs/destinations.md) |
+| Look up a command's flags and exit codes | [docs/cli.md](docs/cli.md) · `chat-stasher <command> --help` |
+| Look up a setting in `config.toml` | [docs/config.md](docs/config.md) |
+| Fix something that looks wrong | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| See what is supported, and how sure we are | [docs/support.md](docs/support.md) |
+| Understand the pipeline and the archive | [docs/how-it-works.md](docs/how-it-works.md) |
 | Decide whether to trust it | [docs/privacy-security.md](docs/privacy-security.md) |
-| Look up a command's flags and exit codes | `chat-stasher <command> --help` |
 | Work on the code | [CONTRIBUTING.md](CONTRIBUTING.md) · [docs-dev/](docs-dev/) |
 
 Release notes are in [CHANGELOG.md](CHANGELOG.md). The CLI and the extension are versioned separately.

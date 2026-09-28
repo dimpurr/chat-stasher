@@ -1,3 +1,38 @@
+# What it supports
+
+<!-- RELEASE GATE: the per-install status report, marked "(next release)" in The browser extension, is merged after 0.5.0-rc.2, along with the dashboard page that reads it. Remove the mark when the release that carries it ships, or drop that sentence and the mark with it. -->
+
+Every AI tool, chat site, browser, operating system and storage destination chat-stasher works with, and how sure we are about each one.
+
+The three large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the tool actually scans and registers. Do not edit them by hand: change the registry and regenerate.
+
+## How to read the status
+
+Two facts are kept apart on purpose: "we know where this tool keeps its sessions" and "a real session was archived end to end". A tool can change its storage in any release, so the first is never shown as the second.
+
+| Status | Meaning |
+|---|---|
+| **verified end-to-end (DATE)** | A real session was archived on a real machine, and the date of that check is recorded. |
+| **supported** | The path or route has a source, and the scanner or extension acts on it. End to end is not claimed. |
+| **experimental** | A web platform enabled in the development build of the extension only. |
+| **uncertain (unverified)** | A path exists only as an unconfirmed claim. It is not scanned unless you point `[harness_roots]` at it. |
+| **not supported** | No path could be established for this system. It is not scanned, and the scanner reports *unknown*, never "0 sessions". |
+
+The **Confidence** column says where a tool's path came from:
+
+| Confidence | Source of the path |
+|---|---|
+| `source-confirmed` | Read from the tool's own source code |
+| `official-docs` | The tool's official documentation |
+| `measured-locally` | Observed on a real machine |
+| `community-claim-unverified` | Reported by others, not confirmed |
+| `unascertained` | Not established |
+
+If a tool keeps its sessions somewhere else on your machine, set its path under `[harness_roots]` ([config.md](config.md#harness_roots)). A path you set is always scanned, whatever the table says.
+
+## The support matrix
+
+<!-- support-matrix:full:start -->
 ### Local AI coding tools
 
 | Harness | OS | Session path template | Format | Confidence | Status | Source |
@@ -89,3 +124,44 @@
 `supported` means the path or route has a source and the scanner/extension will act on it; `verified end-to-end` additionally means a real session was archived on a real machine and the date is recorded. `unascertained` cells are not scanned and are rendered as `not supported`.
 
 `supported` is the promised tier: the discovery path, and on Windows the registry key, is documented and `install-native-host` registers it. `unverified` is the best-effort tier: registration is attempted and reported, never promised. `no native build` means the browser itself ships no build for that OS, so there is nothing to register. Firefox is carried as supported outside these Chromium-family tiers, on paths from Mozilla's own documentation. One registration serves every profile of a browser on a machine; the extension itself still needs loading once per profile.
+<!-- support-matrix:full:end -->
+
+## Operating systems (the CLI)
+
+| System | Prebuilt binary | Install script | Hourly timer |
+|---|---|---|---|
+| macOS, Apple Silicon and Intel | Yes | Yes | launchd (`schedule install`) |
+| Linux, x86-64 and arm64 | From 0.5.0: statically linked, any distribution | Yes, from 0.5.0 | systemd user timer (`schedule install --format systemd`) |
+| Windows, x86-64 | From 0.5.0: `chat-stasher-windows-x86_64.exe` | No: download the file | None built in. Use Task Scheduler. |
+
+From 0.5.0, `npm install -g chat-stasher` and `cargo install chat-stasher` also work. Before that, Linux and Windows build from source. See [install.md](install.md).
+
+Most Linux and Windows tool paths come from each tool's source code or documentation, and have not yet been archived end to end on those systems.
+
+## Destinations
+
+| Destination | Status |
+|---|---|
+| Cloudflare R2 (`opendal:s3`) | Verified end to end (2026-09) |
+| SFTP (`opendal:sftp`), for example a Hetzner Storage Box | In daily use on three machines |
+| A local folder or disk | Supported |
+| Other S3-compatible services (`opendal:s3`) | Same options as R2. Not tested. |
+| A rustic REST server (`rest:…`) | Accepted by the config. Not verified. |
+
+Setup for each is in [destinations.md](destinations.md).
+
+## The browser extension
+
+There is no such thing as "the extension". A real setup is several machines, each with several browsers, each with several profiles, and an extension lives in exactly one profile.
+
+- **Where it runs:** the browsers in the table above. The **host** registration is per machine and covers every profile of each browser. The **extension** itself is loaded once per profile, so **install it in every profile you chat in**: a copy in one profile captures nothing in another, and each copy keeps its own queue and its own backfill progress. A profile you never open neither captures nor backfills.
+- **What is shared, and what is not:** every install on this machine delivers into the **same stage**, under the same machine partition. What is not shared is a count: two profiles signed in to the same account may capture the same conversation, so the archive counts distinct conversations and raw copies separately, and never adds the per-install numbers together. One registration serves every profile; the extension itself does not.
+- **How it is installed:** from each release's `chat-stasher-extension-X.Y.Z.zip`, with **Load unpacked**. It is not in any extension store yet. [install.md → The browser extension](install.md#the-browser-extension) has the steps.
+- **Past conversations (backfill):** opt-in per platform, and not yet verified end to end on any platform. Each install reports for itself (next release), so what one is still working through is never reported as what another has finished.
+
+## Not supported yet
+
+- **Restoring into a tool.** Sessions come out with `read`, `export` and the dashboard. Nothing writes them back into a tool's own folder.
+- **Deleting a conversation from an archive.** The archive is append-only by design.
+- **Extension stores.** The extension is loaded from a zip.
+- **A built-in timer on Windows.**

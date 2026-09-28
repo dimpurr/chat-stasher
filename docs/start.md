@@ -11,7 +11,7 @@ This page takes you from nothing to a working, automatic archive of your AI codi
 
 Adding an off-site copy and web chats comes at the end. Each is one more page.
 
-> **In a hurry, or not sure?** `chat-stasher setup` walks through the same first run: it scans, makes the first archive, reads a session back out of it to prove the archive works, and shows you the key path. It does not install the timer, and the off-site copy is still [destinations.md](destinations.md).
+> **In a hurry, or not sure?** `chat-stasher setup` walks through the same first run: it scans, makes the first archive, reads a session back out of it to prove the archive works, and shows you the key path. It asks before it installs the timer, and the off-site copy is still [destinations.md](destinations.md). [setup.md](setup.md) is that command, question by question.
 
 Everything below was run on macOS. The commands are the same on Linux, with the prebuilt binaries and systemd timers described in [install.md](install.md); on Windows, download the `.exe` first, as that page says.
 
@@ -140,3 +140,8 @@ The dashboard runs on your machine only (`127.0.0.1`) and closes itself after fi
 - **Add an off-site copy.** Right now the archive is on the same disk as the sessions it protects. That guards against a tool deleting its history, but not against losing the disk. [destinations.md](destinations.md) sets up Cloudflare R2, SFTP or an external disk.
 - **Archive your web chats.** Install the browser extension: [install.md → The browser extension](install.md#the-browser-extension). Register the extension's host with **the same stage** you used above, and load the extension itself in **every browser profile you chat in**: a copy in one profile does not cover the next one. The host, unlike the extension, is registered once for the whole machine.
 - **Use more than one computer.** Install chat-stasher on each machine and point them at the same destination. Each machine archives into its own part, and the dashboard shows them side by side.
+- **Do the first run as one wizard.** [setup.md](setup.md) is `chat-stasher setup`: scan, first archive, key, destination and timer, with each step checked before it moves on.
+- **Put the timer under your own scheduler.** [schedule.md](schedule.md) installs it, checks it, and covers several destinations, credentials a timer can reach, logs and removal.
+- **Look up a command, a setting or a failure.** [cli.md](cli.md) is every command with its flags and exit codes; [config.md](config.md) is every key in `config.toml`; [troubleshooting.md](troubleshooting.md) starts from what you see.
+- **See what is supported, and how sure we are.** [support.md](support.md) lists every tool, chat site, browser, system and destination, with the confidence behind each path.
+- **Understand what happens to a conversation.** [how-it-works.md](how-it-works.md) is the pipeline, the archive format, and why an unknown is never reported as a zero.

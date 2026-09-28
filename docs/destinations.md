@@ -24,7 +24,7 @@ Read this once. It applies to every kind.
   key_file = "~/.local/share/chat-stasher/masterkey.json"
   ```
 - **`dest-init` sets up a new destination, once.** It first re-collects this machine's sessions from their source files. Then it copies in whatever your other destinations still hold **for this machine** that the machine itself no longer has, and pushes the result. It seeds this machine's part of the archive only. Other machines' history arrives when those machines push to the same destination.
-- **`run-once --destination <name>`** keeps a destination current. The timer that `schedule` writes pushes to **one** destination, the one you pass with `--destination`. There is no built-in way yet to schedule a second destination; run `run-once --destination <other>` yourself, or add your own timer for it.
+- **`run-once --destination <name>`** keeps a destination current. `schedule install` gives **every declared destination its own timer**, each running `run-once --destination <name>`; pass `--destination` yourself to narrow it to one, and repeat the flag to pick several. See [schedule.md → With destinations declared](schedule.md#with-destinations-declared).
 - **`doctor` dials each declared destination once, read-only.** It reports each one as reached, not reached (with the reason), or not configured. It creates nothing.
 - **Unknown is not empty.** A destination that cannot be read makes a command exit `3`, meaning "did not finish". It never reports the destination as empty.
 
@@ -93,7 +93,7 @@ If the variable is missing or empty, chat-stasher drops that option and prints a
 - **Every process that uses this destination needs the variable**, including a timer. A launchd or systemd job does not see the environment of your shell, and `schedule` does not add variables to the timer file yet. A scheduled command that cannot resolve the credentials cannot reach R2. For the weekly stage clean-up (`reclaim-stage`), this fails safe: nothing is deleted. But nothing is reclaimed either, and the only sign of it is in that job's log.
 - **An env file is not exported just by sourcing it.** If you keep the variables in a file without `export` lines, load it with `set -a; . <file>; set +a` in the same shell that runs the command.
 
-If you want the timer to reach R2 today, the plaintext form above with `chmod 600` is the dependable one.
+For a destination a timer pushes to, the dependable forms are the ones read without a shell: `file:/path/to/secret`, `env-file:/path/to/file.env:NAME` and, on macOS, `keychain:ACCOUNT`. They resolve the same way from a terminal and from launchd or systemd, and a reference that cannot be read refuses the config by name instead of dropping the option. [schedule.md → Credentials a timer can reach](schedule.md#credentials-a-timer-can-reach) and [config.md → Credentials in options](config.md#credentials-in-options) cover each form. The plaintext value with `chmod 600` still works; it just puts the secret in the config file.
 
 ### 3. Initialise it
 
