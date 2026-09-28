@@ -70,7 +70,9 @@
 import {
   HOOK_OBSERVATIONS,
   isHookObservation,
+  isPlatformActiveInChannel,
   type HookObservation,
+  type ReleaseChannel,
 } from './contract';
 import type { BackfillStore } from './backfill/store';
 
@@ -415,4 +417,104 @@ export async function recordHookDecline(
   } catch (err) {
     console.warn('[chat-stasher] hook decline record write failed', (err as Error).message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 🔴 W53 · Retracting a record that has stopped being asserted
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a record may go without its current observation being re-reported
+ * before it is read as **no longer current** and eligible for retraction.
+ *
+ * A page that is still in the state it reported re-reports it on a timer
+ * (`HOOK_SELF_CHECK_INTERVAL_MS = 5s`, `lib/page-hook.ts`), so `at` — the last
+ * time the state was observed — is kept fresh by the very fact that the state
+ * still holds. A record whose `at` stops advancing means the document that was
+ * asserting it is gone: its tab closed, or the origin now appears only as a
+ * nested frame, whose observation the bridge drops. That is measured (W53), and
+ * it is an origin in the W46 trap — nothing legitimate will ever clear it (see
+ * `pruneStaleHookStatus`).
+ *
+ * The window is an *absolute* time, not a multiple of the cadence, because
+ * Chromium throttles backgrounded tabs' timers to about once a minute: a
+ * genuinely broken page that is merely backgrounded advances `at` every ~60s,
+ * and a 5-minute window clears that throat comfortably while never reaching a
+ * page whose failure is still being re-reported.
+ */
+export const HOOK_STATUS_STALE_AFTER_MS = 5 * 60 * 1000;
+
+/**
+ * 🔴 W53 · **Is this record still current?** — "no" exactly when its current
+ * observation has not been re-reported for `HOOK_STATUS_STALE_AFTER_MS`.
+ *
+ * `at` is `mergeHookObservation`'s newest observation time, which the module's
+ * own rules hold equal to the *current* observation's time (`mergeHookObservation`
+ * sets `record.at` to the arriving time, and `currentObservation` reads the
+ * greatest of the entries' `at` — two expressions of one fact). So ageing on
+ * `record.at` is not guessing: it is "when did the page last assert this".
+ *
+ * 🔴 A record stamped in the future (a clock that moved forward) is never stale:
+ * `now - at` is negative, which is not "long ago". Never expiring one such
+ * record is the safe direction — it stays visible until a real observation or
+ * verification supersedes it.
+ */
+export function isHookStatusStale(record: HookStatusRecord, now: number): boolean {
+  return Number.isFinite(record.at) && now - record.at > HOOK_STATUS_STALE_AFTER_MS;
+}
+
+/**
+ * 🔴 W53 · **Retract the stale records and say what is left.**
+ *
+ * A hook record is instance-internal storage (per install, per profile), and it
+ * is retracted by **age**, which is the only signal that survives both W46 gates:
+ *
+ *  · the **top-frame gate** stays — a child frame that verifies still cannot clear
+ *    the record (it is not the top frame of its origin, and it has nothing to say
+ *    about a main document);
+ *  · the **clear is still `store.remove`**, never "write an empty record" — the
+ *    difference is the one `recordHookStatus`'s `reason: null` branch documents,
+ *    and this asserts it on disk rather than only in the comment.
+ *
+ * What is current is what the caller should show. The retraction is a fact about
+ * *this instance's* StorageArea, so nothing it does reaches another instance.
+ *
+ * 🔴 W91b · **The prune is channel-scoped.** Dev and stable builds share one
+ *    extension ID and one `storage.local` (the manifest pins a `key`), so a stale
+ *    check that walked every record would let a *stable* popup open delete the
+ *    experimental record a dev build is still the only witness of — a record W91
+ *    guarantees the stable build never *surfaces* must also never *delete*. A
+ *    record whose platform is not active in the caller's channel is left in
+ *    storage byte-for-byte: only the channel that serves the platform may age it
+ *    out. The caller threads `currentReleaseChannel()` in.
+ *
+ * 🔴 Best-effort, like every write in this module: a StorageArea that cannot be
+ *    reached must not stop the page — here it means the stale record is still
+ *    retracted from what is *shown* even when the physical removal is skipped.
+ */
+export async function pruneStaleHookStatus(
+  store: BackfillStore | null,
+  snapshot: Record<string, unknown> | null,
+  now: number,
+  channel: ReleaseChannel,
+): Promise<HookStatusRecord[]> {
+  const kept: HookStatusRecord[] = [];
+  for (const record of hookStatusOf(snapshot)) {
+    // 🔴 W91b · A record this channel does not serve is another build's witness
+    //    (a stable build must not delete or surface a dev build's leftover). It
+    //    is not pruned, and it is not returned, so the caller's channel filter
+    //    stays the only place it could be shown.
+    if (!isPlatformActiveInChannel(record.platform, channel)) continue;
+    if (!isHookStatusStale(record, now)) {
+      kept.push(record);
+      continue;
+    }
+    if (!store) continue;
+    try {
+      await store.remove(hookStatusKey(record.origin));
+    } catch (err) {
+      console.warn('[chat-stasher] hook status retract failed', (err as Error).message);
+    }
+  }
+  return kept;
 }
