@@ -657,13 +657,36 @@ describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing whil
      */
     expect(traces[1]!.enumerate).toEqual([0]);
     expect(traces[1]!.detail).toEqual([20_000, 20_000]);
-    // Tick 3 confirms the main list is complete; tick 4 starts the independent archive cursor.
+    /**
+     * 🔴 W233 · Which cursor reads on ticks 2-4 here, stated rather than inferred
+     *    from the wait numbers. This case enumerates 4 ids with `pageSize: 4`, so
+     *    tick 1's first page already holds the whole list and tick 2's request is
+     *    the `offset=4` one — the **empty page**, which is W10's only stopping
+     *    signal. The main cursor therefore completes at tick 2, and not, as the
+     *    Task 1 case (where `pageSize: 2` puts the empty page on tick 3) would
+     *    suggest, at tick 3.
+     *
+     *    Tick 3 is therefore already the **archived** cursor's first page, not
+     *    another main-list page: ADR-031's auxiliary cursor takes its one page per
+     *    tick once the main list is complete, and this page comes back empty, so
+     *    the archived cursor completes on its own observed empty page. Its wait is
+     *    0 for exactly the reason tick 2's was — see the W10 note above — the gate
+     *    measures from the persisted anchor, and tick 2's two body fetches already
+     *    carried the clock 40,000 ms past it, so there is nothing left to make up.
+     */
     expect(traces[2]!.enumerate).toEqual([0]);
-    expect(traces[3]!.enumerate).toEqual([2_000]);
+    expect(server.calls.filter((u) => new URL(u).searchParams.get('is_archived') === 'true').length).toBe(1);
+    // Tick 4 has no page left: main and archived are both complete, and a legacy
+    // scope (`acct-fixture-1`, no workspace id in it) has no project routes at
+    // all, so the auxiliary gate finds no source to read.
+    expect(traces[3]!.enumerate).toEqual([]);
     for (const t of traces.slice(2)) expect(t.detail).toEqual([]);
-    // All 4 bodies were still fetched over 60 seconds, plus the archive page's own 2-second list pace.
+    // All 4 bodies were still fetched; they are just spread over 60 seconds
+    // (3 intervals × 20 seconds). Every wait in this case is on the body segment
+    // — neither list page ever needed one (see the W10 note above for the second,
+    // and tick 3's page is read after those 40 seconds have already elapsed).
     expect(detailCalls(server.calls).length).toBe(4);
-    expect(fakeNow - 1_700_000_000_000).toBe(62_000);
+    expect(fakeNow - 1_700_000_000_000).toBe(60_000);
   });
 });
 
