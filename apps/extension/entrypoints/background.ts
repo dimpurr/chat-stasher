@@ -1012,7 +1012,7 @@ async function coordinatedTick(
     }
     return response;
   };
-  if (platform === 'chatgpt' && http.chatgptWorkspace) {
+  if (expectedWorkspace !== null && http.chatgptWorkspace) {
     coordinatedHttp.chatgptWorkspace = http.chatgptWorkspace;
   }
   try {
@@ -1807,6 +1807,23 @@ async function tickIdleReason(
   // The list must be finished, or the run would still issue list requests first
   // (`engine.ts:1504-1510`): a capped scope that has pages left to read is not idle.
   if (!raw.enumCursor.complete && raw.enumCursor.truncated === undefined) return null;
+  // ChatGPT auxiliary pages do not spend body quota. When no ordinary debt is
+  // left (or every remaining debt is already parked as empty), let their own
+  // cursors advance before treating the scope as idle. Ordinary pending bodies
+  // still make a capped scope skippable so another platform can use this wake.
+  if (platform === 'chatgpt') {
+    const workspaceScoped = scope.startsWith('chatgpt:') && !scope.includes('!workspace-')
+      && scope !== 'chatgpt:default';
+    const enumeration = raw.chatgptEnumeration;
+    const hasAuxiliaryPage = enumeration === undefined
+      || enumeration.archived?.complete !== true
+      || (workspaceScoped && (enumeration.projects?.discoveryComplete !== true
+        || (enumeration.projects?.entries ?? []).some((entry) => !entry.complete)));
+    const parkedCount = raw.parkedEmpty?.length ?? 0;
+    const noRunnableDebt = raw.pendingCount === 0
+      || (raw.pendingCount > 0 && parkedCount >= raw.pendingCount);
+    if (hasAuxiliaryPage && noRunnableDebt) return null;
+  }
   if (raw.detailToday.day !== dayKeyOf(now)) return null;
   const cap = Math.min(raw.detailToday.cap ?? maxPerDay, maxPerDay);
   return raw.detailToday.count >= cap ? 'daily-cap' : null;

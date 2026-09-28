@@ -2473,16 +2473,20 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const bodyBudget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
   // ChatGPT's archived list, project discovery list, and each project list own
   // separate persisted cursors. One auxiliary page fits only after the main list
-  // is complete, and it consumes the same list-page budget and pacer.
+  // is complete, and it consumes the same list-page budget and pacer. Preserve
+  // the usual pending-work order, but do not let debts already parked as empty
+  // prevent auxiliary sources from ever being discovered.
   if (opts.platform === 'chatgpt' && state.enumCursor.complete
-    && listPagesFetched < listPagesThisTick) {
+    && listPagesFetched < listPagesThisTick
+    && (state.pending.length === 0 || state.pending.every((id) => isParkedEmpty(state, id)))) {
     const enumeration = state.chatgptEnumeration!;
+    const workspaceScoped = chatGptWorkspaceOfScope(opts.scope) !== null;
     const project = enumeration.projects.entries.find((entry) => !entry.complete);
     const source: 'archived' | 'project-discovery' | 'project' | null = !enumeration.archived.complete
       ? 'archived'
-      : !enumeration.projects.discoveryComplete
+      : workspaceScoped && !enumeration.projects.discoveryComplete
         ? 'project-discovery'
-        : project ? 'project' : null;
+        : workspaceScoped && project ? 'project' : null;
     if (source !== null) {
       const url = source === 'archived'
         ? chatGptArchivedUrl(opts.origin, enumeration.archived.offset, listLimit)
