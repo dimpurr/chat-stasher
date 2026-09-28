@@ -343,14 +343,27 @@ fn the_masterkey_declaration_is_required_and_recorded_as_unverified() {
         value["missing_parameters"],
         serde_json::json!(["masterkey_saved_elsewhere"])
     );
+    // WIZ-1 (ADR-039): the missing parameter is validated *before* the local
+    // pass, so a run that exits 2 must report the declaration as not made and
+    // the pass as not started — never a repository the caller was not shown.
     assert_eq!(value["masterkey"]["declaration"], "not_declared");
     assert_eq!(value["masterkey"]["declaration_is_verified"], false);
-    // The declaration is missing, not the work: a caller that sees exit 2 here
-    // must still be told that the local archive was written.
-    assert_eq!(value["steps"]["local_save"], "created");
+    assert_eq!(value["masterkey"]["kind"], "not_attempted");
+    assert_eq!(value["steps"]["stage"], "provided");
+    assert_eq!(
+        value["steps"]["local_save"], "not_attempted",
+        "a refused run must not claim it created an archive: {value}"
+    );
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
     assert!(
-        undeclared.repository().exists() && undeclared.masterkey().exists(),
-        "the local first save runs before the declaration is asked for, so it must have happened"
+        !undeclared.repository().exists(),
+        "exit 2 must not have created a repository: {}",
+        undeclared.repository().display()
+    );
+    assert!(
+        !undeclared.masterkey().exists(),
+        "exit 2 must not have created a masterkey: {}",
+        undeclared.masterkey().display()
     );
 }
 
@@ -368,6 +381,109 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
     assert!(
         !sandbox.data_root().exists() && !sandbox.stage().exists(),
         "a wizard that has not been told where the archive goes must not create one"
+    );
+}
+
+/// A full snapshot of the throwaway HOME + XDG tree, relative paths only, used
+/// to prove an exit-2 refusal wrote nothing at all.
+fn tree_snapshot(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .expect("a dir that exists is enumerable")
+            .collect::<Result<_, _>>()
+            .expect("enumerate dir");
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(dir.parent().unwrap_or(dir))
+                .unwrap_or(&path);
+            out.push(rel.display().to_string());
+            if path.is_dir() {
+                walk(&path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
+/// WIZ-1 (ADR-039): a non-TTY `setup` that exits 2 because the masterkey
+/// declaration is owed but not made must leave the machine untouched — no stage
+/// directory, no repository, no masterkey. The snapshot compares the whole
+/// isolated tree before and after, so the proof is not an allowlist of paths an
+/// author forgot, but the tree itself.
+#[test]
+fn setup_exit_2_from_a_missing_masterkey_declaration_writes_nothing() {
+    let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
+
+    let output = sandbox.setup(&[]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"])
+    );
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
+
+    let after = tree_snapshot(sandbox.root.path());
+    assert_eq!(
+        after, before,
+        "the whole isolated tree must be byte-comparable before and after an \
+         exit-2 run: {value}"
+    );
+    assert!(
+        !sandbox.stage().exists(),
+        "no stage may be created when the declaration is missing: {}",
+        sandbox.stage().display()
+    );
+}
+
+/// The same promise for the *remote*: a non-TTY `setup` that names a destination
+/// it has not set up exits 2 with the remote parameter named and writes no local
+/// archive either. Before W236 this ran the local pass first and created a
+/// repository the refused call was never shown.
+#[test]
+fn setup_exit_2_from_missing_remote_parameters_writes_nothing() {
+    let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
+
+    // A kind named without its parameters: the remote report refused before the
+    // local pass, so the repository must not be created.
+    let output = sandbox.setup(&[
+        "--destination",
+        "r2box",
+        "--masterkey-saved-elsewhere",
+        "--remote",
+        "s3",
+        "--remote-endpoint",
+        "https://127.0.0.1:1",
+    ]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert_eq!(value["destination"]["config"]["kind"], "not_written");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+    assert!(
+        !sandbox.config_file().exists(),
+        "an incomplete command line must not write a partial destination block"
+    );
+    assert!(
+        !sandbox.repository().exists(),
+        "the local pass must not run when a remote parameter is missing on a \
+         non-TTY run: {}",
+        sandbox.repository().display()
+    );
+
+    let after = tree_snapshot(sandbox.root.path());
+    assert_eq!(
+        after, before,
+        "an exit-2 run for a missing remote parameter must leave the tree untouched: {value}"
     );
 }
 

@@ -621,19 +621,19 @@ crates/chat-stasher/src/main.rs:7175-7314  98292402966b  lines=140
   <- docs-dev/threat-model.md:623  :: reap_remote(&cfg, keep_ssh_masters);
 crates/chat-stasher/src/main.rs:7480-7722  25f55cf734e5  lines=243
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:638  :: fn cmd_index(action: IndexAction) -> ExitCode {
-crates/chat-stasher/src/main.rs:10050-10058  78f23654916e  lines=9
+crates/chat-stasher/src/main.rs:10117-10125  78f23654916e  lines=9
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:10068-10091  3f797bdc8c26  lines=24
+crates/chat-stasher/src/main.rs:10135-10158  3f797bdc8c26  lines=24
   <- docs-dev/install.md:271  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:13281-13306  495447a9695e  lines=26
+crates/chat-stasher/src/main.rs:13482-13507  495447a9695e  lines=26
   <- docs-dev/install.md:870  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:13325-13353  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:13526-13554  563498443d71  lines=29
   <- docs-dev/install.md:831  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:13583-13588  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:13784-13789  00bb766bbeb7  lines=6
   <- docs-dev/install.md:860  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:13602-13604  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:13803-13805  28b586b3526e  lines=3
   <- docs-dev/install.md:826  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:13604-13737  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:13805-13938  9b25725da3b1  lines=134
   <- docs-dev/install.md:847  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:150-163  b160255bd493  lines=14
   <- docs-dev/privacy.md:728, docs-dev/threat-model.md:427  :: pub const HOST_NAME: &str = "com.chat_stasher.host";

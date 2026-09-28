@@ -8517,6 +8517,7 @@ mod decision_surface_tests {
             &[],
             &[],
             2,
+            None,
         ))
         .expect("the setup payload is one JSON object");
         assert_eq!(value["command"], "setup");
@@ -8554,6 +8555,72 @@ mod decision_surface_tests {
             "a run that never looked must not carry a registration count: {}",
             value["native_host"]
         );
+    }
+
+    /// W236 (ADR-039 decision 1 / WIZ-1): a non-TTY run that refused the local
+    /// first save because the masterkey declaration is missing reports the
+    /// declaration as not made and the pass as *not attempted* — never as an
+    /// archive that was created without asking, never as an "absent" key (which
+    /// would claim the wizard looked and found none).
+    #[test]
+    fn setup_json_reports_a_refused_local_save_without_claiming_a_write() {
+        let report = report_with_sessions(1);
+        let missing = vec!["masterkey_saved_elsewhere"];
+        let why = setup_refused_before_save_why(&missing);
+        let stage = PathBuf::from("/fixture/stage");
+        let value: serde_json::Value = serde_json::from_str(&setup_json_payload(
+            scanner::scan_report_json(&report),
+            Some(&stage),
+            false,
+            "not_attempted",
+            &schedule::NextRun::Unknown(
+                "no scheduler timer was installed by this run, so there is no next run to report"
+                    .to_string(),
+            ),
+            None,
+            None,
+            &setup_remote_not_attempted(None, &why),
+            Err(&why),
+            &missing,
+            &[],
+            &[],
+            2,
+            Some(&why),
+        ))
+        .expect("the setup payload is one JSON object");
+
+        assert_eq!(value["healthy"], false);
+        assert_eq!(value["exit_code"], 2);
+        assert_eq!(
+            value["missing_parameters"],
+            serde_json::json!(["masterkey_saved_elsewhere"])
+        );
+        assert_eq!(value["steps"]["stage"], "provided");
+        assert_eq!(value["steps"]["local_save"], "not_attempted");
+        // The contract name (`SKILL.md`) is `not_declared`, and the masterkey
+        // object carries `not_attempted` rather than `absent` so no reader can
+        // read the refusal as "the wizard looked and there was no key".
+        assert_eq!(value["steps"]["masterkey"], "not_declared");
+        assert_eq!(value["masterkey"]["kind"], "not_attempted");
+        assert_eq!(value["masterkey"]["declaration"], "not_declared");
+        assert!(
+            value["masterkey"].get("path").is_none(),
+            "a refused run never created or opened a key, so it has no path to offer"
+        );
+        // The refusal's reason, not the stage-missing one.
+        assert_eq!(value["chain"]["kind"], "not_attempted");
+        assert_ne!(
+            value["chain"]["why"],
+            serde_json::json!(
+                "no stage was given, so no run-once pass was attempted and no chain exists"
+            ),
+            "a refused save has its own reason, not the stage-missing sentence"
+        );
+        assert!(value["chain"]["why"]
+            .as_str()
+            .is_some_and(|text| text.contains("nothing was written")));
+        assert_eq!(value["unread"], serde_json::json!([]));
+        assert_eq!(value["incomplete"], serde_json::json!([]));
     }
 
     /// The declaration is a sentence the user has to mean. Anything shorter,
@@ -10247,11 +10314,93 @@ fn cmd_setup(
                     &[],
                     &[],
                     2,
+                    // Stage missing is its own refusal reason, already carried
+                    // by the hardcoded "no stage was given" whys above; it is
+                    // not the masterkey/remote pre-pass refusal this field
+                    // renders specially.
+                    None,
                 )
             );
         }
         return ExitCode::from(2);
     };
+
+    // WIZ-1, kept on the *before the first write* side (ADR-039 decision 1:
+    // the non-TTY run reports missing parameters by name): in a non-interactive
+    // run every required parameter is validated before the local archive pass
+    // runs, so a run that exits 2 has written nothing. The declaration is owed
+    // whenever a masterkey exists or will exist — a repository is already on
+    // this machine, or the scan found content the first pass would archive into
+    // one. The remote parameters are owed whenever a destination is named that
+    // the config does not already declare. Deciding both here, before any pass,
+    // is what keeps exit 2 side-effect-free: a run that has not been told the
+    // key is saved elsewhere must not create the very archive that key
+    // protects.
+    if !interactive {
+        let mut premissing: Vec<&'static str> = Vec::new();
+        if !masterkey_saved_elsewhere
+            // reason: a `true` here (an existing repository, or an existence
+            // probe that could not be trusted) errs toward refusing the save,
+            // which only costs a false exit 2; erring the other way would write
+            // an archive the caller was never shown the key for, which is the
+            // failure this pre-pass exists to prevent. `false` on Ok is a real
+            // absence measured by the probe, not a fallback.
+            && (setup_local_repository_exists(&config).unwrap_or(true) || !scan.records.is_empty())
+        {
+            premissing.push("masterkey_saved_elsewhere");
+        }
+        if destination.is_some() {
+            let destination_declared = setup_destination_declared(destination.as_deref());
+            for name in setup_remote_missing(&remote, destination_declared) {
+                if !premissing.contains(&name) {
+                    premissing.push(name);
+                }
+            }
+        }
+        if !premissing.is_empty() {
+            let why = setup_refused_before_save_why(&premissing);
+            println!(
+                "{}",
+                setup_json_payload(
+                    scanner::scan_report_json(&scan),
+                    Some(stage),
+                    install_schedule,
+                    "not_attempted",
+                    &schedule::NextRun::Unknown(
+                        "no scheduler timer was installed by this run, so there is no next run \
+                         to report"
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    // The wizard stopped before the remote step, so the object
+                    // is "not attempted" (a never-started step named by
+                    // `missing_parameters`), never a verdict about the
+                    // destination.
+                    &SetupRemoteReport {
+                        name: destination.clone(),
+                        kind: None,
+                        config: SetupDestinationConfig::NotWritten {
+                            why: format!("a required parameter was missing: {why}"),
+                        },
+                        reach: SetupReach::NotAttempted { why: why.clone() },
+                        trust: SetupTrust::NotRequired,
+                        dest_init: SetupDestinationInit::NotRun { why: why.clone() },
+                        credentials: SetupRemoteCredentials::NotChecked {
+                            why: format!("a required parameter was missing: {why}"),
+                        },
+                    },
+                    Err(&why),
+                    &premissing,
+                    &[],
+                    &[],
+                    2,
+                    Some(&why),
+                )
+            );
+            return ExitCode::from(2);
+        }
+    }
 
     // ADR-039 decision 2, step 2 — the local first save happens before the
     // destination question. What is on offer locally is available now; the
@@ -10623,6 +10772,10 @@ fn cmd_setup(
             &incomplete,
             &remote_gaps.unread,
             exit_code,
+            // Not a refused run: the local first save either ran or reported
+            // its own failure in `local`, so the payload renders the observed
+            // states rather than a pre-pass refusal.
+            None,
         )
     );
     ExitCode::from(exit_code)
@@ -10698,6 +10851,19 @@ fn setup_missing_parameters(stage: Option<&PathBuf>) -> Vec<&'static str> {
     } else {
         vec!["stage"]
     }
+}
+
+/// The reason a non-interactive run refused the local archive pass before it
+/// started, named from the parameters that were missing. Carried into the
+/// refusal payload's `chain`/`runs`/`masterkey`/`native_host` `why` fields, so
+/// a wrapper gets not only the names but the sentence that ties them to the
+/// nothing-was-written outcome.
+fn setup_refused_before_save_why(missing: &[&'static str]) -> String {
+    format!(
+        "required parameter(s) missing ({}), so the local first save was refused \
+         before it ran and nothing was written",
+        missing.join(", ")
+    )
 }
 
 /// Name every step that did not finish. Pure, so the human lines, the JSON and
@@ -12969,6 +13135,14 @@ fn setup_schedule_json(
 /// The `setup --json` object. `exit_code` is passed in rather than recomputed
 /// here, so the number in the object and the process exit status are the same
 /// decision.
+///
+/// `local_refused_why` is `Some(why)` only when the local first save was
+/// *refused before it ran* — a required parameter was missing on a non-TTY
+/// invocation, so the wizard stopped before creating an archive that the missing
+/// parameter was asked to guard. Nothing was written. The `why` is carried into
+/// the `chain`, `runs`, `masterkey` and `steps` arm renderings that would
+/// otherwise fall back to the "no stage was given" or "absent" claims, which
+/// would read as measurements a refused run never made.
 #[allow(clippy::too_many_arguments)]
 fn setup_json_payload(
     scan: serde_json::Value,
@@ -12979,14 +13153,16 @@ fn setup_json_payload(
     local: Option<&SetupLocalSaveReport>,
     chain: Option<&SetupChain>,
     remote: &SetupRemoteReport,
-    host: Result<&chat_stasher::doctor::NativeHostCheck, &'static str>,
+    host: Result<&chat_stasher::doctor::NativeHostCheck, &str>,
     missing: &[&'static str],
     incomplete: &[&'static str],
     unread: &[&'static str],
     exit_code: u8,
+    local_refused_why: Option<&str>,
 ) -> String {
     let save = local.map(|local| &local.save);
     let declared = !missing.contains(&"masterkey_saved_elsewhere");
+    let refused = local_refused_why.is_some();
     // `Err` is a run that never looked — either it could not read the config or
     // it stopped before the host step — and it carries its own reason. The
     // object is tagged and never `null`, in the same idiom as `chain` and `runs`
@@ -13004,12 +13180,15 @@ fn setup_json_payload(
     };
     let chain = match chain {
         Some(chain) => chain.to_json(),
-        // No stage means no pass ran. An explicit tagged object, never `null`:
-        // a null here would read as "the chain was empty", and the chain was
-        // not produced at all.
+        // No pass ran. An explicit tagged object, never `null`: a null here
+        // would read as "the chain was empty", and the chain was not produced
+        // at all. The reason is the refusal's own when one stopped it; "no
+        // stage was given" is only the stage-missing case.
         None => serde_json::json!({
             "kind": "not_attempted",
-            "why": "no stage was given, so no run-once pass was attempted and no chain exists",
+            "why": local_refused_why.unwrap_or(
+                "no stage was given, so no run-once pass was attempted and no chain exists"
+            ),
         }),
     };
     let runs = match local {
@@ -13019,7 +13198,9 @@ fn setup_json_payload(
         }),
         None => serde_json::json!({
             "kind": "not_attempted",
-            "why": "no stage was given, so no run-once pass was attempted",
+            "why": local_refused_why.unwrap_or(
+                "no stage was given, so no run-once pass was attempted"
+            ),
         }),
     };
     let value = serde_json::json!({
@@ -13039,13 +13220,21 @@ fn setup_json_payload(
                 Some(SetupLocalSave::Unknown { .. }) => "unknown",
                 None => "not_attempted",
             },
-            "masterkey": match save {
-                Some(SetupLocalSave::Created | SetupLocalSave::Existed) => {
-                    if declared { "declared" } else { "not_declared" }
+            "masterkey": if refused {
+                // The wizard stopped before the pass, so it never looked for a
+                // key. "not_declared" when the declaration is owed but not made
+                // (the case that stopped it), "not_attempted" otherwise — never
+                // "absent", which would claim a key was looked for and not found.
+                if declared { "not_attempted" } else { "not_declared" }
+            } else {
+                match save {
+                    Some(SetupLocalSave::Created | SetupLocalSave::Existed) => {
+                        if declared { "declared" } else { "not_declared" }
+                    }
+                    // No repository, therefore no key: the question does not
+                    // apply, which is a third answer and not a "no".
+                    _ => "absent",
                 }
-                // No repository, therefore no key: the question does not apply,
-                // which is a third answer and not a "no".
-                _ => "absent",
             },
             "destination": remote.outcome(),
             "schedule": schedule_status,
@@ -13060,23 +13249,35 @@ fn setup_json_payload(
         "native_host": host_json,
         "chain": chain,
         "runs": runs,
-        "masterkey": match (save, local) {
-            (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
-                serde_json::json!({
-                    "path": local.key_file.display().to_string(),
-                    "declaration": if declared { "declared" } else { "not_declared" },
-                    // The declaration is a statement by the user. Nothing here,
-                    // and nothing anywhere else, checks it — recorded so that a
-                    // reader of this object cannot mistake one for a
-                    // verification.
-                    "declaration_is_verified": false,
-                })
+        "masterkey": if refused {
+            // The declaration state is a report of the flag, and the `why`
+            // carries the refusal. The run never created or opened an archive,
+            // so there is no `path` and no `absent` verdict.
+            serde_json::json!({
+                "kind": "not_attempted",
+                "why": local_refused_why,
+                "declaration": if declared { "declared" } else { "not_declared" },
+                "declaration_is_verified": false,
+            })
+        } else {
+            match (save, local) {
+                (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
+                    serde_json::json!({
+                        "path": local.key_file.display().to_string(),
+                        "declaration": if declared { "declared" } else { "not_declared" },
+                        // The declaration is a statement by the user. Nothing here,
+                        // and nothing anywhere else, checks it — recorded so that a
+                        // reader of this object cannot mistake one for a
+                        // verification.
+                        "declaration_is_verified": false,
+                    })
+                }
+                _ => serde_json::json!({
+                    "kind": "absent",
+                    "why": "no repository and no masterkey exist, so there is nothing to declare \
+                            saved",
+                }),
             }
-            _ => serde_json::json!({
-                "kind": "absent",
-                "why": "no repository and no masterkey exist, so there is nothing to declare \
-                        saved",
-            }),
         },
         "schedule": setup_schedule_json(schedule_status, next_run, install_schedule),
     });
