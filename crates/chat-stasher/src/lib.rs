@@ -38,6 +38,8 @@ pub mod sidecar;
 pub mod sqlite_probe;
 pub mod stagereclaim;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod ui;
 pub mod verify;
 pub mod view;

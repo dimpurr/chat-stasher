@@ -20,6 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+// One implementation, shared with the crate's unit tests: an integration suite
+// cannot see a `#[cfg(test)]` item of the crate, so this file is pulled in by
+// path rather than copied.
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The bundled registry, narrowed to `claude-code`.
 ///
 /// Narrowed on purpose. The full registry names paths on this machine that the
@@ -711,8 +717,6 @@ fn rule_1_wins_when_the_masterkey_declaration_and_a_remote_parameter_are_both_mi
 #[cfg(unix)]
 #[test]
 fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
-    use std::os::unix::fs::PermissionsExt;
-
     let sandbox = Sandbox::new(true);
     let scheduler = sandbox.root.path().join("fake-scheduler");
     let calls = sandbox.root.path().join("scheduler-calls");
@@ -742,18 +746,18 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             calls.display(), state.display(), state.display(), state.display()
         )
     };
-    fs::write(&scheduler, script).expect("write fake scheduler");
-    let mut permissions = fs::metadata(&scheduler)
-        .expect("scheduler metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+    test_support::plant_executable(&scheduler, &script);
 
     let scheduled_binary = sandbox.home().join(".local/bin/chat-stasher");
     fs::create_dir_all(scheduled_binary.parent().expect("binary parent"))
         .expect("create installed binary directory");
-    fs::copy(env!("CARGO_BIN_EXE_chat-stasher"), &scheduled_binary)
-        .expect("copy CLI to installed path for scheduler self-check");
+    // The CLI under test execs this copy as its self-check, and the copy is
+    // ours to make: plant it through a child so this process holds no write
+    // descriptor on a file that is about to be exec'd.
+    test_support::copy_executable(
+        Path::new(env!("CARGO_BIN_EXE_chat-stasher")),
+        &scheduled_binary,
+    );
 
     let stage = sandbox.stage();
     let args = [
@@ -858,8 +862,6 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
 #[cfg(unix)]
 #[test]
 fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
-    use std::os::unix::fs::PermissionsExt;
-
     let sandbox = Sandbox::new(true);
     let scheduler = sandbox.root.path().join("fake-scheduler");
     let state = sandbox.root.path().join("scheduler-active");
@@ -874,22 +876,14 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
             state.display(), state.display(), state.display()
         )
     };
-    fs::write(&scheduler, script).expect("write fake scheduler");
-    let mut permissions = fs::metadata(&scheduler)
-        .expect("scheduler metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&scheduler, permissions).expect("make scheduler executable");
+    test_support::plant_executable(&scheduler, &script);
 
     let installed_binary = sandbox.home().join(".local/bin/chat-stasher");
     fs::create_dir_all(installed_binary.parent().expect("binary parent"))
         .expect("create installed binary directory");
-    fs::write(&installed_binary, "#!/bin/sh\nexit 1\n").expect("write failing installed binary");
-    let mut permissions = fs::metadata(&installed_binary)
-        .expect("installed binary metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&installed_binary, permissions).expect("make installed binary executable");
+    // The CLI execs this to prove the self-check refuses a failing binary, so it
+    // must be reachable to `exec` and not merely present.
+    test_support::plant_executable(&installed_binary, "#!/bin/sh\nexit 1\n");
 
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args([
