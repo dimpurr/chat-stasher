@@ -658,7 +658,7 @@ export async function recordBackfillHalt(
  * 🔴 🔴 W64c · **…and the evidence has to arrive, rather than be assumed from the
  *    status.** The paragraph above was written as if `platform === 'gemini'` *were* the
  *    evidence; it is not. The re-review of W64b found the rule applying to every Gemini
- *    400, including one nothing had been measured about (`nm/R64b-grok.log`, finding 2:
+ *    400, including one nothing had been measured about (`R64b-grok.log`, finding 2:
  *    "Any Gemini 400 is mapped, including a malformed batch"). The measurement belongs
  *    to an event — this platform refusing a request that came back through *its*
  *    credential path — and only the wrapper that owns that credential sees the event.
@@ -761,7 +761,7 @@ function haltReasonForStatus(
    *    status.** The re-review found this line classifying *every* Gemini 400 as a
    *    refused login, including one nothing was measured about — a malformed batch
    *    this leg built itself — while the message it produced told the user to sign in
-   *    (`nm/R64b-grok.log`, finding 2). A 400 is a statement about the credential only
+   *    (`R64b-grok.log`, finding 2). A 400 is a statement about the credential only
    *    when the wrapper that owns that credential says so: it read the page's `at`,
    *    re-read it once, and this response is what stood afterwards. With no such
    *    evidence the honest answer is the same one every other platform gets —

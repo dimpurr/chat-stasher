@@ -1317,7 +1317,7 @@ impl SetupRemoteKind {
 /// with the other candidates staying explicitly selectable.
 ///
 /// W121 is in main (merge `930722e`) and its acceptance is recorded in
-/// `nm/W121-OUT.md:160-166` (seed / push / read / verify green against R2), so
+/// `W121-OUT.md:160-166` (seed / push / read / verify green against R2), so
 /// the switch is on the S3 recipe. Nothing user-facing names a recommendation of
 /// its own — if decision 3 is reversed, this constant is the only line that
 /// changes and every sentence that mentions the recommendation reads it.

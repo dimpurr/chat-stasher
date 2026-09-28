@@ -30,7 +30,7 @@
  * That is the failure this file reproduces. It is not hypothetical on this platform: the
  * sibling `gizmos/{id}/conversations` route silently ignores `offset` and paged by an
  * opaque cursor instead — measured by a competitor whose project export consequently
- * fetched only its first page (`nm/w5-competitors/repos/chatgpt-exporter`, pionxzh
+ * fetched only its first page (`chatgpt-exporter`, pionxzh
  * issue #341, fixed in commit `0e17703`). The same silent-ignore on the list route is the
  * one wire behaviour this leg cannot survive.
  *
@@ -52,14 +52,14 @@
  *    account. It is the mechanism that would make it happen silently, reproduced with
  *    synthetic pages and an injected http port — zero network, zero logged-in state.
  *    Whether the live endpoint ever repeats a page is a measurement, and it is on the
- *    read-only check list (`nm/W232-OUT.md` §5), not in here.
+ *    read-only check list (`W232-OUT.md` §5), not in here.
  *
  * ## Red before green
  *
  * Every case in `describe('W232 · a page that repeats is a halt')` and the reset case is
  * written against the **unfixed** condition. On `0c47e6a` (before the one-line change)
  * they fail — the leg keeps going, `halted` stays null, and `enumCursor.complete` stays
- * false. `nm/W232-OUT.md` §3 records the revert run and its output.
+ * false. `W232-OUT.md` §3 records the revert run and its output.
  */
 
 import { describe, expect, it } from 'vitest';

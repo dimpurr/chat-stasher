@@ -2,7 +2,7 @@
  * W59b · **The five things an adversarial review of W59 found, pinned.**
  *
  * W59 made a permanent halt one build's judgement and gave the next build one fresh
- * attempt. The review (nm/R59-grok.log) found five places where that is not what the
+ * attempt. The review (R59-grok.log) found five places where that is not what the
  * code does. Four of them are cases here; the fifth — the identity two builds compare
  * on — is in tests/w59b-build-identity.test.ts, next to the composition it is about.
  * The guarantees the review found swapped out of three older suites are re-asserted as

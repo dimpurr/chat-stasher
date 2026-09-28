@@ -156,6 +156,12 @@ jobs:
       - name: Gate — output inventory
         run: python3 scripts/output-inventory.py --check
 
+      # A release publishes the tree, so a path into private material is the
+      # one thing that must not be in it. Same command the ubuntu job in
+      # ci.yml runs on every push.
+      - name: Gate — public surface names no private directory
+        run: python3 scripts/check-private-paths.py
+
       # One line: the script provides its own fixture and builds the debug
       # binary it needs. Previously three steps duplicated from ci.yml, with a
       # comment admitting the two copies would drift. They no longer exist.

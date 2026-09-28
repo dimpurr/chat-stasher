@@ -8,7 +8,7 @@
  * reads prose**: the citation lock checks only that the lines a citation points at
  * have not changed. A sentence that was never put back is invisible to it, and so
  * is a sentence put back pointing at the wrong code — which is exactly what the
- * re-review of that merge found (`nm/R64b-grok.log`, finding 3: the sentences
+ * re-review of that merge found (`R64b-grok.log`, finding 3: the sentences
  * about a stop written by an *older* build are absent from `docs-dev/privacy.md` and
  * `docs-dev/threat-model.md`, and main's one-line comment on `haltReasonForStatus` is
  * absent from `engine.ts`).

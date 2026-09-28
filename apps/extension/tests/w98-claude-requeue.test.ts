@@ -4,7 +4,7 @@
  * The pre-W92 branch-root rule refused every real body and the engine then dropped
  * each refused id (`dropDebt`), while the enumeration cursor stayed `complete` — so
  * the list would never be read again and those conversations could never be
- * backfilled (nm/W95-OUT.md: 50 `detail-tree-incomplete` receipts, 147 ids dropped).
+ * backfilled (W95-OUT.md: 50 `detail-tree-incomplete` receipts, 147 ids dropped).
  *
  * The fix under test is a versioned, one-time re-enumeration: the first run of a
  * Claude scope whose ledger predates the W92 fix resets that scope's enumeration

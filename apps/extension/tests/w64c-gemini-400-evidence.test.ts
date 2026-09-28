@@ -6,7 +6,7 @@
  * is answered HTTP 400). The re-review found the rule was applied to **every** Gemini
  * 400 — including one nothing had been measured about, such as a malformed batch this
  * leg built itself — because the classifier inferred the credential story from the
- * status and the platform id alone (`nm/R64b-grok.log`, finding 2: "The classifier
+ * status and the platform id alone (`R64b-grok.log`, finding 2: "The classifier
  * does not require that this 400 survived `createGeminiAuthorizedFetch`'s re-read.
  * Any Gemini 400 is mapped").
  *

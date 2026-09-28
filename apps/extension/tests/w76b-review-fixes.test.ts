@@ -1,7 +1,7 @@
 /**
  * W76b · **The four findings of the R76 review, pinned one tick at a time.**
  *
- * The review (`nm/R76-grok.log`) found four defects in W76's fair rotation. Each
+ * The review (`R76-grok.log`) found four defects in W76's fair rotation. Each
  * one is a *different* way a single wake can do the wrong thing, so each has its
  * own describe block and its own observable fact — the requests the page was
  * really asked for, the archives that really grew, and the trace a later reader
@@ -648,7 +648,7 @@ describe('W76b-4 · a scope whose next run would fetch nothing does not spend th
 // W76c · the idle skip is not an exit from the one-wake-one-site rule
 // ===========================================================================
 //
-// The R76 re-review (`nm/R76b-grok.log`) found finding 1 only *partly* closed: the
+// The R76 re-review (`R76b-grok.log`) found finding 1 only *partly* closed: the
 // idle skip added by W76b for a run that would fetch nothing was the one `continue`
 // in the walk that did not ask whether this target's turn had already put a request
 // to the platform. A proven `GET /api/organizations` followed by a `daily-cap` skip

@@ -1,5 +1,5 @@
 //! The browser × OS registration matrix (decision **D5** of
-//! `.private/docs/36-EXTENSION-TOPOLOGY.md` §5).
+//! `36-EXTENSION-TOPOLOGY.md` §5).
 //!
 //! This file exists because the alternative — a path table asserted only by the
 //! code that uses it — cannot fail when a path is *wrong*. A wrong discovery

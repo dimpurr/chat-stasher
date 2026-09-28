@@ -4,7 +4,7 @@
  *
  * W92b made "N empty bodies in a row" halt the leg, but kept N as a run-local `let`
  * and (for the below-K case) dropped each empty id on sight as a `detail-empty`
- * failure. The review of that commit (nm/R92b-grok.log §1–§2) measured two losses:
+ * failure. The review of that commit (R92b-grok.log §1–§2) measured two losses:
  *
  *   1. an interleaved transient stop (transport-error / rate-limited / daily-cap /
  *      `shouldAbort`) or a next-build re-decision discards the counter, so an

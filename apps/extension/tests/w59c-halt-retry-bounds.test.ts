@@ -2,7 +2,7 @@
  * W59c · **Round 3 of the stale-halt retry: the two bounds W59b left open, and the
  * burst it left reachable.**
  *
- * An adversarial review of W59b (nm/R59b-grok.log) found four things. Three of them are
+ * An adversarial review of W59b (R59b-grok.log) found four things. Three of them are
  * cases here; the fourth — the weakened W44-2 table — is restored in
  * tests/w44-halt-capability.test.ts, next to the table it was weakened in.
  *

@@ -1212,8 +1212,8 @@ fn plausible_seconds(v: i64) -> Option<i64> {
 // as a **string** in `raw.text` (see `inbox.rs`). So every field name below is
 // read out of the platform's real wire shape — the shapes the extension's own
 // parsers already read (`lib/backfill/enumerate.ts`, `lib/gemini-rpc.ts`,
-// `lib/contract.ts`) and the real-sanitized competitor fixtures under
-// `nm/w5-competitors/`.
+// `lib/contract.ts`) and the real-sanitized competitor fixtures those
+// projects publish themselves.
 //
 // Zone discipline: nothing is read as UTC by assumption. An RFC 3339 string
 // keeps the offset it was written with (`source_zone` records it); a numeric

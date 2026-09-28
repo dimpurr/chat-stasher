@@ -817,7 +817,7 @@ export async function waitForOutbox(
  * rewritten `HOME`/`XDG_CONFIG_HOME` with manifests planted in three candidate
  * directories (`…/Google/ChromeForTesting/NativeMessagingHosts`, `…/Google/Chrome/…`,
  * `…/Chromium/…`), answered `Specified native messaging host not found.` — the
- * probe is kept at `nm/w217-probe/probe.mjs`. Reaching the *real* directory
+ * probe is kept at `w217-probe.mjs`. Reaching the *real* directory
  * would mean writing into the machine's own browser configuration, which is
  * neither hermetic nor the same path on Linux, and a suite that only works on
  * one platform is not one this repository accepts (CLAUDE.md, "one-sided cfg").
