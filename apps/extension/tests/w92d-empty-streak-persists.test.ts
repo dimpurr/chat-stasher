@@ -63,8 +63,25 @@ function stepClock(start: number): Clock & { at: (ms: number) => void } {
   };
 }
 
-function listBody(ids: readonly string[]): string {
-  return JSON.stringify({ items: ids.map((id) => ({ id })), total: ids.length });
+/**
+ * 🔴 W232 · The list answers the `offset` it was asked for. Before this it returned every
+ * id for any offset — a server that ignores the parameter, which the engine now
+ * (correctly) halts on. These tests are about the empty streak and the build
+ * re-decision, not paging, so the fixture was made faithful rather than the halt
+ * narrowed: at `offset = ids.length` it returns the empty page that really ends it.
+ */
+function listBody(ids: readonly string[], offset = 0, limit = 100): string {
+  return JSON.stringify({
+    items: ids.slice(offset, offset + limit).map((id) => ({ id })),
+    limit,
+    offset,
+    total: ids.length,
+  });
+}
+
+/** The list page for the `offset` in a request URL. */
+function listPageFor(url: string, ids: readonly string[]): string {
+  return listBody(ids, Number(new URL(url).searchParams.get('offset') ?? 0));
 }
 
 function idOf(url: string): string {
@@ -104,7 +121,7 @@ function alternatingBackend(ids: readonly string[]): Backend {
   let detailRequests = 0;
   const http: HttpPort = async (url: string): Promise<HttpResponse> => {
     calls.push(url);
-    if (new URL(url).pathname === CHATGPT_LIST_PATH) return { status: 200, text: listBody(ids) };
+    if (new URL(url).pathname === CHATGPT_LIST_PATH) return { status: 200, text: listPageFor(url, ids) };
     detailRequests += 1;
     if (detailRequests % 2 === 1) return { status: 200, text: bodyFor(idOf(url), 'empty') };
     throw new Error('synthetic transport failure');
@@ -117,7 +134,7 @@ function taggedBackend(ids: readonly string[], tags: readonly ('empty' | 'tree' 
   const calls: string[] = [];
   const http: HttpPort = async (url: string): Promise<HttpResponse> => {
     calls.push(url);
-    if (new URL(url).pathname === CHATGPT_LIST_PATH) return { status: 200, text: listBody(ids) };
+    if (new URL(url).pathname === CHATGPT_LIST_PATH) return { status: 200, text: listPageFor(url, ids) };
     const id = idOf(url);
     const index = ids.indexOf(id);
     if (index < 0) throw new Error('unexpected conversation');

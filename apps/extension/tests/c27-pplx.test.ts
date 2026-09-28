@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runBackfill, type HttpPort, type HttpResponse } from '../lib/backfill/engine';
+import { listPageFingerprint, runBackfill, type HttpPort, type HttpResponse } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
 import { checkBackfillRequest } from '../lib/backfill/tab-port';
 import {
@@ -168,10 +168,16 @@ describe('C27-2 · with no termination field, an empty page and a short page mus
     const persisted = await store.load(stateKey('perplexity', 'acct-empty-page')) as {
       enumCursor: { complete: boolean; truncated?: string };
     };
+    // 🔴 W232 · Perplexity pages by `offset`, which this engine advances itself, so the
+    //    repeat-page guard now asks its one question here too — and records the page it
+    //    read. The three facts this test is about are unchanged; the fourth field is the
+    //    record that came with the guard. The empty page is not fingerprinted (there is
+    //    nothing to fingerprint) and the run halts nothing, which is the point.
     expect(persisted.enumCursor).toEqual({
       offset: LIMIT * 2,
       complete: false,
       truncated: 'empty-page-inferred',
+      pageFingerprints: [await listPageFingerprint(['pplx-0001-aaaaaaaa', 'pplx-0002-aaaaaaaa'])],
     });
   });
 

@@ -63,11 +63,19 @@ function ids(n: number, from = 0): string[] {
   return Array.from({ length: n }, (_, i) => `conv-${String(i + from).padStart(4, '0')}-aaaaaaaa`);
 }
 
-function listBody(all: string[]): string {
+/**
+ * 🔴 W232 · **The list answers the `offset` it was asked for.** Before W232 this
+ * returned every id for *any* offset, i.e. it modelled a server that ignores the
+ * parameter — which is the one wire behaviour the engine now (correctly) halts on.
+ * Nothing these tests are about lives in that behaviour, so the fixture was made
+ * faithful rather than the halt being narrowed: `offset = all.length` now returns the
+ * empty page that really ends an enumeration.
+ */
+function listBody(all: string[], offset = 0, limit = 100): string {
   return JSON.stringify({
-    items: all.map((id) => ({ id, title: 'synthetic-fixture', create_time: 0 })),
-    limit: 100,
-    offset: 0,
+    items: all.slice(offset, offset + limit).map((id) => ({ id, title: 'synthetic-fixture', create_time: 0 })),
+    limit,
+    offset,
     total: all.length,
   });
 }
@@ -86,7 +94,10 @@ function flakyBackend(all: string[]) {
   let failDetail = true;
   const http = async (url: string): Promise<HttpResponse> => {
     calls.push(url);
-    if (url.includes('/backend-api/conversations')) return { status: 200, text: listBody(all) };
+    if (url.includes('/backend-api/conversations')) {
+      const u = new URL(url);
+      return { status: 200, text: listBody(all, Number(u.searchParams.get('offset') ?? 0)) };
+    }
     if (failDetail) {
       // The measured failure, verbatim in shape: a torn message channel.
       throw new Error('message channel closed before a response was received');
