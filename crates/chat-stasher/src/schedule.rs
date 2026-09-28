@@ -2005,6 +2005,22 @@ mod tests {
             .expect("2026-09-23 12:00 exists in local time")
     }
 
+    /// The timestamp half of a systemd `Trigger:` line — weekday, date, time and
+    /// zone abbreviation — three days after the clock the caller injects.
+    ///
+    /// Derived rather than written down. [`systemd_trigger_line`] reads the
+    /// `Trigger:` line and its `; ` delimiter and never the calendar, so a
+    /// literal date in a fixture here is decoration — and decoration that ages
+    /// into a date in the past reads, wrongly, as a deadline the test depends on.
+    /// `now` is the test's own fixture clock ([`local_noon`]) and never the wall
+    /// clock, so the fixture stays deterministic while its date stays current.
+    fn trigger_stamp(now: DateTime<Local>, zone: &str) -> String {
+        format!(
+            "{} 03:17:00 {zone}",
+            (now + Days::new(3)).format("%a %Y-%m-%d")
+        )
+    }
+
     /// A calendar plist is its own source: the fire time is computed from the
     /// `StartCalendarInterval` keys the plist carries, on the local calendar.
     #[test]
@@ -2146,18 +2162,27 @@ mod tests {
         );
     }
 
-    /// Only the `Trigger:` line is a fire time. `n/a` is systemd's own spelling
-    /// for "no next elapse" and must not be read as one.
+    /// Only the `Trigger:` line is a fire time, and only that line's timestamp:
+    /// the `; 3 days left` tail the fixture carries must not reach the value.
+    /// `n/a` is systemd's own spelling for "no next elapse" and must not be read
+    /// as one.
     #[test]
     fn the_systemd_answer_comes_from_the_trigger_line_alone() {
-        let status = "● chat-stasher-run-once.timer - Hourly chat-stasher archive cycle\n     \
+        // Both stamps come from this module's fixture clock rather than being
+        // written down, so the fixture is what systemd prints for a timer armed
+        // three days out — and never a date that has already passed.
+        let now = local_noon();
+        let since = now.format("%a %Y-%m-%d %H:%M:%S CEST").to_string();
+        let trigger = trigger_stamp(now, "CEST");
+        let status = format!(
+            "● chat-stasher-run-once.timer - Hourly chat-stasher archive cycle\n     \
                       Loaded: loaded (/home/u/.config/systemd/user/chat-stasher-run-once.timer)\n     \
-                      Active: active (waiting) since Wed 2026-09-23 12:00:00 CEST; 2h ago\n    \
-                      Trigger: Sun 2026-09-27 03:17:00 CEST; 3 days left\n   \
-                      Triggers: ● chat-stasher-run-once.service\n";
+                      Active: active (waiting) since {since}; 2h ago\n    \
+                      Trigger: {trigger}; 3 days left\n   \
+                      Triggers: ● chat-stasher-run-once.service\n");
         assert_eq!(
-            systemd_trigger_line(status).as_deref(),
-            Some("Sun 2026-09-27 03:17:00 CEST")
+            systemd_trigger_line(&status).as_deref(),
+            Some(trigger.as_str())
         );
         assert_eq!(systemd_trigger_line("    Trigger: n/a\n"), None);
         // "TriggeredBy:" begins with the same eight characters, and a unit line
@@ -2215,24 +2240,24 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("create test directory");
         let script = temp.path().join("systemctl");
-        let answer = temp.path().join("answer");
-        fs::write(
-            &answer,
-            "    Trigger: Sun 2026-09-27 03:17:00 CEST; 3 days left\n",
-        )
-        .expect("write answer");
-        // `cat` reproduces the answer file, so the branch under test is the
-        // parse and not the fixture.
+        let now = local_noon();
+        // The line systemd would print for a timer armed three days out: the
+        // timestamp half comes from the clock this test injects, never from a
+        // literal date, so the fixture cannot turn into a deadline that has
+        // already passed. `printf` is a shell builtin, so the fake resolves
+        // nothing through `PATH` and reads no second file either — the branch
+        // under test is the parse, and the only thing that has to work is the
+        // shell itself, which the fake-scheduler install tests already exercise.
+        let trigger = trigger_stamp(now, "CEST");
         fs::write(
             &script,
-            format!("#!/bin/sh\ncat \"{}\"\n", answer.display()),
+            format!("#!/bin/sh\nprintf '%s\\n' '    Trigger: {trigger}; 3 days left'\n"),
         )
         .expect("write fake systemctl");
         let mut permissions = fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
 
-        let now = local_noon();
         let known = next_run(
             Unit::RunOnce,
             Format::Systemd,
@@ -2241,10 +2266,19 @@ mod tests {
             &script,
             now,
         );
-        assert_eq!(known.value(), Some("Sun 2026-09-27 03:17:00 CEST"));
+        // The reason travels with the message: a bare `None` here cannot say
+        // which of the two unknowns came back, and the fixture's own shell
+        // answering nothing is one of them (seen on a CI runner, not here).
+        assert_eq!(
+            known.value(),
+            Some(trigger.as_str()),
+            "the scheduler's own text, minus its `; <relative time>` tail; note={:?}",
+            known.note()
+        );
         assert_eq!(known.note(), None);
 
-        fs::write(&answer, "    Trigger: n/a\n").expect("write n/a answer");
+        fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '    Trigger: n/a'\n")
+            .expect("write the n/a answer");
         let unarmed = next_run(
             Unit::RunOnce,
             Format::Systemd,

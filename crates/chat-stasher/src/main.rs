@@ -14284,16 +14284,29 @@ mod narration_tests {
 mod setup_scheduler_tests {
     use super::*;
 
+    /// A next run in the shape the systemd probe hands back, dated three days
+    /// from now.
+    ///
+    /// Shaped from the clock rather than written down: the tests below only carry
+    /// this string through a formatter, so a literal date would be decoration —
+    /// but decoration that ages into a date in the past, which reads as a deadline
+    /// these fixtures do not have. UTC, because that is the zone it names.
+    fn armed_stamp() -> String {
+        format!(
+            "{} 03:17:00 UTC",
+            (chrono::Utc::now() + chrono::Days::new(3)).format("%a %Y-%m-%d")
+        )
+    }
+
     /// The summary row exists in both states. A row that only appears when a
     /// time is known is how "the scheduler did not report one" reads as "there
     /// is none" — the reader cannot tell an omitted row from a missing one.
     #[test]
     fn the_summary_row_names_a_time_or_says_why_there_is_none() {
+        let armed = armed_stamp();
         assert_eq!(
-            setup_next_run_line(&schedule::NextRun::Known(
-                "Sun 2026-09-27 03:17:00 CEST".to_string()
-            )),
-            "next run: Sun 2026-09-27 03:17:00 CEST"
+            setup_next_run_line(&schedule::NextRun::Known(armed.clone())),
+            format!("next run: {armed}")
         );
         assert_eq!(
             setup_next_run_line(&schedule::NextRun::Unknown(
@@ -14310,15 +14323,13 @@ mod setup_scheduler_tests {
     /// never sees an empty value without the reason it is empty.
     #[test]
     fn the_json_note_accompanies_the_empty_value_only() {
+        let armed = armed_stamp();
         let known = setup_schedule_json(
             "installed_and_checked",
-            &schedule::NextRun::Known("Sun 2026-09-27 03:17:00 CEST".to_string()),
+            &schedule::NextRun::Known(armed.clone()),
             true,
         );
-        assert_eq!(
-            known["next_run"],
-            serde_json::json!("Sun 2026-09-27 03:17:00 CEST")
-        );
+        assert_eq!(known["next_run"], serde_json::json!(armed.as_str()));
         assert_eq!(known["status"], "installed_and_checked");
         assert_eq!(known["requested"], true);
         assert!(

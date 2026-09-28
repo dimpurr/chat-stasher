@@ -395,6 +395,12 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
 /// Root-relative, not relative to each directory's parent, so a caller can tell
 /// "the repository" from "the rustic cache" by prefix rather than by guessing
 /// which component a fragment came from.
+///
+/// Components are joined with `/`, and that is the whole point of spelling a path
+/// out here: the callers filter these strings by prefix (`data/chat-stasher/…`)
+/// and by component name (`rustic`), and `Path::display` would hand them
+/// `data\chat-stasher\…` on Windows, matching neither — so the snapshot has to
+/// be the platform's own separators normalised away, not passed through.
 fn tree_snapshot(root: &std::path::Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
         let mut entries: Vec<_> = fs::read_dir(dir)
@@ -405,7 +411,12 @@ fn tree_snapshot(root: &std::path::Path) -> Vec<String> {
         for entry in entries {
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(&path);
-            out.push(rel.display().to_string());
+            out.push(
+                rel.components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
             if path.is_dir() {
                 walk(root, &path, out);
             }
@@ -706,6 +717,15 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     let scheduler = sandbox.root.path().join("fake-scheduler");
     let calls = sandbox.root.path().join("scheduler-calls");
     let state = sandbox.root.path().join("scheduler-active");
+    // What the fake scheduler answers when it is asked for a next run: the shape
+    // systemd prints, three days from now, so no fixture here carries a date that
+    // has already passed by the time the suite runs. Both sides of the assertion
+    // below are this one string — the probe's job is to pass the scheduler's own
+    // text through, and never to recompute it from the interval it was given.
+    let armed = format!(
+        "{} 03:17:00 UTC",
+        (chrono::Utc::now() + chrono::Days::new(3)).format("%a %Y-%m-%d")
+    );
     let script = if cfg!(target_os = "macos") {
         format!(
             "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
@@ -714,10 +734,11 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     } else {
         // `$3` is the verb of `systemctl --user --no-pager status <timer>`,
         // the one call whose output the next-run probe reads. It answers with a
-        // fixed `Trigger:` line: the probe must pass the scheduler's own text
-        // through, never recompute it from the interval it was given.
+        // `Trigger:` line and the relative-time tail that must not reach the
+        // value: the probe must pass the scheduler's own text through, never
+        // recompute it from the interval it was given.
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: Sun 2026-09-27 03:17:00 UTC; 3 days left' ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: {armed}; 3 days left' ;;\nesac\n",
             calls.display(), state.display(), state.display(), state.display()
         )
     };
@@ -774,7 +795,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             // this run installed.
             assert_eq!(
                 value["schedule"]["next_run"],
-                serde_json::json!("Sun 2026-09-27 03:17:00 UTC")
+                serde_json::json!(armed.as_str())
             );
             assert!(
                 value["schedule"].get("next_run_note").is_none(),
