@@ -1,5 +1,7 @@
 # What it supports
 
+<!-- RELEASE GATE: the per-install status report, marked "(next release)" in The browser extension, is merged after 0.5.0-rc.2, along with the dashboard page that reads it. Remove the mark when the release that carries it ships, or drop that sentence and the mark with it. -->
+
 Every AI tool, chat site, browser, operating system and storage destination chat-stasher works with, and how sure we are about each one.
 
 The three large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the tool actually scans and registers. Do not edit them by hand: change the registry and regenerate.
@@ -102,7 +104,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Brave | Windows | supported | https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go |
 | Arc | macOS | supported | https://github.com/keepassxreboot/keepassxc-browser/issues/1793 |
 | Arc | Linux | no native build | https://arc.net/download |
-| Arc | Windows | supported | https://github.com/chauncygu/collection-claude-code-source-code/blob/main/original-source-code/src/utils/claudeInChrome/common.ts |
+| Arc | Windows | supported | - |
 | Chrome Beta | macOS | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
 | Chrome Beta | Linux | unverified | https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md |
 | Chrome Beta | Windows | unverified | https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc |
@@ -155,7 +157,7 @@ There is no such thing as "the extension". A real setup is several machines, eac
 - **Where it runs:** the browsers in the table above. The **host** registration is per machine and covers every profile of each browser. The **extension** itself is loaded once per profile, so **install it in every profile you chat in**: a copy in one profile captures nothing in another, and each copy keeps its own queue and its own backfill progress. A profile you never open neither captures nor backfills.
 - **What is shared, and what is not:** every install on this machine delivers into the **same stage**, under the same machine partition. What is not shared is a count: two profiles signed in to the same account may capture the same conversation, so the archive counts distinct conversations and raw copies separately, and never adds the per-install numbers together. One registration serves every profile; the extension itself does not.
 - **How it is installed:** from each release's `chat-stasher-extension-X.Y.Z.zip`, with **Load unpacked**. It is not in any extension store yet. [install.md → The browser extension](install.md#the-browser-extension) has the steps.
-- **Past conversations (backfill):** opt-in per platform, and not yet verified end to end on any platform. Each install reports for itself, so what one is still working through is never reported as what another has finished.
+- **Past conversations (backfill):** opt-in per platform, and not yet verified end to end on any platform. Each install reports for itself (next release), so what one is still working through is never reported as what another has finished.
 
 ## Not supported yet
 

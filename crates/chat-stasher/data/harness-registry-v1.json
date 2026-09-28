@@ -546,16 +546,18 @@
     {
       "id": "arc",
       "display_name": "Arc",
-      "source": "https://github.com/keepassxreboot/keepassxc-browser/issues/1793",
       "tiers": {
-        "macos": {"tier": "supported"},
+        "macos": {
+          "tier": "supported",
+          "source": "https://github.com/keepassxreboot/keepassxc-browser/issues/1793"
+        },
         "linux": {
           "tier": "no-native-build",
           "source": "https://arc.net/download"
         },
         "windows": {
           "tier": "supported",
-          "source": "https://github.com/chauncygu/collection-claude-code-source-code/blob/main/original-source-code/src/utils/claudeInChrome/common.ts"
+          "source": "no vendor doc: the key is carried from a third-party implementation (S10 in nativehost.rs, read 2026-09-26); its URL is a mirror of proprietary source, so it is not linked"
         }
       }
     },
