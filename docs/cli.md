@@ -97,7 +97,7 @@ The first-run wizard: [setup.md](setup.md).
 | `--install-schedule` / `--uninstall-schedule` | Install or remove the timers after setup. |
 | `--json` | One JSON object. Always on when not attached to a terminal. |
 
-Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, nothing written · `3` something could not be read.
+Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. [setup.md](setup.md#for-scripts-and-agents) has the details.
 
 ### `doctor`
 

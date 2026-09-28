@@ -123,7 +123,7 @@ What to read in the object:
 
 | Field | What it tells you |
 |---|---|
-| `missing_parameters` | Flags that were needed and not given, for example `["stage"]` or `["masterkey_saved_elsewhere"]`. Supply them and run again. |
+| `missing_parameters` | Flags that were needed and not given, for example `["stage"]` or `["masterkey_saved_elsewhere"]`. Supply them and run again. On its own, the masterkey declaration is the one case that wrote anything first — see below. |
 | `incomplete` | Steps that ran and did not finish. |
 | `unread` | Parts that could not be read. Their absence proves nothing. |
 | `steps` | One entry per step: `stage`, `local_save`, `masterkey`, `destination`, `schedule`, `native_host`. |
@@ -137,10 +137,12 @@ Exit codes:
 |---|---|
 | `0` | Everything it was asked to do finished. |
 | `1` | A step did not finish (`incomplete` is not empty). |
-| `2` | A required parameter is missing, or a flag is malformed. Nothing was written. |
+| `2` | A required parameter is missing, or a flag is malformed. Nothing was written — with the single exception below. |
 | `3` | Something could not be read (`unread` is not empty), or the scan could not run. |
 
 When several apply, `3` wins over `1`, and `1` wins over `2`.
+
+**The one refusal that writes something.** A person cannot confirm they have copied a file that does not exist yet. So when a run with no terminal owes exactly one thing — `missing_parameters` is `["masterkey_saved_elsewhere"]`, and nothing else is missing — it creates the local repository and the master key, reports the key's path in `masterkey.path`, and *then* exits `2`. Nothing else happens on that run: no archive pass, no remote step, no timer. Read the location to copy from `masterkey.path` rather than assuming the usual one, because your config can put the key somewhere else. Tell the user to copy that file somewhere off this disk, wait for their answer, and run the same command again with `--masterkey-saved-elsewhere`; it continues from the key that is already there. If anything else is missing as well, this does not happen, and that run writes nothing at all.
 
 Three rules the wizard keeps, and your script should too:
 
