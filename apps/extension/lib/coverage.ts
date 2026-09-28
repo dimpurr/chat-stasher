@@ -503,7 +503,17 @@ function rowOf(input: CoverageScopeInput, opts: {
     halt: header.halted,
     // 🔴 W199 · Read through the validators, so a record of unknown shape becomes `null`
     //    ("we cannot read one") rather than a half-built lease a comparison would act on.
-    accountLease: readAccountLease(header.accountLease) ?? null,
+    //
+    // 🔴 W239 · **And read through the plan first, because a row is not allowed to carry
+    //    a claim the plan says cannot be an account.** An old header still holds a lease
+    //    taken over the organization, and this field is read by more than the sentence
+    //    below (`accountNote`, whose organization arm answers from the plan either way):
+    //    the install status report forwards `row.accountLease?.value` to the host as
+    //    `account_fingerprint` (`entrypoints/background.ts`), which is a value that
+    //    outlives the build able to explain it. The plan is asked, never the record, so
+    //    what an older build happened to write cannot decide what this build reports —
+    //    the same rule, and the same reason, as `accountNote`'s first line.
+    accountLease: planScopeIsOrganization(platform) ? null : readAccountLease(header.accountLease) ?? null,
     suspended: readAccountSuspension(header.suspended) ?? null,
     skippedReason: input.skippedReason,
     speed,

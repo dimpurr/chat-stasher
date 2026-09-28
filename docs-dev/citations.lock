@@ -55,9 +55,9 @@ apps/extension/entrypoints/background.ts:2833-2903  c340ed954456  lines=71
   <- docs-dev/privacy.md:397  :: }
 apps/extension/entrypoints/background.ts:2850-2915  82ed974be623  lines=66
   <- docs-dev/privacy.md:397  :: async function recordAlarmTick(
-apps/extension/entrypoints/background.ts:3187-3261  4d9944b0edbe  lines=75
+apps/extension/entrypoints/background.ts:3196-3270  4d9944b0edbe  lines=75
   <- docs-dev/privacy.md:398  :: sendResponse({ ok: false, error: err.message });
-apps/extension/entrypoints/background.ts:3192-3261  b1c374a6580f  lines=70
+apps/extension/entrypoints/background.ts:3201-3270  b1c374a6580f  lines=70
   <- docs-dev/privacy.md:398  :: * 🔴 W47 · **A message that claims to be a hook report and i…
 apps/extension/entrypoints/dw-bridge.content.ts:463-469  ff11500827ff  lines=7
   <- docs-dev/privacy.md:129  :: function readKimiAccessToken(): string | null {
@@ -185,13 +185,13 @@ apps/extension/lib/backfill/enumerate.ts:3915-3927  f1085cfb0b6d  lines=13
   <- docs-dev/privacy.md:604  :: GEMINI_RPC_DETAIL,
 apps/extension/lib/backfill/enumerate.ts:3942-3947  9822b23e6f57  lines=6
   <- docs-dev/threat-model.md:682  :: + '🔴 Unverified and handled, not guessed: the request ARGUM…
-apps/extension/lib/backfill/enumerate.ts:3953-3959  2665dbd863fc  lines=7
+apps/extension/lib/backfill/enumerate.ts:3953-3959  310e5595362d  lines=7
   <- docs-dev/privacy.md:703  :: // 🔴 W31 · claude.ai
 apps/extension/lib/backfill/enumerate.ts:4200-4278  cd3e6793d8f8  lines=79
   <- docs-dev/privacy.md:703, docs-dev/threat-model.md:309  :: export function parseClaudeDetailTree(
 apps/extension/lib/backfill/enumerate.ts:4424-4455  0663964bc1bb  lines=32
   <- docs-dev/threat-model.md:693  :: provenance:
-apps/extension/lib/backfill/enumerate.ts:4505-4558  a2922ec560ba  lines=54
+apps/extension/lib/backfill/enumerate.ts:4505-4558  f364e0e59079  lines=54
   <- docs-dev/threat-model.md:370  :: /**
 apps/extension/lib/backfill/enumerate.ts:4826-4857  3de94e683edf  lines=32
   <- docs-dev/install.md:105, docs-dev/install.md:1051, docs-dev/privacy.md:586  :: export function unsupportedBackfillFor(platform: string): U…
@@ -473,7 +473,7 @@ crates/chat-stasher/Cargo.toml:26-27  4a5b59a2acb8  lines=2
   <- docs-dev/threat-model.md:62, docs-dev/threat-model.md:80, docs-dev/threat-model.md:741  :: rustic_core = { version = "=0.12.0" }
 crates/chat-stasher/Cargo.toml:33  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:741  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
-crates/chat-stasher/src/activity.rs:2085-2135  8c2dfeee36d6  lines=51
+crates/chat-stasher/src/activity.rs:2110-2160  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:346  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
 crates/chat-stasher/src/config.rs:23  219b41f02316  lines=1
   <- docs-dev/install.md:261  :: /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).

@@ -4517,7 +4517,7 @@ export function planHoldsAccountLease(platform: string): boolean {
  * and for those two the organization is the same value.
  *
  * Not a theory about a platform we have not seen: W126's audit recorded it as the one
- * residual RISK for Claude after the organization guard (`nm/W126-OUT.md`, the Claude row
+ * residual RISK for Claude after the organization guard (`W126-OUT.md`, the Claude row
  * of the platform matrix), and W199's prior-art pass found the same collapse in
  * production in an unrelated project — farion1231/cc-switch v3.20.1, whose managed
  * accounts were keyed by `chatgpt_account_id`, "which identifies a ChatGPT workspace

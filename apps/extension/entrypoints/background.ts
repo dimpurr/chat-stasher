@@ -2928,6 +2928,15 @@ async function recordAlarmTick(
     const report = buildCoverage({ ...input, install: { ...identity, profile_label: identity.profile_label ?? 'Unnamed profile' } });
     const grouped = new Map<string, { platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>();
     for (const row of report.rows) {
+      /**
+       * 🔴 W239 · **A row's lease is an account lease, or it is nothing.** The row is
+       *    built by `buildCoverage`, which refuses to fill this field for a plan whose
+       *    scope names an organization — a value this report would otherwise carry off
+       *    the machine as `account_fingerprint`, where it is read as an account id, and
+       *    two accounts in one organization would arrive at the host as one. That refusal
+       *    is the plan's answer, not this loop's: an older build's lease on the stored
+       *    header must not be able to decide what this build reports.
+       */
       const fingerprint = row.accountLease?.value;
       const key = `${row.platform}\u0000${fingerprint ?? ''}`;
       const existing = grouped.get(key) ?? { platform: row.platform, captured_by_this_browser: 0, pending: 0, paused_reason: null, ...(fingerprint ? { account_fingerprint: fingerprint } : {}) };

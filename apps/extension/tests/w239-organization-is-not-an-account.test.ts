@@ -10,7 +10,7 @@
  * case: an account switch that changes the active organization halts before a request.
  *
  * It cannot close the **same-organization** case. Two accounts can be members of one
- * organization (a Team/Enterprise workspace; `nm/W199-OUT.md` §4 records the same failure
+ * organization (a Team/Enterprise workspace; `W199-OUT.md` §4 records the same failure
  * in production in an unrelated project — farion1231/cc-switch v3.20.1, where managed
  * accounts keyed by `chatgpt_account_id` "identifies a ChatGPT workspace rather than a
  * person" collapsed into one record). For those two accounts the organization is the same
@@ -237,5 +237,66 @@ describe('W239-D · the coverage row tells the three facts apart', () => {
     });
     expect(note).toContain('Account this scope belongs to');
     expect(note).toContain('response body');
+  });
+});
+
+describe('W239-E · the organization claim does not leave this machine', () => {
+  const NOW = Date.UTC(2026, 8, 28, 12, 0, 0);
+  const ORG_LEASE = {
+    value: 'f'.repeat(64),
+    saltId: 'fixture-salt',
+    source: 'request-url-organization' as const,
+    at: 1,
+  };
+
+  /** One row, with whatever lease an older build recorded on that scope's header. */
+  function rowWithLease(platform: string, scope: string, accountLease?: BackfillHeader['accountLease']) {
+    const input: CoverageInput = {
+      scopes: [{
+        platform,
+        scope,
+        header: {
+          v: 2,
+          platform,
+          scope,
+          totalKnown: null,
+          totalSource: 'unknown',
+          enumCursor: { offset: 3, complete: true },
+          pendingCount: 2,
+          archivedCount: 1,
+          detailToday: { day: '2026-09-28', count: 0 },
+          halted: null,
+          ...(accountLease ? { accountLease } : {}),
+        },
+        debt: { pending: ['p1', 'p2'], archived: ['a1'], times: new Map() },
+        registered: true,
+        skippedReason: null,
+      }],
+      enabled: true,
+      hostPaused: false,
+      presetRaw: 'gentle',
+      tick: null,
+      now: NOW,
+    };
+    return buildCoverage(input).rows[0]!;
+  }
+
+  it('🔴 a lease taken over an organization is not handed on as this scope\'s account', () => {
+    // The row's `accountLease` is what the install status report forwards to the host as
+    // `account_fingerprint` (`entrypoints/background.ts`, the per-platform grouping): it
+    // reads `row.accountLease?.value` and sends it, so a value still sitting here is a
+    // value that leaves the machine. An old header is the one place this label survives —
+    // the page sentence is already answered from the plan — and what it holds is an
+    // organization, which is not an account on this machine or anywhere else.
+    const row = rowWithLease('claude', ORG_A, ORG_LEASE);
+    expect(row.accountLease).toBeNull();
+  });
+
+  it('🔴 a platform whose scope is a person still reports its lease', () => {
+    // The rule is about the scope's axis, not about old records: a leased platform must
+    // keep reporting the account it recorded, or the report would lose a real answer.
+    const row = rowWithLease('grok', 'acct-fixture-1', { ...ORG_LEASE, source: 'response-body-platform-uid' });
+    expect(row.accountLease?.value).toBe('f'.repeat(64));
+    expect(row.accountLease?.source).toBe('response-body-platform-uid');
   });
 });
