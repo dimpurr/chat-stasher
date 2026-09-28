@@ -80,6 +80,8 @@ export interface DebtRecord {
   at?: number;
   /** Where `at` came from. Both this and `at` are present, or neither is — see `timeOfRow`. */
   atFrom?: DebtTimeSource;
+  /** ChatGPT source facts; absent means provenance was not established. */
+  chatgptProvenance?: import('./types').ChatGptDebtProvenance;
 }
 
 /**
@@ -171,6 +173,7 @@ export interface DebtSetSnapshot {
    * separately (`unknownTime`) rather than in any month.
    */
   times: Map<string, DebtTime>;
+  provenance?: Map<string, import('./types').ChatGptDebtProvenance>;
 }
 
 /** What one `persist` wants the store to become. Both lists are ids; `drop` and `settle` differ in where the id lands. */
@@ -420,16 +423,28 @@ export async function readDebtSet(platform: string, scope: string): Promise<Debt
   //    source this build does not know, is treated as having no time — see `timeOfRow` in
   //    lib/coverage-read.ts for why a bare number is not enough.
   const times = new Map<string, DebtTime>();
+  const provenance = new Map<string, import('./types').ChatGptDebtProvenance>();
   for (const row of ordered) {
     const time = timeInRow(row);
     if (time) times.set(row.id, time);
+    if (isChatGptProvenance(row.chatgptProvenance)) provenance.set(row.id, row.chatgptProvenance);
   }
   return {
     pending: ordered.filter((r) => r.state === 'pending').map((r) => r.id),
     archived: ordered.filter((r) => r.state === 'archived').map((r) => r.id),
     nextSeq: maxSeq + 1,
     times,
+    ...(provenance.size > 0 ? { provenance } : {}),
   };
+}
+
+function isChatGptProvenance(value: unknown): value is import('./types').ChatGptDebtProvenance {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const project = row.project;
+  const projectOk = project === null || project === 'unknown' || (!!project && typeof project === 'object' && !Array.isArray(project)
+    && typeof (project as Record<string, unknown>).id === 'string' && typeof (project as Record<string, unknown>).name === 'string');
+  return (row.source === 'main' || row.source === 'archived' || row.source === 'project') && projectOk && typeof row.archived === 'boolean';
 }
 
 /**
@@ -523,6 +538,8 @@ export async function applyDebtDiff(
   scope: string,
   diff: DebtDiff,
   nextSeq: number,
+  provenance: Record<string, import('./types').ChatGptDebtProvenance> = {},
+  provenanceDirty: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
   const db = await openDb();
   if (!db) return false;
@@ -530,7 +547,7 @@ export async function applyDebtDiff(
   const puts: DebtRecord[] = [];
   let seq = nextSeq;
   for (const id of diff.enqueue) {
-    puts.push({ platform, scope, id, state: 'pending', seq: seq++ });
+    puts.push({ platform, scope, id, state: 'pending', seq: seq++, ...(provenance[id] ? { chatgptProvenance: provenance[id] } : {}) });
   }
   /**
    * 🔴 W113b · **A settle's `seq` is taken here, but its record is written inside the
@@ -588,8 +605,20 @@ export async function applyDebtDiff(
           record.at = time.at;
           record.atFrom = time.from;
         }
+        if (had?.chatgptProvenance) record.chatgptProvenance = had.chatgptProvenance;
+        if (provenance[entry.id]) record.chatgptProvenance = provenance[entry.id];
         store.put(record);
         settledPuts.push(record);
+      };
+    }
+    const changedIds = new Set([...diff.enqueue, ...diff.settle]);
+    for (const id of provenanceDirty) {
+      if (changedIds.has(id) || deletes.some((key) => key[2] === id)) continue;
+      const request = store.get([platform, scope, id]);
+      request.onsuccess = () => {
+        const had = request.result as DebtRecord | undefined;
+        if (!had || !isChatGptProvenance(provenance[id])) return;
+        store.put({ ...had, chatgptProvenance: provenance[id] });
       };
     }
     await txDone(tx);

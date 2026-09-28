@@ -1,6 +1,7 @@
 import {
   BACKFILL_PLANS,
   backfillPlanFor,
+  auxListPathMatches,
   detailPathMatches,
   formSegmentFor,
   type BackfillEnumPlan,
@@ -36,6 +37,7 @@ export function coordinationSegmentForRequest(platform: string, url: string): 'e
   if (scopePaths && parsed.pathname === scopePaths.resolvePath) return 'enumerate';
   if (scopePaths && templatePathMatches(scopePaths.listPath, parsed.pathname)) return 'enumerate';
   if (parsed.pathname === plan.listPath) return 'enumerate';
+  if (plan.listAuxPaths?.some((route) => auxListPathMatches(route, parsed.pathname))) return 'enumerate';
   if (scopePaths && templatePathMatches(scopePaths.detailPath, parsed.pathname)) return 'detail';
   if (plan.detailPath !== null && detailPathMatches(plan.detailPath, parsed.pathname)) return 'detail';
   if (plan.detailStep2 && detailPathMatches(plan.detailStep2.path, parsed.pathname)) return 'detail';

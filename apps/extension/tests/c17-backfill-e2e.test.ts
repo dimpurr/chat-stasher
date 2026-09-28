@@ -75,6 +75,9 @@ function makeServer(opts: ServerOpts) {
     calls.push(url);
     const u = new URL(url);
     if (u.pathname === '/backend-api/conversations') {
+      if (u.searchParams.get('is_archived') === 'true') {
+        return { status: 200, text: JSON.stringify({ items: [] }) };
+      }
       const offset = Number(u.searchParams.get('offset') ?? '0');
       const page = Math.floor(offset / opts.pageSize);
       const slice = opts.ids.slice(offset, offset + opts.pageSize);
@@ -85,6 +88,12 @@ function makeServer(opts: ServerOpts) {
       const body: Record<string, unknown> = { items };
       if (opts.total !== null) body.total = opts.total;
       return { status: 200, text: JSON.stringify(body) };
+    }
+    if (u.pathname === '/backend-api/gizmos/snorlax/sidebar') {
+      return { status: 200, text: JSON.stringify({ items: [], cursor: null }) };
+    }
+    if (u.pathname.startsWith('/backend-api/gizmos/') && u.pathname.endsWith('/conversations')) {
+      return { status: 200, text: JSON.stringify({ items: [], cursor: null }) };
     }
     // Body fetch: it must hit chatgpt's responseShape (mapping + current_node).
     const id = decodeURIComponent(u.pathname.replace('/backend-api/conversation/', ''));
@@ -278,7 +287,8 @@ describe('C17 task 1 · enumerate → debts → paced one-by-one fetch → write
     //    at all — tick 4 reads no page (which is why `complete` is checked on the
     //    state after tick 3, and again below after tick 4).
     expect((await stateOf()).enumCursor.complete).toBe(true);
-    const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations'));
+    const allListUrls = server.calls.filter((u) => u.includes('/backend-api/conversations')
+      && new URL(u).searchParams.get('is_archived') !== 'true');
     // 3 in total, over 4 ticks: offset=0, offset=2, the confirming empty page at
     // offset=4, and nothing at all on tick 4.
     expect(allListUrls.map((u) => new URL(u).searchParams.get('offset'))).toEqual(['0', '2', '4']);
@@ -647,12 +657,13 @@ describe('C17 task 3 · seam B: which wins, the pacer or the pause / pacing whil
      */
     expect(traces[1]!.enumerate).toEqual([0]);
     expect(traces[1]!.detail).toEqual([20_000, 20_000]);
-    // Ticks 3 and 4 have no page and no body left to read.
-    for (const t of traces.slice(2)) expect(t.enumerate).toEqual([]);
+    // Tick 3 confirms the main list is complete; tick 4 starts the independent archive cursor.
+    expect(traces[2]!.enumerate).toEqual([0]);
+    expect(traces[3]!.enumerate).toEqual([2_000]);
     for (const t of traces.slice(2)) expect(t.detail).toEqual([]);
-    // All 4 bodies were still fetched; they are just spread over 60 seconds (3 intervals × 20 seconds).
+    // All 4 bodies were still fetched over 60 seconds, plus the archive page's own 2-second list pace.
     expect(detailCalls(server.calls).length).toBe(4);
-    expect(fakeNow - 1_700_000_000_000).toBe(60_000);
+    expect(fakeNow - 1_700_000_000_000).toBe(62_000);
   });
 });
 

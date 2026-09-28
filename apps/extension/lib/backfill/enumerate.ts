@@ -221,6 +221,7 @@ import type { DebtTime } from './debt-store';
 import type { BackfillCapability, DetailOutcome } from './types';
 
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
+export const CHATGPT_PROJECTS_PATH = '/backend-api/gizmos/snorlax/sidebar';
 export const CHATGPT_DETAIL_PATH = '/backend-api/conversation/';
 
 /**
@@ -308,6 +309,78 @@ export interface EnumPage {
 export type ParseResult =
   | { ok: true; page: EnumPage }
   | { ok: false; detail: string };
+
+export interface ChatGptProjectPage {
+  projects: Array<{ id: string; name: string }>;
+  nextCursor: number | null;
+}
+
+export interface ChatGptProjectConversationPage {
+  ids: string[];
+  nextCursor: string | null;
+}
+
+export type ChatGptProjectParse<T> = { ok: true; page: T } | { ok: false; detail: string };
+
+/** Parse project discovery without treating a missing cursor or item as an empty listing. */
+export function parseChatGptProjectPage(text: string): ChatGptProjectParse<ChatGptProjectPage> {
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return { ok: false, detail: 'project sidebar response is not JSON' }; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, detail: 'project sidebar response is not an object' };
+  const record = body as Record<string, unknown>;
+  if (!Array.isArray(record.items) || !Object.hasOwn(record, 'cursor')) return { ok: false, detail: 'project sidebar response has no items array or cursor field' };
+  const cursor = record.cursor;
+  if (cursor !== null && cursor !== undefined && (!Number.isInteger(cursor) || (cursor as number) < 0)) {
+    return { ok: false, detail: 'project sidebar response has an invalid cursor' };
+  }
+  const projects: ChatGptProjectPage['projects'] = [];
+  for (const item of record.items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { ok: false, detail: 'project sidebar item is not an object' };
+    const root = item as Record<string, unknown>;
+    const first = root.gizmo;
+    const nested = first && typeof first === 'object' && !Array.isArray(first) ? (first as Record<string, unknown>).gizmo : undefined;
+    const project = nested && typeof nested === 'object' && !Array.isArray(nested) ? nested as Record<string, unknown> : null;
+    if (!project || typeof project.id !== 'string' || project.id.length === 0 || typeof project.name !== 'string') {
+      return { ok: false, detail: 'project sidebar item has no project id or display name' };
+    }
+    projects.push({ id: project.id, name: project.name });
+  }
+  return { ok: true, page: { projects, nextCursor: typeof cursor === 'number' ? cursor : null } };
+}
+
+/** Parse one project conversation page; its continuation cursor stays opaque. */
+export function parseChatGptProjectConversationPage(text: string): ChatGptProjectParse<ChatGptProjectConversationPage> {
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return { ok: false, detail: 'project conversations response is not JSON' }; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, detail: 'project conversations response is not an object' };
+  const record = body as Record<string, unknown>;
+  if (!Array.isArray(record.items) || !Object.hasOwn(record, 'cursor')) return { ok: false, detail: 'project conversations response has no items array or cursor field' };
+  const cursor = record.cursor;
+  if (cursor !== null && cursor !== undefined && typeof cursor !== 'string') return { ok: false, detail: 'project conversations response has an invalid cursor' };
+  const ids: string[] = [];
+  for (const item of record.items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { ok: false, detail: 'project conversation item is not an object' };
+    const id = (item as Record<string, unknown>).id;
+    if (typeof id !== 'string' || id.length === 0) return { ok: false, detail: 'project conversation item has no string id' };
+    ids.push(id);
+  }
+  return { ok: true, page: { ids, nextCursor: typeof cursor === 'string' && cursor.length > 0 ? cursor : null } };
+}
+
+export const chatGptArchivedUrl = (origin: string, offset: number, limit: number): string =>
+  `${origin}${CHATGPT_LIST_PATH}?offset=${offset}&limit=${limit}&is_archived=true`;
+
+export const chatGptProjectsUrl = (origin: string, cursor: number | null): string => {
+  const query = new URLSearchParams({ conversations_per_gizmo: '0' });
+  if (cursor !== null) query.set('cursor', String(cursor));
+  return `${origin}${CHATGPT_PROJECTS_PATH}?${query.toString()}`;
+};
+
+export const chatGptProjectConversationsUrl = (origin: string, projectId: string, cursor: string | null): string => {
+  const query = new URLSearchParams({ limit: '50' });
+  if (cursor !== null) query.set('cursor', cursor);
+  return `${origin}/backend-api/gizmos/${encodeURIComponent(projectId)}/conversations?${query.toString()}`;
+};
 
 // ---------------------------------------------------------------------------
 // 🔴 C23 · The channel's capabilities as a **closed-set declaration**
@@ -901,6 +974,14 @@ export interface BackfillEnumPlan {
   platform: string;
   /** 1 · The list endpoint (a path, used for the content script's allowlist comparison; must be exact). */
   listPath: string;
+  /** Additional same-origin GET enumeration routes, with closed query declarations. */
+  listAuxPaths?: Array<{
+    path: string;
+    prefix?: boolean;
+    queryKeys: string[];
+    requiredQueryKeys?: string[];
+    selector?: { key: string; value: string };
+  }>;
   /**
    * 2 · The paging scheme (the URL part).
    * 🔴 C23: this is **no longer the same as "GET only"**. Omitting listPost ⇒
@@ -1209,6 +1290,17 @@ export interface BackfillEnumPlan {
   refusalOf?(text: string): DeepSeekEnvelopeRefusal | null;
   /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
   provenance: string;
+}
+
+export function auxListPathMatches(
+  route: NonNullable<BackfillEnumPlan['listAuxPaths']>[number],
+  pathname: string,
+): boolean {
+  if (!route.prefix) return pathname === route.path;
+  if (!pathname.startsWith(route.path)) return false;
+  const rest = pathname.slice(route.path.length);
+  const segments = rest.split('/').filter(Boolean);
+  return segments.length === 2 && segments[0]!.length > 0 && segments[1] === 'conversations';
 }
 
 /** 🔴 C26 · The explicit record of a half leg: "the list can be listed, the bodies cannot be fetched yet". */
@@ -2746,6 +2838,11 @@ const chatgptDetailUrl = (origin: string, id: string): string =>
 export const CHATGPT_PLAN: BackfillEnumPlan = {
   platform: 'chatgpt',
   listPath: CHATGPT_LIST_PATH,
+  listAuxPaths: [
+    { path: CHATGPT_LIST_PATH, queryKeys: ['offset', 'limit', 'is_archived'], requiredQueryKeys: ['offset', 'limit', 'is_archived'], selector: { key: 'is_archived', value: 'true' } },
+    { path: CHATGPT_PROJECTS_PATH, queryKeys: ['conversations_per_gizmo', 'cursor'], requiredQueryKeys: ['conversations_per_gizmo'] },
+    { path: '/backend-api/gizmos/', prefix: true, queryKeys: ['limit', 'cursor'], requiredQueryKeys: ['limit'] },
+  ],
   listUrl: (origin, offset, limit) =>
     `${origin}${CHATGPT_LIST_PATH}?offset=${offset}&limit=${limit}`,
   parseListPage: parseConversationListPage,

@@ -194,10 +194,10 @@ describe('W98 · a complete Claude scope that predates the fix re-enumerates onc
 });
 
 describe('W98 · other platforms are untouched', () => {
-  it('a complete ChatGPT scope issues no list request and gains no Claude marker', async () => {
+  it('a complete ChatGPT main list starts its independent sources and gains no Claude marker', async () => {
     const scope = 'w98-chatgpt-scope';
     const store = memoryStore();
-    await replaceDebtSet('chatgpt', scope, { pending: ['c1-aaaaaaaa'], archived: ['c2-aaaaaaaa'], nextSeq: 3, times: new Map() });
+    await replaceDebtSet('chatgpt', scope, { pending: [], archived: ['c2-aaaaaaaa'], nextSeq: 3, times: new Map() });
     await store.save(stateKey('chatgpt', scope), {
       v: 2,
       platform: 'chatgpt',
@@ -205,16 +205,16 @@ describe('W98 · other platforms are untouched', () => {
       totalKnown: null,
       totalSource: 'unknown',
       enumCursor: { offset: 2, complete: true },
-      pendingCount: 1,
+      pendingCount: 0,
       archivedCount: 1,
       detailToday: { day: '2026-09-24', count: 0 },
       halted: null,
     } satisfies BackfillHeader);
 
-    let calls = 0;
-    const http: HttpPort = async (): Promise<HttpResponse> => {
-      calls += 1;
-      throw new Error('no request may be sent for a complete, non-Claude scope');
+    const calls: string[] = [];
+    const http: HttpPort = async (url): Promise<HttpResponse> => {
+      calls.push(url);
+      return { status: 200, text: JSON.stringify({ items: [] }) };
     };
 
     const report = await runBackfill({
@@ -229,7 +229,8 @@ describe('W98 · other platforms are untouched', () => {
       maxDetails: 0,
     });
 
-    expect(calls).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!).searchParams.get('is_archived')).toBe('true');
     expect(report.state.reenumerated).toEqual({});
     expect(report.state.enumCursor.complete).toBe(true);
   });

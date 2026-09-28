@@ -115,8 +115,10 @@ import {
   type ReleaseChannel,
 } from '../contract';
 import type { OrgResolution } from './claude-org';
+import type { ChatGptWorkspaceResolution } from './chatgpt-workspace';
 import {
   backfillPlanFor,
+  auxListPathMatches,
   detailPathMatches,
   expectedMethodFor,
   formQueryMatches,
@@ -146,6 +148,8 @@ export const BACKFILL_FETCH_MESSAGE = 'cs-backfill-fetch';
 export const BACKFILL_PING_MESSAGE = 'cs-backfill-ping';
 /** content script → background: I am alive on a platform page; the tab id comes with the sender. */
 export const BACKFILL_TAB_HELLO_MESSAGE = 'cs-backfill-tab-hello';
+/** Background → top-frame content script: report this page's observed workspace. */
+export const CHATGPT_WORKSPACE_REQUEST_MESSAGE = 'cs-backfill-chatgpt-workspace';
 /**
  * 🔴 W31c · background → content script: **which organization is this page using?**
  *
@@ -470,11 +474,14 @@ export function checkBackfillRequest(
    * of the dispatch every existing plan already used.
    */
   const scopePaths = plan.scopeInPath;
+  const auxList = plan.listAuxPaths?.find((route) => auxListPathMatches(route, u.pathname)
+    && (!route.selector || u.searchParams.get(route.selector.key) === route.selector.value));
   if (scopePaths && u.pathname === scopePaths.resolvePath) segment = 'resolve';
   else if (scopePaths && scopePathMatches(scopePaths.listPath, u.pathname, scope)) segment = 'list';
   else if (scopePaths && scopePathMatches(scopePaths.detailPath, u.pathname, scope)) segment = 'detail';
   else if (viaForm !== null) segment = viaForm;
   else if (u.pathname === plan.listPath) segment = 'list';
+  else if (auxList) segment = 'list';
   // 🔴 C26: detailPath may be null (the list segment is sourced, the body segment
   //    is not). null ⇒ this platform has **no** permitted body URL. 🔴 W157 · No plan is in
   //    that state today: Perplexity held it last and W84/W84b filled its body segment
@@ -520,6 +527,18 @@ export function checkBackfillRequest(
   }
 
   const post = postSpecFor(plan, segment);
+
+  if (auxList) {
+    if (u.hash !== '') return refuseUrl('list url carries a fragment');
+    const seen = new Set<string>();
+    for (const key of u.searchParams.keys()) {
+      if (!auxList.queryKeys.includes(key) || seen.has(key)) return refuseUrl('list url carries an undeclared or repeated query key');
+      seen.add(key);
+    }
+    for (const key of auxList.requiredQueryKeys ?? []) {
+      if (!seen.has(key)) return refuseUrl('list url is missing a required query key');
+    }
+  }
 
   // 4b · 🔴 W8 · The body URL's query, which C26 never had to look at because no
   //      plan put its id there. W8 declared one (DeepSeek), so the query dimension
@@ -1024,7 +1043,7 @@ export function tabHttpPort(
   send: TabSend,
   timeoutMs: number = BACKFILL_TAB_REPLY_TIMEOUT_MS,
 ): HttpPort {
-  return async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
+  const port: HttpPort = async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
     // 🔴 The back-compat landing point: GET with no body ⇒ the message sent is
     //    **byte for byte** still `{type, url}`, not one field more. What C22's
     //    ChatGPT path sees on the wire is completely unchanged.
@@ -1052,6 +1071,20 @@ export function tabHttpPort(
     if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
     return response;
   };
+  port.chatgptWorkspace = async (): Promise<ChatGptWorkspaceResolution> => {
+    const reply = await withReplyTimeout(
+      send(tabId, { type: CHATGPT_WORKSPACE_REQUEST_MESSAGE }), tabId, timeoutMs, 'the ChatGPT workspace observation',
+    );
+    if (isRecord(reply) && reply.ok === true && reply.observed === true && typeof reply.workspace === 'string') {
+      return { ok: true, workspace: reply.workspace, observed: true };
+    }
+    if (isRecord(reply) && reply.ok === false
+      && (reply.reason === 'workspace-ambiguous' || reply.reason === 'workspace-unresolved')) {
+      return { ok: false, reason: reply.reason, observed: reply.observed === true };
+    }
+    throw new Error(`tab ${tabId} gave an unrecognised ChatGPT workspace observation`);
+  };
+  return port;
 }
 
 /**

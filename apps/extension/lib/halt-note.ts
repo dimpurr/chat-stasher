@@ -95,6 +95,11 @@ export function haltNote(
       //    the technical detail, which is a description of the state rather than
       //    the one thing a user can do about it. Both of these have exactly one
       //    action, and it is a human action — which is why the leg stopped.
+      if (platform === 'chatgpt') {
+        return t(halted.reason === 'org-ambiguous'
+          ? 'popup.notes.halted.workspaceAmbiguous'
+          : 'popup.notes.halted.workspaceUnresolved');
+      }
       return t(halted.reason === 'org-ambiguous'
         ? 'popup.notes.halted.orgAmbiguous'
         : 'popup.notes.halted.orgUnresolved');
@@ -133,5 +138,4 @@ export function haltNote(
     }
   return null;
 }
-
 

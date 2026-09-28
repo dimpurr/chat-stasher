@@ -51,6 +51,12 @@ import {
   canBackfillDetail,
   capabilityOf,
   detailRequestInit,
+  chatGptArchivedUrl,
+  chatGptProjectConversationsUrl,
+  chatGptProjectsUrl,
+  parseChatGptProjectConversationPage,
+  parseChatGptProjectPage,
+  parseConversationListPage,
   listRequestInit,
   listTokenPostInit,
   unsupportedBackfillFor,
@@ -82,6 +88,8 @@ import {
   parseRetryAfterMs,
   transientRetryDelayMs,
   type BackfillState,
+  type ChatGptDebtProvenance,
+  type ChatGptEnumerationState,
   type DetailOutcomeRecord,
   type EnumTruncation,
   type HaltJudgement,
@@ -136,7 +144,9 @@ export interface HttpResponse {
  * top-level keys are all closed sets, declared in lib/backfill/enumerate.ts and
  * enforced in lib/backfill/tab-port.ts.
  */
-export type HttpPort = (url: string, init?: BackfillRequestInit) => Promise<HttpResponse>;
+export type HttpPort = ((url: string, init?: BackfillRequestInit) => Promise<HttpResponse>) & {
+  chatgptWorkspace?: () => Promise<import('./chatgpt-workspace').ChatGptWorkspaceResolution>;
+};
 
 /** 🔴 GET with no body ⇒ fall back to the old call `http(url)`, byte for byte. This line is the back-compat landing point. */
 async function sendVia(http: HttpPort, url: string, init: BackfillRequestInit): Promise<HttpResponse> {
@@ -873,6 +883,39 @@ function isParkedEmpty(state: BackfillState, id: string): boolean {
   return (state.parkedEmpty ?? []).includes(id);
 }
 
+function newChatGptEnumeration(): ChatGptEnumerationState {
+  return {
+    archived: { offset: 0, complete: false, listed: 0 },
+    projects: { discoveryCursor: null, discoveryComplete: false, entries: [] },
+    counts: {
+      main: { listed: 0, complete: false },
+      archived: { listed: 0, complete: false },
+      project: { listed: 0, complete: false },
+    },
+  };
+}
+
+function mergeChatGptProvenance(state: BackfillState, id: string, incoming: ChatGptDebtProvenance): void {
+  const rows = state.chatgptDebtProvenance ?? (state.chatgptDebtProvenance = {});
+  const prior = rows[id];
+  const project = incoming.project && incoming.project !== 'unknown'
+    ? incoming.project
+    : prior?.project ?? incoming.project;
+  const archived = incoming.archived || prior?.archived === true;
+  const source = project && project !== 'unknown' ? 'project' : archived ? 'archived' : prior?.source ?? incoming.source;
+  const next: ChatGptDebtProvenance = { source, project, archived };
+  if (prior?.source === next.source && prior.archived === next.archived
+    && JSON.stringify(prior.project) === JSON.stringify(next.project)) return;
+  rows[id] = next;
+  (state.chatgptProvenanceDirty ?? (state.chatgptProvenanceDirty = new Set<string>())).add(id);
+}
+
+function chatGptWorkspaceOfScope(scope: string): string | null {
+  if (!scope.startsWith('chatgpt:') || scope.includes('!workspace-')) return null;
+  const workspace = scope.slice('chatgpt:'.length);
+  return workspace.length > 0 ? workspace : null;
+}
+
 /**
  * 🔴 W124b · **The repeat-page guard's fingerprint of one list page.**
  *
@@ -980,6 +1023,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     };
   }
   const { state, ledger } = opened;
+  if (opts.platform === 'chatgpt') {
+    if (!state.chatgptEnumeration) {
+      state.chatgptEnumeration = newChatGptEnumeration();
+      // Existing ChatGPT headers already own the main cursor. Carry its measured
+      // position forward while giving each added source a fresh independent cursor.
+      state.chatgptEnumeration.counts.main = {
+        listed: state.enumCursor.offset,
+        complete: state.enumCursor.complete,
+      };
+    }
+    state.chatgptDebtProvenance ??= {};
+    state.chatgptProvenanceDirty ??= new Set<string>();
+  }
   /** Persist the header, plus only the debt ids that actually moved (lib/backfill/ledger.ts). */
   const persist = async (s: BackfillState): Promise<void> => {
     await ledger.save(s);
@@ -1775,6 +1831,25 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     return halt('unsupported-platform', detail);
   }
 
+  // ChatGPT's new workspace scope is not a `scopeInPath` parameter, but the
+  // legacy `default` key and the two explicit unknown-workspace sentinels still
+  // carry no identity and are refused before any request is built.
+  if (opts.platform === 'chatgpt' && (
+    opts.scope === 'chatgpt:default'
+    || opts.scope === 'chatgpt:!workspace-unresolved'
+    || opts.scope === 'chatgpt:!workspace-ambiguous'
+    || opts.scope === 'chatgpt:'
+  )) {
+    const ambiguous = opts.scope === 'chatgpt:!workspace-ambiguous';
+    return halt(
+      ambiguous ? 'org-ambiguous' : 'org-unresolved',
+      ambiguous
+        ? 'ChatGPT workspace is ambiguous on this page; no conversations were enumerated or marked complete'
+        : 'ChatGPT workspace is unknown on this page; no conversations were enumerated or marked complete',
+      unjudged(),
+    );
+  }
+
   /**
    * 🔴 W31 · **The page size, with the plan's own value in the middle of the chain.**
    *
@@ -2205,6 +2280,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     const archivedSet = new Set(state.archived);
     const pendingSet = new Set(state.pending);
     for (const id of parsed.page.ids) {
+      if (opts.platform === 'chatgpt') {
+        mergeChatGptProvenance(state, id, { source: 'main', project: 'unknown', archived: false });
+        state.chatgptEnumeration!.counts.main.listed += 1;
+      }
       if (archivedSet.has(id)) skippedAlreadyArchived += 1;
       else if (pendingSet.has(id)) skippedAlreadyPending += 1;
     }
@@ -2346,6 +2425,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * "the list is finished" is never said on the strength of a number this
      * endpoint has already printed wrongly.
      */
+    if (opts.platform === 'chatgpt' && state.enumCursor.complete) {
+      state.chatgptEnumeration!.counts.main.complete = true;
+    }
     await persist(state);
 
     /**
@@ -2385,6 +2467,105 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       if (recorded === null) {
         console.warn('[chat-stasher] the list gave conversation times, but the debt store refused the write; they will be counted as time-unknown');
       }
+    }
+  }
+
+  const bodyBudget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
+  // ChatGPT's archived list, project discovery list, and each project list own
+  // separate persisted cursors. One auxiliary page fits only after the main list
+  // is complete, and it consumes the same list-page budget and pacer.
+  if (opts.platform === 'chatgpt' && state.enumCursor.complete && state.pending.length === 0
+    && listPagesFetched < listPagesThisTick) {
+    const enumeration = state.chatgptEnumeration!;
+    const project = enumeration.projects.entries.find((entry) => !entry.complete);
+    const source: 'archived' | 'project-discovery' | 'project' | null = !enumeration.archived.complete
+      ? 'archived'
+      : !enumeration.projects.discoveryComplete
+        ? 'project-discovery'
+        : project ? 'project' : null;
+    if (source !== null) {
+      const url = source === 'archived'
+        ? chatGptArchivedUrl(opts.origin, enumeration.archived.offset, listLimit)
+        : source === 'project-discovery'
+          ? chatGptProjectsUrl(opts.origin, enumeration.projects.discoveryCursor)
+          : chatGptProjectConversationsUrl(opts.origin, project!.id, project!.cursor);
+      await enumPacer.gate();
+      anchor('enumerate', enumPacer.lastAt);
+      let response: HttpResponse;
+      try {
+        response = await sendVia(http, url, listRequestInit(plan, opts.origin,
+          source === 'archived' ? enumeration.archived.offset : 0, listLimit));
+      } catch (error) {
+        const reason = (error as Error).message;
+        if (reason === 'scope-mismatch' || reason === 'org-ambiguous' || reason === 'org-unresolved') {
+          return halt(reason, `ChatGPT ${source} enumeration refused: the observed workspace did not match this ledger`);
+        }
+        return halt('transport-error', `ChatGPT ${source} page read failed: ${reason}`);
+      }
+      if (response.status < 200 || response.status > 299) {
+        return halt(haltReasonForStatus(response.status, plan.platform, response.survivedCredentialReread === true),
+          `ChatGPT ${source} page returned HTTP ${response.status}`,
+          { retryAfterMs: retryAfterMsFor(response, clock.now()) });
+      }
+
+      let ids: string[] = [];
+      if (source === 'archived') {
+        const parsed = parseConversationListPage(response.text);
+        if (!parsed.ok) return halt('shape-changed', `ChatGPT archived page malformed: ${parsed.detail}`);
+        ids = parsed.page.ids;
+        if (ids.length > 0 && enumeration.archived.lastPageIds
+          && JSON.stringify([...ids].sort()) === JSON.stringify([...enumeration.archived.lastPageIds].sort())) {
+          return halt('shape-changed', 'ChatGPT archived list repeated the prior page; this page was not committed');
+        }
+        if (ids.length > 0) enumeration.archived.lastPageIds = ids;
+        enumeration.archived.listed += ids.length;
+        enumeration.counts.archived.listed += ids.length;
+        enumeration.archived.offset += ids.length;
+        enumeration.archived.complete = ids.length === 0;
+        for (const id of ids) mergeChatGptProvenance(state, id, { source: 'archived', project: null, archived: true });
+      } else if (source === 'project-discovery') {
+        const parsed = parseChatGptProjectPage(response.text);
+        if (!parsed.ok) return halt('shape-changed', `ChatGPT project discovery malformed: ${parsed.detail}`);
+        if (enumeration.projects.discoveryCursor !== null
+          && parsed.page.nextCursor === enumeration.projects.discoveryCursor) {
+          return halt('shape-changed', 'ChatGPT project discovery repeated its continuation cursor; this page was not committed');
+        }
+        for (const discovered of parsed.page.projects) {
+          if (!enumeration.projects.entries.some((entry) => entry.id === discovered.id)) {
+            enumeration.projects.entries.push({ ...discovered, cursor: null, complete: false, listed: 0 });
+          }
+        }
+        enumeration.projects.discoveryCursor = parsed.page.nextCursor;
+        enumeration.projects.discoveryComplete = parsed.page.nextCursor === null;
+      } else {
+        const parsed = parseChatGptProjectConversationPage(response.text);
+        if (!parsed.ok) return halt('shape-changed', `ChatGPT project page malformed: ${parsed.detail}`);
+        if (project!.cursor !== null && parsed.page.nextCursor === project!.cursor) {
+          return halt('shape-changed', 'ChatGPT project continuation cursor repeated; this page was not committed');
+        }
+        ids = parsed.page.ids;
+        project!.listed += ids.length;
+        project!.cursor = parsed.page.nextCursor;
+        project!.complete = parsed.page.nextCursor === null;
+        enumeration.counts.project.listed += ids.length;
+        for (const id of ids) {
+          mergeChatGptProvenance(state, id, { source: 'project', project: { id: project!.id, name: project!.name }, archived: false });
+        }
+      }
+
+      const alreadyPending = new Set(state.pending);
+      const alreadyArchived = new Set(state.archived);
+      for (const id of ids) {
+        if (alreadyArchived.has(id)) skippedAlreadyArchived += 1;
+        else if (alreadyPending.has(id)) skippedAlreadyPending += 1;
+      }
+      newDebts += enqueueDebts(state, ids).length;
+      enumeration.counts.archived.complete = enumeration.archived.complete;
+      enumeration.counts.project.complete = enumeration.projects.discoveryComplete
+        && enumeration.projects.entries.every((entry) => entry.complete);
+      enumeratedPages += 1;
+      listPagesFetched += 1;
+      await persist(state);
     }
   }
 
@@ -2500,7 +2681,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   const dailyCap = planCap === null
     ? null
     : Math.min(state.detailToday.cap ?? planCap, planCap);
-  const budget = opts.maxDetails ?? Number.POSITIVE_INFINITY;
+  const budget = bodyBudget;
 
   /**
    * 🔴 W92d · **The empty-body streak is persisted, not run-local.**
@@ -3019,8 +3200,12 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       //      impossible now: the file-name fragment = the debt key itself (the
       //      identity map; see pathSafeSessionId in contract.ts).
       sessionId: id,
-      ...(opts.platform === 'chatgpt' ? {
-        provenance: { workspace: 'unknown', project: 'unknown', archived: false },
+      ...(opts.platform === 'chatgpt' && state.chatgptDebtProvenance?.[id] ? {
+        provenance: {
+          workspace: chatGptWorkspaceOfScope(opts.scope) ?? 'unknown',
+          project: state.chatgptDebtProvenance[id]!.project,
+          archived: state.chatgptDebtProvenance[id]!.archived,
+        },
       } : {}),
     };
     // 🔴 C20 · This fix's landing point: **the sink's result decides.**

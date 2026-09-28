@@ -115,8 +115,11 @@ export class Ledger {
   async save(state: BackfillState): Promise<void> {
     const diff = this.diffAgainst(state);
 
-    if (diff.enqueue.length > 0 || diff.settle.length > 0 || diff.drop.length > 0) {
-      const applied = await applyDebtDiff(this.platform, this.scope, diff, this.nextSeq);
+    const provenanceDirty = state.chatgptProvenanceDirty ?? new Set<string>();
+    if (diff.enqueue.length > 0 || diff.settle.length > 0 || diff.drop.length > 0 || provenanceDirty.size > 0) {
+      const applied = await applyDebtDiff(
+        this.platform, this.scope, diff, this.nextSeq, state.chatgptDebtProvenance ?? {}, provenanceDirty,
+      );
       if (!applied) {
         throw new Error(
           '[chat-stasher] the backfill debt store refused a write; refusing to fetch bodies'
@@ -132,6 +135,7 @@ export class Ledger {
       }
       for (const id of diff.drop) this.pending.delete(id);
       this.nextSeq += diff.enqueue.length + diff.settle.length;
+      for (const id of provenanceDirty) provenanceDirty.delete(id);
     }
 
     const header = headerOf(state);
@@ -553,7 +557,7 @@ async function openHeaderLedger(
   }
   return {
     ok: true,
-    state: stateFrom(header, snapshot.pending, snapshot.archived),
+    state: stateFrom(header, snapshot.pending, snapshot.archived, snapshot.provenance),
     ledger: new Ledger(store, platform, scope, snapshot),
   };
 }
@@ -651,7 +655,7 @@ export async function recoverLedgerLoss(
     return { ok: false, why: 'no-loss', detail: 'the header and the debt store already agree; nothing was reset' };
   }
 
-  const state = stateFrom(rawHeader, snapshot.pending, snapshot.archived);
+  const state = stateFrom(rawHeader, snapshot.pending, snapshot.archived, snapshot.provenance);
   // 🔴 Two fields and one addition, and nothing else — `stateFrom` carried the rest
   //    over, including any halt record that was already there. Clearing that halt
   //    would be this repair reaching outside its job: it is not this function's
@@ -810,7 +814,7 @@ async function migrate(
     failuresDropped: legacy.failuresDropped,
     halted: legacy.halted,
   };
-  const state = stateFrom(header, readBack.pending, readBack.archived);
+  const state = stateFrom(header, readBack.pending, readBack.archived, readBack.provenance);
   try {
     countHeaderWrite(header);
     await store.save(stateKey(platform, scope), header);

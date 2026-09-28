@@ -470,6 +470,9 @@ describe('W27-D · a tick whose first registered tab hangs still fetches — thr
           // Tab 1 is the wedged one: the message channel never settles.
           return tabId === 1 ? hungPing() : Promise.resolve({ ok: true, origin: ORIGIN });
         }
+        if (message?.type === 'cs-backfill-chatgpt-workspace') {
+          return Promise.resolve({ ok: true, workspace: 'acct-fixture-1', observed: true });
+        }
         if (message?.type === 'cs-backfill-fetch') {
           const path = new URL((message as { url: string }).url).pathname;
           calls.push({ tabId, type: `fetch:${path}` });
