@@ -353,14 +353,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let shim = dir.path().join("security");
-        fs::write(&shim, "#!/bin/sh\nprintf 'keychain-secret\\n'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&shim).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&shim, perms).unwrap();
-        }
+        crate::test_support::plant_executable(&shim, "#!/bin/sh\nprintf 'keychain-secret\\n'\n");
         // Serialised by the same idea as the config tests: this is one process.
         let old = std::env::var_os(SECURITY_TOOL_ENV);
         std::env::set_var(SECURITY_TOOL_ENV, &shim);
@@ -383,14 +376,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let shim = dir.path().join("security");
-        fs::write(&shim, "#!/bin/sh\nexit 44\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&shim).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&shim, perms).unwrap();
-        }
+        crate::test_support::plant_executable(&shim, "#!/bin/sh\nexit 44\n");
         let old = std::env::var_os(SECURITY_TOOL_ENV);
         std::env::set_var(SECURITY_TOOL_ENV, &shim);
         let result = resolve("keychain:chat-stasher:r2");

@@ -23,6 +23,12 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+// One implementation, shared with the crate's unit tests: an integration suite
+// cannot see a `#[cfg(test)]` item of the crate, so this file is pulled in by
+// path rather than copied.
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- fixture
 
 fn sandbox() -> tempfile::TempDir {
@@ -2809,8 +2815,6 @@ End&#39; --out ~/out"##,
 #[cfg(unix)]
 #[test]
 fn the_footer_command_pastes_into_a_posix_shell_as_one_command() {
-    use std::os::unix::fs::PermissionsExt;
-
     let sb = sandbox();
     let (repo, key) = build_repo(sb.path());
     let ui = Ui::start(sb.path(), &repo, &key, &[], "ui");
@@ -2856,8 +2860,10 @@ fn the_footer_command_pastes_into_a_posix_shell_as_one_command() {
     let stub_dir = sb.path().join("stubbin");
     fs::create_dir_all(&stub_dir).unwrap();
     let stub = stub_dir.join("chat-stasher");
-    fs::write(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    // The pasted line execs this through `sh`, so it has to be planted rather
+    // than written here: a descriptor open in this process would be inherited
+    // by the `sh` below and refuse its own `exec` with ETXTBSY.
+    test_support::plant_executable(&stub, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
     let home = sb.path().join("home");
     let out = Command::new("sh")
         .arg("-c")

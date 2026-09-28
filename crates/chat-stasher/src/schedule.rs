@@ -1860,8 +1860,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launchd_install_and_uninstall_are_idempotent_with_fake_launchctl() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("create test directory");
         let script = temp.path().join("launchctl");
         let state = temp.path().join("loaded");
@@ -1880,10 +1878,7 @@ mod tests {
             state.display(),
             state.display()
         );
-        fs::write(&script, script_body).expect("write fake launchctl");
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("make fake launchctl executable");
+        crate::test_support::plant_executable(&script, &script_body);
 
         let file = TemplateFile {
             name: "com.chat-stasher.run-once.disk.plist".to_string(),
@@ -1929,8 +1924,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn systemd_install_and_uninstall_are_idempotent_with_fake_systemctl() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("create test directory");
         let script = temp.path().join("systemctl");
         let state = temp.path().join("active");
@@ -1949,10 +1942,7 @@ mod tests {
             state.display(),
             state.display()
         );
-        fs::write(&script, script_body).expect("write fake systemctl");
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
+        crate::test_support::plant_executable(&script, &script_body);
 
         let files = vec![
             TemplateFile {
@@ -2236,8 +2226,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_systemd_probe_reports_only_what_systemctl_answered() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("create test directory");
         let script = temp.path().join("systemctl");
         let now = local_noon();
@@ -2245,18 +2233,21 @@ mod tests {
         // timestamp half comes from the clock this test injects, never from a
         // literal date, so the fixture cannot turn into a deadline that has
         // already passed. `printf` is a shell builtin, so the fake resolves
-        // nothing through `PATH` and reads no second file either — the branch
-        // under test is the parse, and the only thing that has to work is the
-        // shell itself, which the fake-scheduler install tests already exercise.
+        // nothing through `PATH` and reads no second file either; the branch
+        // under test is the parse.
+        //
+        // This note used to blame that `PATH` lookup for the `could not be run`
+        // CI saw here. It was wrong: the error was ETXTBSY (`Text file busy`,
+        // os error 26) — the kernel refusing to exec a file that still has an
+        // open write descriptor, and the descriptor was this process's own,
+        // inherited by a child another test thread forked while `fs::write` was
+        // still open. See `crate::test_support`; the fixture is planted through
+        // a child so no fork of ours can carry one.
         let trigger = trigger_stamp(now, "CEST");
-        fs::write(
+        crate::test_support::plant_executable(
             &script,
-            format!("#!/bin/sh\nprintf '%s\\n' '    Trigger: {trigger}; 3 days left'\n"),
-        )
-        .expect("write fake systemctl");
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("make fake systemctl executable");
+            &format!("#!/bin/sh\nprintf '%s\\n' '    Trigger: {trigger}; 3 days left'\n"),
+        );
 
         let known = next_run(
             Unit::RunOnce,
@@ -2268,7 +2259,7 @@ mod tests {
         );
         // The reason travels with the message: a bare `None` here cannot say
         // which of the two unknowns came back, and the fixture's own shell
-        // answering nothing is one of them (seen on a CI runner, not here).
+        // answering nothing is one of them.
         assert_eq!(
             known.value(),
             Some(trigger.as_str()),
@@ -2277,8 +2268,10 @@ mod tests {
         );
         assert_eq!(known.note(), None);
 
-        fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '    Trigger: n/a'\n")
-            .expect("write the n/a answer");
+        crate::test_support::plant_executable(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '    Trigger: n/a'\n",
+        );
         let unarmed = next_run(
             Unit::RunOnce,
             Format::Systemd,
