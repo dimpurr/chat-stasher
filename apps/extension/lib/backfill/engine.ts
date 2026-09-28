@@ -34,7 +34,6 @@ import {
   compareAccountLease,
   decideRunLease,
   identityOf,
-  planHoldsAccountLease,
   suspensionFor,
   type RunLease,
 } from './account-lease';
@@ -1482,10 +1481,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    * The three outcomes are `decideRunLease`'s (lib/backfill/account-lease.ts) and only
    * one of them stops the run. In order:
    *
-   *  · **`'unleased'`** — this plan does not hold a lease, or the scope is the
-   *    `'default'` sentinel. Nothing is written and nothing is compared: byte-identical
-   *    to the pre-W199 behaviour, which is the correct answer for "there is no account
-   *    here to be wrong about".
+   *  · **`'unleased'`** — this plan does not hold a lease, the scope is the `'default'`
+   *    sentinel, or the scope names an **organization** (🔴 W239: `scope-names-an-organization`
+   *    — an organization is not a person, and a lease over one would agree with every
+   *    account inside it). Nothing is written and nothing is compared: byte-identical to the
+   *    pre-W199 behaviour, which is the correct answer for "there is no account here to be
+   *    wrong about". 🔴 `reason` is the lease module's own, never a value chosen here: a
+   *    second spelling of "why this run has no lease" is how the two would come to disagree.
    *  · **`'refuse'`** — the recorded lease and the scope's own address name different
    *    accounts on the same salt. One key cannot be two accounts, so the run does not
    *    start. **Nothing is fetched and nothing is written**: this is a refusal about the
@@ -1505,12 +1507,16 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    a platform body, and does not turn an unreadable salt into an accusation. A run
    *    with no lease runs exactly as it did before this change.
    */
-  const runLease: RunLease = planHoldsAccountLease(opts.platform)
-    ? decideRunLease(
-      state.accountLease,
-      await accountLeaseForScope(opts.platform, opts.scope, store, clock.now()),
-    )
-    : { kind: 'unleased', reason: 'platform-not-scoped' };
+  // 🔴 W239 · One decision point, not two: this used to short-circuit the plans with no
+  //    lease into a reason hardcoded here, which is how a run came to state something false
+  //    about an organization-scoped scope and is why the reason a run reports could differ
+  //    from the reason the lease module decides. `accountLeaseForScope` answers for every
+  //    plan and touches the store for none of the ones it refuses, so there is one place
+  //    this sentence comes from. See the bullet above.
+  const runLease: RunLease = decideRunLease(
+    state.accountLease,
+    await accountLeaseForScope(opts.platform, opts.scope, store, clock.now()),
+  );
   // Exposed to the two attribution checks below as the one comparison partner, so the
   // list segment and the body segment cannot compare against different things.
   const leaseIdentity: AccountIdentity | null =

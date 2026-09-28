@@ -42,6 +42,7 @@
 
 import type { AccountIdSource } from './contract';
 import { t } from './i18n';
+import { planScopeIsOrganization } from './backfill/enumerate';
 import { describeFailureReason, droppedOf, failuresOf, type FailureEntry } from './backfill/failures';
 import { computeProgress, retryMinutesLeft, type ProgressInput } from './backfill/progress';
 import { SPEED_PLANS, presetFrom, type SpeedPreset } from './backfill/speed';
@@ -641,6 +642,15 @@ export function stateNote(row: CoverageRow, now: number): string | null {
  *    names.
  */
 export function accountNote(row: CoverageRow): string {
+  // 🔴 W239 · The organization case comes **first**, and it is not a refinement of "none":
+  //    it is the one platform where the limit is known in advance and by name. Answering
+  //    it with `none` would describe a scope that this build cannot tell apart from any
+  //    other as though the extension had merely never looked, and an old header carrying a
+  //    lease over the organization would be printed as "the account this scope belongs to"
+  //    — the very claim W239 removed, read back off disk. Which platforms these are is
+  //    asked of the plan (`ORGANIZATION_SCOPED_PLATFORMS`), not of the record, so the
+  //    sentence cannot depend on what an older build happened to write.
+  if (planScopeIsOrganization(row.platform)) return t('coverage.account.orgScope');
   if (!row.accountLease) return t('coverage.account.none');
   return t('coverage.account.known', {
     source: t(ACCOUNT_SOURCE_KEY[row.accountLease.source]),

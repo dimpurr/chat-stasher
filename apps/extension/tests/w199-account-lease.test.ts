@@ -241,7 +241,7 @@ describe('W199-A · the lease is step 1\'s construction, read from the scope', (
     expect(reading.lease.value).not.toContain(ACCOUNT_A);
   });
 
-  it('🔴 a scope that names no account, and a plan that holds no lease, are two different unknowns', async () => {
+  it('🔴 a scope that names no account, a plan that holds no lease, and a scope that names an organization are three different unknowns', async () => {
     const store = memoryStore();
     expect(await accountLeaseForScope('grok', 'default', store, 1))
       .toEqual({ kind: 'unleased', reason: 'scope-names-no-account' });
@@ -250,8 +250,14 @@ describe('W199-A · the lease is step 1\'s construction, read from the scope', (
     // capture, and W108 owns binding it.
     expect(await accountLeaseForScope('chatgpt', ACCOUNT_A, store, 1))
       .toEqual({ kind: 'unleased', reason: 'platform-not-scoped' });
+    // 🔴 W239 · Claude is the third case and it is *not* the second one: its scope does name
+    //    something — an organization — and that something is not a person (two accounts can
+    //    be members of one), so a lease over it would agree with every response either of
+    //    them sends. It gets its own reason rather than borrowing "this plan declares no
+    //    account axis", which is simply false about this plan. See
+    //    `ORGANIZATION_SCOPED_PLATFORMS`.
     expect(await accountLeaseForScope('claude', '11111111-2222-3333-4444-555555555555', store, 1))
-      .toEqual({ kind: 'unleased', reason: 'platform-not-scoped' });
+      .toEqual({ kind: 'unleased', reason: 'scope-names-an-organization' });
     expect(planHoldsAccountLease('chatgpt')).toBe(false);
     expect(planHoldsAccountLease('claude')).toBe(false);
     for (const p of ['deepseek', 'perplexity', 'gemini', 'grok']) {

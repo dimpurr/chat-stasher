@@ -16,9 +16,12 @@
  *  4. 🔴 **the salt is per install, is created once, and is never silently
  *     replaced** — a fresh salt over a corrupt record would re-key every later
  *     fingerprint and make one unchanged account look like a switch.
- *  5. 🔴 **the source is recorded per platform** — the six platforms resolve to the
+ *  5. 🔴 **the source is recorded per platform** — the platforms resolve to the
  *     sources the report's table states, and the two mechanisms stay
- *     distinguishable on the bundle.
+ *     distinguishable on the bundle. 🔴 W239 · One platform left that table: an
+ *     organization-scoped plan records `organization-is-not-an-account` instead, because
+ *     a value derived from an organization is equal for two accounts that share it (see
+ *     `w239-organization-is-not-an-account.test.ts`).
  *
  * Zero network, zero logged-in state, zero real account data: every id below is a
  * synthetic fixture, the http port is a pure function, and the write-down channel
@@ -34,6 +37,7 @@ import {
   ACCOUNT_SALT_KEY,
   accountFingerprintFor,
   accountIdFromCapture,
+  coordinationIdFromCapture,
   fingerprintAccountId,
   loadOrCreateAccountSalt,
 } from '../lib/account-fingerprint';
@@ -223,21 +227,29 @@ describe('W165-A3 · unknown is a value with a reason, never an absence and neve
 });
 
 describe('W165-A4 · the source is recorded per platform, and fires exactly where it can', () => {
-  it('🔴 Claude resolves from the organization in the page’s own request URL', async () => {
-    const reading = accountIdFromCapture(capture(CLAUDE_URL(ORG_A), BODY_NO_ID), null);
-    expect(reading).toEqual({ kind: 'id', id: ORG_A, source: 'request-url-organization' });
-
+  it('🔴 an organization-scoped plan is not in this table at all: an organization is not an account (W239)', async () => {
+    // 🔴 This case used to read "Claude resolves from the organization in the page’s own
+    //    request URL", and the *mechanism* it recorded was right. W239 (W128 step 3)
+    //    replaced the conclusion rather than the mechanism: claude.ai's scope is an
+    //    organization, two accounts can be members of one, and a value derived from it
+    //    alone is therefore **equal for both** — so it is not the account this field may
+    //    record. That is the premise this assertion had, and it is the premise that moved;
+    //    the assertion is not weaker, it is about a different fact. The argument and its
+    //    evidence live at `ORGANIZATION_SCOPED_PLATFORMS` and in
+    //    `w239-organization-is-not-an-account.test.ts`.
     const store = memoryStore();
     const got = await accountFingerprintFor(capture(CLAUDE_URL(ORG_A), BODY_NO_ID), store, null);
-    expect(got.kind).toBe('fingerprint');
-    if (got.kind === 'fingerprint') expect(got.source).toBe('request-url-organization');
-    // …and the two organizations are two different fingerprints under one salt.
-    const other = await accountFingerprintFor(capture(CLAUDE_URL(ORG_B), BODY_NO_ID), store, null);
-    expect(other.kind).toBe('fingerprint');
-    if (got.kind === 'fingerprint' && other.kind === 'fingerprint') {
-      expect(other.value).not.toBe(got.value);
-      expect(other.saltId).toBe(got.saltId);
-    }
+    expect(got).toEqual({ kind: 'unknown', reason: 'organization-is-not-an-account' });
+
+    // …and it does not depend on which organization: the old value would have differed per
+    // organization, which is exactly why it looked like an account.
+    expect(await accountFingerprintFor(capture(CLAUDE_URL(ORG_B), BODY_NO_ID), store, null))
+      .toEqual({ kind: 'unknown', reason: 'organization-is-not-an-account' });
+
+    // 🔴 The mechanism this case records is still the one that reads the value — it is
+    //    simply read for the thing it is. The organization stays the namespace every
+    //    request addresses, which is what the host's per-namespace budget is keyed by.
+    expect(coordinationIdFromCapture(capture(CLAUDE_URL(ORG_A), BODY_NO_ID), null)).toBe(ORG_A);
   });
 
   it('🔴 the five path-unscoped platforms take the ADR-002 account axis, labelled as such', async () => {

@@ -12,7 +12,10 @@
  *  · **What makes a bundle's fingerprint meaningful** is that the same account on
  *    the same install hashes the same string every time, and a different account
  *    hashes a different one. If either half fails the field is worse than absent,
- *    because it would be read as evidence about an account.
+ *    because it would be read as evidence about an account. 🔴 W239 · The second
+ *    half is why an organization-scoped plan gets no fingerprint at all: a value
+ *    derived from an organization is equal for every account in it, so recording it
+ *    would make the archive assert a sameness that is not there.
  *  · **What makes it irreversible** is that the input id is never stored, and the
  *    hash is keyed with a random 32-byte secret that exists only in this install's
  *    `storage.local`. So the archive alone cannot recover the id — not by reading
@@ -226,15 +229,20 @@ export async function fingerprintAccountId(
  *    difference between them is the whole point of recording the source on the
  *    bundle rather than only the hash:
  *
- *  · **Claude — `request-url-organization`, verified, page-owned, and already
- *    load-bearing.** claude.ai addresses every conversation by organization and
- *    puts the id in the path of the page's own request, which is why the condition
- *    below is `backfillPlanFor(id).scopeInPath` rather than the string `'claude'`:
- *    the day a second platform addresses its conversations the same way, it is
- *    covered without an edit here. The id is read through `orgFromRequestUrl`,
- *    whose predicate accepts only the endpoint's uuid shape, so a conversation
- *    title sitting in that field cannot be read as an organization (claude-org.ts's
- *    W49 note).
+ *  · **Claude — an organization, which is not an account, so this field says
+ *    `organization-is-not-an-account` (🔴 W239, W128 step 3).** claude.ai addresses
+ *    every conversation by organization and puts that id in the path of the page's own
+ *    request — `request-url-organization`, verified and page-owned. It is nevertheless
+ *    **not** recorded here, because the field's own contract requires something this
+ *    value cannot do: two accounts can be members of one organization, and a value
+ *    derived from the organization alone is **equal for both**. Recording it would not
+ *    be "unknown" — it would be a positive, false statement that a conversation
+ *    captured under B came from the same account as one captured under A, which is
+ *    precisely the mis-attribution W128 exists to stop. The organization is not lost by
+ *    this: it is in the bundle's own `url`, it is the scope every backfill header is
+ *    filed under, and it is what `coordinationIdFromCapture` hands the native host. What
+ *    it is not is an account. See `ORGANIZATION_SCOPED_PLATFORMS`
+ *    (lib/backfill/enumerate.ts) for the full argument and its evidence.
  *
  *  · **ChatGPT, Gemini, Grok, DeepSeek, Perplexity — `response-body-platform-uid`,
  *    the ADR-002 account axis, labelled as exactly that.** These five expose no
@@ -268,10 +276,25 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
   if (!row) return { kind: 'unknown', reason: 'platform-not-recognized' };
 
   if (backfillPlanFor(row.id)?.scopeInPath) {
+    // 🔴 W239 · A path-carried scope is a container the platform addresses conversations
+    //    by, and an organization is not a person. Two accounts can share one, so a value
+    //    derived from it is equal for both — which is the one thing this field may not
+    //    be, because it is read as evidence about an account. `scopeInPath` is the right
+    //    predicate rather than the platform id: it is the structural fact (the id is a
+    //    path segment) that this answer is about, and the only path-carried id source
+    //    `AccountIdSource` has is the organization one. The scope this platform's work is
+    //    filed under is still read from the same URL, by the same predicate, everywhere
+    //    the organization is the right answer — see `coordinationIdFromCapture` below.
+    //
+    //    The two ways this branch can answer are kept apart, because "this URL named no
+    //    organization" is a fact about *this capture* and "an organization is not an
+    //    account" is a fact about the platform. Reading the second over the first would
+    //    replace a specific unknown with a general one, which is invariant 1's mistake
+    //    in the other direction.
     const org = orgFromRequestUrl(captured.url);
     return org === null
       ? { kind: 'unknown', reason: 'organization-not-in-request-url' }
-      : { kind: 'id', id: org, source: 'request-url-organization' };
+      : { kind: 'unknown', reason: 'organization-is-not-an-account' };
   }
 
   const identity = extractIdentity(captured.text, sessionId);
@@ -285,6 +308,47 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
     case 'default':
       return { kind: 'unknown', reason: 'no-account-id-in-capture' };
   }
+}
+
+/**
+ * 🔴 W239 · **The id this capture's requests are filed under — a namespace, not an
+ *    account.**
+ *
+ * One question, asked by a different reader than `accountIdFromCapture`'s: which bucket does
+ * work on this capture belong to, on this machine? The answer goes to the native host as
+ * `account_id` (§6.2's deliver message), which derives the cross-install key from it
+ * (EXT-11) and keys two things by it — the per-platform budget D1 arbitrates on, and the
+ * instance registry — so the value has to be the **namespace the requests address**:
+ *
+ *  · **an organization-scoped plan: the organization.** Every request the run makes carries
+ *    it in the path, so two installs working in one organization are, correctly, one budget;
+ *  · **everything else: step 1's own account id**, unchanged — the ADR-002 body axis, which
+ *    is the value the run scope is built from on those plans.
+ *
+ * 🔴 **Why this is a second function rather than the first one's return value.** The two
+ *    readers want different things from the same capture and, for an organization-scoped
+ *    plan, they want *different answers*: the host wants the namespace, and the archive wants
+ *    the fact that no account can be named. One function serving both would have to call the
+ *    organization an account for the host's sake, which is exactly the claim W239 removed —
+ *    so the split is the change, not an implementation detail of it.
+ *
+ * 🔴 The value never enters the archive through this path: it is sent to the host and
+ *    returned to no caller that writes a bundle. The bundle's `account` field comes from
+ *    `accountFingerprintFor`, which is the function that answers the *attribution* question.
+ *
+ * Returns null when no id is visible. That is a state the host's contract already has ("no
+ * account id"), and inventing a placeholder would key a budget on a value no request carries.
+ */
+export function coordinationIdFromCapture(captured: CapturedFetch, sessionId: string | null): string | null {
+  const row = findPlatformForUrl(captured.url)
+    ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
+  if (!row) return null;
+  if (backfillPlanFor(row.id)?.scopeInPath) return orgFromRequestUrl(captured.url);
+  // The session id is passed through rather than dropped: step 1's guard against a capture
+  // whose only "id" is the session id it is filed under applies here too, and a reader that
+  // omitted it would key a budget on the conversation's own name.
+  const reading = accountIdFromCapture(captured, sessionId);
+  return reading.kind === 'id' ? reading.id : null;
 }
 
 /**

@@ -4481,10 +4481,12 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
  *  · **ChatGPT** is out because its stable id is the `ChatGPT-Account-Id` **request
  *    header** (ADR-031), which this build does not capture at all; W108 owns binding it.
  *    Declaring it here would lease a value the platform mostly does not put in its body.
- *  · **Claude** is out because it addresses conversations by **organization** and already
- *    has its own page-side guard (`scopeInPath`); the same-organization gap is W128's
- *    step 3, and a lease over an organization would not close it (an organization is not
- *    a person — see farion1231/cc-switch v3.20.1's same-workspace account merge).
+ *  · **Claude** is out because it addresses conversations by **organization**, and an
+ *    organization is not a person. W239 (step 3) is where that stopped being a note and
+ *    became the declaration below: `ORGANIZATION_SCOPED_PLATFORMS`. A lease over an
+ *    organization would be taken from the same value every response carries, so it could
+ *    only agree with itself — see that declaration for the evidence and for what this
+ *    build does instead.
  *
  * 🔴 **What declaring one costs.** A scope on such a plan is fingerprinted at run start
  *    and every response is compared against that lease. A *proven* disagreement stops the
@@ -4498,6 +4500,66 @@ export const ACCOUNT_LEASE_PLATFORMS: readonly string[] = ['deepseek', 'perplexi
 /** Whether this platform's run holds an account lease. See `ACCOUNT_LEASE_PLATFORMS`. */
 export function planHoldsAccountLease(platform: string): boolean {
   return ACCOUNT_LEASE_PLATFORMS.includes(platform);
+}
+
+/**
+ * 🔴 W239 · W128 step 3 — **the plans whose scope is an organization, which is not a
+ *    person.**
+ *
+ * ## The gap this names, in the words it was found in
+ *
+ * claude.ai addresses every conversation by organization: the id sits in the path of the
+ * page's own request, which is why this plan is the one with `scopeInPath` and why the
+ * page-side guard re-checks that value on every request (`./claude-page.ts`'s `allowed`).
+ * That guard closes the **cross**-organization case — a switch that changes the active
+ * organization halts before a request is built. It cannot close the **same**-organization
+ * case: two accounts can be members of one organization (a Team or Enterprise workspace),
+ * and for those two the organization is the same value.
+ *
+ * Not a theory about a platform we have not seen: W126's audit recorded it as the one
+ * residual RISK for Claude after the organization guard (`nm/W126-OUT.md`, the Claude row
+ * of the platform matrix), and W199's prior-art pass found the same collapse in
+ * production in an unrelated project — farion1231/cc-switch v3.20.1, whose managed
+ * accounts were keyed by `chatgpt_account_id`, "which identifies a ChatGPT workspace
+ * rather than a person", so two members of one workspace became one record. That project's
+ * fix was to key by a **second, per-user** axis; this build has no such value for
+ * claude.ai (no reviewed implementation reads one, and W165's table marks the five
+ * body-scan platforms `unknown` because the scan is a conjecture), so the honest move is
+ * the other one: stop presenting the organization as an account.
+ *
+ * ## What follows from it, and why a lease over an organization is not the fix
+ *
+ *  · **`ACCOUNT_LEASE_PLATFORMS` must not gain these names.** A lease would be taken from
+ *    the scope (the organization) and compared against the same organization in every
+ *    response, so it would agree with itself and stop nothing; a *suspension* taken over
+ *    one organization would also be lifted by the next request that names it, whatever
+ *    account sent that request. A lease over an organization is not a weaker version of
+ *    this guard, it is a mechanism that can only return the answer it was built from.
+ *  · **The organization stays the request namespace.** It is what every request addresses
+ *    and what the native host's per-namespace budget is keyed by (D1), so it is still read
+ *    and still sent (`account-fingerprint.ts`'s `coordinationIdFromCapture`). What changes
+ *    is that it is never recorded or compared as an *account*: the bundle's `account` field
+ *    says `organization-is-not-an-account`, and the lease says `scope-names-an-organization`.
+ *  · **The organization itself is still on the record**, verbatim, in the bundle's `url`
+ *    and in the scope every backfill header is filed under. Nothing is lost by refusing to
+ *    fingerprint it; a second value derived from it would have added no fact.
+ *
+ * ## Why a table rather than `plan.scopeInPath`
+ *
+ * `scopeInPath` is a structural fact — "the scope is a path segment". Whether that segment
+ * names a person or a container is a separate claim that has to be argued per platform,
+ * and the three readers of it (the bundle field, the run lease, the coverage sentence) must
+ * reach the same verdict. Reading the structural flag in three places would let a future
+ * path-scoped plan be treated as person-scoped by two of them and not the third; one
+ * declaration, read by all three, cannot. `w239-organization-is-not-an-account.test.ts`
+ * asserts the two cannot drift: every name here must really be a `scopeInPath` plan, and
+ * no name here may appear in `ACCOUNT_LEASE_PLATFORMS`.
+ */
+export const ORGANIZATION_SCOPED_PLATFORMS: readonly string[] = ['claude'];
+
+/** Whether this platform's scope names an organization rather than a person. See `ORGANIZATION_SCOPED_PLATFORMS`. */
+export function planScopeIsOrganization(platform: string): boolean {
+  return ORGANIZATION_SCOPED_PLATFORMS.includes(platform);
 }
 
 export const BACKFILL_PLANS: readonly BackfillEnumPlan[] = [

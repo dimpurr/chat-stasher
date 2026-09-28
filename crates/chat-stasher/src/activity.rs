@@ -2248,6 +2248,10 @@ mod tests {
             "no-account-id-in-capture",
             "email-is-not-an-account-id",
             "salt-unreadable",
+            // W239 · the organization-scoped refusal. It is a reason and not a value for
+            // the same reason as the others: what it states is that no account can be
+            // named here, so a key made from it would be a key made from nothing.
+            "organization-is-not-an-account",
         ] {
             let line = with_account(&format!(r#"{{"kind":"unknown","reason":"{reason}"}}"#));
             let row = build_row("deepseek.s", "mbp", "deepseek", &[line.as_str()]);

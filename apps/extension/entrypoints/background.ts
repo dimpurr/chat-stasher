@@ -11,7 +11,7 @@ import {
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
-import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
+import { accountFingerprintFor, coordinationIdFromCapture } from '../lib/account-fingerprint';
 import {
   acquireSharedLease,
   backfillLeaseKey,
@@ -482,8 +482,13 @@ async function preparePayload(
   }
 
   const bundle = await buildBundle(captured, store);
-  const accountReading = accountIdFromCapture(captured, bundle.sessionId);
-  const accountId = accountReading.kind === 'id' ? accountReading.id : undefined;
+  // 🔴 W239 · This is the id the host coordinates under — a **namespace** — and it is not
+  //    the same question as the bundle's `account` field, which is an attribution claim.
+  //    For an organization-scoped plan the two answers differ on purpose: the host needs
+  //    the organization (it is what every request addresses, and D1's budget is per
+  //    namespace), while the bundle must not call it an account. See
+  //    `coordinationIdFromCapture` for why the split is the change rather than a detail.
+  const accountId = coordinationIdFromCapture(captured, bundle.sessionId) ?? undefined;
   // 🔴 C21 · Naming is an **identity mapping**, not "replace unsafe characters":
   //    sanitizePathSegment is many-to-one ('a b' and 'a/b' collide), and the old
   //    download path overwrote ⇒ two different conversations could erase each

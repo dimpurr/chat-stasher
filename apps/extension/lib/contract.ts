@@ -1027,6 +1027,15 @@ export interface InboxIdentity {
  *    captured response body by the generic scan. That scan's candidate key names
  *    are explicitly **not** confirmed against a logged-in page, so this is the
  *    value the ledger already scopes by rather than a verified platform field.
+ *
+ * 🔴 W239 · **This build no longer produces `'request-url-organization'`** — not on a
+ *    bundle and not on a lease. The value is kept, and must be kept, because archives
+ *    and backfill headers written before W239 carry it and have to stay readable: an
+ *    old bundle whose source this build could not name would be refused and its
+ *    account dropped, which is a worse answer than reading it. What changed is that
+ *    the organization stops being *recorded as* an account (`AccountUnknownReason`'s
+ *    `organization-is-not-an-account`), so the only way this label is met today is
+ *    off disk.
  */
 export type AccountIdSource = 'request-url-organization' | 'response-body-platform-uid';
 
@@ -1052,6 +1061,18 @@ export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = ['request-url-orga
  *                                         look for in the first place.
  *  · 'organization-not-in-request-url'  — an account-scoped plan, and this capture's
  *                                         URL named no organization.
+ *  · 'organization-is-not-an-account'   — 🔴 W239 · this platform addresses its
+ *                                         conversations by organization, and an
+ *                                         organization is not a person: two accounts
+ *                                         can be members of one, and a value derived
+ *                                         from it alone would be **equal for both**.
+ *                                         The field's contract requires that a
+ *                                         different account hash differently, so here
+ *                                         it says so instead of recording a value that
+ *                                         a reader would take as evidence about an
+ *                                         account. The organization is not lost — it
+ *                                         is in the bundle's own `url`, and it remains
+ *                                         the request namespace (`coordinationIdFromCapture`).
  *  · 'no-account-id-in-capture'         — nothing account-shaped was visible.
  *  · 'email-is-not-an-account-id'       — an email was visible; an email is not an
  *                                         account/org id, and this field is never
@@ -1070,6 +1091,7 @@ export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = ['request-url-orga
 export type AccountUnknownReason =
   | 'platform-not-recognized'
   | 'organization-not-in-request-url'
+  | 'organization-is-not-an-account'
   | 'no-account-id-in-capture'
   | 'email-is-not-an-account-id'
   | 'handle-is-not-an-account-id'
