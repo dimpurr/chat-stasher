@@ -11,8 +11,8 @@ short and full tables from the two sources of truth
 and fails when either differs from what is committed:
 
   * the committed tables under `scripts/support-matrix/`, and
-  * any `<!-- support-matrix:short|full:start/end -->` block in README.md or
-    `docs-dev/*.md` (none have been inserted yet — the README rewrite owns that).
+  * any `<!-- support-matrix:short|full:start/end -->` block in README.md,
+    `docs/*.md` or `docs-dev/*.md`.
 
 Usage:
     python3 scripts/check-support-matrix.py            # check; exit 1 if stale

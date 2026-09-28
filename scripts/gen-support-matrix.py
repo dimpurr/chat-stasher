@@ -610,12 +610,20 @@ def normalize(text: str) -> str:
 
 
 def markdown_docs(root: str) -> list[str]:
+    """Every document whose marker block this check owns.
+
+    Both documentation trees, because a block is placed by whoever needs it and
+    a committed block the check cannot see is a block that can drift: `docs/` is
+    the reader-facing set and `docs-dev/` the development one, and neither is a
+    more likely home for the full table than the other.
+    """
     docs = ["README.md"]
-    docs_dir = os.path.join(root, "docs-dev")
-    if os.path.isdir(docs_dir):
-        for name in sorted(os.listdir(docs_dir)):
-            if name.endswith(".md"):
-                docs.append(os.path.join("docs-dev", name))
+    for name in ("docs", "docs-dev"):
+        tree = os.path.join(root, name)
+        if os.path.isdir(tree):
+            for entry in sorted(os.listdir(tree)):
+                if entry.endswith(".md"):
+                    docs.append(os.path.join(name, entry))
     return docs
 
 
@@ -664,7 +672,7 @@ def check(root: str) -> tuple[list[str], list[str]]:
                 )
     if not found_any:
         notes.append(
-            "no support-matrix markers in README.md or docs-dev/*.md yet; "
+            "no support-matrix markers in README.md, docs/*.md or docs-dev/*.md yet; "
             "the committed fixtures above are the gate"
         )
     return failures, notes

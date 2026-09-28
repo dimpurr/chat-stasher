@@ -162,7 +162,7 @@ A chat tab that was open before the extension was installed or updated is **not 
 Click the extension's icon **in each profile you installed it in**. Each copy has to reach the host on its own, and the popup is where it says whether it can. The popup shows:
 
 - one summary line from the host: sessions staged in the last 24 hours and in total, how those 24 hours split by tool, and when the last push happened. A value the host cannot measure says *unknown*, with the reason. This line describes the **stage**, which every install on this machine shares, so it reads the same in every profile;
-- an **Open dashboard** button, which starts `chat-stasher ui` and opens it.
+- an **Open dashboard** button, which starts `chat-stasher ui` and opens it. It needs one line in your config to know which copy to open: `destination = "<name>"` under `[native_host]`. There is no fallback, even when you have declared only one destination, so until you add that line the button opens nothing. [troubleshooting.md](troubleshooting.md#open-dashboard-in-the-popup-does-not-open-anything) has the line to write.
 
 If the host is missing, unreachable or older than the extension, the popup says exactly that. The dashboard button is then disabled, and the reason is shown.
 
