@@ -86,7 +86,7 @@ chat-stasher setup --stage <stage> --json
 Use that form even when it would be chosen for you, because you are not a terminal: `--json` states the contract you are reading from.
 
 - `--stage <stage>` is the one required parameter. The stage is a folder where sealed sessions wait before they are archived, so it must not be deleted. Suggest `~/stash/chat-stasher/stage`, and let the user confirm the path: every future run deposits their data there.
-- A missing named parameter is **reported, never guessed**: `missing_parameters` names the flags the run needed and did not get, and the run exits `2`. Supply them and run it again. Nothing was written.
+- A missing named parameter is **reported, never guessed**: `missing_parameters` names the flags the run needed and did not get, and the run exits `2`. Supply them and run it again. Nothing was written — with one exception, and it is the masterkey declaration described below: when that is the *only* parameter owed, the run creates the local repository and the key first, so the user has a file to copy, and stops there.
 - The exit codes are the tool's own: `0` finished · `1` finished and a step failed · `3` did not finish reading, so nothing it failed to look at may be reported as absent · `2` a usage error. The `exit_code` field inside the object is the same decision as the process status, not a second opinion.
 - Warnings go to stderr. Read stdout only, and parse it as one object.
 
@@ -95,8 +95,8 @@ Read the object before you report anything:
 | Field | What it tells you |
 |---|---|
 | `steps.stage` | `provided` or `missing` |
-| `steps.local_save` | `created` (this run made the repository and the masterkey), `existed`, `nothing_to_archive`, `failed`, `unknown` |
-| `steps.masterkey` | `declared`, `not_declared`, or `absent` when no key exists yet |
+| `steps.local_save` | `created` (this run made the repository and the masterkey), `existed`, `nothing_to_archive`, `failed`, `unknown`, or `not_attempted` when the run refused before the pass |
+| `steps.masterkey` | `declared`, `not_declared` (the declaration is owed and not made), `not_attempted` (a run that refused before it looked), or `absent` when there is no repository and therefore no key |
 | `steps.destination`, `steps.schedule`, `steps.native_host` | how far those steps got |
 | `chain` | `init`, `noop` and `readback`, each `observed` where the run watched it happen, and an explicit unknown where it did not |
 | `incomplete` | the steps that did not finish, named one by one |
@@ -104,9 +104,11 @@ Read the object before you report anything:
 
 `chain.readback` being `known` is the evidence that the archive can be opened again; the manual path below cannot give you that. Report an unknown as unknown, with its `why`: never as `0`, never as `no`, never as `nothing`.
 
-**Human step: the master key.** The first pass that archives something creates `~/.local/share/chat-stasher/masterkey.json`. A pass with nothing to archive creates neither the repository nor the key, and then `steps.masterkey` is `absent`, which is a third answer and not a "no": there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there.
+**Human step: the master key.** The key is `~/.local/share/chat-stasher/masterkey.json`, and two runs create it: the first pass that archives something, and — for the reason two paragraphs down — a headless run whose only owed parameter is the declaration. A machine with nothing to archive and no repository gets neither, and then `steps.masterkey` is `absent`, which is a third answer and not a "no": there is no key to back up yet, and saying otherwise would send the user looking for a file that is not there.
 
-When a key does exist, the run records whether the user has said they keep a copy. Until they have, `steps.masterkey` is `not_declared` and the run exits `2` with `masterkey_saved_elsewhere` in `missing_parameters`. Tell the user to copy that file somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file. Wait for their answer, then re-run the same command with `--masterkey-saved-elsewhere`, which records it.
+When a key does exist, the run records whether the user has said they keep a copy. Until they have, `steps.masterkey` is `not_declared` and the run exits `2` with `masterkey_saved_elsewhere` in `missing_parameters`. The file to copy is the one at `masterkey.path` — read it from there rather than from the default above, because a config can put the key somewhere else. Tell the user to copy that file somewhere off this disk, such as a password manager or an external drive, and say plainly that it is the only key to the archive and that a lost key cannot be recovered. Do not read or print the file. Wait for their answer, then re-run the same command with `--masterkey-saved-elsewhere`, which records it.
+
+**When the declaration is the only thing owed, the run creates the key first.** A user cannot confirm they saved a file that does not exist yet, so a headless run whose `missing_parameters` is exactly `["masterkey_saved_elsewhere"]` creates the local repository and the key and *then* exits `2`, and `masterkey.path` is the new key's path. Nothing else ran: `steps.local_save`, `chain`, `runs` and `steps.schedule` are all `not_attempted`, and no snapshot was archived. That is the single exception to "an exit-2 `setup` wrote nothing", and it is a file the user is about to copy rather than an archive — never report it as an archive, and never as a completed run. Re-running the same command with `--masterkey-saved-elsewhere` continues from the key that is already there. If anything else is missing as well, this does not happen: the run refuses before writing anything at all.
 
 Do not pass that flag before they answer: it is a declaration about their machine, and the tool's own output says so, with `masterkey.declaration_is_verified` set to `false`. Nothing here, and nothing anywhere else, can check that a copy exists.
 

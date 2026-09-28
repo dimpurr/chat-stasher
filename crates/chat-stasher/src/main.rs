@@ -8517,6 +8517,8 @@ mod decision_surface_tests {
             &[],
             &[],
             2,
+            None,
+            None,
         ))
         .expect("the setup payload is one JSON object");
         assert_eq!(value["command"], "setup");
@@ -8554,6 +8556,73 @@ mod decision_surface_tests {
             "a run that never looked must not carry a registration count: {}",
             value["native_host"]
         );
+    }
+
+    /// W236 (ADR-039 decision 1 / WIZ-1): a non-TTY run that refused the local
+    /// first save because the masterkey declaration is missing reports the
+    /// declaration as not made and the pass as *not attempted* — never as an
+    /// archive that was created without asking, never as an "absent" key (which
+    /// would claim the wizard looked and found none).
+    #[test]
+    fn setup_json_reports_a_refused_local_save_without_claiming_a_write() {
+        let report = report_with_sessions(1);
+        let missing = vec!["masterkey_saved_elsewhere"];
+        let why = setup_refused_before_save_why(&missing);
+        let stage = PathBuf::from("/fixture/stage");
+        let value: serde_json::Value = serde_json::from_str(&setup_json_payload(
+            scanner::scan_report_json(&report),
+            Some(&stage),
+            false,
+            "not_attempted",
+            &schedule::NextRun::Unknown(
+                "no scheduler timer was installed by this run, so there is no next run to report"
+                    .to_string(),
+            ),
+            None,
+            None,
+            &setup_remote_not_attempted(None, &why),
+            Err(&why),
+            &missing,
+            &[],
+            &[],
+            2,
+            Some(&why),
+            None,
+        ))
+        .expect("the setup payload is one JSON object");
+
+        assert_eq!(value["healthy"], false);
+        assert_eq!(value["exit_code"], 2);
+        assert_eq!(
+            value["missing_parameters"],
+            serde_json::json!(["masterkey_saved_elsewhere"])
+        );
+        assert_eq!(value["steps"]["stage"], "provided");
+        assert_eq!(value["steps"]["local_save"], "not_attempted");
+        // The contract name (`SKILL.md`) is `not_declared`, and the masterkey
+        // object carries `not_attempted` rather than `absent` so no reader can
+        // read the refusal as "the wizard looked and there was no key".
+        assert_eq!(value["steps"]["masterkey"], "not_declared");
+        assert_eq!(value["masterkey"]["kind"], "not_attempted");
+        assert_eq!(value["masterkey"]["declaration"], "not_declared");
+        assert!(
+            value["masterkey"].get("path").is_none(),
+            "a refused run never created or opened a key, so it has no path to offer"
+        );
+        // The refusal's reason, not the stage-missing one.
+        assert_eq!(value["chain"]["kind"], "not_attempted");
+        assert_ne!(
+            value["chain"]["why"],
+            serde_json::json!(
+                "no stage was given, so no run-once pass was attempted and no chain exists"
+            ),
+            "a refused save has its own reason, not the stage-missing sentence"
+        );
+        assert!(value["chain"]["why"]
+            .as_str()
+            .is_some_and(|text| text.contains("nothing was written")));
+        assert_eq!(value["unread"], serde_json::json!([]));
+        assert_eq!(value["incomplete"], serde_json::json!([]));
     }
 
     /// The declaration is a sentence the user has to mean. Anything shorter,
@@ -10247,11 +10316,121 @@ fn cmd_setup(
                     &[],
                     &[],
                     2,
+                    // Stage missing is its own refusal reason, already carried
+                    // by the hardcoded "no stage was given" whys above; it is
+                    // not the masterkey/remote pre-pass refusal this field
+                    // renders specially.
+                    None,
+                    None,
                 )
             );
         }
         return ExitCode::from(2);
     };
+
+    // WIZ-1, kept on the *before the first write* side (ADR-039 decision 1:
+    // the non-TTY run reports missing parameters by name): in a non-interactive
+    // run every required parameter is validated before the local archive pass
+    // runs, so a run that exits 2 has written nothing. The declaration is owed
+    // whenever a masterkey exists or will exist — a repository is already on
+    // this machine, or the scan found content the first pass would archive into
+    // one. The remote parameters are owed whenever a destination is named that
+    // the config does not already declare. Deciding both here, before any pass,
+    // is what keeps exit 2 side-effect-free: a run that has not been told the
+    // key is saved elsewhere must not create the very archive that key
+    // protects.
+    if !interactive {
+        let mut premissing: Vec<&'static str> = Vec::new();
+        if !masterkey_saved_elsewhere
+            // reason: a `true` here (an existing repository, or an existence
+            // probe that could not be trusted) errs toward refusing the save,
+            // which only costs a false exit 2; erring the other way would write
+            // an archive the caller was never shown the key for, which is the
+            // failure this pre-pass exists to prevent. `false` on Ok is a real
+            // absence measured by the probe, not a fallback.
+            && (setup_local_repository_exists(&config).unwrap_or(true) || !scan.records.is_empty())
+        {
+            premissing.push("masterkey_saved_elsewhere");
+        }
+        if destination.is_some() {
+            let destination_declared = setup_destination_declared(destination.as_deref());
+            for name in setup_remote_missing(&remote, destination_declared) {
+                if !premissing.contains(&name) {
+                    premissing.push(name);
+                }
+            }
+        }
+        if !premissing.is_empty() {
+            // WIZ-1 has one deliberate exception to "exit 2 writes nothing":
+            // when the *only* parameter owed is the masterkey declaration, the
+            // wizard still refuses the run, but it first creates the local
+            // repository and its masterkey — the minimum a human needs in front
+            // of them to copy the key off this disk — and stops before the
+            // archive pass, the remote step and the scheduler. Re-running with
+            // the declaration then continues. If anything else is missing too,
+            // rule 1 wins and nothing is written at all.
+            let only_masterkey_declaration_owed =
+                premissing.len() == 1 && premissing[0] == "masterkey_saved_elsewhere";
+            // The key path to offer, when the bootstrap actually put one on the
+            // disk. It is `None` for rule 1 (nothing was written) and for a
+            // bootstrap that failed, and in both cases the refusal falls back to
+            // the masterkey object's ordinary never-attempted shape.
+            //
+            // A failed bootstrap is reported through the refusal's own reason
+            // rather than on stderr: this path prints nothing but its JSON, so
+            // stdout is the only channel a caller sees. The reason says the
+            // preparation failed without claiming to know whether the key file
+            // landed — the key is persisted before the repository is
+            // initialized, so a failure in the second half leaves a key on the
+            // disk, and "nothing was written" would be a guess. What it does
+            // claim is that no snapshot was archived, which is true of every
+            // path that reaches here.
+            let (why, created_key) = match only_masterkey_declaration_owed {
+                false => (setup_refused_before_save_why(&premissing), None),
+                true => match setup_create_repo_and_key(&config) {
+                    Ok(path) => (setup_refused_awaiting_declaration_why(), Some(path)),
+                    Err(error) => (setup_refused_bootstrap_failed_why(&error), None),
+                },
+            };
+            println!(
+                "{}",
+                setup_json_payload(
+                    scanner::scan_report_json(&scan),
+                    Some(stage),
+                    install_schedule,
+                    "not_attempted",
+                    &schedule::NextRun::Unknown(
+                        "no scheduler timer was installed by this run, so there is no next run \
+                         to report"
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    // The wizard stopped before the remote step, so the object
+                    // is "not attempted" (a never-started step named by
+                    // `missing_parameters`), never a verdict about the
+                    // destination.
+                    &SetupRemoteReport {
+                        name: destination.clone(),
+                        kind: None,
+                        config: SetupDestinationConfig::NotWritten { why: why.clone() },
+                        reach: SetupReach::NotAttempted { why: why.clone() },
+                        trust: SetupTrust::NotRequired,
+                        dest_init: SetupDestinationInit::NotRun { why: why.clone() },
+                        credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
+                    },
+                    Err(&why),
+                    &premissing,
+                    &[],
+                    &[],
+                    2,
+                    Some(&why),
+                    created_key.as_deref(),
+                )
+            );
+            return ExitCode::from(2);
+        }
+    }
 
     // ADR-039 decision 2, step 2 — the local first save happens before the
     // destination question. What is on offer locally is available now; the
@@ -10623,6 +10802,11 @@ fn cmd_setup(
             &incomplete,
             &remote_gaps.unread,
             exit_code,
+            // Not a refused run: the local first save either ran or reported
+            // its own failure in `local`, so the payload renders the observed
+            // states rather than a pre-pass refusal.
+            None,
+            None,
         )
     );
     ExitCode::from(exit_code)
@@ -10698,6 +10882,50 @@ fn setup_missing_parameters(stage: Option<&PathBuf>) -> Vec<&'static str> {
     } else {
         vec!["stage"]
     }
+}
+
+/// The reason a non-interactive run refused the local archive pass before it
+/// started, named from the parameters that were missing. Carried into the
+/// refusal payload's `chain`/`runs`/`masterkey`/`native_host` `why` fields, so
+/// a wrapper gets not only the names but the sentence that ties them to the
+/// nothing-was-written outcome.
+fn setup_refused_before_save_why(missing: &[&'static str]) -> String {
+    format!(
+        "required parameter(s) missing ({}), so the local first save was refused \
+         before it ran and nothing was written",
+        missing.join(", ")
+    )
+}
+
+/// The reason for the one deliberate exception to "exit 2 writes nothing": the
+/// WIZ-1 masterkey bootstrap. Here the *only* owed parameter was
+/// `--masterkey-saved-elsewhere`, so the wizard created the local repository
+/// and its masterkey — the minimum for the user to copy the key — and then
+/// stopped before the archive pass, the remote step and the scheduler. The
+/// payload that carries this reason offers the key file's `path`, which is the
+/// whole point of the run.
+fn setup_refused_awaiting_declaration_why() -> String {
+    "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+     the local repository and its masterkey for you to copy elsewhere, then stopped \
+     before the archive pass, the remote step and the scheduler; re-run the same command \
+     with --masterkey-saved-elsewhere to continue"
+        .to_string()
+}
+
+/// The same refusal when the bootstrap itself could not run.
+///
+/// Deliberately silent about how far it got: the key is persisted before the
+/// repository is initialized, so a failure in the second half leaves a key file
+/// on the disk. Saying "nothing was written" would be a guess, and this project
+/// does not report a guess as a measurement. What is certain here is that no
+/// snapshot was archived — the archive pass is after every line of the
+/// bootstrap — so that, and only that, is what this sentence claims.
+fn setup_refused_bootstrap_failed_why(error: &str) -> String {
+    format!(
+        "the only missing parameter was --masterkey-saved-elsewhere, and preparing the local \
+         repository and masterkey for you to copy failed ({error}), so nothing was archived and \
+         the run stopped; fix that and re-run"
+    )
 }
 
 /// Name every step that did not finish. Pure, so the human lines, the JSON and
@@ -11084,6 +11312,34 @@ fn setup_local_repository_exists(config: &Config) -> Result<bool, String> {
     BackupStore::for_metadata_query(setup_local_store(config))
         .repository_exists()
         .map_err(|error| format!("{error:#}"))
+}
+
+/// The WIZ-1 masterkey bootstrap: create the local repository and its
+/// masterkey and return the key's path — the minimum a human needs in front of
+/// them to copy the key off this disk.
+///
+/// Deliberately **not** the archive pass. This is the one side effect the
+/// "exit 2 writes nothing" rule carves out for a non-TTY run whose *only* owed
+/// parameter is `--masterkey-saved-elsewhere`: the declaration is a human step
+/// that needs the key to already exist, so the wizard creates just enough for
+/// the user to do that, and stops — no snapshots are archived, no remote is
+/// configured, no scheduler is installed.
+///
+/// Re-runs of the repository subset of the push path: the key is persisted
+/// first (so the repository is never initialized under a key that is not on the
+/// disk), then the repository itself is initialized if it does not exist.
+/// `open_or_init` writes nothing when the repository is already there, and
+/// `masterkey` loads the existing key without touching it, so a bootstrap on a
+/// machine that already archived is a clean no-op. The machine name is
+/// irrelevant to init (it only sets the snapshot `host`, and no snapshot is
+/// created), so the same metadata-query store the existence probe uses is fine.
+fn setup_create_repo_and_key(config: &Config) -> Result<std::path::PathBuf, String> {
+    let cfg = setup_local_store(config);
+    let (mk, _) = masterkey(&cfg).map_err(|error| format!("{error:#}"))?;
+    BackupStore::for_metadata_query(cfg.clone())
+        .open_or_init(&mk)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(cfg.key_file)
 }
 
 /// The local first save: two `run-once` passes, then what they left behind.
@@ -12969,6 +13225,22 @@ fn setup_schedule_json(
 /// The `setup --json` object. `exit_code` is passed in rather than recomputed
 /// here, so the number in the object and the process exit status are the same
 /// decision.
+///
+/// `local_refused_why` is `Some(why)` only when the local first save was
+/// *refused before it ran* — a required parameter was missing on a non-TTY
+/// invocation, so the wizard stopped before creating an archive that the missing
+/// parameter was asked to guard. The `why` is carried into the `chain`, `runs`,
+/// `masterkey` and `steps` arm renderings that would otherwise fall back to the
+/// "no stage was given" or "absent" claims, which would read as measurements a
+/// refused run never made.
+///
+/// `masterkey_created_path` is `Some` only for the one exception to "exit 2
+/// writes nothing": the WIZ-1 masterkey bootstrap, where the *sole* owed
+/// parameter was `--masterkey-saved-elsewhere`. The wizard created the key so
+/// the human can copy it, so the masterkey object carries its real `path` even
+/// though the run is still a refusal and no archive pass happened. It is `None`
+/// for every ordinary refusal (and every non-refusal), which renders the master
+/// key as never-attempted with no path to offer.
 #[allow(clippy::too_many_arguments)]
 fn setup_json_payload(
     scan: serde_json::Value,
@@ -12979,14 +13251,17 @@ fn setup_json_payload(
     local: Option<&SetupLocalSaveReport>,
     chain: Option<&SetupChain>,
     remote: &SetupRemoteReport,
-    host: Result<&chat_stasher::doctor::NativeHostCheck, &'static str>,
+    host: Result<&chat_stasher::doctor::NativeHostCheck, &str>,
     missing: &[&'static str],
     incomplete: &[&'static str],
     unread: &[&'static str],
     exit_code: u8,
+    local_refused_why: Option<&str>,
+    masterkey_created_path: Option<&Path>,
 ) -> String {
     let save = local.map(|local| &local.save);
     let declared = !missing.contains(&"masterkey_saved_elsewhere");
+    let refused = local_refused_why.is_some();
     // `Err` is a run that never looked — either it could not read the config or
     // it stopped before the host step — and it carries its own reason. The
     // object is tagged and never `null`, in the same idiom as `chain` and `runs`
@@ -13004,12 +13279,15 @@ fn setup_json_payload(
     };
     let chain = match chain {
         Some(chain) => chain.to_json(),
-        // No stage means no pass ran. An explicit tagged object, never `null`:
-        // a null here would read as "the chain was empty", and the chain was
-        // not produced at all.
+        // No pass ran. An explicit tagged object, never `null`: a null here
+        // would read as "the chain was empty", and the chain was not produced
+        // at all. The reason is the refusal's own when one stopped it; "no
+        // stage was given" is only the stage-missing case.
         None => serde_json::json!({
             "kind": "not_attempted",
-            "why": "no stage was given, so no run-once pass was attempted and no chain exists",
+            "why": local_refused_why.unwrap_or(
+                "no stage was given, so no run-once pass was attempted and no chain exists"
+            ),
         }),
     };
     let runs = match local {
@@ -13019,7 +13297,9 @@ fn setup_json_payload(
         }),
         None => serde_json::json!({
             "kind": "not_attempted",
-            "why": "no stage was given, so no run-once pass was attempted",
+            "why": local_refused_why.unwrap_or(
+                "no stage was given, so no run-once pass was attempted"
+            ),
         }),
     };
     let value = serde_json::json!({
@@ -13039,13 +13319,21 @@ fn setup_json_payload(
                 Some(SetupLocalSave::Unknown { .. }) => "unknown",
                 None => "not_attempted",
             },
-            "masterkey": match save {
-                Some(SetupLocalSave::Created | SetupLocalSave::Existed) => {
-                    if declared { "declared" } else { "not_declared" }
+            "masterkey": if refused {
+                // The wizard stopped before the pass, so it never looked for a
+                // key. "not_declared" when the declaration is owed but not made
+                // (the case that stopped it), "not_attempted" otherwise — never
+                // "absent", which would claim a key was looked for and not found.
+                if declared { "not_attempted" } else { "not_declared" }
+            } else {
+                match save {
+                    Some(SetupLocalSave::Created | SetupLocalSave::Existed) => {
+                        if declared { "declared" } else { "not_declared" }
+                    }
+                    // No repository, therefore no key: the question does not
+                    // apply, which is a third answer and not a "no".
+                    _ => "absent",
                 }
-                // No repository, therefore no key: the question does not apply,
-                // which is a third answer and not a "no".
-                _ => "absent",
             },
             "destination": remote.outcome(),
             "schedule": schedule_status,
@@ -13060,23 +13348,50 @@ fn setup_json_payload(
         "native_host": host_json,
         "chain": chain,
         "runs": runs,
-        "masterkey": match (save, local) {
-            (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
+        "masterkey": if refused {
+            if let Some(path) = masterkey_created_path {
+                // Only the WIZ-1 masterkey bootstrap gets here: the wizard
+                // created the key for the human to copy, so it has a real path
+                // to offer even though the run is still a refusal and the
+                // declaration is still owed. The declaration is a report of the
+                // flag — `declaration_is_verified: false` — never a claim that
+                // a copy exists.
                 serde_json::json!({
-                    "path": local.key_file.display().to_string(),
+                    "path": path.display().to_string(),
                     "declaration": if declared { "declared" } else { "not_declared" },
-                    // The declaration is a statement by the user. Nothing here,
-                    // and nothing anywhere else, checks it — recorded so that a
-                    // reader of this object cannot mistake one for a
-                    // verification.
+                    "declaration_is_verified": false,
+                })
+            } else {
+                // An ordinary refusal. The declaration state is a report of the
+                // flag, and the `why` carries the reason. The run never created
+                // or opened an archive, so there is no `path` and no `absent`
+                // verdict.
+                serde_json::json!({
+                    "kind": "not_attempted",
+                    "why": local_refused_why,
+                    "declaration": if declared { "declared" } else { "not_declared" },
                     "declaration_is_verified": false,
                 })
             }
-            _ => serde_json::json!({
-                "kind": "absent",
-                "why": "no repository and no masterkey exist, so there is nothing to declare \
-                        saved",
-            }),
+        } else {
+            match (save, local) {
+                (Some(SetupLocalSave::Created | SetupLocalSave::Existed), Some(local)) => {
+                    serde_json::json!({
+                        "path": local.key_file.display().to_string(),
+                        "declaration": if declared { "declared" } else { "not_declared" },
+                        // The declaration is a statement by the user. Nothing here,
+                        // and nothing anywhere else, checks it — recorded so that a
+                        // reader of this object cannot mistake one for a
+                        // verification.
+                        "declaration_is_verified": false,
+                    })
+                }
+                _ => serde_json::json!({
+                    "kind": "absent",
+                    "why": "no repository and no masterkey exist, so there is nothing to declare \
+                            saved",
+                }),
+            }
         },
         "schedule": setup_schedule_json(schedule_status, next_run, install_schedule),
     });
@@ -13969,16 +14284,29 @@ mod narration_tests {
 mod setup_scheduler_tests {
     use super::*;
 
+    /// A next run in the shape the systemd probe hands back, dated three days
+    /// from now.
+    ///
+    /// Shaped from the clock rather than written down: the tests below only carry
+    /// this string through a formatter, so a literal date would be decoration —
+    /// but decoration that ages into a date in the past, which reads as a deadline
+    /// these fixtures do not have. UTC, because that is the zone it names.
+    fn armed_stamp() -> String {
+        format!(
+            "{} 03:17:00 UTC",
+            (chrono::Utc::now() + chrono::Days::new(3)).format("%a %Y-%m-%d")
+        )
+    }
+
     /// The summary row exists in both states. A row that only appears when a
     /// time is known is how "the scheduler did not report one" reads as "there
     /// is none" — the reader cannot tell an omitted row from a missing one.
     #[test]
     fn the_summary_row_names_a_time_or_says_why_there_is_none() {
+        let armed = armed_stamp();
         assert_eq!(
-            setup_next_run_line(&schedule::NextRun::Known(
-                "Sun 2026-09-27 03:17:00 CEST".to_string()
-            )),
-            "next run: Sun 2026-09-27 03:17:00 CEST"
+            setup_next_run_line(&schedule::NextRun::Known(armed.clone())),
+            format!("next run: {armed}")
         );
         assert_eq!(
             setup_next_run_line(&schedule::NextRun::Unknown(
@@ -13995,15 +14323,13 @@ mod setup_scheduler_tests {
     /// never sees an empty value without the reason it is empty.
     #[test]
     fn the_json_note_accompanies_the_empty_value_only() {
+        let armed = armed_stamp();
         let known = setup_schedule_json(
             "installed_and_checked",
-            &schedule::NextRun::Known("Sun 2026-09-27 03:17:00 CEST".to_string()),
+            &schedule::NextRun::Known(armed.clone()),
             true,
         );
-        assert_eq!(
-            known["next_run"],
-            serde_json::json!("Sun 2026-09-27 03:17:00 CEST")
-        );
+        assert_eq!(known["next_run"], serde_json::json!(armed.as_str()));
         assert_eq!(known["status"], "installed_and_checked");
         assert_eq!(known["requested"], true);
         assert!(

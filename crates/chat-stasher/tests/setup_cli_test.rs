@@ -343,14 +343,29 @@ fn the_masterkey_declaration_is_required_and_recorded_as_unverified() {
         value["missing_parameters"],
         serde_json::json!(["masterkey_saved_elsewhere"])
     );
+    // WIZ-1 (ADR-039): the missing parameter is validated *before* the archive
+    // pass, so a run that exits 2 must report the declaration as not made and
+    // the pass as not started — never an archive the caller was not shown.
+    //
+    // The key is the one thing that pass does not own (W236 rule 2): the
+    // declaration is a human step, and a human cannot attest to a copy of a file
+    // that does not exist yet, so when the declaration is the *only* thing owed
+    // this run creates the local repository and its key and stops — no snapshot,
+    // no remote, no timer. `missing_masterkey_declaration_alone_bootstraps_the_
+    // key_and_stops` is where that is pinned in full; here the object only has
+    // to offer the key's real path, so the agent can name the file.
     assert_eq!(value["masterkey"]["declaration"], "not_declared");
     assert_eq!(value["masterkey"]["declaration_is_verified"], false);
-    // The declaration is missing, not the work: a caller that sees exit 2 here
-    // must still be told that the local archive was written.
-    assert_eq!(value["steps"]["local_save"], "created");
-    assert!(
-        undeclared.repository().exists() && undeclared.masterkey().exists(),
-        "the local first save runs before the declaration is asked for, so it must have happened"
+    assert_eq!(value["steps"]["stage"], "provided");
+    assert_eq!(
+        value["steps"]["local_save"], "not_attempted",
+        "a refused run must not claim it created an archive: {value}"
+    );
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
+    assert_eq!(
+        value["masterkey"]["path"],
+        serde_json::json!(undeclared.masterkey().to_str().unwrap()),
+        "the key the user is asked to copy must be the one on this disk: {value}"
     );
 }
 
@@ -371,6 +386,328 @@ fn setup_without_a_stage_names_the_parameter_and_writes_nothing() {
     );
 }
 
+/// Every path in the throwaway HOME + XDG tree, root-relative and sorted, used
+/// to prove a refusal wrote exactly what it says it wrote.
+///
+/// Names only — a file rewritten with different bytes is not visible here. That
+/// is enough for what this compares: the tree is created empty and the only
+/// file that exists before a run is `registry.json`, which no run rewrites.
+/// Root-relative, not relative to each directory's parent, so a caller can tell
+/// "the repository" from "the rustic cache" by prefix rather than by guessing
+/// which component a fragment came from.
+///
+/// Components are joined with `/`, and that is the whole point of spelling a path
+/// out here: the callers filter these strings by prefix (`data/chat-stasher/…`)
+/// and by component name (`rustic`), and `Path::display` would hand them
+/// `data\chat-stasher\…` on Windows, matching neither — so the snapshot has to
+/// be the platform's own separators normalised away, not passed through.
+fn tree_snapshot(root: &std::path::Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .expect("a dir that exists is enumerable")
+            .collect::<Result<_, _>>()
+            .expect("enumerate dir");
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            out.push(
+                rel.components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+            if path.is_dir() {
+                walk(root, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// WIZ-1's one deliberate exception to "exit 2 writes nothing": when the *only*
+/// owed parameter is the masterkey declaration, a non-TTY `setup` still refuses
+/// (exit 2), but it first creates the local repository and its masterkey — the
+/// minimum a human needs in front of them to copy the key off this disk — and
+/// stops before the archive pass, the remote step and the scheduler. The
+/// masterkey object carries the key's `path`, so the agent can tell the user
+/// which file to copy; re-running with the declaration then continues.
+#[test]
+fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
+    let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
+
+    let output = sandbox.setup(&[]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"])
+    );
+    // The archive pass never ran — no snapshot was archived — and the
+    // declaration is still owed. These are observations, not a claim that the
+    // repository does not exist: the JSON says so separately through the key's
+    // `path`.
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
+    assert_eq!(value["chain"]["kind"], "not_attempted");
+    assert_eq!(value["runs"]["kind"], "not_attempted");
+    assert_eq!(value["steps"]["schedule"], "not_attempted");
+    // The masterkey object offers the path of the key that was just created, so
+    // an agent knows exactly which file to tell the user to copy.
+    assert_eq!(
+        value["masterkey"]["path"],
+        serde_json::json!(sandbox.masterkey().to_str().unwrap())
+    );
+    assert_eq!(value["masterkey"]["declaration"], "not_declared");
+    assert_eq!(value["masterkey"]["declaration_is_verified"], false);
+
+    // Only the repository and the key appeared. Their creation is the point of
+    // the run; everything else owns all three "must NOT" guarantees from WIZ-1:
+    // no archive snapshot (no run-once pass), no config remote, no scheduler.
+    assert!(sandbox.repository().exists(), "the repository must exist");
+    assert!(sandbox.masterkey().exists(), "the masterkey must exist");
+    assert!(
+        !sandbox.config_file().exists(),
+        "a bootstrap keys the local archive only; it must not write a destination block"
+    );
+    let state_run_marker = sandbox
+        .root
+        .path()
+        .join("data/chat-stasher/state/run-state.json");
+    assert!(
+        !state_run_marker.exists(),
+        "no run-once pass ran, so no run-state (no archive snapshot) may exist: {}",
+        state_run_marker.display()
+    );
+    assert!(
+        !sandbox.stage().exists(),
+        "no pass ran, so the stage must not be created either: {}",
+        sandbox.stage().display()
+    );
+
+    let after = tree_snapshot(sandbox.root.path());
+    let added: Vec<_> = after
+        .iter()
+        .filter(|path| !before.contains(path))
+        .cloned()
+        .collect();
+    assert!(
+        !added.is_empty(),
+        "the bootstrap must write the repo and the key"
+    );
+    // The rustic library opens a cache of its own the first time it touches a
+    // repository — `$HOME/Library/Caches/rustic` here, `$XDG_CACHE_HOME` (or
+    // `$HOME/.cache`) elsewhere. That cache and the directories created to hold
+    // it are incidental, not archive writes, and their shape is the platform's
+    // business, so they are the one allowance this comparison makes. Everything
+    // else added has to be the local repository and its key.
+    let cache_paths: Vec<&String> = added
+        .iter()
+        .filter(|path| path.split('/').any(|component| component == "rustic"))
+        .collect();
+    let is_cache_path = |path: &str| {
+        path.split('/').any(|component| component == "rustic")
+            || cache_paths
+                .iter()
+                .any(|cache| cache.starts_with(&format!("{path}/")))
+    };
+    let unexpected: Vec<_> = added
+        .iter()
+        .filter(|path| *path != "data/chat-stasher" && !path.starts_with("data/chat-stasher/"))
+        .filter(|path| !is_cache_path(path.as_str()))
+        .cloned()
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the only new paths may be the local repository and its key (plus the rustic cache \
+         the library opens on its own); added: {added:?}"
+    );
+    // The repository exists but holds no snapshot, which is the direct proof
+    // that the bootstrap initialized and stopped rather than archiving: the
+    // archive pass would have left one here.
+    let snapshots = fs::read_dir(sandbox.repository().join("snapshots"))
+        .expect("an initialized repository has a snapshots directory");
+    assert_eq!(
+        snapshots.count(),
+        0,
+        "the bootstrap must not archive a snapshot"
+    );
+}
+
+/// A bootstrap that could not run refuses without inventing a key to copy.
+///
+/// The reason is deliberately silent about how far the attempt got: the key is
+/// persisted *before* the repository is initialized, so a failure in the second
+/// half leaves a key file on the disk. Which is why the refusal may say that
+/// nothing was **archived** and may not say that nothing was **written**.
+#[test]
+fn a_bootstrap_that_fails_refuses_without_claiming_a_key() {
+    let sandbox = Sandbox::new(true);
+    // A file where the repository belongs: the path is there, so the existence
+    // probe does not report an absence, and initializing it fails.
+    fs::create_dir_all(sandbox.repository().parent().expect("a parent"))
+        .expect("create the local data root");
+    fs::write(sandbox.repository(), b"not a repository").expect("occupy the repository path");
+
+    let output = sandbox.setup(&[]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"])
+    );
+    assert_eq!(value["masterkey"]["kind"], "not_attempted");
+    assert!(
+        value["masterkey"]["path"].is_null(),
+        "no key may be offered when the preparation failed: {value}"
+    );
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
+    let why = value["masterkey"]["why"].as_str().expect("a why string");
+    assert!(
+        why.contains("preparing the local repository and masterkey for you to copy failed"),
+        "the refusal must name the preparation it could not perform: {why}"
+    );
+    assert!(
+        !why.contains("nothing was written"),
+        "the key is persisted before the repository is initialized, so this refusal may \
+         not claim the disk is untouched: {why}"
+    );
+    assert_eq!(
+        value["chain"]["kind"], "not_attempted",
+        "a failed bootstrap must still not have archived anything: {value}"
+    );
+}
+
+/// The other half of the WIZ-1 bootstrap contract: once the key exists and the
+/// user re-runs with `--masterkey-saved-elsewhere`, the wizard continues — it
+/// does **not** mint a fresh key or re-initialise a fresh repository, it adopts
+/// the one it just created (local_save `existed`) and records the declaration.
+#[test]
+fn rerunning_with_the_declaration_after_a_bootstrap_continues() {
+    let sandbox = Sandbox::new(true);
+
+    // First run: only the declaration is owed, so the bootstrap creates the
+    // local repository + masterkey and stops at exit 2.
+    let first_output = sandbox.setup(&[]);
+    let first = json_of(&first_output);
+    assert_eq!(exit_code(&first_output), 2, "value={first}");
+    assert!(sandbox.masterkey().exists());
+    // The key the first run minted is the one the re-run must adopt: capture it
+    // so a re-mint is visible as a different file, not merely as a `created`.
+    let key_before_rerun = fs::read(sandbox.masterkey()).expect("read the bootstrapped key");
+
+    // Re-run with the declaration: the run proceeds to the end, archives the
+    // waiting session under the key it was shown, and reports the repository as
+    // already existing rather than re-created.
+    let output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 0, "value={value}");
+    assert_eq!(
+        fs::read(sandbox.masterkey()).expect("read the key after the re-run"),
+        key_before_rerun,
+        "the re-run must adopt the key the bootstrap created, not mint a new one"
+    );
+    assert_eq!(value["steps"]["local_save"], "existed");
+    assert_eq!(value["steps"]["masterkey"], "declared");
+    assert_eq!(value["healthy"], true);
+    // The re-run did not stop at the declaration: it finished the chain the
+    // wizard is for, read one session back out of the archive it wrote.
+    assert_eq!(value["chain"]["readback"]["kind"], "known");
+    assert_eq!(
+        value["chain"]["readback"]["sessions"], 1,
+        "the re-run must have archived the session that was waiting: {value}"
+    );
+}
+
+/// The same promise for the *remote*: a non-TTY `setup` that names a destination
+/// it has not set up exits 2 with the remote parameter named and writes no local
+/// archive either. Before W236 this ran the local pass first and created a
+/// repository the refused call was never shown.
+#[test]
+fn setup_exit_2_from_missing_remote_parameters_writes_nothing() {
+    let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
+
+    // A kind named without its parameters: the remote report refused before the
+    // local pass, so the repository must not be created.
+    let output = sandbox.setup(&[
+        "--destination",
+        "r2box",
+        "--masterkey-saved-elsewhere",
+        "--remote",
+        "s3",
+        "--remote-endpoint",
+        "https://127.0.0.1:1",
+    ]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert_eq!(value["destination"]["config"]["kind"], "not_written");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+    assert!(
+        !sandbox.config_file().exists(),
+        "an incomplete command line must not write a partial destination block"
+    );
+    assert!(
+        !sandbox.repository().exists(),
+        "the local pass must not run when a remote parameter is missing on a \
+         non-TTY run: {}",
+        sandbox.repository().display()
+    );
+
+    let after = tree_snapshot(sandbox.root.path());
+    assert_eq!(
+        after, before,
+        "an exit-2 run for a missing remote parameter must leave the tree untouched: {value}"
+    );
+}
+
+/// Rule 1 wins whenever anything else is missing alongside the masterkey
+/// declaration: the write-nothing promise holds in full, and the WIZ-1
+/// bootstrap (which is key-creation, not a write) must not run either. Here the
+/// declaration is owed *and* a destination is named without a kind, so both
+/// parameters are missing — the director's "if other parameters are ALSO
+/// missing, refuse before any write" sentence, pinned to the tree.
+#[test]
+fn rule_1_wins_when_the_masterkey_declaration_and_a_remote_parameter_are_both_missing() {
+    let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
+
+    // No `--masterkey-saved-elsewhere` (declaration owed) and no remote kind
+    // for the named destination: neither is supplied, so the bootstrap must not
+    // create the very key the refused run never got a declaration for.
+    let output = sandbox.setup(&["--destination", "nowhere"]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere", "remote"])
+    );
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
+    assert!(
+        !sandbox.repository().exists(),
+        "the bootstrap must not run when a second parameter is also missing"
+    );
+    assert!(
+        !sandbox.masterkey().exists(),
+        "no key may be created when the run refused before any write"
+    );
+
+    let after = tree_snapshot(sandbox.root.path());
+    assert_eq!(
+        after, before,
+        "when rule 1 wins the whole tree must be untouched, bootstrap or not: {value}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
@@ -380,6 +717,15 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     let scheduler = sandbox.root.path().join("fake-scheduler");
     let calls = sandbox.root.path().join("scheduler-calls");
     let state = sandbox.root.path().join("scheduler-active");
+    // What the fake scheduler answers when it is asked for a next run: the shape
+    // systemd prints, three days from now, so no fixture here carries a date that
+    // has already passed by the time the suite runs. Both sides of the assertion
+    // below are this one string — the probe's job is to pass the scheduler's own
+    // text through, and never to recompute it from the interval it was given.
+    let armed = format!(
+        "{} 03:17:00 UTC",
+        (chrono::Utc::now() + chrono::Days::new(3)).format("%a %Y-%m-%d")
+    );
     let script = if cfg!(target_os = "macos") {
         format!(
             "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$1\" in\nprint) test -f '{}' ;;\nbootstrap) touch '{}' ;;\nbootout) rm -f '{}' ;;\nesac\n",
@@ -388,10 +734,11 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     } else {
         // `$3` is the verb of `systemctl --user --no-pager status <timer>`,
         // the one call whose output the next-run probe reads. It answers with a
-        // fixed `Trigger:` line: the probe must pass the scheduler's own text
-        // through, never recompute it from the interval it was given.
+        // `Trigger:` line and the relative-time tail that must not reach the
+        // value: the probe must pass the scheduler's own text through, never
+        // recompute it from the interval it was given.
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: Sun 2026-09-27 03:17:00 UTC; 3 days left' ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho scheduler-noise\necho scheduler-error >&2\ncase \"$2\" in\nis-active) test -f '{}' ;;\nenable) touch '{}' ;;\ndisable) rm -f '{}' ;;\nesac\ncase \"$3\" in\nstatus) echo '    Trigger: {armed}; 3 days left' ;;\nesac\n",
             calls.display(), state.display(), state.display(), state.display()
         )
     };
@@ -448,7 +795,7 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             // this run installed.
             assert_eq!(
                 value["schedule"]["next_run"],
-                serde_json::json!("Sun 2026-09-27 03:17:00 UTC")
+                serde_json::json!(armed.as_str())
             );
             assert!(
                 value["schedule"].get("next_run_note").is_none(),
@@ -1101,15 +1448,23 @@ fn an_incomplete_remote_names_every_parameter_it_needs() {
 #[test]
 fn naming_an_undeclared_destination_without_a_kind_asks_for_the_kind() {
     let sandbox = Sandbox::new(true);
+    let before = tree_snapshot(sandbox.root.path());
     let output = sandbox.setup(&["--destination", "nowhere", "--masterkey-saved-elsewhere"]);
     let value = json_of(&output);
 
     assert_eq!(exit_code(&output), 2, "value={value}");
     assert_eq!(value["missing_parameters"], serde_json::json!(["remote"]));
+    assert_eq!(value["steps"]["local_save"], "not_attempted");
     assert_eq!(value["destination"]["config"]["kind"], "not_written");
     assert!(
         !sandbox.config_file().exists(),
         "nothing may be written when the kind is unknown"
+    );
+    let after = tree_snapshot(sandbox.root.path());
+    assert_eq!(
+        after, before,
+        "an undeclared destination with no kind must leave the whole tree untouched, and must \
+         not bootstrap the local repository either: {value}"
     );
 }
 
