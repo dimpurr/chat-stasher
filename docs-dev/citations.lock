@@ -311,10 +311,10 @@ apps/extension/lib/contract.ts:1293-1309  61ac9dc62d25  lines=17
   <- docs-dev/privacy.md:419, docs-dev/threat-model.md:333  :: export function extractIdentity(text: string, sessionId: st…
 apps/extension/lib/gemini-capture.ts:150-234  2f22e0ff5308  lines=85
   <- docs-dev/privacy.md:537, docs-dev/privacy.md:598, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
-apps/extension/lib/hook-status.ts:78-155  a1b6f1b47629  lines=78
-  <- docs-dev/privacy.md:384  :: export const HOOK_STATUS_KEY_PREFIX = 'cs_hook_v1:';
-apps/extension/lib/hook-status.ts:289-418  cf4d4983ffd4  lines=130
-  <- docs-dev/privacy.md:384  :: export const HOOK_DECLINE_NOT_A_PLATFORM_ORIGIN = 'not-a-pl…
+apps/extension/lib/hook-status.ts:78-155  32138100895c  lines=78
+  <- docs-dev/privacy.md:384  :: /** Storage key prefix. One record per origin; at most one …
+apps/extension/lib/hook-status.ts:289-418  8d9dfc487218  lines=130
+  <- docs-dev/privacy.md:384  :: *    the two facts were one silent nothing until W47.
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs-dev/privacy.md:378  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
 apps/extension/lib/host-status.ts:88-112  f8682e917e91  lines=25
