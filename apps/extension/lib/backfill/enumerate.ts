@@ -65,10 +65,28 @@
  * ## Facts and review status (marked honestly, same standard as the rest of the file)
  *  · ChatGPT's conversation list is GET /backend-api/conversations?offset=&limit=
  *    and the response carries its own total.
- *    **This has not been re-reviewed** — this change forbids calling any platform
+ *    ~~**This has not been re-reviewed** — this change forbids calling any platform
  *    API for real, and there is no logged-in session. So the field names `items`
- *    and `total` are **an assumption awaiting verification**, not a measurement.
- *  · The parser is therefore written as "shape mismatch ⇒ report shape-changed
+ *    and `total` are **an assumption awaiting verification**, not a measurement.~~
+ *    🔴 **W232 · That is no longer the state, and the strike-through is kept so the
+ *    comparison is possible.** The route, the two parameter names, and the presence of
+ *    `items` + `total` in the response are now **measured**, on two independent kinds of
+ *    evidence:
+ *      · a read-only, same-origin, authenticated probe of the owner's own account
+ *        (2026-09-24, `Authorization: Bearer <session accessToken>`): HTTP 200 with an
+ *        `items` array and a numeric `total` (nm/W106-OUT.md §W106b). The same probe
+ *        records what the cookie-only request returns — 200 with `items: []` and
+ *        `total: 0`, a well-formed "you have no conversations" that is false — which is
+ *        why lib/platform-auth.ts attaches the bearer to this path;
+ *      · and every reviewed external implementation requests this route with these
+ *        parameter names (the index in .private/docs/25-EXTENSION-COMPETITORS.md §2.1,
+ *        plus nm/w5-competitors/repos/chatgpt-exporter/src/api.ts:436).
+ *    🔴 What is **still** not measured, and is not written down as known: the server's
+ *    default `order` when none is sent (the web client sends `order=updated`), and
+ *    whether the endpoint ever ignores `offset`. The first is a live read-only check
+ *    (nm/W232-OUT.md §5); the second is what the guard in engine.ts now turns from a
+ *    silent non-ending into a named halt.
+ *  · The parser is still written as "shape mismatch ⇒ report shape-changed
  *    and stop" rather than a best-effort guess. A wrong assumption turns into a
  *    traced halt record immediately; it does not turn into a silently crawling
  *    leg, and it does not turn into fake progress.
@@ -205,7 +223,22 @@ import type { BackfillCapability, DetailOutcome } from './types';
 export const CHATGPT_LIST_PATH = '/backend-api/conversations';
 export const CHATGPT_DETAIL_PATH = '/backend-api/conversation/';
 
-/** How many rows one page holds. 28 is the common default page size for list APIs; 1000 rows ≈ 36 pages is still "cheap". */
+/**
+ * How many rows one page holds.
+ *
+ * 🔴 W232 · **100 is not a round number chosen here — it is the ceiling the platform
+ *    imposes, and this constant sits exactly on it.** `GET /backend-api/conversations`
+ *    rejects `limit > 100` with HTTP 422 (`value_error.number.not_le`), and a 422 reaches
+ *    `haltReasonForStatus`, which is a **permanent** halt. So "read bigger pages to
+ *    enumerate faster" is not a tuning knob on this platform; it is a way to stop the leg
+ *    for good, and the assertion that keeps this constant on the right side of the ceiling
+ *    is in tests/w232-chatgpt-list-guard.test.ts.
+ *
+ *    The sentence that used to be here justified **28** ("the common default page size for
+ *    list APIs; 1000 rows ≈ 36 pages") while the constant said 100 — a rationale left
+ *    behind by a value change, whose arithmetic only worked for the old number. It is
+ *    replaced rather than edited: the old reason was never a reason for 100.
+ */
 export const DEFAULT_LIST_LIMIT = 100;
 
 export interface EnumPage {
@@ -2718,17 +2751,21 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
   parseListPage: parseConversationListPage,
   detailPath: CHATGPT_DETAIL_PATH,
   detailUrl: chatgptDetailUrl,
-  // Provenance: **no external source**. This set is the "facts already researched"
-  // handed to the previous worker by C11; it was not re-reviewed then, and this
-  // change did not re-review it either (no network, no logged-in session).
-  // So its credibility level is [unverified assumption], not 'from-source'.
-  // It is still kept as "backfillable" because it already carries the full
-  // seven-item declaration plus a shape test: a wrong assumption halts
-  // ('shape-changed') with a trace immediately, and never becomes fake progress.
+  // 🔴 W232 · Provenance raised from [unverified assumption] to sourced. The paragraph
+  // that used to sit here said "no external source … its credibility level is
+  // [unverified assumption]", and for the route plus the two parameter names that is no
+  // longer true: see the "Facts and review status" section at the head of this file for
+  // the two kinds of evidence (a read-only authenticated probe of the owner's account,
+  // 2026-09-24; and every reviewed external implementation). What is still **not**
+  // measured is named there too, and is not stated here as known.
   provenance:
-    'unverified-assumption · GET /backend-api/conversations?offset=&limit= with {items[].id, total};'
-    + ' no external source-code provenance, no real end-to-end verification'
-    + ' (this change forbids network access and a logged-in session)',
+    'measured + multi-source · GET /backend-api/conversations?offset=&limit= with {items[].id, total};'
+    + ' route and parameter names corroborated by every reviewed implementation'
+    + ' (.private/docs/25-EXTENSION-COMPETITORS.md §2.1; nm/w5-competitors/repos/chatgpt-exporter/src/api.ts:436),'
+    + ' response fields measured on the owner\'s own account by a read-only authenticated same-origin'
+    + ' probe (2026-09-24, nm/W106-OUT.md §W106b, HTTP 200 with an items array and a numeric total);'
+    + ' NOT measured: the server default order when none is sent, and whether offset is ever ignored'
+    + ' — both named in nm/W232-OUT.md §5',
 };
 
 export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';

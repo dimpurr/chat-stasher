@@ -2083,6 +2083,41 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    emits. The condition is `offset > 0` rather than "we hold a token", and
      *    everything else, including the halt and its reasoning, is shared.
      *
+     * 🔴 W232 · **The guard now runs for every plan whose paging parameter this
+     *    engine advances itself** — `guardApplies = tokenMode || !cursorMode` — and
+     *    the two platforms that were outside it were outside it for no reason the
+     *    question has.
+     *
+     *    Until W232 the condition was `tokenMode || listOffsetInferred`, which
+     *    described *where the question was first asked*, not *what it is about*.
+     *    `listOffsetInferred` exists for a different fact — "this list has no
+     *    termination field, so a short page is a client inference" (W31) — and it
+     *    happened to be true of the one offset plan that needed the guard first.
+     *    ChatGPT is offset-paged, the engine advances its `offset` by hand exactly
+     *    as it does claude.ai's, and it was simply never asked.
+     *
+     *    What that cost, on the one platform where it was left out, is the failure
+     *    this change closes: ChatGPT's only termination signal is the empty page
+     *    (the `offset >= totalKnown` branch was removed in W10), so a server that
+     *    silently ignores `offset` — the behaviour a competitor measured on this
+     *    platform's sibling `gizmos/{id}/conversations` route, which is why its
+     *    project export fetched one page and stopped — ends the enumeration
+     *    **never**. A ChatGPT leg reads one list page per tick, so the loop is
+     *    slow but unbounded; `enqueueDebts` adds nothing; and every persisted
+     *    field still reads as healthy. `complete` is false because nothing said it
+     *    finished, `truncated` is undefined because nothing said it stopped,
+     *    `halted` is null because nothing failed — and `offset` grows every tick,
+     *    so even a progress view shows movement. There was no state in which this
+     *    leg was wrong, only a scope that never finished.
+     *
+     *    🔴 Cursor paging is deliberately still outside (DeepSeek). There the
+     *    parameter is not ours: the next cursor is read out of the response, and
+     *    that mode already has its own named outcomes for "the response gave me
+     *    nothing to page with" (`cursor-missing`) and "the response does not say
+     *    whether there is more" (`has-more-missing`). Asking the fingerprint
+     *    question there would add a second, weaker detector beside two that read
+     *    the platform's own signal.
+     *
      * 🔴 W124 / W124b · **The detector is "the page has already been returned in
      *    this pass", and it is no longer "every id is already owed".** The old
      *    detector — `parsed.page.ids.every(id => archived ∪ pending ∪ seenThisRun
@@ -2130,7 +2165,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      *    nothing: its ids are already in pending/archived by construction (that is
      *    the premise of the check), so nothing can be lost by stopping here.
      */
-    const guardApplies = tokenMode || plan.listOffsetInferred === true;
+    // 🔴 W232 · token mode and every offset plan (ChatGPT, claude.ai, Perplexity);
+    //    cursor paging is the one mode where the parameter is not this engine's —
+    //    see this block's header.
+    const guardApplies = tokenMode || !cursorMode;
     if (guardApplies && parsed.page.ids.length > 0) {
       const fingerprint = await listPageFingerprint(parsed.page.ids);
       const recorded = Array.isArray(state.enumCursor.pageFingerprints)

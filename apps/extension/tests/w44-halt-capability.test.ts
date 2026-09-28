@@ -78,11 +78,17 @@ function ids(n: number, from = 0): string[] {
   return Array.from({ length: n }, (_, i) => `conv-${String(i + from).padStart(4, '0')}-aaaaaaaa`);
 }
 
-function listBody(all: string[]): string {
+/**
+ * 🔴 W232 · The list answers the `offset` it was asked for. It used to return every id
+ * for any offset — i.e. it modelled a server that ignores the parameter, which the
+ * engine now (correctly) halts on. What this file is about is capability halts, not
+ * paging, so the fixture was made faithful rather than the halt narrowed.
+ */
+function listBody(all: string[], offset = 0, limit = 100): string {
   return JSON.stringify({
-    items: all.map((id) => ({ id, title: 'synthetic-fixture', create_time: 0 })),
-    limit: 100,
-    offset: 0,
+    items: all.slice(offset, offset + limit).map((id) => ({ id, title: 'synthetic-fixture', create_time: 0 })),
+    limit,
+    offset,
     total: all.length,
   });
 }
@@ -100,7 +106,10 @@ function backend(all: string[]): { http: HttpPort; calls: string[] } {
   const calls: string[] = [];
   const http: HttpPort = async (url: string): Promise<HttpResponse> => {
     calls.push(url);
-    if (url.includes('/backend-api/conversations')) return { status: 200, text: listBody(all) };
+    if (url.includes('/backend-api/conversations')) {
+      const u = new URL(url);
+      return { status: 200, text: listBody(all, Number(u.searchParams.get('offset') ?? 0)) };
+    }
     const id = decodeURIComponent(url.split('/backend-api/conversation/')[1]!.split('?')[0]!);
     return { status: 200, text: detailBody(id) };
   };
