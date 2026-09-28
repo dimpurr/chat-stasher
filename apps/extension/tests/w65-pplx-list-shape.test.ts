@@ -31,8 +31,8 @@
  * `/rest/thread/list_ask_threads?version=2.18&source=default`, issued from the
  * logged-in page's own context over raw CDP (`127.0.0.1:9222`), body built by
  * `PERPLEXITY_PLAN`'s own `listPost.body`. Scripts and the full table:
- * `/Users/dimpurr/scratch/DimLifeS/chat-stasher/nm/drive/w65-probe{,2}.mjs` and
- * `/Users/dimpurr/scratch/DimLifeS/chat-stasher/nm/W65-OUT.md`.
+ * `w65-probe{,2}.mjs` and
+ * `W65-OUT.md`.
  *
  * 🔴 Every fixture below is **synthetic** and hand-written from the field names
  *    and types the probe observed. No request goes to perplexity.ai, there is no

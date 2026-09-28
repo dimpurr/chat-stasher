@@ -74,17 +74,17 @@
  *    evidence:
  *      · a read-only, same-origin, authenticated probe of the owner's own account
  *        (2026-09-24, `Authorization: Bearer <session accessToken>`): HTTP 200 with an
- *        `items` array and a numeric `total` (nm/W106-OUT.md §W106b). The same probe
+ *        `items` array and a numeric `total` (W106-OUT.md §W106b). The same probe
  *        records what the cookie-only request returns — 200 with `items: []` and
  *        `total: 0`, a well-formed "you have no conversations" that is false — which is
  *        why lib/platform-auth.ts attaches the bearer to this path;
  *      · and every reviewed external implementation requests this route with these
- *        parameter names (the index in .private/docs/25-EXTENSION-COMPETITORS.md §2.1,
- *        plus nm/w5-competitors/repos/chatgpt-exporter/src/api.ts:436).
+ *        parameter names (the index in 25-EXTENSION-COMPETITORS.md §2.1,
+ *        plus chatgpt-exporter/src/api.ts:436).
  *    🔴 What is **still** not measured, and is not written down as known: the server's
  *    default `order` when none is sent (the web client sends `order=updated`), and
  *    whether the endpoint ever ignores `offset`. The first is a live read-only check
- *    (nm/W232-OUT.md §5); the second is what the guard in engine.ts now turns from a
+ *    (W232-OUT.md §5); the second is what the guard in engine.ts now turns from a
  *    silent non-ending into a named halt.
  *  · The parser is still written as "shape mismatch ⇒ report shape-changed
  *    and stop" rather than a best-effort guess. A wrong assumption turns into a
@@ -444,12 +444,12 @@ export const MAX_REQUEST_BODY_BYTES = 4096;
  *
  * What was measured (W101, 2026-09-24, no request sent):
  *  · the live gemini ledger's `enumCursor.token` is **3993 characters** at
- *    `offset = 280` (`nm/w92-ledger-read.json`), and our own builder turns it
+ *    `offset = 280` (`w92-ledger-read.json`), and our own builder turns it
  *    into a **4323-byte** body — 227 bytes over the 4 KiB ceiling, which is the
  *    exact request the page bridge refused (`list token=set (enumerated 280):
  *    refused: request body exceeds MAX_REQUEST_BODY_BYTES`);
  *  · the pinguarmy real-sanitized fixture carries a **441-character** token after
- *    **25** items (`nm/w5-competitors/repos/pinguarmy-ai-chat-exporter/tests/
+ *    **25** items (`pinguarmy-ai-chat-exporter/tests/
  *    fixtures/providers/gemini/2026-08-24-normal.json`).
  *
  * Those two points put the cursor at roughly **14 encoded characters per
@@ -2290,7 +2290,7 @@ export function parseDeepSeekDetailPage(text: string): DetailParseResult {
  * C27 read `thread_id` and W28's fixture asserted that name and `slug` held the
  * same string. **`thread_id` does not exist.** A live probe on 2026-09-23 (4
  * read-only requests from the logged-in page's own context, scripts in
- * `~/scratch/DimLifeS/chat-stasher/nm/drive/w65-probe{,2}.mjs`) got HTTP 200 and
+ * `w65-probe{,2}.mjs`) got HTTP 200 and
  * a top-level array whose items carry **36 keys, `thread_id` among neither of
  * them**, and `slug`/`uuid`/`context_uuid` as three separate strings. Every
  * earlier Perplexity list run halted on the missing key, which is what a strict
@@ -2302,7 +2302,7 @@ export function parseDeepSeekDetailPage(text: string): DetailParseResult {
  * **both** the conversation URL and the content route as `slug || uuid`
  * (`perplexity.ts:getChatUrl` → `` `${A}/search/${t?.perplexitySlug || e}` ``;
  * `perplexity.ts:fetchContent` → `` `${p}/thread/${e.perplexitySlug || e.id}` ``,
- * Echoes 8.3.1 in `nm/w5-competitors/crx/echoes_x/`). The live leg names a file
+ * Echoes 8.3.1). The live leg names a file
  * after what the page URL's `/search/<segment>` carries — that is the W28
  * invariant, "one thread, one id, both legs" — so when the two keys ever hold
  * different strings the segment is the slug, and reading `uuid` here would file
@@ -2858,11 +2858,11 @@ export const CHATGPT_PLAN: BackfillEnumPlan = {
   provenance:
     'measured + multi-source · GET /backend-api/conversations?offset=&limit= with {items[].id, total};'
     + ' route and parameter names corroborated by every reviewed implementation'
-    + ' (.private/docs/25-EXTENSION-COMPETITORS.md §2.1; nm/w5-competitors/repos/chatgpt-exporter/src/api.ts:436),'
+    + ' (25-EXTENSION-COMPETITORS.md §2.1; chatgpt-exporter/src/api.ts:436),'
     + ' response fields measured on the owner\'s own account by a read-only authenticated same-origin'
-    + ' probe (2026-09-24, nm/W106-OUT.md §W106b, HTTP 200 with an items array and a numeric total);'
+    + ' probe (2026-09-24, W106-OUT.md §W106b, HTTP 200 with an items array and a numeric total);'
     + ' NOT measured: the server default order when none is sent, and whether offset is ever ignored'
-    + ' — both named in nm/W232-OUT.md §5',
+    + ' — both named in W232-OUT.md §5',
 };
 
 export const DEEPSEEK_LIST_PATH = '/api/v0/chat_session/fetch_page';
@@ -3146,7 +3146,7 @@ const perplexityDetailUrl = (origin: string, conversationId: string): string =>
  * site's own extracted endpoint table; lib/contract.ts registers it). What W84
  * supplied is the ancestor of every earlier refusal to fill it in: **an observed
  * completeness signal.** A 2026-09-23 probe from the logged-in page's context
- * (3 body requests, `/Users/dimpurr/scratch/DimLifeS/chat-stasher/nm/drive/w84-probe.mjs`)
+ * (3 body requests, `w84-probe.mjs`)
  * returned top-level `has_next_page` (boolean) and `next_cursor` (string | null)
  * under both the schematized and the minimal parameter set. So the completeness
  * rule is W40 outcome (b): archive only when the response says it holds the whole
@@ -3952,7 +3952,7 @@ export const GEMINI_PLAN: BackfillEnumPlan = {
 // ---------------------------------------------------------------------------
 // 🔴 W31 · claude.ai
 //
-// Everything below rests on the W20 research (`nm/W20-OUT.md` §Claude), which is
+// Everything below rests on the W20 research (`W20-OUT.md` §Claude), which is
 // **source-backed and never measured**: claude.ai cannot be opened by this
 // project's browser-automation tool, so no request was issued to it by this
 // change or by the research before it. Every fact here therefore carries its

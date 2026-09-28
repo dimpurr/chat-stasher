@@ -8,7 +8,7 @@
  * `active_installs: 1`" so that backfill specs can exercise pacing without a
  * registered host. That is one install. The product's real topology is
  * `user → N machines → M browsers → K profiles → one extension instance each`
- * (`.private/docs/36-EXTENSION-TOPOLOGY.md` §1), and the audit behind it
+ * (`36-EXTENSION-TOPOLOGY.md` §1), and the audit behind it
  * (`_reconworker-W203-extension-singleton-audit.md`) found the singleton
  * assumption exactly in the places this file drives: bundle provenance, the stage
  * write lock, the backfill request budget, and the response to a rate limit.

@@ -336,6 +336,21 @@ jobs:
       - name: Documentation link check self-test
         run: python3 scripts/check-doc-links.py --selftest
 
+      # A tracked file must not name a private working directory. Nothing read
+      # a file for the paths it names — the link check resolves links between
+      # our Markdown, and the citation lock only asks whether the lines a
+      # citation already points at still hold — so files written after the
+      # public/private split still pointed at private material, one of them at
+      # an absolute path into it. The self-test is here for the same reason as
+      # the others: a gate that cannot prove it still catches anything is worth
+      # nothing. It builds a throwaway repository under a temp directory, so it
+      # needs no history and cannot leave this tree dirty.
+      - name: Public surface names no private directory
+        run: python3 scripts/check-private-paths.py
+
+      - name: Private-path check self-test
+        run: python3 scripts/check-private-paths.py --selftest
+
       - name: Output inventory is up to date
         run: python3 scripts/output-inventory.py --check
 

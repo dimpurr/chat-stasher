@@ -8,7 +8,7 @@
  * the pre-W92 walk had dropped, and **offset 200 — the 18-row tail the pre-W92 run
  * never reached, still `pending` — was judged by the old guard as "every id already
  * owed ⇒ the offset parameter did not move"** and wrote a permanent `shape-changed`
- * (`nm/W124-OUT.md` §1.0-1.2). Three live GETs at offsets 0/100/200 returned
+ * (`W124-OUT.md` §1.0-1.2). Three live GETs at offsets 0/100/200 returned
  * pairwise-disjoint pages, so the parameter *was* advancing; the guard's premise was
  * simply false during a re-enumeration.
  *
@@ -30,7 +30,7 @@
  *    page`), the W98 re-list scenarios halt `shape-changed` at the tail page instead
  *    of finishing. With the pre-W124 guard (`every id is in archived ∪ pending`) the
  *    same two halt. The W124b-specific case (a *later* page repeated) is the one both
- *    earlier guards miss. `nm/W124b-OUT.md` records the revert run.
+ *    earlier guards miss. `W124b-OUT.md` records the revert run.
  */
 
 import { describe, expect, it } from 'vitest';

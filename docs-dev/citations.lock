@@ -185,7 +185,7 @@ apps/extension/lib/backfill/enumerate.ts:3915-3927  f1085cfb0b6d  lines=13
   <- docs-dev/privacy.md:590  :: GEMINI_RPC_DETAIL,
 apps/extension/lib/backfill/enumerate.ts:3942-3947  9822b23e6f57  lines=6
   <- docs-dev/threat-model.md:668  :: + '🔴 Unverified and handled, not guessed: the request ARGUM…
-apps/extension/lib/backfill/enumerate.ts:3953-3959  2665dbd863fc  lines=7
+apps/extension/lib/backfill/enumerate.ts:3953-3959  310e5595362d  lines=7
   <- docs-dev/privacy.md:689  :: // 🔴 W31 · claude.ai
 apps/extension/lib/backfill/enumerate.ts:4200-4278  cd3e6793d8f8  lines=79
   <- docs-dev/privacy.md:689, docs-dev/threat-model.md:309  :: export function parseClaudeDetailTree(

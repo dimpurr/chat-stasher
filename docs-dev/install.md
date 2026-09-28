@@ -239,10 +239,10 @@ cargo build --release
 
 ⚠️ Which of those binaries has been observed to build and run is in section 8 —
 "a Release carries it" and "it runs on your machine" are two different claims.
-The Homebrew formula in this repository (`homebrew/chat-stasher.rb`) has no tap
-to be published to yet (`dimpurr/homebrew-chat-stasher` did not exist when this
-was checked on 2026-09-25), so `brew install` is not a channel you can use
-today.
+The Homebrew formula in this repository (`homebrew/chat-stasher.rb`) is
+published to the tap `dimpurr/homebrew-tap` (`dimpurr/tap`) by `release.yml`'s
+`homebrew-tap` job, which skips itself while `TAP_TOKEN` is unset. On 2026-09-28
+it was not in that tap, so `brew install` is not a channel you can use today.
 
 - You need the Rust toolchain (`cargo`). **The package manifest does not declare a
   minimum Rust version** (`crates/chat-stasher/Cargo.toml:1-6`). Which exact

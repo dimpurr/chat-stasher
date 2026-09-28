@@ -635,7 +635,7 @@ export interface GeminiAuthOptions {
  * a Gemini 400 halt `auth-refused` on the strength of a real measurement — this file's
  * Gemini header records that a `batchexecute` request whose `at` is missing or stale is
  * answered HTTP 400 — and the re-review found the classifier applying that to **every**
- * Gemini 400, including one nothing had been measured about (`nm/R64b-grok.log`,
+ * Gemini 400, including one nothing had been measured about (`R64b-grok.log`,
  * finding 2).
  *
  * So the fact travels instead of being inferred: `survivedCredentialReread: true` means
