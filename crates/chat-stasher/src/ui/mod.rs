@@ -2073,6 +2073,7 @@ pub(crate) mod fixture {
             Self {
                 state: IndexState::Ready(crate::fts::IndexSummary {
                     ids: ids.iter().map(|id| id.to_string()).collect(),
+                    not_indexable: Default::default(),
                     written_unix: Some(NOW),
                 }),
                 hits: Vec::new(),

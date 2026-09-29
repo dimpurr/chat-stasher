@@ -17,7 +17,7 @@ use chat_stasher::stagereclaim::{self, BlockedKind, NamedStore};
 use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
-use rustic_core::repofile::{MasterKey, NodeType};
+use rustic_core::repofile::{MasterKey, Node, NodeType};
 use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -3912,10 +3912,12 @@ fn cmd_search_text(
                 return ExitCode::from(3);
             }
         };
-        let indexed = selected
-            .iter()
-            .filter(|id| summary.ids.contains(*id))
-            .count();
+        // `covers`, not membership in `ids`: a session whose last re-read failed
+        // keeps the text an earlier build stored for it, so it is in the index
+        // while no longer being text the index can vouch for. Counting it as
+        // covered would report a zero-hit answer as complete over a session the
+        // current shard never supplied — and would leave the exit code at 0.
+        let indexed = selected.iter().filter(|id| summary.covers(id)).count();
         let missing = selected.len().saturating_sub(indexed);
         index_coverage = Some((indexed, missing));
         if query.chars().count() < chat_stasher::fts::MIN_QUERY_CHARS {
@@ -7949,48 +7951,33 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             .unwrap_or(u64::MAX)
                     });
                 }
-                let sources: Vec<_> = paths_by_id
-                    .iter()
-                    .map(|(id, indexes)| -> anyhow::Result<_> {
-                        let shards: Vec<_> = indexes
-                            .iter()
-                            .map(|idx| -> anyhow::Result<_> {
-                                let (path, node) = &entries_all[*idx];
-                                let data_ids = match node.content.as_deref() {
-                                    Some(data_ids) => data_ids
-                                        .iter()
-                                        .map(|data_id| data_id.to_hex().as_str().to_owned())
-                                        .collect(),
-                                    None if node.meta.size == 0 => vec!["empty-file".to_owned()],
-                                    None => {
-                                        return Err(anyhow::anyhow!(
-                                            "non-empty archived shard has no content IDs"
-                                        ));
-                                    }
-                                };
-                                Ok((path.to_string_lossy().into_owned(), data_ids))
-                            })
-                            .collect::<anyhow::Result<Vec<_>>>()?;
-                        Ok(chat_stasher::fts::SourceDoc {
-                            id: id.clone(),
-                            source_sha256: index_source_fingerprint(
-                                &shards,
-                                titles.get(id).map(String::as_str),
-                            ),
-                        })
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let sources = index_sources(&paths_by_id, &entries_all, &titles);
                 index.build(&sources, |id| {
+                    use chat_stasher::fts::LoadFailure;
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
-                        anyhow::anyhow!("changed source disappeared during index build")
+                        LoadFailure::new(
+                            0,
+                            anyhow::anyhow!("changed source disappeared during index build"),
+                        )
                     })?;
                     let mut raw = Vec::new();
                     for idx in indexes {
-                        repo.dump(&entries_all[*idx].1, &mut raw)
-                            .context("read changed archived document")?;
+                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut raw) {
+                            // Whatever was read into `raw` before the read failed
+                            // was still read, and the build's volume counts it.
+                            return Err(LoadFailure::new(
+                                raw.len() as u64,
+                                anyhow::Error::new(error).context("read changed archived document"),
+                            ));
+                        }
                     }
                     let bytes_read = raw.len() as u64;
-                    let extracted = chat_stasher::fts::extract_index_document(&raw)?;
+                    let extracted = match chat_stasher::fts::extract_index_document(&raw) {
+                        Ok(extracted) => extracted,
+                        // The shard was read in full before it failed to parse:
+                        // those bytes are part of what this build read (C6).
+                        Err(error) => return Err(LoadFailure::new(bytes_read, error)),
+                    };
                     Ok(chat_stasher::fts::LoadedDoc {
                         text: chat_stasher::fts::DocText {
                             title: titles.get(id).cloned().unwrap_or(extracted.title),
@@ -8052,6 +8039,51 @@ fn unresolved_index_sessions<'a>(
         .filter_map(readback::bucket_shard_path)
         .map(|(machine, session, _)| format!("{machine}/{session}"))
         .filter(|id| !already_resolved.contains(id))
+        .collect()
+}
+
+/// The build's source list: one entry per archived session, each carrying either
+/// the fingerprint of the shards its text comes from or the reason the archive
+/// could not describe it.
+///
+/// This collection does not fail. A shard whose metadata says it holds bytes
+/// and yet names no content IDs can be neither fingerprinted nor read, and the
+/// session it belongs to is returned as
+/// [`chat_stasher::fts::SourceDoc::Unreadable`] instead of failing everything
+/// here: one such shard must cost one session, not the whole archive's index
+/// (C1). The build records it by name with its reason.
+fn index_sources(
+    paths_by_id: &BTreeMap<String, Vec<usize>>,
+    entries_all: &[(PathBuf, Node)],
+    titles: &BTreeMap<String, String>,
+) -> Vec<chat_stasher::fts::SourceDoc> {
+    use chat_stasher::fts::SourceDoc;
+    paths_by_id
+        .iter()
+        .map(|(id, indexes)| {
+            let mut shards = Vec::with_capacity(indexes.len());
+            for idx in indexes {
+                let (path, node) = &entries_all[*idx];
+                let data_ids = match node.content.as_deref() {
+                    Some(data_ids) => data_ids
+                        .iter()
+                        .map(|data_id| data_id.to_hex().as_str().to_owned())
+                        .collect(),
+                    None if node.meta.size == 0 => vec!["empty-file".to_owned()],
+                    None => {
+                        // A macro literal, so the output inventory reads the
+                        // sentence printed beside the session.
+                        let reason = anyhow::anyhow!("non-empty archived shard has no content IDs");
+                        return SourceDoc::unreadable(id.clone(), reason.to_string());
+                    }
+                };
+                shards.push((path.to_string_lossy().into_owned(), data_ids));
+            }
+            SourceDoc::fingerprinted(
+                id.clone(),
+                index_source_fingerprint(&shards, titles.get(id).map(String::as_str)),
+            )
+        })
         .collect()
 }
 
@@ -9101,6 +9133,80 @@ mod decision_surface_tests {
         assert_ne!(
             first_hash,
             index_source_fingerprint(&changed, Some("synthetic title"))
+        );
+    }
+
+    /// A file node with `size` bytes and the given content ids. `None` for
+    /// `content` is the malformed shard: metadata that says the shard holds
+    /// bytes while naming nothing that holds them.
+    fn shard(path: &str, size: u64, content: Option<Vec<&str>>) -> (PathBuf, Node) {
+        (
+            PathBuf::from(path),
+            Node {
+                name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+                node_type: NodeType::File,
+                meta: rustic_core::repofile::Metadata {
+                    size,
+                    ..Default::default()
+                },
+                content: content.map(|ids| ids.into_iter().map(id_of).collect()),
+                subtree: None,
+            },
+        )
+    }
+
+    /// A synthetic content id from a short tag: a `DataId` is 32 bytes, so the
+    /// tag is repeated to fill it rather than passed through as-is.
+    fn id_of(tag: &str) -> rustic_core::DataId {
+        tag.repeat(64 / tag.len().max(1))
+            .parse()
+            .expect("a synthetic hex data id")
+    }
+
+    /// One session's shard cannot be described at all — non-empty, with no
+    /// content IDs — and the build must record *that session* and index the
+    /// rest. Aborting the whole source list here is the archive-wide abort this
+    /// case exists to prevent, one level above `Index::build`'s own per-session
+    /// handling (W255 C1's shape).
+    #[test]
+    fn a_shard_with_no_content_ids_does_not_abort_the_source_list() {
+        let entries_all = vec![
+            shard("sessions/m-1/good/000001.jsonl", 12, Some(vec!["ab", "cd"])),
+            shard("sessions/m-1/bad/000001.jsonl", 12, None),
+            shard("sessions/m-1/empty/000001.jsonl", 0, None),
+        ];
+        let titles = BTreeMap::new();
+        let paths_by_id = BTreeMap::from([
+            ("m-1/good".to_owned(), vec![0usize]),
+            ("m-1/bad".to_owned(), vec![1usize]),
+            ("m-1/empty".to_owned(), vec![2usize]),
+        ]);
+        let sources = index_sources(&paths_by_id, &entries_all, &titles);
+        assert_eq!(sources.len(), 3, "every session is still considered");
+        // The one session the archive cannot describe is named, with its reason,
+        // and the other two are fingerprinted as usual: one such shard costs one
+        // session's place in the index, not the whole archive's.
+        let by_id: BTreeMap<&str, &chat_stasher::fts::SourceDoc> =
+            sources.iter().map(|source| (source.id(), source)).collect();
+        match by_id["m-1/bad"] {
+            chat_stasher::fts::SourceDoc::Unreadable { reason, .. } => {
+                assert!(
+                    reason.contains("no content IDs"),
+                    "the reason must name the shard's defect: {reason}"
+                );
+            }
+            other => panic!("a shard with no content IDs must be named unreadable: {other:?}"),
+        }
+        assert!(matches!(
+            by_id["m-1/good"],
+            chat_stasher::fts::SourceDoc::Fingerprinted { .. }
+        ));
+        assert!(
+            matches!(
+                by_id["m-1/empty"],
+                chat_stasher::fts::SourceDoc::Fingerprinted { .. }
+            ),
+            "a zero-length shard is a described shard, not a malformed one"
         );
     }
 

@@ -107,7 +107,7 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <p class=ok>Read in full — every snapshot scanned was readable.</p>
 <p class=sub>index coverage: <b>2</b> of <b>4</b> session(s) in this view indexed · <b>1</b> machine(s) behind: m-2 0/2 · index file written: 2026-02-02 02:40 UTC (the file's mtime, not a recorded build time) · mode: fts (trigram)</p>
 <p class=sub>query: <b>synthetic</b> · mode: fts (trigram) · <b>0</b> result(s) over 0 indexed document(s) the text matched</p>
-<div class=warn><b>UNKNOWN — not "not there".</b> The index covers <b>2</b> of the <b>4</b> session(s) in this view, so <b>2</b> session(s) are <i>not searchable</i>: a session that is not in the index cannot be looked up, which is not the same as looking and not finding it.<ul><li class=mono>m-2: 0 of 2 session(s) in this view indexed</li></ul></div>
+<div class=warn><b>UNKNOWN — not "not there".</b> The index covers <b>2</b> of the <b>4</b> session(s) in this view, so <b>2</b> session(s) are <i>not searchable</i>: a session the index cannot answer for cannot be looked up, which is not the same as looking and not finding it.<ul><li class=mono>m-2: 0 of 2 session(s) in this view indexed</li></ul></div>
 </main>
 <footer>
 <p><b>Index tier.</b> This page was rendered from one archive-metadata read taken before the server started plus the local full-text index. Each hit shows at most about 240 characters of conversation text around the match, taken from that index — not from the archive: the index is a plaintext cache built by <code>chat-stasher index build</code>, and an excerpt's absence proves nothing about the archive, only about the index. This page fetched 0 session shard blob(s).</p>
