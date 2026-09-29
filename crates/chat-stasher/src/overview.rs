@@ -672,7 +672,7 @@ pub fn extension_status_is_stale(reported_at: Option<&str>, now_unix: i64) -> bo
         .is_none_or(|value| now_unix.saturating_sub(value.timestamp()) > 48 * 60 * 60)
 }
 
-/// The private marker `main::read_extension_status` sets on a record read from
+/// The private marker `main::read_overview_indexes` sets on a record read from
 /// the legacy flat `ext-status/<install_id>.json` layout. Kept in step with that
 /// constant by [`normalize_extension_installs`], which is the only reader.
 const LEGACY_STATUS_LAYOUT: &str = "\u{0}legacy-status-layout";

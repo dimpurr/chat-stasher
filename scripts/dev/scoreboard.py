@@ -93,12 +93,15 @@ ANOMALIES rules and their knobs:
                         --verify-days (default 90) days before the run.
   source-stale /        One of the four inputs is missing or unreadable
   source-unavailable    (unavailable), or older than the freshness limit
-                        (stale): a status report or the whole ext-status
-                        source, the overview snapshot's file mtime, or the
-                        newest oracle run, against --stale-hours (default 48,
-                        the same threshold `overview --json` marks a status
-                        record stale with). A status record or a whole source
-                        with no readable timestamp also counts as stale. The
+                        (stale): each install's own status report, whatever
+                        the install's cadence — a silent daily reporter is
+                        named as one, and no cadence exempts a report from
+                        the limit — or the whole ext-status source, the
+                        overview snapshot's file mtime, or the newest oracle
+                        run, against --stale-hours (default 48, the same
+                        threshold `overview --json` marks a status record
+                        stale with). A status record or a whole source with
+                        no readable timestamp also counts as stale. The
                         editorial file's own age is deliberately not judged
                         here: its rows carry per-platform verification dates,
                         and the 90-day rule above is where that age shows up.
@@ -379,7 +382,7 @@ def _read_one_status_record(
     path: str, machine_dir: str | None
 ) -> tuple[InstallRecord | None, RecordProblem | None]:
     """Read one record file. The identity checks mirror the archive reader in
-    the CLI (`main.rs` `read_extension_status`): schema, the file name's
+    the CLI (`main.rs` `read_overview_indexes`): schema, the file name's
     install id, and the machine key. A mismatch is a visible problem, never an
     imagined row."""
     name = os.path.basename(path)
@@ -592,9 +595,17 @@ def read_overview(path: str | None) -> OverviewReading:
     exit_code = parsed.get("exit_code")
     # exit 3 ships overview_error_json: the archive was not read to
     # completion, and nothing below may be read as a measured zero. exit 1 is
-    # a real empty ("read to the end and no index exists anywhere").
+    # a real empty ("read to the end and no index exists anywhere"). exit 2 is
+    # the CLI contract's usage error and is named as one; a missing exit code
+    # is named as missing rather than guessed, in either direction.
     if not isinstance(exit_code, int) or exit_code not in (0, 1):
-        reason = f"did not finish reading (exit {exit_code!r}"
+        if exit_code == 2:
+            lead = "usage error"
+        elif isinstance(exit_code, int):
+            lead = "did not finish reading"
+        else:
+            lead = "no readable exit code"
+        reason = f"{lead} (exit {exit_code!r}"
         kind = parsed.get("error_kind")
         error = parsed.get("error")
         if isinstance(kind, str):
@@ -1050,13 +1061,11 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
         key = (session.machine, session.harness)
         total, unknown, no_content = ev.cell_stats.get(key, (0, 0, 0))
         ev.cell_stats[key] = (total + 1, unknown + (0 if session.known or session.no_content else 1), no_content + (1 if session.no_content else 0))
-    quietest_tool_no_data: list[str] = []
     for tool in args.catalog.local:
         rows = overview.sessions_for_harness(tool.id)
         anchors = [(s.anchor, s.machine) for s in rows if s.known and s.anchor is not None]
         if not anchors:
             ev.tool_newest[tool.id] = None
-            quietest_tool_no_data.append(tool.id)
             continue
         newest = max(anchors, key=lambda pair: pair[0])
         ev.tool_newest[tool.id] = newest
@@ -1099,16 +1108,27 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     ev.sources, source_anomalies = _source_rows(args, ext, overview, oracle, editorial, state, now)
     ev.anomalies.extend(source_anomalies)
 
-    # -- per-install silence (topology: a daily reporter that went quiet) -----
+    # -- per-install report age (a status report past the freshness limit) ----
+    # Any install's report is judged, whatever its cadence: the limit comes
+    # from the freshness contract, not from how often the install promised to
+    # speak. `reported_daily` only names a silent reporter that had built a
+    # daily streak; it never exempts anyone from the limit. A record with no
+    # readable time is stale here too, not only as part of a whole stale
+    # source — a missing measurement is never freshness.
     stale_seconds = args.stale_hours * 3600
     for record in ext.records:
         if record.reported_at is None:
+            ev.anomalies.append(
+                f"source-stale: install “{record.label}” on {record.machine} — report time unreadable, "
+                "counted as stale"
+            )
             continue
         report_age = (now - record.reported_at).total_seconds()
-        if record.reported_daily and report_age > stale_seconds:
+        if report_age > stale_seconds:
+            daily_clause = "; this install used to report daily" if record.reported_daily else ""
             ev.anomalies.append(
                 f"source-stale: install “{record.label}” on {record.machine} — no report for "
-                f"{fmt_age(report_age)} (limit {args.stale_hours:.0f} h; this install used to report daily)"
+                f"{fmt_age(report_age)} (limit {args.stale_hours:.0f} h{daily_clause})"
             )
 
     # -- notes ------------------------------------------------------------------
@@ -1474,9 +1494,13 @@ def render_markdown(
                 markers.append("identity conflict")
             if record.legacy_migration:
                 markers.append("legacy-migrated")
-            if record.reported_at is not None and (now - record.reported_at).total_seconds() > args.stale_hours * 3600:
+            # The same two states the ANOMALIES section judges per install:
+            # past the limit, or no readable time at all. The marker text is
+            # assembled with its leading space outside `esc()` — flattening
+            # whitespace is for field content, and it would eat this space.
+            if record.reported_at is None or (now - record.reported_at).total_seconds() > args.stale_hours * 3600:
                 markers.append("stale")
-            marker_text = f" ({'; '.join(markers)})" if markers else ""
+            marker_text = f" ({esc('; '.join(markers))})" if markers else ""
             reported = when(record.reported_at, now)
             for platform_name in sorted(record.rows):
                 row = record.rows[platform_name]
@@ -1485,7 +1509,7 @@ def render_markdown(
                     "baseline only" if platform_track and platform_track.first_seen and platform_track.last_advanced is None else ABSENT
                 )
                 out.append(
-                    f"| {esc(record.machine)} | {esc(record.short_id)}{esc(marker_text)} | {esc(record.label)} | "
+                    f"| {esc(record.machine)} | {esc(record.short_id)}{marker_text} | {esc(record.label)} | "
                     f"{esc(platform_name)} | {fmt_int(row.captured)} | {fmt_int(row.pending)} | "
                     f"{esc(row.paused_reason) or ABSENT} | {esc(reported)} | {esc(advance)} |"
                 )
@@ -1953,6 +1977,21 @@ def selftest() -> int:
                 [_row(second_platform, 12, 3)], reported_daily=True,
             ),
         )
+        nondaily_silent_dir = os.path.join(tmp, "ext-nondaily-silent")
+        _write_json(
+            os.path.join(nondaily_silent_dir, "machine-a", f"{INSTALL_A}.json"),
+            _status_payload(
+                INSTALL_A, "machine-a", "2026-09-24T17:00:00Z",
+                [_row(first_platform, 12, 3)], reported_daily=False,
+            ),
+        )
+        _write_json(
+            os.path.join(nondaily_silent_dir, "machine-b", f"{INSTALL_B}.json"),
+            _status_payload(
+                INSTALL_B, "machine-b", "2026-09-29T17:00:00Z",
+                [_row(first_platform, 30, 9)], reported_daily=False,
+            ),
+        )
         blank_time_dir = os.path.join(tmp, "ext-blank-time")
         _write_json(
             os.path.join(blank_time_dir, "machine-a", f"{INSTALL_A}.json"),
@@ -2118,6 +2157,12 @@ def selftest() -> int:
         expect(f"verification-stale: {first_platform} — last verified 2026-06-20" in text, "verification-stale fires past the 90-day window")
         expect(f"no-new-capture: {quiet_tool} — newest archived session content is 4.0 d old" in text, "quiet local tool is flagged by content age")
         expect(f"no-new-capture: {first_tool}" not in text, "fresh local tool is not flagged")
+        expect("unknown (no known-time session)" in text, "a tool whose sessions carry no readable time says unknown, not a fabricated age")
+        expect(
+            "no-new-capture (local tools) — sessions exist but none carries a known time, so no age can be read: "
+            f"{second_tool}" in text,
+            "the no-known-time state is named in the not-evaluable list, never silently passed",
+        )
         expect("recall 58/234 = 24.8%" in text, "newest oracle result supplies the platform cell")
         expect("1 older result(s) in the results section" in text, "older oracle results are referenced, not hidden")
         expect("window 2025-01-05 → 2026-06-29" in text, "the export window travels with the recall number")
@@ -2199,10 +2244,35 @@ def selftest() -> int:
             "a silent daily reporter is the topology's own warning sentence",
         )
 
+        # ---------------- case: a non-daily reporter goes silent --------------
+        result = run_cli(base_args(repo_root, nondaily_silent_dir) + ["--no-state"])
+        expect(result.returncode == 0, "the non-daily silent run exits 0")
+        text = result.stdout
+        expect(
+            "source-stale: install “Chrome · Personal” on machine-a — no report for 5.0 d (limit 48 h)"
+            in text,
+            "a report past the limit is stale whatever its install's cadence, and lands in ANOMALIES",
+        )
+        expect(
+            "used to report daily" not in text,
+            "the daily clause is only claimed for an install that said it reports daily",
+        )
+        expect(
+            "source-stale: install “Chrome · Personal” on machine-b" not in text,
+            "a fresh report beside a stale one is never called stale",
+        )
+        expect(f"{INSTALL_A[:8]}… (stale)" in text, "the stale marker keeps its separating space")
+        expect(f"{INSTALL_B[:8]}… (stale)" not in text, "a fresh install carries no stale marker")
+
         # ---------------- case: report time unparseable ----------------------
         result = run_cli(base_args(repo_root, blank_time_dir) + ["--no-state"])
         text = result.stdout
         expect("source-stale: extension status reports — 1 record(s) and none carries a readable time" in text, "a blank report time counts as stale, never as fresh")
+        expect(
+            "source-stale: install “Chrome · Personal” on machine-a — report time unreadable, counted as stale"
+            in text,
+            "the unreadable-time record is judged per install, not only as a whole source",
+        )
         expect("time unreadable" in text, "the per-install row shows the unreadable time")
 
         # ---------------- case: unreadable records stay visible --------------
