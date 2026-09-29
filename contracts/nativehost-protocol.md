@@ -599,6 +599,14 @@ The record also carries `identity_conflict`, and
 `identity_conflict_evidence` when it is true. A record written before this field
 existed has neither, which is *unknown* and not `false`.
 
+**The flag is not the report's own observation.** It is read from the host's
+state and the file renamed over its predecessor under one lock, at the moment of
+the write. A report delayed between recording its sequence and writing its copy
+therefore cannot publish a record that denies a conflict the host already holds:
+what the dashboard shows and what the host refuses captures over cannot disagree
+in that direction. The flag is sticky in the host's state, so this only ever
+adds a conflict to a record, never removes one.
+
 Successful response:
 
 ```json

@@ -2534,16 +2534,18 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
     let dir = stage.join("ext-status");
     let result = (|| -> anyhow::Result<()> {
         // ① EXT-13 · The sequence is recorded in the host's own state database
-        //    **before** the staged file is written, and inside one transaction.
-        //    Two copies reporting at the same moment would otherwise both read
-        //    the same base and the later write would erase the earlier one's
-        //    observation — and the observation erased would be the conflict,
-        //    which is the one direction this must never fail in. The staged
-        //    record is what the dashboard reads; this is what the gates read,
-        //    and deriving one from the other would make the gates depend on a
-        //    file the stage may not be able to accept.
+        //    **before** the staged file is written. Two copies reporting at the
+        //    same moment would otherwise both read the same base and the later
+        //    write would erase the earlier one's observation — and the
+        //    observation erased would be the conflict, which is the one
+        //    direction this must never fail in. The staged record is what the
+        //    dashboard reads; this is what the gates read, and deriving one from
+        //    the other would make the gates depend on a file the stage may not
+        //    be able to accept. What this fold concluded stays in the database:
+        //    the report's own copy is written below, out of what the database
+        //    holds *then*, never out of the snapshot read here.
         let conn = open_state_db()?;
-        let observed = with_immediate(&conn, || {
+        with_immediate(&conn, || {
             record_report_seq(
                 &conn,
                 &machine,
@@ -2553,7 +2555,6 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 chrono::Utc::now().timestamp_millis(),
             )
         })?;
-        let (identity, _observation) = observed;
 
         // ① Status is keyed by `(machine, install_id)`: the machine is the
         //    directory, so a record's own `machine` is not a claim the caller
@@ -2574,12 +2575,6 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
         value["schema"] = serde_json::Value::String("chat-stasher/ext-status@1".into());
         value["daily_report_streak"] = serde_json::Value::from(daily_streak);
         value["reported_daily"] = serde_json::Value::Bool(reported_daily);
-        value["identity_conflict"] = serde_json::Value::Bool(identity.identity_conflict);
-        if identity.identity_conflict {
-            value["identity_conflict_evidence"] = serde_json::Value::String(
-                "two live writers share this install id: one report sequence reached it twice with different nonces".into(),
-            );
-        }
         if migrated_from_legacy {
             value["legacy_migration"] = serde_json::Value::Bool(true);
         }
@@ -2588,12 +2583,7 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
         //    high-water mark here instead would make the file say the record's
         //    sequence is something the record's writer never sent, and the
         //    high-water mark is already the host's business in its own state.
-        let bytes = serde_json::to_vec(&value)?;
-        let mut temp = tempfile::NamedTempFile::new_in(&keyed_dir)?;
-        use std::io::Write as _;
-        temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
-        temp.persist(&target).map_err(|e| e.error)?;
+        publish_status_record(&conn, &machine, install_id, value, &keyed_dir, &target)?;
         Ok(())
     })();
     match result {
@@ -2606,6 +2596,58 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             format!("cannot persist extension status: {e}"),
         ),
     }
+}
+
+/// Publish one staged status record — the copy the dashboard reads — carrying
+/// the conflict flag **as the state database holds it when the file is written**.
+///
+/// ④ The flag is read and the file renamed inside **one** transaction, and the
+/// flag is not the one the report read when it recorded its own sequence. The
+/// two are not the same fact, and the difference is a slow writer: a report can
+/// be delayed between its own record and this write for reasons that have
+/// nothing to do with a copy (a busy disk, a suspended process, a stage on a
+/// network mount), and two copies reporting at once can commit their
+/// observations in one order and write their copies in the other. Reading the
+/// flag from the report's own snapshot is what would let that slower writer
+/// erase the conflict a faster copy had already published — leaving a dashboard
+/// that shows a clean install whose captures the host is refusing.
+///
+/// The lock is what makes the read and the write one step: a conflict committed
+/// after this transaction began cannot be committed *during* it, so a copy can
+/// only publish "no conflict" while no conflict exists, never after one was
+/// published. And the flag is sticky in the database (see `record_report_seq`),
+/// so a report that carries no conflict of its own still publishes the one the
+/// database holds — which is the point, not an accident.
+///
+/// Called after the record commits, so a stage that cannot accept the file takes
+/// the report's copy down without touching what the host learned.
+fn publish_status_record(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    install_id: &str,
+    mut value: serde_json::Value,
+    keyed_dir: &Path,
+    target: &Path,
+) -> anyhow::Result<()> {
+    with_immediate(conn, || {
+        let identity = read_identity_state(conn, machine, install_id)?;
+        value["identity_conflict"] = serde_json::Value::Bool(identity.identity_conflict);
+        if identity.identity_conflict {
+            value["identity_conflict_evidence"] = serde_json::Value::String(
+                "two live writers share this install id: one report sequence reached it twice with different nonces".into(),
+            );
+        }
+        let bytes = serde_json::to_vec(&value)?;
+        // 🔴 Written to a temporary file in the destination directory and renamed
+        //    over the record, so a reader never sees half a record. Ordering two
+        //    writers' renames is the lock's doing, above.
+        let mut temp = tempfile::NamedTempFile::new_in(keyed_dir)?;
+        use std::io::Write as _;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(target).map_err(|e| e.error)?;
+        Ok(())
+    })
 }
 
 /// The previous observation of one install, and whether it came from the legacy
@@ -4648,6 +4690,114 @@ mod tests {
                 CoordinationOutcome::Refused(NackKind::IdentityConflict, _)
             ),
             "a claim may not be granted on a conflict that was already committed when the lock came free"
+        );
+    }
+
+    /// ④ The staged record carries the conflict flag the database holds **when
+    /// the file is written**, not the flag the report read when it recorded its
+    /// own sequence. Those are two different facts, and the gap between them is
+    /// a slow writer: the review's interleaving is a report whose own
+    /// observation is clean, delayed past the collision another copy commits.
+    /// Publishing from the report's own snapshot is what lets that report erase
+    /// the conflict — and the direction it fails in is the bad one, because the
+    /// host is refusing this install's captures while the dashboard it writes
+    /// says the install is fine.
+    ///
+    /// The publisher here waits for the state lock, so nothing in this test
+    /// depends on a race: only a writer that reads the flag *outside* the lock
+    /// can see the state as it was before `copying` began.
+    #[test]
+    fn a_stale_report_cannot_publish_away_a_committed_conflict() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const MACHINE: &str = "w248-machine";
+        const INSTALL: &str = "11111111-1111-4111-8111-111111111111";
+
+        let state = tempfile::tempdir().expect("temp state dir");
+        let stage = tempfile::tempdir().expect("temp stage dir");
+        let keyed = stage.path().join(MACHINE);
+        fs::create_dir_all(&keyed).expect("the machine's record directory");
+        let target = keyed.join(format!("{INSTALL}.json"));
+
+        let reporting = open_state_db_at(state.path()).expect("open the reporting connection");
+        let copying = open_state_db_at(state.path()).expect("open the copying connection");
+
+        // One writer's own report: a sequence nobody else has used, recorded and
+        // committed with no conflict anywhere.
+        with_immediate(&reporting, || {
+            record_report_seq(&reporting, MACHINE, INSTALL, Some(11), Some("stale"), 1)
+        })
+        .expect("the report records its own sequence");
+
+        // The copy allocates the same number under a nonce of its own. Still
+        // uncommitted, so the connection above cannot see it — which is exactly
+        // the position a slower report is in while this commits.
+        copying
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the copy takes the write lock");
+        let (_, observation) =
+            record_report_seq(&copying, MACHINE, INSTALL, Some(11), Some("copy"), 2)
+                .expect("the copy allocates sequence 11 as well");
+        assert_eq!(
+            observation,
+            SeqObservation::Conflict(11),
+            "the fixture must really collide, or the assertion below proves nothing"
+        );
+
+        let value = serde_json::json!({
+            "install_id": INSTALL,
+            "schema": "chat-stasher/ext-status@1",
+        });
+        let (published_at, target_for_publish) = (keyed.clone(), target.clone());
+        let (attempting, waiting) = mpsc::channel();
+        let published: anyhow::Result<()> = std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                attempting.send(()).expect("announce the publish");
+                publish_status_record(
+                    &reporting,
+                    MACHINE,
+                    INSTALL,
+                    value,
+                    &published_at,
+                    &target_for_publish,
+                )
+            });
+            waiting.recv().expect("the publisher announced itself");
+            // A scheduling margin, not a premise. The publisher needs
+            // microseconds to reach the lock and this thread only has to commit;
+            // losing the race would not make the assertion wrong — the conflict
+            // is committed either way, and a publisher that reads it under the
+            // lock publishes it either way — it would only make the test say
+            // less.
+            std::thread::sleep(Duration::from_millis(250));
+            copying
+                .execute_batch("COMMIT")
+                .expect("commit the collision");
+            worker.join().expect("the publisher thread joins")
+        });
+        published.expect("the staged record is written");
+
+        assert!(
+            read_identity_state(&copying, MACHINE, INSTALL)
+                .expect("read the committed state")
+                .identity_conflict,
+            "the fixture must leave a committed conflict behind"
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&target).expect("the staged record exists"))
+                .expect("the staged record is JSON");
+        assert_eq!(
+            record["install_id"], INSTALL,
+            "the published record is the report's own copy: {record}"
+        );
+        assert_eq!(
+            record["identity_conflict"], true,
+            "a report delayed past the collision must not publish a copy that denies it: {record}"
+        );
+        assert!(
+            record.get("identity_conflict_evidence").is_some(),
+            "the record says which observation set the flag: {record}"
         );
     }
 }

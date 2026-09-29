@@ -671,23 +671,23 @@ crates/chat-stasher/src/nativehost.rs:2111-2122  c1d3ca75f622  lines=12
   <- docs-dev/install.md:409, docs-dev/install.md:522  :: // Read-only: existence and kind are both checked, and neit…
 crates/chat-stasher/src/nativehost.rs:2128-2157  0317baf37da8  lines=30
   <- docs-dev/install.md:547, docs-dev/threat-model.md:451  :: /// Unlike every CLI command, the host never *creates* the …
-crates/chat-stasher/src/nativehost.rs:2759-2947  4389fc9d8ec1  lines=189
+crates/chat-stasher/src/nativehost.rs:2801-2989  4389fc9d8ec1  lines=189
   <- docs-dev/privacy.md:298  :: if parsed
-crates/chat-stasher/src/nativehost.rs:2785-2794  74f364fec566  lines=10
+crates/chat-stasher/src/nativehost.rs:2827-2836  74f364fec566  lines=10
   <- docs-dev/threat-model.md:462  :: // Recomputed over the UTF-8 bytes of the *decoded* payload…
-crates/chat-stasher/src/nativehost.rs:2801-2807  a444120e69ed  lines=7
+crates/chat-stasher/src/nativehost.rs:2843-2849  a444120e69ed  lines=7
   <- docs-dev/threat-model.md:466  :: // `invalid-bundle` is the answer for a payload this channe…
-crates/chat-stasher/src/nativehost.rs:2884-2895  a22b84d4a068  lines=12
+crates/chat-stasher/src/nativehost.rs:2926-2937  a22b84d4a068  lines=12
   <- docs-dev/privacy.md:143, docs-dev/threat-model.md:41  :: match inbox::seal_payload(
-crates/chat-stasher/src/nativehost.rs:2958-2960  4bc756fb6043  lines=3
+crates/chat-stasher/src/nativehost.rs:3000-3002  4bc756fb6043  lines=3
   <- docs-dev/install.md:537  :: DeliveryOutcome::SealFailed(inbox::SealError::Lock(e)) => {
-crates/chat-stasher/src/nativehost.rs:2966-2968  48ef311083b1  lines=3
+crates/chat-stasher/src/nativehost.rs:3008-3010  48ef311083b1  lines=3
   <- docs-dev/install.md:537  :: DeliveryOutcome::SealFailed(inbox::SealError::Other(e)) => {
-crates/chat-stasher/src/nativehost.rs:3171  4b5e040ebb0a  lines=1
+crates/chat-stasher/src/nativehost.rs:3213  4b5e040ebb0a  lines=1
   <- docs-dev/install.md:307  :: pub fn scan_stage(stage: &Path) -> StageScan {
-crates/chat-stasher/src/nativehost.rs:3434-3444  7a213899b5c2  lines=11
+crates/chat-stasher/src/nativehost.rs:3476-3486  7a213899b5c2  lines=11
   <- docs-dev/install.md:307  :: fn summary(request_id: Option<String>) -> serde_json::Value…
-crates/chat-stasher/src/nativehost.rs:3819-3853  6e78c5dd7bec  lines=35
+crates/chat-stasher/src/nativehost.rs:3861-3895  6e78c5dd7bec  lines=35
   <- docs-dev/privacy.md:742, docs-dev/threat-model.md:174, docs-dev/threat-model.md:446  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
 crates/chat-stasher/src/orphans.rs:201-232  0c70a9665fc5  lines=32
   <- docs-dev/orphan-packs.md:140  :: let listed = backends
