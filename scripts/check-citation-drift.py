@@ -39,6 +39,7 @@ DOC_FILES = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "docs-dev/install.md",
+    "docs-dev/node-metadata.md",
     "docs-dev/orphan-packs.md",
     "docs-dev/privacy.md",
     "docs-dev/threat-model.md",

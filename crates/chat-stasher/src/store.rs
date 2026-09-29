@@ -31,9 +31,9 @@ use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
 use rustic_core::{
-    BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions, LsOptions,
-    NoProgressBars, ParentOptions, PathList, ProgressBars, Repository, RepositoryBackends,
-    RepositoryOptions, SnapshotOptions,
+    BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions,
+    LocalSourceSaveOptions, LsOptions, NoProgressBars, ParentOptions, PathList, ProgressBars,
+    Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions, TimeOption,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -138,6 +138,12 @@ pub fn assert_stage_writer_audited(writer: StageWriter) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// One field of a node, as the tree's own serialization spells it. An absent
+/// field and a `null` one are different states and are printed differently.
+fn render_json(value: Option<&serde_json::Value>) -> String {
+    value.map_or_else(|| "(absent)".to_string(), serde_json::Value::to_string)
 }
 
 /// Everything BackupStore needs to reach a repository.
@@ -443,11 +449,32 @@ impl BackupStore {
         .context("parse stage root")?
         .sanitize()
         .context("sanitize stage root")?;
-        let build_opts = BackupOptions::default().parent_opts(
-            ParentOptions::default()
-                .ignore_ctime(true)
-                .ignore_inode(true),
-        );
+        // The node metadata policy, in both halves. The parent options say which
+        // fields may differ without a file counting as changed; the save options
+        // say which fields the node stores at all. Both are needed, because a
+        // field the comparison is told to ignore while the node still carries it
+        // leaves the tree's bytes resting on a value this project has declared
+        // irrelevant: Windows reports a file's creation time as `ctime`, and a
+        // directory's times are the times of the writes into it, so neither of
+        // them is content — and a stored value that moves on its own re-serializes
+        // the tree carrying it, and every tree above it, on every push, with
+        // nothing else changed. What makes a directory part of the archive is the
+        // tree it holds, so dropping its times drops nothing the comparison uses,
+        // while a file's mtime — what change detection reads — is untouched.
+        // `docs-dev/node-metadata.md` records both measured cases and why each
+        // field is dropped rather than pinned to the mtime the comparison reads.
+        let build_opts = BackupOptions::default()
+            .ignore_save_opts(
+                LocalSourceSaveOptions::default()
+                    .set_atime(TimeOption::Mtime)
+                    .set_ctime(TimeOption::No)
+                    .set_dir_times(TimeOption::No),
+            )
+            .parent_opts(
+                ParentOptions::default()
+                    .ignore_ctime(true)
+                    .ignore_inode(true),
+            );
         let snap = r
             .backup(&build_opts, &source, snap)
             .context("run rustic backup")?;
@@ -470,6 +497,134 @@ impl BackupStore {
             repo_was_init: init,
             orphans,
         })
+    }
+
+    /// What the newest snapshot for this store's machine stored differently
+    /// from the one before it, node by node and field by field.
+    ///
+    /// A tree is rewritten when the *bytes* of one of its nodes move, and the
+    /// only thing that re-serializes a tree on an untouched stage is a stored
+    /// field that moved on its own. The push summary counts files, so it
+    /// cannot name that field, and a node's bytes come from the serialization
+    /// of every field it has — including ones no counter separates. This
+    /// walks both snapshots through `rustic_core`, and for every node present
+    /// in one and not the other, or whose serialization differs, prints each
+    /// field that changed. Comparing the *serialized* form is deliberate: a
+    /// field this report does not know to look for cannot hide, and the
+    /// `subtree` entry it prints is the child tree id whose change is what
+    /// carried the churn up through the trees above it.
+    ///
+    /// Diagnostics, not a hot path: it decodes every tree of both snapshots.
+    /// `crate::store`'s no-op-push tests call it when a push that uploaded no
+    /// content still added tree bytes, which is the state a platform's
+    /// metadata quirks produce and no other output distinguishes.
+    pub fn node_metadata_diff(&self, mk: &MasterKey) -> anyhow::Result<String> {
+        let (repo, _adoption) = self
+            .open_indexed(mk)
+            .context("open repository for the node metadata diff")?;
+        let mut snaps: Vec<SnapshotFile> = repo
+            .get_all_snapshots()
+            .context("list snapshots for the node metadata diff")?
+            .into_iter()
+            .filter(|snap| snap.hostname == self.machine)
+            .collect();
+        snaps.sort();
+        let (old, new) = match snaps.as_slice() {
+            [.., old, new] => (old.clone(), new.clone()),
+            other => {
+                return Ok(format!(
+                    "node metadata diff: {} snapshot(s) for {} - nothing to compare\n",
+                    other.len(),
+                    self.machine
+                ));
+            }
+        };
+        let old_nodes = self.snapshot_nodes(&repo, &old)?;
+        let new_nodes = self.snapshot_nodes(&repo, &new)?;
+
+        let mut report = format!(
+            "node metadata diff: {} snapshot {} (tree {}) -> snapshot {} (tree {})\n  \
+             nodes: old={} new={}\n",
+            self.machine,
+            old.id,
+            old.tree,
+            new.id,
+            new.tree,
+            old_nodes.len(),
+            new_nodes.len()
+        );
+        let mut changed = 0usize;
+        let mut paths: BTreeSet<&String> = old_nodes.keys().collect();
+        paths.extend(new_nodes.keys());
+        for path in paths {
+            match (old_nodes.get(path), new_nodes.get(path)) {
+                (Some(before), Some(after)) if before == after => {}
+                (Some(before), Some(after)) => {
+                    changed += 1;
+                    report.push_str(&format!("  changed: {path}\n"));
+                    let mut fields: BTreeSet<&String> = before
+                        .as_object()
+                        .map_or_else(BTreeSet::new, |object| object.keys().collect());
+                    if let Some(object) = after.as_object() {
+                        fields.extend(object.keys());
+                    }
+                    for field in fields {
+                        let was = before.get(field);
+                        let now = after.get(field);
+                        if was != now {
+                            report.push_str(&format!(
+                                "    {field}: {} -> {}\n",
+                                render_json(was),
+                                render_json(now)
+                            ));
+                        }
+                    }
+                }
+                (Some(before), None) => {
+                    changed += 1;
+                    report.push_str(&format!(
+                        "  removed: {path} (was {})\n",
+                        render_json(Some(before))
+                    ));
+                }
+                (None, Some(after)) => {
+                    changed += 1;
+                    report.push_str(&format!(
+                        "  added:   {path} (now {})\n",
+                        render_json(Some(after))
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        if changed == 0 {
+            report.push_str("  no node differs; the two snapshots store identical node metadata\n");
+        }
+        Ok(report)
+    }
+
+    /// Every node of one snapshot, keyed by its path inside the snapshot, in
+    /// the serialized form the tree's bytes are built from.
+    fn snapshot_nodes(
+        &self,
+        repo: &Repository<IndexedFullStatus>,
+        snap: &SnapshotFile,
+    ) -> anyhow::Result<BTreeMap<String, serde_json::Value>> {
+        let root = repo
+            .node_from_snapshot_and_path(snap, "")
+            .context("read snapshot root for the node metadata diff")?;
+        let mut nodes = BTreeMap::new();
+        for entry in repo
+            .ls(&root, &LsOptions::default())
+            .context("list snapshot for the node metadata diff")?
+        {
+            let (path, node) = entry.context("read snapshot entry for the node metadata diff")?;
+            nodes.insert(
+                path.to_string_lossy().into_owned(),
+                serde_json::to_value(&node).context("serialize node for the node metadata diff")?,
+            );
+        }
+        Ok(nodes)
     }
 
     /// Find archived inbox `file_sha256` values in repository snapshots.
