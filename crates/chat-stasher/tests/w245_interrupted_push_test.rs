@@ -1100,6 +1100,66 @@ fn dir_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
     files
 }
 
+/// Every index file `before` captured is still there, byte for byte.
+///
+/// What this deliberately does **not** assert is that the index *directory*
+/// gained no file. A push that re-serializes any tree writes a tree pack, and
+/// that pack's index entry is written under the name of the index file's own
+/// content — so a directory-level equality goes red for a tree-byte reason,
+/// with nothing adopted and nothing uploaded, and says nothing about the index
+/// file a push *read*. The tree-byte claim is a separate subject with its own
+/// pin: `w242_interrupted_push_test::a_completed_push_makes_the_next_push_a_no_op`
+/// asserts `data_added == 0` — no tree bytes either — on every platform.
+fn assert_index_files_survive(dir: &Path, before: &[(String, Vec<u8>)], context: &str) {
+    let after = dir_files(dir);
+    for (name, bytes) in before {
+        let found = after
+            .iter()
+            .find(|(found, _)| found == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{context}: the index file {name} is gone; the index directory now holds {}",
+                    after
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+        assert_eq!(
+            &found.1, bytes,
+            "{context}: the index file {name} was rewritten by a push that only reads it"
+        );
+    }
+}
+
+/// The index-file assertion is only worth what it can fail on: a file whose
+/// bytes changed, and a file that is gone. Both are checked here against a real
+/// repository, so the helper cannot go vacuous (comparing nothing, or a list to
+/// itself) without these going red.
+#[test]
+#[should_panic(expected = "was rewritten")]
+fn an_index_file_with_changed_bytes_is_reported() {
+    let sb = Sandbox::opendal_fs(1, 1_000);
+    assert!(sb.push().status.success());
+    let index = dir_files(&sb.repo.join("index"));
+    assert!(!index.is_empty(), "the first push wrote no index file");
+    let mut wrong = index.clone();
+    wrong[0].1.push(0x2e);
+    assert_index_files_survive(&sb.repo.join("index"), &wrong, "changed bytes");
+}
+
+#[test]
+#[should_panic(expected = "is gone")]
+fn an_index_file_that_is_gone_is_reported() {
+    let sb = Sandbox::opendal_fs(1, 1_000);
+    assert!(sb.push().status.success());
+    let index = dir_files(&sb.repo.join("index"));
+    let mut gone = index.clone();
+    gone.push(("not-a-file-the-push-wrote".to_string(), Vec::new()));
+    assert_index_files_survive(&sb.repo.join("index"), &gone, "missing file");
+}
+
 /// A pack another client is still writing, seen from a backend whose listing
 /// shows it: the bytes uploaded so far, at the name the pack will keep.
 ///
@@ -1230,10 +1290,12 @@ fn an_index_file_that_appears_after_the_packs_were_stranded_is_not_double_counte
     for pack in &stranded {
         assert!(pack.exists(), "{} disappeared", pack.display());
     }
-    assert_eq!(
-        dir_files(&sb.repo.join("index")),
-        index,
-        "an index file must not be rewritten by a push that only reads it"
+    // The other client's index file is left as it was: the same name, the same
+    // bytes. See `assert_index_files_survive` for what this must not claim.
+    assert_index_files_survive(
+        &sb.repo.join("index"),
+        &index,
+        "an index file a second client wrote must not be rewritten by a push that only reads it",
     );
     assert_eq!(
         assert_no_mismatched_content(&sb, "after an index file reappeared"),
@@ -1304,10 +1366,10 @@ fn an_index_file_injected_between_the_survey_and_the_adopting_pass_is_not_double
     for pack in &stranded {
         assert!(pack.exists(), "{} disappeared", pack.display());
     }
-    assert_eq!(
-        dir_files(&sb.repo.join("index")),
-        index,
-        "the index file the other client wrote must be left as it was"
+    assert_index_files_survive(
+        &sb.repo.join("index"),
+        &index,
+        "the index file the other client wrote must be left as it was",
     );
     assert_eq!(
         assert_no_mismatched_content(&sb, "after an index file was injected mid-open"),
