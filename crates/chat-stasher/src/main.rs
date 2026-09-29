@@ -4027,11 +4027,22 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
     // destination's sessions by walking snapshot trees, so the difference
     // between this number and `snapshots_in_repo` is the difference between
     // "we looked everywhere" and "we looked at part of it" — which is the
-    // difference between a negative and an unknown.
+    // difference between a negative and an unknown. The shortfall is printed as
+    // its own number because it is the same number the exit code is decided
+    // from, and a reader who sees only "2 of 3" has to do the subtraction to
+    // learn that a snapshot was unreadable at all.
+    let unreadable_snapshots = report
+        .snapshots_in_repo
+        .saturating_sub(report.snapshots_scanned);
     println!(
-        "[search] snapshots scanned: {} of {} in repo{}",
+        "[search] snapshots scanned: {} of {} in repo{}{}",
         report.snapshots_scanned,
         report.snapshots_in_repo,
+        if unreadable_snapshots == 0 {
+            String::new()
+        } else {
+            format!(", {unreadable_snapshots} unreadable")
+        },
         if report.scanned_all_snapshots() {
             ""
         } else {

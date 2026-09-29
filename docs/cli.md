@@ -282,7 +282,7 @@ Finds sessions in **one** destination, always named.
 | `--cost` | Also report what reading the matched sessions in full would cost. |
 | `--json` | One object: matched, not matched, and could-not-be-placed groups. |
 
-Without `--text`, search reads metadata only and never downloads a conversation. It walks **every snapshot** of a machine — not just the newest one — so a session whose local bodies have been reclaimed (`reclaim-stage` deletes them once every destination has proved it holds them) is still found, reported against the snapshot that actually holds it. The run says `snapshots scanned: N of M`; `not in this destination`, exit `1`, is printed only when all M were walked.
+Without `--text`, search reads metadata only and never downloads a conversation. It walks **every snapshot** of a machine — not just the newest one — so a session whose local bodies have been reclaimed (`reclaim-stage` deletes them once every destination has proved it holds them) is still found, reported against the snapshot that actually holds it. The run says `snapshots scanned: N of M`, and names the shortfall when there is one (`2 of 3, 1 unreadable`); a snapshot that could not be walked is a set of sessions that was never looked for, so `not in this destination`, exit `1`, is printed only when all M were walked, and anything less is exit `3` — an unknown, never a negative.
 
 A session whose dates are unknown is listed separately, never dropped. While any remain and a date filter is active, "0 matched" exits `3`, not `1`.
 
@@ -302,7 +302,7 @@ Exit codes: `0` wrote sessions and answered for everything · `1` selected nothi
 
 ### `read`
 
-Prints one session (`--session <id>`) and its SHA-256, without content: the shard list in sequence order, the concatenated length and digest, and — only when you pass `--stage <dir>` — the digest of the shards on your own disk, to compare against. `--stage` is a comparison aid, never a requirement and never the addressing scheme: the session is resolved from the archive by `--machine` and `--session`, out of the newest snapshot that holds its shards. So a session whose local bodies were reclaimed (see `reclaim-stage`) still reads back, and you do not need the archiving machine's stage path to read its conversations.
+Prints one session (`--session <id>`) and its SHA-256, without content: the shard list in sequence order, the concatenated length and digest, and — only when you pass `--stage <dir>` — the digest of the shards on your own disk, to compare against. `--stage` is a comparison aid, never a requirement and never the addressing scheme: the session is resolved from the archive by `--machine` and `--session`, out of the newest snapshot that holds its shards. So a session whose local bodies were reclaimed (see `reclaim-stage`) still reads back, and you do not need the archiving machine's stage path to read its conversations. A snapshot **newer** than the one that holds the copy, which cannot be read, makes the read exit `3` with that snapshot named: an older copy is never returned as the session's current bytes.
 
 `--all-machines` instead reports, across **every snapshot of every machine** cumulatively, each session's id, shard count, length and digest — a session is listed against the newest snapshot that holds it. It reads a lot: unlike `search` it downloads and hashes every shard it lists, so it is a full read of the destination, not a listing.
 

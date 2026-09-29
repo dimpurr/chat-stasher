@@ -810,10 +810,20 @@ impl BackupStore {
     /// the stage once every destination has proved it holds them, and every
     /// snapshot taken afterwards therefore holds the session's directory but no
     /// shards. On m3 that is 3162 of 3178 sessions in the newest snapshot, all
-    /// of them present in older ones. A snapshot that cannot be opened is
-    /// **not** skipped silently — it is carried into the final error, because
-    /// "not in any snapshot I could read" and "not in any snapshot" are
-    /// different answers.
+    /// of them present in older ones.
+    ///
+    /// A snapshot that cannot be walked **stops the walk** — it is not skipped.
+    /// The rule the walk has to keep is not "walk until something holds the
+    /// session" but "a success proves no newer snapshot holds it": the newest
+    /// appearance wins (ADR-021), so the first unreadable snapshot is exactly
+    /// the point past which no older copy can be shown as the current one. An
+    /// older copy returned anyway would be a silent stale read — the caller
+    /// asked for the session's bytes and would get a version a later snapshot
+    /// may have superseded, with nothing said about it. Every such case is
+    /// therefore an `Err` naming the snapshot, which the CLI reports as exit 3
+    /// ("did not finish"), never as a result. The same holds when the walk ends
+    /// without a holder: "not in any snapshot I could read" and "not in any
+    /// snapshot" are different answers, and only the second is a negative.
     ///
     /// Payload tier: this is the one call that fetches and decrypts conversation
     /// bytes. A session no snapshot holds is an `Err`, never an empty result.
@@ -838,15 +848,20 @@ impl BackupStore {
             ));
         };
 
-        let mut unreadable: Vec<String> = Vec::new();
+        // `None` while every snapshot walked so far was readable; `Some(why)` at
+        // the first one that was not. The walk stops there: everything left is
+        // older, and an older copy cannot be shown as the session's current one
+        // while a newer snapshot is unread.
+        let mut unreadable: Option<String> = None;
+        let snapshots_held = host_snaps.len();
         for snap in host_snaps {
             let snap_id = snap.id.to_hex().as_str().to_string();
             let short = &snap_id[..8.min(snap_id.len())];
             let root = match repo.node_from_snapshot_and_path(&snap, "") {
                 Ok(root) => root,
                 Err(e) => {
-                    unreadable.push(format!("snapshot {short} tree root: {e}"));
-                    continue;
+                    unreadable = Some(format!("snapshot {short} tree root: {e}"));
+                    break;
                 }
             };
             let entries = match repo
@@ -855,8 +870,8 @@ impl BackupStore {
             {
                 Ok(entries) => entries,
                 Err(e) => {
-                    unreadable.push(format!("snapshot {short} tree walk: {e}"));
-                    continue;
+                    unreadable = Some(format!("snapshot {short} tree walk: {e}"));
+                    break;
                 }
             };
 
@@ -869,20 +884,20 @@ impl BackupStore {
             return Ok((concat, hashes));
         }
 
-        let could_not_read = if unreadable.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " — and {} snapshot(s) could not be read at all ({}), so this is not a complete \
-                 answer about the destination either",
-                unreadable.len(),
-                unreadable.join("; ")
-            )
-        };
+        if let Some(why) = unreadable {
+            return Err(anyhow!(
+                "session `{}` cannot be resolved for machine `{machine}`: {why}. That snapshot is \
+                 newer than any that holds a copy, so no copy below it can be shown as the current \
+                 one — this is UNKNOWN, not \"not there\". (exit 3: did not finish)",
+                crate::id::short_session_id(session_id),
+            ));
+        }
+        // Reached only when every snapshot of the machine was walked and none
+        // held the session — a proof of absence rather than a failure to look.
         Err(anyhow!(
-            "session `{}` holds no shards in any scanned snapshot for machine `{machine}`{}",
+            "session `{}` holds no shards in any of the {snapshots_held} snapshots of machine \
+             `{machine}` (all of them were read)",
             crate::id::short_session_id(session_id),
-            could_not_read
         ))
     }
 

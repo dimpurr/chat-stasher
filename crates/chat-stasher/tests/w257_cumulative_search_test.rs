@@ -35,7 +35,7 @@ use chat_stasher::selector::Selector;
 use chat_stasher::stagereclaim::{self, NamedStore};
 use chat_stasher::store::{self, BackupStore, StageWriter, StoreConfig};
 use rustic_core::repofile::MasterKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -164,11 +164,56 @@ struct Fixture {
     mk: MasterKey,
     /// What `RECLAIMED` concatenates to, as written before the first push.
     reclaimed_bytes: Vec<u8>,
+    /// What `CONTINUED` concatenates to in snapshot **A** — the older, longer
+    /// copy that a walk reaching past a broken newer snapshot would hand back.
+    continued_old_bytes: Vec<u8>,
     /// What `CONTINUED` concatenates to in snapshot C.
     continued_bytes: Vec<u8>,
 }
 
+/// Every pack file in the repository, as a set of paths. Used to find the packs
+/// a given push added: their blobs are exactly the ones that push introduced.
+fn pack_files(repo: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![repo.join("data")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                out.insert(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out
+}
+
 fn fixture() -> Fixture {
+    fixture_with_a_damaged_newest_snapshot(false)
+}
+
+/// The [`fixture`], with the **newest** snapshot made unreadable: the packs
+/// the last push added are deleted, so its tree cannot be walked while the
+/// older snapshots still read perfectly.
+///
+/// That is the exact shape the HIGH finding is about. Snapshot C holds a
+/// **newer, shorter** copy of `CONTINUED` (and may hold anything at all), and it
+/// is newer than the snapshot that holds the copy a walk would fall back to.
+/// Because C cannot be read, "the session's current bytes" is unknowable — and
+/// the wrong answer, an older copy returned as if it were current, is
+/// indistinguishable from the right one at the call site.
+///
+/// Deleting the packs rather than truncating them is deliberate:
+/// `require_sound_packs` refuses a pack that is present-but-shorter than the
+/// index records, which would fail every read for a reason that is not the one
+/// under test. An *absent* pack is explicitly not that check's question — its
+/// read returns `Err`, so nothing slices anything — and that is the corrupted
+/// state a real interrupted or pruned backend leaves.
+fn fixture_with_a_damaged_newest_snapshot(damage: bool) -> Fixture {
     let dir = tempfile::TempDir::new().unwrap();
     let stage = dir.path().join("stage");
     let cfg = store_config(dir.path(), "repo");
@@ -176,7 +221,7 @@ fn fixture() -> Fixture {
     store::persist_key_file(&cfg, &mk).unwrap();
 
     let reclaimed_bytes = write_session(&stage, RECLAIMED, 2, "reclaimed");
-    let _continued_old = write_session(&stage, CONTINUED, 2, "continued-old");
+    let continued_old_bytes = write_session(&stage, CONTINUED, 2, "continued-old");
     write_activity_index(
         &stage,
         &[RECLAIMED, CONTINUED],
@@ -207,14 +252,31 @@ fn fixture() -> Fixture {
 
     // One session continues. Its sequence keeps going (never back onto the
     // archived names), so snapshot C holds a *newer and shorter* copy.
+    let before_last = pack_files(Path::new(&cfg.repo_root));
     let continued_bytes = write_session(&stage, CONTINUED, 1, "continued-new");
     push(&cfg, &stage, &mk); // snapshot C
+
+    if damage {
+        let added: Vec<String> = pack_files(Path::new(&cfg.repo_root))
+            .into_iter()
+            .filter(|pack| !before_last.contains(pack))
+            .collect();
+        assert!(
+            !added.is_empty(),
+            "the last push must have added a pack; with none there is nothing to damage, and \
+             this fixture would test nothing"
+        );
+        for pack in &added {
+            fs::remove_file(pack).unwrap();
+        }
+    }
 
     Fixture {
         dir,
         cfg,
         mk,
         reclaimed_bytes,
+        continued_old_bytes,
         continued_bytes,
     }
 }
@@ -702,4 +764,395 @@ fn cost_of_walking_every_snapshot_is_measured() {
                 .unwrap()),
         "with no reclaim every session's newest appearance is the same snapshot"
     );
+}
+
+/// The HIGH finding the review of `b4b31fc` raised: a **successful** read must
+/// prove that no newer snapshot holds the session.
+///
+/// The walk resolves a session by its newest appearance (ADR-021), so the
+/// snapshot it falls back to is only the session's current copy while every
+/// newer snapshot has been shown not to hold it. Skipping a snapshot that could
+/// not be walked breaks exactly that: the session is handed back from an older
+/// snapshot as if it were current, with nothing said. This fixture is built so
+/// the difference is observable — snapshot C holds a *newer, shorter* copy of
+/// `CONTINUED`, and its packs are gone, so a walk that skips it returns the
+/// older, longer copy from snapshot A and calls it the answer.
+#[test]
+fn a_read_refuses_an_older_copy_when_a_newer_snapshot_is_unreadable() {
+    let f = fixture_with_a_damaged_newest_snapshot(true);
+
+    // The premise, proven rather than assumed: the older copy really is a
+    // different, longer answer than the one snapshot C holds. Without this, a
+    // stale read would be indistinguishable from a correct one.
+    assert_ne!(
+        f.continued_old_bytes, f.continued_bytes,
+        "the fixture must hold two different copies of the same session, or this test is vacuous"
+    );
+
+    let store = BackupStore::new(f.cfg.clone(), MACHINE.to_string());
+
+    let err = store
+        .read_session_concat(MACHINE, CONTINUED, &f.mk)
+        .expect_err(
+            "a snapshot newer than the one that holds the session could not be read, so the \
+             session's current bytes are unknown — an older copy must never be returned as a \
+             successful read",
+        );
+    let said = err.to_string();
+    println!("[W257] read over a damaged newest snapshot: {said}");
+
+    // It must say UNKNOWN, and it must name what it could not read — an operator
+    // cannot act on "something went wrong".
+    assert!(said.contains("UNKNOWN"), "{said}");
+    assert!(
+        said.contains("tree walk") || said.contains("tree root"),
+        "the failure must name the snapshot it could not walk: {said}"
+    );
+    assert!(
+        said.contains("cannot be resolved for machine"),
+        "the failure must name the machine it is a partial answer for: {said}"
+    );
+    // And specifically: not the stale copy.
+    assert!(
+        !said.contains(&format!("sha256={}", sha256_hex(&f.continued_old_bytes))),
+        "{said}"
+    );
+
+    // The rule is about the *machine's* newer snapshots, not about this one
+    // session: `RECLAIMED` is only in snapshot A, and C is newer than A, so C
+    // could have held a newer copy of it too. The same UNKNOWN applies.
+    let err = store
+        .read_session_concat(MACHINE, RECLAIMED, &f.mk)
+        .expect_err(
+            "a session whose only known copy is older than an unreadable snapshot is not \
+             resolved either — the unreadable one might hold a newer copy",
+        );
+    assert!(err.to_string().contains("UNKNOWN"), "{err}");
+}
+
+/// The same rule for `search`, and the shape the terminal output has to have:
+/// an unreadable snapshot makes the answer incomplete, so a negative can never
+/// be printed.
+#[test]
+fn search_is_incomplete_and_prints_no_negative_over_an_unreadable_snapshot() {
+    let f = fixture_with_a_damaged_newest_snapshot(true);
+    let store = BackupStore::new(f.cfg.clone(), MACHINE.to_string());
+
+    let report = search_sessions(&store, &f.mk, &Selector::default()).unwrap();
+    println!(
+        "[W257] damaged: in_repo={} scanned={} unreadable={:?} answer_complete={}",
+        report.snapshots_in_repo,
+        report.snapshots_scanned,
+        report.unreadable,
+        report.answer_complete()
+    );
+
+    assert_eq!(report.snapshots_in_repo, 3, "A, B and C");
+    assert_eq!(
+        report.snapshots_scanned, 2,
+        "C could not be walked, and the count must not claim it was"
+    );
+    assert_eq!(
+        report.unreadable.len(),
+        1,
+        "the snapshot that could not be walked must be recorded, not swallowed: {:?}",
+        report.unreadable
+    );
+    assert!(
+        report.unreadable[0].contains("snapshot") && report.unreadable[0].contains("tree walk"),
+        "{:?}",
+        report.unreadable
+    );
+
+    // Both halves of "did we look everywhere" are false, and neither may be
+    // mistaken for an answer.
+    assert!(!report.complete(), "a snapshot could not be read");
+    assert!(
+        !report.scanned_all_snapshots(),
+        "2 of 3 snapshots walked is not the whole destination"
+    );
+    assert!(
+        !report.answer_complete(),
+        "nothing may be concluded from a destination half of which was not looked at"
+    );
+
+    // A negative must not be printable, whatever the query.
+    let line = report.no_hit_line();
+    println!("[W257] damaged terminal line:\n    {line}");
+    assert!(line.contains("UNKNOWN"), "{line}");
+    assert!(
+        !line.contains("not in this destination"),
+        "one unreadable snapshot makes every miss unproven:\n{line}"
+    );
+
+    // The hits that were found are still real — the walk stops at the
+    // unreadable snapshot, it does not abandon what it already saw.
+    let continued = report
+        .hits
+        .iter()
+        .find(|h| h.session_id == CONTINUED)
+        .expect("the copy in snapshot A is still readable and must be reported");
+    assert_eq!(
+        continued.shard_count, 2,
+        "the reported copy is A's, the only one that can be read"
+    );
+    assert_eq!(report.hits.len(), 2, "both sessions are still found");
+}
+
+/// The CLI end of the same rule: exit 3, the stale digest never printed, and
+/// the scan line carrying both numbers.
+#[test]
+fn cli_read_and_search_are_unknown_over_an_unreadable_snapshot() {
+    let f = fixture_with_a_damaged_newest_snapshot(true);
+
+    // `read --session` must not succeed with the older copy. Before the fix it
+    // exited 0 and printed A's digest, which is a stale read indistinguishable
+    // from a correct one.
+    let read = isolated_command(f.dir.path())
+        .args(["read", "--repo"])
+        .arg(&f.cfg.repo_root)
+        .args(["--key-file"])
+        .arg(&f.cfg.key_file)
+        .args(["--machine", MACHINE, "--session", CONTINUED])
+        .output()
+        .unwrap();
+    let read_out = String::from_utf8_lossy(&read.stdout).into_owned();
+    let read_err = String::from_utf8_lossy(&read.stderr).into_owned();
+    println!(
+        "[W257] read over a damaged newest snapshot: exit={:?}",
+        read.status.code()
+    );
+    assert_eq!(
+        read.status.code(),
+        Some(3),
+        "an unreadable newer snapshot is \"did not finish\", not a result:\n{read_out}\n{read_err}"
+    );
+    assert!(
+        !read_out.contains(&format!("sha256={}", sha256_hex(&f.continued_old_bytes))),
+        "the older copy must never be printed as the session's bytes:\n{read_out}"
+    );
+    assert!(
+        read_err.contains("UNKNOWN"),
+        "the reason must reach stderr, where a failed run's diagnostics go:\n{read_err}"
+    );
+
+    // A session that is nowhere: still no negative, because C was not read.
+    let absent = isolated_command(f.dir.path())
+        .args(["search", "--repo"])
+        .arg(&f.cfg.repo_root)
+        .args(["--key-file"])
+        .arg(&f.cfg.key_file)
+        .args(["--session", "zzzz-no-such-session"])
+        .output()
+        .unwrap();
+    let absent_out = String::from_utf8_lossy(&absent.stdout).into_owned();
+    println!(
+        "[W257] absent over a damaged snapshot -> exit={:?}",
+        absent.status.code()
+    );
+    assert_eq!(
+        absent.status.code(),
+        Some(3),
+        "a miss over a destination that was not read in full is not a negative:\n{absent_out}"
+    );
+    assert!(
+        !absent_out.contains("not in this destination"),
+        "the negative line must be unreachable while a snapshot is unreadable:\n{absent_out}"
+    );
+    assert!(
+        absent_out.contains("snapshots scanned: 2 of 3 in repo, 1 unreadable"),
+        "the scan line must carry the unreadable count, not just the fraction:\n{absent_out}"
+    );
+
+    // And the same two numbers on the machine-readable surface.
+    let json = isolated_command(f.dir.path())
+        .args(["search", "--repo"])
+        .arg(&f.cfg.repo_root)
+        .args(["--key-file"])
+        .arg(&f.cfg.key_file)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&json.stdout))
+        .expect("stdout must stay exactly one JSON object");
+    assert_eq!(json.status.code(), Some(3), "{parsed}");
+    assert_eq!(parsed["snapshots_scanned"], 2);
+    assert_eq!(parsed["snapshots_in_repo"], 3);
+    assert_eq!(parsed["snapshots_all_scanned"], false);
+    assert_eq!(parsed["complete"], false);
+    assert_eq!(parsed["answer_complete"], false);
+    assert_eq!(
+        parsed["unreadable_parts"].as_array().unwrap().len(),
+        1,
+        "{parsed}"
+    );
+}
+
+/// The figure the review of `b4b31fc` asked for, at the scale the archive
+/// actually has: what `search` and `read --session` cost over **400+ snapshots**.
+///
+/// The check in the shipped suite (`cost_of_walking_every_snapshot_is_measured`)
+/// walks 24 snapshots and fits a slope from it. That is the right shape for a
+/// gate and the wrong shape for the question "is this acceptable on the real
+/// archive", which has 417 snapshots on the busiest machine. This builds the
+/// same shape at 417 and reports the numbers directly.
+///
+/// `#[ignore]`d because building 417 snapshots is minutes of work: it is a
+/// measurement, not a gate. Run it explicitly:
+///
+/// ```text
+/// cargo test -p chat-stasher --test w257_cumulative_search_test -- --ignored --nocapture field_scale
+/// ```
+///
+/// **Bytes** are reported from the two sources that can be stated exactly:
+/// the counters the search itself reports (`data_blobs_read`,
+/// `index_files_read`), and the on-disk size of the tiers a search fetches as
+/// whole files (`snapshots/`, `index/`). Tree blobs travel *inside* the data
+/// packs, so their byte volume is not separable from the pack that carries
+/// them — what is separable, and what the whole change turns on, is that no
+/// conversation body is fetched at all.
+#[test]
+#[ignore = "manual wall-clock measurement; builds 417 snapshots"]
+fn field_scale_cost_of_search_and_read_over_four_hundred_snapshots() {
+    /// The field archive's own count (`mac`, W253 §B).
+    const SNAPSHOTS: usize = 417;
+    /// Enough sessions that the per-session term is visible, without making the
+    /// build an hour long. The field machine indexes 3178.
+    const SESSIONS: usize = 40;
+
+    fn dir_bytes(dir: &Path) -> u64 {
+        let mut total = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(meta) = path.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let stage = dir.path().join("stage");
+    let cfg = cached_store_config(dir.path(), "repo");
+    let mk = MasterKey::new();
+    store::persist_key_file(&cfg, &mk).unwrap();
+
+    let sessions: Vec<String> = (0..SESSIONS)
+        .map(|i| format!("claude-code.{MACHINE}.00000000-0000-0000-0000-{i:012}"))
+        .collect();
+    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+
+    // One push per "run", each rewriting the activity index the way a real run
+    // does, so every snapshot's tree really is a different tree.
+    let mut payload_bytes = 0u64;
+    let mut session_bytes: Vec<u64> = Vec::with_capacity(SESSIONS);
+    for (i, session) in sessions.iter().enumerate() {
+        let written = write_session(&stage, session, 1, &format!("field-{i}")).len() as u64;
+        payload_bytes += written;
+        session_bytes.push(written);
+    }
+    let started = std::time::Instant::now();
+    for run in 0..SNAPSHOTS {
+        write_activity_index(
+            &stage,
+            &names,
+            1_700_000_000 + (run as i64) * 86_400,
+            1_700_000_600 + (run as i64) * 86_400,
+        );
+        push(&cfg, &stage, &mk);
+    }
+    let build_ms = started.elapsed().as_millis();
+
+    let repo = Path::new(&cfg.repo_root).to_path_buf();
+    let snapshots_bytes = dir_bytes(&repo.join("snapshots"));
+    let index_bytes = dir_bytes(&repo.join("index"));
+    let data_bytes = dir_bytes(&repo.join("data"));
+
+    let store = BackupStore::new(cfg.clone(), MACHINE.to_string());
+
+    // Cold: no metadata cache is populated for this repository yet in this
+    // process. Warm: the second call, which is what a repeated run sees.
+    let cold_store = BackupStore::new(store_config(dir.path(), "repo"), MACHINE.to_string());
+    let started = std::time::Instant::now();
+    let cold = search_sessions(&cold_store, &mk, &Selector::default()).unwrap();
+    let cold_ms = started.elapsed().as_millis();
+
+    let _ = search_sessions(&store, &mk, &Selector::default()).unwrap();
+    let started = std::time::Instant::now();
+    let warm = search_sessions(&store, &mk, &Selector::default()).unwrap();
+    let warm_ms = started.elapsed().as_millis();
+
+    // The same repository with a single snapshot, to separate the walk's
+    // per-snapshot cost from everything else a search pays once.
+    let solo_root = dir.path().join("solo");
+    let solo_cfg = cached_store_config(&solo_root, "repo");
+    store::persist_key_file(&solo_cfg, &mk).unwrap();
+    let solo_stage = solo_root.join("stage");
+    for (i, session) in sessions.iter().enumerate() {
+        write_session(&solo_stage, session, 1, &format!("field-{i}"));
+    }
+    write_activity_index(&solo_stage, &names, 1_700_000_000, 1_700_000_600);
+    push(&solo_cfg, &solo_stage, &mk);
+    let solo_store = BackupStore::new(solo_cfg, MACHINE.to_string());
+    let _ = search_sessions(&solo_store, &mk, &Selector::default()).unwrap();
+    let started = std::time::Instant::now();
+    let solo = search_sessions(&solo_store, &mk, &Selector::default()).unwrap();
+    let solo_ms = started.elapsed().as_millis();
+
+    // One session read back out of the 417-snapshot repository.
+    let target = &sessions[0];
+    let started = std::time::Instant::now();
+    let (bytes, hashes) = store.read_session_concat(MACHINE, target, &mk).unwrap();
+    let read_ms = started.elapsed().as_millis();
+
+    println!(
+        "[W257] FIELD SCALE: snapshots={SNAPSHOTS} sessions={SESSIONS} \
+         (build {build_ms}ms)\n\
+         [W257]   search, no cache   = {cold_ms}ms\n\
+         [W257]   search, warm cache = {warm_ms}ms\n\
+         [W257]   search, 1 snapshot = {solo_ms}ms  -> marginal \
+         {:.2}ms/snapshot\n\
+         [W257]   read --session     = {read_ms}ms for {} B in {} shard(s)\n\
+         [W257]   payload: data_blobs_read={} (cold) / {} (warm) / {} (solo), \
+         index_files_read={} / {} / {}\n\
+         [W257]   bytes on disk: snapshots={snapshots_bytes} B, index={index_bytes} B, \
+         data packs={data_bytes} B; one session's payload={payload_bytes} B",
+        warm_ms.saturating_sub(solo_ms) as f64 / (SNAPSHOTS - 1) as f64,
+        bytes.len(),
+        hashes.len(),
+        cold.data_blobs_read,
+        warm.data_blobs_read,
+        solo.data_blobs_read,
+        cold.index_files_read,
+        warm.index_files_read,
+        solo.index_files_read,
+    );
+
+    // The properties, as opposed to the timings: a 417-snapshot search must
+    // still walk every snapshot, read no conversation body, and read the
+    // activity index once.
+    assert_eq!(cold.snapshots_in_repo, SNAPSHOTS);
+    assert_eq!(cold.snapshots_scanned, SNAPSHOTS);
+    assert_eq!(cold.hits.len(), SESSIONS);
+    assert_eq!(cold.sessions_seen, SESSIONS);
+    assert_eq!(
+        cold.data_blobs_read, 0,
+        "no conversation body may be fetched"
+    );
+    assert_eq!(cold.index_files_read, 1);
+    assert_eq!(warm.data_blobs_read, 0);
+    assert_eq!(
+        bytes.len() as u64,
+        session_bytes[0],
+        "the read must hand back exactly the shard the session was written with"
+    );
+    assert_eq!(hashes.len(), 1);
 }
