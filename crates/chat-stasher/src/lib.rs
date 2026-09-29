@@ -26,6 +26,7 @@ pub mod normalize;
 pub mod overview;
 pub mod push_progress;
 pub mod readback;
+pub mod reader_guard;
 pub mod reap;
 pub mod remote_err;
 pub mod runstate;

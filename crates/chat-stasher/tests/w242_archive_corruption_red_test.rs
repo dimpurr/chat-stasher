@@ -1,6 +1,6 @@
-//! W242 item 3 — RED. Two ways the reader fails the exit-code contract when a
-//! stored **metadata** pack is truncated, which is exactly the half-written
-//! object ADR-016 Decision 4 narrowed its risk to.
+//! W242 item 3 — the reader's exit-code contract over a **truncated pack**,
+//! which is exactly the half-written object ADR-016 Decision 4 narrowed its
+//! risk to.
 //!
 //! The contract these tests assert is the project's own (CLAUDE.md invariant 2,
 //! and `verify`'s documented exit codes): an archive that could not be read
@@ -9,26 +9,37 @@
 //! hang are neither: the first looks like a broken tool, the second looks like
 //! a stuck one, and neither tells the user that the archive is unreadable.
 //!
-//! Both tests are `#[ignore]`d because both fail today. That is deliberate —
-//! they are the RED half of "write a test that pins the safe behaviour, or a
-//! RED test plus a fix if it is unsafe", and the fix is not ours to make: the
-//! panic and the stall are inside the pinned `rustic_core` /`rustic_backend`
-//! reader, reached through its metadata cache. They are kept as executable
-//! documentation of the defect and can be run with
-//! `cargo test -p chat-stasher --test w242_archive_corruption_red_test -- --ignored`.
-//!
-//! Measured 2026-09-29, on a repository holding one 20 KB session, with the
-//! default configuration (metadata cache enabled) and a **cold** cache:
+//! W242 wrote the first two as RED against the then-unfixed tree. Measured
+//! 2026-09-29, on a repository holding one 20 KB session, with the default
+//! configuration (metadata cache enabled) and a **cold** cache:
 //!
 //! * `read --all-machines` → exit **101**, a Rust panic:
-//!   `bytes-1.12.1/src/bytes.rs:374: range end out of bounds: 3139 <= 1833`.
-//! * `verify --level all` → did not finish within 300 s. On a repository whose
-//!   whole payload is 20 KB.
+//!   `bytes-1.12.1/src/bytes.rs:374: range end out of bounds: 3139 <= 1833`,
+//!   raised at `rustic_core-0.12.0/src/backend/cache.rs:165` — the cache reads
+//!   a cacheable blob (a tree) by reading the whole file and then slicing it to
+//!   the range the index recorded, without checking the file is that long.
+//! * `verify --level all` → did not finish within 300 s, on a repository whose
+//!   whole payload is 20 KB. The panic above happens on one of
+//!   `TreeStreamerOnce`'s detached workers, which dies without sending and
+//!   without closing its channel, so the consumer blocks in `recv()` forever.
 //!
-//! Both are specific to the cache path. With `rustic_no_cache = true` the same
-//! corruption is reported correctly: `read` exits 3. The green sibling file
-//! (`w242_archive_integrity_test.rs`) runs with the cache off for that reason,
-//! and its assertions are about the archive's contents, not about this defect.
+//! Both are green now, and not because the tests were weakened: the reader
+//! refuses a truncated archive *before* reading it
+//! (`chat_stasher::reader_guard::require_sound_packs` asks the index whether
+//! any pack it references is shorter than it records — a *missing* pack is a
+//! different failure that `rustic`'s own check reports cleanly, and is
+//! deliberately left to it), and a panic that gets through anyway is reported
+//! as "did not finish reading" instead of crashing or wedging. `W244-OUT.md`
+//! has the full account.
+//!
+//! W242 also measured that the corruption is **invisible** while the metadata
+//! cache is warm: `read` hands the session back from a cached copy of the
+//! metadata pack. `the_refusal_does_not_depend_on_a_cold_cache` pins that the
+//! refusal is not cache-dependent either, since a user's second run has a warm
+//! cache by definition.
+//!
+//! The green sibling file (`w242_archive_integrity_test.rs`) runs with the
+//! cache off; its assertions are about the archive's contents, not this defect.
 
 use chat_stasher::store::{BackupStore, StoreConfig};
 use rustic_core::repofile::MasterKey;
@@ -126,6 +137,38 @@ impl Fixture {
         assert!(truncated > 0, "the fixture wrote no packs to truncate");
     }
 
+    /// Truncate only the **metadata** pack, leaving the data pack whole.
+    ///
+    /// The fixture's content is deliberately compressible, which is what makes
+    /// the tree pack the large one (the fixture's own doc says this is the pack
+    /// layout it is about), so the largest pack is the metadata pack. The
+    /// premise is asserted rather than assumed: if a future content change
+    /// flips the order this fails here, instead of silently testing something
+    /// else.
+    fn truncate_metadata_pack_only(&self) {
+        let paths = pack_paths(&self.repo());
+        assert!(
+            paths.len() >= 2,
+            "the fixture wrote {} pack(s); this test needs a metadata pack and a data pack",
+            paths.len()
+        );
+        let mut by_size: Vec<(u64, PathBuf)> = paths
+            .into_iter()
+            .map(|p| (p.metadata().unwrap().len(), p))
+            .collect();
+        by_size.sort();
+        let (big, metadata) = by_size.pop().unwrap();
+        let (second, _) = by_size.pop().unwrap();
+        assert!(
+            big > second * 2,
+            "the metadata pack ({big} bytes) must dominate the data pack ({second} bytes) for \
+             this test's premise to hold; the fixture's content is no longer compressible enough"
+        );
+        let bytes = fs::read(&metadata).unwrap();
+        let keep = bytes.len() / 2;
+        fs::write(&metadata, &bytes[..keep]).unwrap();
+    }
+
     /// The real binary, with every ambient path redirected into the fixture and
     /// **no** cache configuration: the default a user gets.
     fn cli(&self) -> Command {
@@ -186,11 +229,9 @@ impl Fixture {
 }
 
 /// `read` must report "did not finish reading", not crash.
+///
+/// RED in W242 (exit 101, the `Bytes::slice` panic), green since W244.
 #[test]
-#[ignore = "RED 2026-09-29: with the default metadata cache and a cold cache, a truncated \
-            pack makes `read` panic (exit 101) instead of exiting 3 — the measurements are \
-            in this file's module doc, and `w242_archive_integrity_test.rs` is the green \
-            control with the cache off"]
 fn read_over_a_truncated_pack_must_exit_3_not_panic() {
     let fx = Fixture::new();
     fx.truncate_every_pack();
@@ -203,10 +244,9 @@ fn read_over_a_truncated_pack_must_exit_3_not_panic() {
 }
 
 /// `verify` exists to find exactly this. It must report it, not stall.
+///
+/// RED in W242 (no exit within the limit), green since W244.
 #[test]
-#[ignore = "RED 2026-09-29: with the default metadata cache and a cold cache, `verify` over a \
-            truncated pack does not finish (measured: >300 s on a 20 KB payload) — the \
-            measurements are in this file's module doc"]
 fn verify_over_a_truncated_pack_must_exit_3_not_stall() {
     let fx = Fixture::new();
     fx.truncate_every_pack();
@@ -228,10 +268,14 @@ fn verify_over_a_truncated_pack_must_exit_3_not_stall() {
     );
 }
 
-/// The control: with the cache off, the same corruption is reported correctly.
-/// This is what makes the two RED tests above attributable to the cache path
-/// rather than to truncation in general, and it is why the green sibling file
-/// runs with `rustic_no_cache = true`.
+/// The control: the refusal is not an artefact of the cache being enabled.
+///
+/// Against the unfixed tree this test was what attributed the two RED tests to
+/// the cache path — with `rustic_no_cache = true` the same corruption was
+/// already reported correctly (exit 3) while the cached reader crashed. Now it
+/// pins the property that attribution depended on: turning the cache off must
+/// change nothing, because a reader whose answer depends on a cache setting is
+/// a reader whose answer depends on the machine.
 #[test]
 fn with_the_cache_off_a_truncated_pack_exits_3() {
     let fx = Fixture::new();
@@ -269,8 +313,43 @@ fn the_fixture_really_truncates_its_repository() {
     }
 }
 
+/// The refusal must not depend on the cache being cold.
+///
+/// A second run has a warm metadata cache by definition, and W242 measured that
+/// a warm cache makes a truncated **metadata** pack invisible to the unfixed
+/// reader: the pack is served from the cache, so `read` hands the session back
+/// as if the archive were intact. The audit asks the backend for the real pack
+/// sizes, so it sees the truncation whether or not a cache is in the way.
+#[test]
+fn the_refusal_does_not_depend_on_a_cold_cache() {
+    let fx = Fixture::new();
+    // Reading the intact fixture once fills the metadata cache, which is the
+    // configuration this test is about.
+    assert_eq!(
+        fx.run_bounded(&["read", "--all-machines"]),
+        Some(0),
+        "the intact fixture must read cleanly before it is corrupted"
+    );
+    fx.truncate_metadata_pack_only();
+    assert_eq!(
+        fx.run_bounded(&["read", "--all-machines"]),
+        Some(EXIT_DID_NOT_FINISH),
+        "a truncated metadata pack must be refused even when the cache still holds \
+         a good copy of it"
+    );
+}
+
 fn pack_sizes(repo: &Path) -> Vec<u64> {
-    let mut sizes = Vec::new();
+    let mut sizes: Vec<u64> = pack_paths(repo)
+        .iter()
+        .map(|p| p.metadata().unwrap().len())
+        .collect();
+    sizes.sort();
+    sizes
+}
+
+fn pack_paths(repo: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
     let mut stack = vec![repo.join("data")];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -281,10 +360,10 @@ fn pack_sizes(repo: &Path) -> Vec<u64> {
             if path.is_dir() {
                 stack.push(path);
             } else {
-                sizes.push(path.metadata().unwrap().len());
+                paths.push(path);
             }
         }
     }
-    sizes.sort();
-    sizes
+    paths.sort();
+    paths
 }

@@ -7282,7 +7282,9 @@ fn cmd_read(
                 "ON"
             }
         );
-        let (bytez, hashes) = match store.read_session_readback(stage, session, &mk) {
+        let (bytez, hashes) = match chat_stasher::reader_guard::catching_panic("read", || {
+            store.read_session_readback(stage, session, &mk)
+        }) {
             Ok(v) => v,
             Err(e) => {
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
@@ -7827,16 +7829,17 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
 fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
     println!("[read] mode           : all-machines (newest snapshot per hostname)");
     println!("[read] repo           : {}", store.cfg.repo_root);
-    let report = match store.read_all_machines(mk) {
-        Ok(r) => r,
-        Err(e) => {
-            chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
-            // Deliberately 3, not 1. `read_all_machines` failed before it
-            // produced a complete archive report, so the archive was not read
-            // to completion; 1 is for a completed read whose result failed.
-            return ExitCode::from(3);
-        }
-    };
+    let report =
+        match chat_stasher::reader_guard::catching_panic("read", || store.read_all_machines(mk)) {
+            Ok(r) => r,
+            Err(e) => {
+                chat_stasher::remote_err::eprint_remote_error("read", &e, &store.cfg);
+                // Deliberately 3, not 1. `read_all_machines` failed before it
+                // produced a complete archive report, so the archive was not read
+                // to completion; 1 is for a completed read whose result failed.
+                return ExitCode::from(3);
+            }
+        };
     println!(
         "[read] snapshots read : {} (get_all_snapshots lists every snapshot file)",
         report.snapshots_in_repo
@@ -8013,7 +8016,7 @@ fn run_check(
     failed: &mut usize,
     unreadable: &mut usize,
 ) {
-    match store.check_repo(mk, data) {
+    match chat_stasher::reader_guard::catching_panic("verify", || store.check_repo(mk, data)) {
         Ok(summary) => {
             print_check_summary(&summary, name);
             if !summary.ok() {
@@ -8058,7 +8061,14 @@ fn run_reconcile(
     failed: &mut usize,
     unreadable: &mut usize,
 ) {
-    match store.reconcile_manifest(mk, stage) {
+    // `catching_panic` is not a timeout: it converts a rustic panic into the
+    // same `Err` this match already treats as unreadable (exit 3), and turns a
+    // panic on a rustic worker thread into that exit code as well — which is the
+    // only thing that can, because such a panic leaves this thread blocked on a
+    // channel forever. See `reader_guard`'s module docs.
+    match chat_stasher::reader_guard::catching_panic("verify", || {
+        store.reconcile_manifest(mk, stage)
+    }) {
         Ok(report) => {
             print_reconcile(&report, full_ids);
             if !report.ok() {
