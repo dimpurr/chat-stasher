@@ -1518,7 +1518,7 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
             }
         }
     };
-    let repo = match repo.open(&Credentials::Masterkey(mk)) {
+    let repo = match repo.open(&Credentials::Masterkey(mk.clone())) {
         Ok(r) => r,
         Err(e) => {
             return ReclaimCheck::OpenFailed {
@@ -1527,8 +1527,8 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
             }
         }
     };
-    let repo = match repo.to_indexed() {
-        Ok(r) => r,
+    let repo = match crate::orphans::index_adopting(repo, &cfg, &backends, &mk) {
+        Ok((r, _adoption)) => r,
         Err(e) => {
             return ReclaimCheck::OpenFailed {
                 repo_root: repo_root.clone(),

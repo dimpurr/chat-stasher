@@ -23,6 +23,7 @@ pub mod metahash;
 pub mod models;
 pub mod nativehost;
 pub mod normalize;
+pub mod orphans;
 pub mod overview;
 pub mod push_progress;
 pub mod readback;

@@ -67,7 +67,7 @@
 use anyhow::Context;
 use chrono::{Duration as ChronoDuration, NaiveDate};
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, LsOptions, Repository};
+use rustic_core::LsOptions;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::activity::{
@@ -895,11 +895,8 @@ pub fn search_sessions(
     selector: &Selector,
 ) -> anyhow::Result<SearchReport> {
     let backends = store.backends()?;
-    let repo = Repository::new(&store.cfg.repository_options(), &backends)?
-        .open(&Credentials::Masterkey(mk.clone()))
-        .context("open repository for search")?
-        .to_indexed()
-        .context("index repository for search")?;
+    let (repo, _adoption) = crate::orphans::open_adopting(&store.cfg, &backends, mk)
+        .context("open repository for search")?;
 
     let snaps = repo
         .get_all_snapshots()

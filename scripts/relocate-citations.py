@@ -77,8 +77,9 @@ thing about a citation that the merge is allowed to change.
 
 **Which documents this rewrites** is not a list kept here: it is exactly
 `drift.doc_files()`, the scan set of scripts/check-citation-drift.py — README.md,
-SECURITY.md, CONTRIBUTING.md, docs-dev/install.md, docs-dev/privacy.md,
-docs-dev/threat-model.md and every contracts/*.md. SECURITY.md, CONTRIBUTING.md and
+SECURITY.md, CONTRIBUTING.md, docs-dev/install.md, docs-dev/orphan-packs.md,
+docs-dev/privacy.md, docs-dev/threat-model.md and every contracts/*.md.
+SECURITY.md, CONTRIBUTING.md and
 contracts/*.md are in that set deliberately: a citation left stale in one of
 them is the same stale anchor as one left stale in README.md, and they are the
 documents the drift check will fail on next. Source files, and

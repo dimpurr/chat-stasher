@@ -37,7 +37,7 @@
 
 use anyhow::Context;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
-use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
+use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -167,11 +167,8 @@ impl BackupStore {
     /// marker ([`crate::sidecar::writer_machine`]) — never by a local path.
     pub fn read_archived_writers(&self, mk: &MasterKey) -> anyhow::Result<ArchivedWriters> {
         let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for writer versions")?
-            .to_indexed()
-            .context("index repository for writer versions")?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for writer versions")?;
         self.require_sound_packs(&repo)?;
         let mut out = ArchivedWriters::default();
         for snapshot in newest_snapshot_per_host(repo.get_all_snapshots()?) {
@@ -206,11 +203,8 @@ impl BackupStore {
     /// Used by `stagereclaim` to prove candidates that are still currently on stage.
     pub fn read_latest_per_machine(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for read-all")?
-            .to_indexed()
-            .context("index repository for read-all")?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for read-all")?;
         self.require_sound_packs(&repo)?;
 
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
@@ -312,11 +306,8 @@ impl BackupStore {
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for read-all")?
-            .to_indexed()
-            .context("index repository for read-all")?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for read-all")?;
         self.require_sound_packs(&repo)?;
 
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
@@ -486,11 +477,8 @@ impl BackupStore {
             return Ok(out);
         }
         let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for shard restore")?
-            .to_indexed()
-            .context("index repository for shard restore")?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for shard restore")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         for snap in newest_snapshot_per_host(snaps) {

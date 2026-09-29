@@ -215,6 +215,10 @@ pub struct PushSummary {
     pub snapshots_in_repo: usize,
     pub snapshot_host: String,
     pub repo_was_init: bool,
+    /// Packs the backend held that no index file named, and what this push's
+    /// open did about them. `None` means the repository was created by this
+    /// push (a fresh repository has no packs at all).
+    pub orphans: Option<crate::orphans::OrphanOutcome>,
 }
 
 /// BackupStore: owns repository open/init, push, and read-back.
@@ -345,27 +349,52 @@ impl BackupStore {
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
         self.open_or_init_with_progress(mk, NoProgressBars {})
+            .map(|(r, init, _)| (r, init))
+    }
+
+    /// Open an existing repository and build its index, reaching the packs no
+    /// index file names (see [`crate::orphans`]).
+    ///
+    /// Every read path goes through here. For a repository whose index and
+    /// backend agree — every healthy one — this is the plain `to_indexed()` open
+    /// and nothing else. It differs only when the backend holds a pack no index
+    /// file names, which is the state a killed push leaves behind: then the
+    /// index is rebuilt with those packs reachable, which is what lets a read of
+    /// a snapshot written after such a push resolve its content at all. The
+    /// second element is what that open did, for callers that report it — a
+    /// refusal is a real state, not a detail.
+    pub fn open_indexed(
+        &self,
+        mk: &MasterKey,
+    ) -> anyhow::Result<(Repository<IndexedFullStatus>, crate::orphans::OrphanOutcome)> {
+        let backends = self.backends()?;
+        crate::orphans::open_adopting(&self.cfg, &backends, mk)
     }
 
     /// Like [`BackupStore::open_or_init`], but the freshly created repository
     /// carries a caller-supplied [`ProgressBars`] so a `push` can observe the
     /// backup as it runs. All other call sites keep the silent
     /// `NoProgressBars` default.
+    ///
+    /// The third element is what the open found out about packs the index files
+    /// do not name, and what it did about them; a repository this call creates
+    /// has none, and reports `None`.
     fn open_or_init_with_progress<P: ProgressBars>(
         &self,
         mk: &MasterKey,
         pb: P,
-    ) -> anyhow::Result<(Repository<IndexedFullStatus>, bool)> {
+    ) -> anyhow::Result<(
+        Repository<IndexedFullStatus>,
+        bool,
+        Option<crate::orphans::OrphanOutcome>,
+    )> {
         let backends = self.backends()?;
         let repo = Repository::new_with_progress(&self.cfg.repository_options(), &backends, pb)?;
         let creds = Credentials::Masterkey(mk.clone());
         if self.repo_exists(&backends)? {
-            let r = repo
-                .open(&creds)
-                .context("open existing repository")?
-                .to_indexed()
-                .context("index repository")?;
-            Ok((r, false))
+            let opened = repo.open(&creds).context("open existing repository")?;
+            let (r, outcome) = crate::orphans::index_adopting(opened, &self.cfg, &backends, mk)?;
+            Ok((r, false, Some(outcome)))
         } else {
             let config_opts = ConfigOptions::default().set_append_only(true);
             let r = repo
@@ -373,7 +402,7 @@ impl BackupStore {
                 .context("init new repository")?
                 .to_indexed()
                 .context("index new repository")?;
-            Ok((r, true))
+            Ok((r, true, None))
         }
     }
 
@@ -398,7 +427,7 @@ impl BackupStore {
         // is already counted above and gives the `shards=N/total` scale.
         let push_progress =
             std::sync::Arc::new(crate::push_progress::PushProgress::new(stage_shards as u64));
-        let (r, init) = self.open_or_init_with_progress(
+        let (r, init, orphans) = self.open_or_init_with_progress(
             mk,
             crate::push_progress::PushProgressBars::new(push_progress),
         )?;
@@ -439,6 +468,7 @@ impl BackupStore {
             snapshots_in_repo: snaps.len(),
             snapshot_host: snap.hostname.clone(),
             repo_was_init: init,
+            orphans,
         })
     }
 
@@ -457,12 +487,9 @@ impl BackupStore {
         if wanted.is_empty() {
             return Ok(BTreeSet::new());
         }
-        let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for consumed audit")?
-            .to_indexed()
-            .context("index repository for consumed audit")?;
+        let (repo, _adoption) = self
+            .open_indexed(mk)
+            .context("open repository for consumed audit")?;
         self.require_sound_packs(&repo)?;
         let snapshots = repo
             .get_all_snapshots()
@@ -514,10 +541,7 @@ impl BackupStore {
         &self,
         mk: &MasterKey,
     ) -> anyhow::Result<(Repository<IndexedFullStatus>, SnapshotFile)> {
-        let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))?
-            .to_indexed()?;
+        let (repo, _adoption) = self.open_indexed(mk)?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots()?;
         let newest_for_host = snaps
@@ -626,12 +650,9 @@ impl BackupStore {
         session_id: &str,
         mk: &MasterKey,
     ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
-        let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for session content")?
-            .to_indexed()
-            .context("index repository for session content")?;
+        let (repo, _adoption) = self
+            .open_indexed(mk)
+            .context("open repository for session content")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         let Some(snap) = crate::readback::newest_snapshot_per_host(snaps)
@@ -687,12 +708,9 @@ impl BackupStore {
         if wanted.is_empty() {
             return Ok(out);
         }
-        let backends = self.backends()?;
-        let repo = Repository::new(&self.cfg.repository_options(), &backends)?
-            .open(&Credentials::Masterkey(mk.clone()))
-            .context("open repository for export")?
-            .to_indexed()
-            .context("index repository for export")?;
+        let (repo, _adoption) = self
+            .open_indexed(mk)
+            .context("open repository for export")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
 

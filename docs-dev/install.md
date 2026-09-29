@@ -270,6 +270,8 @@ scheduled `push` would then run exactly as if you had never declared one, and th
 archive would quietly stop being copied anywhere
 (`crates/chat-stasher/src/main.rs:10168-10176,10186-10209`).
 
+(`crates/chat-stasher/src/main.rs:10163-10171,10181-10204`).
+
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
@@ -505,6 +507,10 @@ forever" (`crates/chat-stasher/src/store.rs:1275-1277`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
 (`crates/chat-stasher/src/store.rs:1375-1383`).
 
+forever" (`crates/chat-stasher/src/store.rs:1289-1291`). The key file is written
+with owner-only-readable permissions, on platforms that can express them
+(`crates/chat-stasher/src/store.rs:1389-1397`).
+
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
 `chat-stasher setup` reaches this point from the other side, and it is the one
@@ -515,6 +521,9 @@ does not exist yet — so a headless run that owes nothing but
 the key's path as `masterkey.path`, and stops before the archive pass, the
 remote step and the timer (`crates/chat-stasher/src/main.rs:11385-11392`; the
 refusal's own wording is `crates/chat-stasher/src/main.rs:10956-10962`).
+
+remote step and the timer (`crates/chat-stasher/src/main.rs:11380-11387`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:10951-10957`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -525,6 +534,8 @@ Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
 (`crates/chat-stasher/src/store.rs:153-156`, `:306-310`, `:1553-1558`; the config
+
+(`crates/chat-stasher/src/store.rs:153-156`, `:310-314`, `:1567-1572`; the config
 field itself is `crates/chat-stasher/src/config.rs:268-269`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -536,11 +547,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:5090-5105`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:5083-5098`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:5095-5120`). An
+it does anything else (`crates/chat-stasher/src/main.rs:5088-5113`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -572,10 +583,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5104-5116`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5097-5109`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:5095-5103`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:5088-5096`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -615,6 +626,8 @@ Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
 (`crates/chat-stasher/src/store.rs:153-156`, `:1553-1558`; the field itself is
+
+(`crates/chat-stasher/src/store.rs:153-156`, `:1567-1572`; the field itself is
 `crates/chat-stasher/src/config.rs:268-269`), so the option names below belong
 to the backend, not to this tool.
 
@@ -836,11 +849,15 @@ chat-stasher status
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
 does not (`crates/chat-stasher/src/main.rs:13966-13968`). This is the
+
+does not (`crates/chat-stasher/src/main.rs:13959-13961`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
 (`crates/chat-stasher/src/main.rs:13689-13717`). These are the conclusions defined
+
+(`crates/chat-stasher/src/main.rs:13682-13710`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -858,6 +875,8 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 few lines and does not flood the screen
 (`crates/chat-stasher/src/main.rs:13968-14101`):
 
+(`crates/chat-stasher/src/main.rs:13961-14094`):
+
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
 - When a source root directory does not exist, an extra line: `[scan] skipped N non-existent source root(s).`
@@ -870,6 +889,8 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
 (`crates/chat-stasher/src/main.rs:13947-13952`). So "the command errored"
+
+(`crates/chat-stasher/src/main.rs:13940-13945`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -880,6 +901,8 @@ example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
 (`crates/chat-stasher/src/main.rs:13645-13670`). **Note:** the human-readable report goes to
+
+(`crates/chat-stasher/src/main.rs:13638-13663`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -962,6 +985,8 @@ confirmed in the code, not a temporary disclaimer.
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
   words are in section 4.3 (`crates/chat-stasher/src/store.rs:1275-1282`).
+
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1289-1296`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap
