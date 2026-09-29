@@ -51,50 +51,47 @@ the wrong shape for a scheduled run in any case.
 
 ## What this project does: adopt on open
 
-`Repository::to_indexed_checked()` lists the packs and reads the header of any
-pack the index does not name, so the index those packs are missing is rebuilt in
-memory. That is the same re-indexing `repair index` performs, minus the index
-rewrite and minus the `append_only` refusal — and it needs no delete path at all.
-A later `backup` then finds every one of those blobs already present and uploads
-none of them.
+On an open with unindexed packs, this project verifies each candidate header and
+all its blobs, then constructs rustic `IndexPack` entries from the headers it
+just verified. It also captures entries from the existing index files in the
+same survey. It passes both sets to the pinned rustic API
+`Repository::to_indexed_with_packs()`, which lists neither packs nor index files.
+A later `backup` then finds the verified blobs already present and uploads none
+of them.
 
-**A header is not a pack, so a header read is not a verification.** The checked
-pass parses a pack's encrypted header and compares the lengths declared in it
-with the file size; it never decrypts a blob. A pack whose *ciphertext* was
-damaged in place — a torn write, a bit-flipping store — passes that check, and its
-blobs would enter the dedup index, where a later backup would skip uploading
-content no reader can decrypt. Before the checked pass runs, this project
-therefore reads the header of every pack the index does not name *and every blob
-that header declares* (`crates/chat-stasher/src/packcheck.rs:93`, called from
-`crates/chat-stasher/src/orphans.rs:238`): the header has to decrypt with the
-repository key, every blob has to decrypt and decompress to the length its header
-gives, and every blob's plaintext has to hash to the id the header names — the
-same three checks rustic's own `check --read-data` makes for a pack an index file
-names, and the third is what a later backup's dedup entry rests on. The pack's
-bytes must also hash to the id it is stored under, which is how rustic names a
-pack and what its own check recomputes: that one catches damage that was left
-alone, and the per-blob check is what catches damage that was **renamed to the
-hash of its new bytes** — a name is a claim, not a verification.
+**A header is not a pack, so a header read is not a verification.** This project
+reads the header of every pack the index does not name *and every blob that
+header declares* (`crates/chat-stasher/src/packcheck.rs:95`, called from
+`crates/chat-stasher/src/orphans.rs:251`): the header has to decrypt with the
+repository key, every blob has to decrypt and decompress to the length its
+header gives, and every blob's plaintext has to hash to the id the header names.
+The pack's bytes must also hash to the id it is stored under. That catches damage
+left under the old name, while the per-blob check catches damage renamed to the
+hash of its new bytes. A name is a claim, not a verification.
 
-**The adopting pass is given the set this open verified.** `to_indexed_checked()`
-lists the packs itself, and rustic offers no way to hand it a set — this project
-therefore checks the listing on both sides of that pass
-(`crates/chat-stasher/src/orphans.rs:397`, `crates/chat-stasher/src/orphans.rs:408`):
-the packs *no index file names* have to be the same set before and after, and any
-difference refuses the adoption. A pack that appeared while the open ran is
-therefore never adopted — the cost of that refusal is a re-upload, which is the
-safe direction — and a pack that vanished cannot leave the index pointing at
-bytes that are gone. rustic's own machinery is not reachable for this: the
-function that installs a caller-built index (`into_indexed_with_index`) and the
-types it takes (`GlobalIndex`, `Indexer`) are `pub(crate)` in the pinned version.
+**Only the set this open verified is handed to rustic.** The backend listing is
+compared before and after verification so an index file that arrives during the
+survey window can be noticed. Then the returned `IndexPack`s are passed directly
+to `to_indexed_with_packs()`; there is no later pack listing in the adoption
+path. A pack that appears after the final comparison cannot enter the in-memory
+index. The regression test
+`a_pack_that_appears_at_the_former_relisting_point_is_not_adopted` injects valid
+packs containing different staged content at that point and checks that the
+retry uploads those content blobs rather than treating them as already stored.
+
+The application needs one small addition to the pinned rustic API because
+rustic 0.12.0 keeps the method that attaches a caller-built index private. The
+local patch is in `vendor/rustic_core/src/repository.rs`; it accepts verified
+`IndexPack`s and combines them with entries from existing index files without
+listing packs.
 
 So the bytes stop being waste because they **become the content**. The measured
 effect at test scale (4 sessions × 500 000 bytes): the old retry added 1 047 572 B
 over a stranded 1 045 700 B repository — a second full copy — while the adopting
 retry adds only its snapshot, index and tree pack
-(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:610`).
+(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:613-616`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:333`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:363`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:366`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -123,7 +120,7 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:305` is where every failure to validate sends
+`crates/chat-stasher/src/orphans.rs:405-407` is where every failure to validate sends
 the open back to the plain index — the same fallback whether the refuser was a
 pack this open could not verify or a pack set that changed under it.
 
@@ -132,9 +129,7 @@ One pack that cannot be verified refuses the adoption, so no pack on that open i
 adopted, including the ones that verified. That granularity is deliberate and is
 the behavior the tests already pinned (`an_unreadable_stranded_pack_…` asserts
 that no pack is reported as adopted when one is unreadable); excluding only the
-bad pack would mean handing the checked pass a filtered listing, and which blobs
-are reachable would then depend on which packs happened to verify. The cost is
-real and is worth naming: a damaged pack is permanent on this path, because
+bad pack would make the dedup index depend on a partial verification result. The cost is real and is worth naming: a damaged pack is permanent on this path, because
 nothing here deletes or rewrites it and `append_only:true` blocks the command
 that would — so the reuse those packs offered is gone until a deliberately
 planned repair (`repair index`, single-writer, with `append_only` off, ADR-016)
@@ -142,13 +137,14 @@ re-indexes them. What is never at stake is the bytes: the content is uploaded
 again and the archive is complete either way.
 
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:191` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:201-232` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:359` refuses to adopt when the index names a
-pack the backend no longer has. That case matters: the checked pass rebuilds the
-index from what the backend *lists*, so it would drop that entry — and an entry
-for a missing pack is one the local metadata cache can still serve, a documented
-property that `tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone` in
+`crates/chat-stasher/src/orphans.rs:385-399` refuses to adopt when the index names a
+pack the backend no longer has. That case matters: adopting from existing index
+files plus only newly verified packs would otherwise drop that entry — and an
+entry for a missing pack is one the local metadata cache can still serve, a documented
+property that `tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone`
+in
 `crates/chat-stasher/tests/search_cache_windows_shape_test.rs` exists to pin. A
 repository whose index and backend agree gets exactly the index it got before this
 module existed.
@@ -239,7 +235,7 @@ injected into that same window — where nothing may be adopted a second time an
 no content may be uploaded again.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:259`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:263-292`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does

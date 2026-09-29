@@ -11,18 +11,19 @@
 //! leaving them alone: an interrupted 560 MB push re-uploaded 100 % of the
 //! payload and the stranded 343 MB stayed forever (W242 §2).
 //!
-//! The answer here is adoption, not deletion. `Repository::to_indexed_checked()`
-//! lists the packs and reads the header of any pack the index does not name, so
-//! the index those packs are missing is rebuilt in memory; a later `backup` then
-//! finds every one of their blobs already present (rustic_core's
+//! The answer here is adoption, not deletion. This code verifies each
+//! unindexed pack, builds its `IndexPack` from the verified header, and passes
+//! that exact set to rustic's `to_indexed_with_packs`; this code supplies the
+//! existing index entries too, so rustic lists neither index nor pack files
+//! during this conversion. A later `backup`
+//! then finds every one of their blobs already present (rustic_core's
 //! `archiver/file_archiver.rs:154` is a plain `index.has_data` test, independent
 //! of any parent snapshot) and uploads none of them. The bytes stop being waste
 //! because they become the content.
 //!
-//! Adoption is fenced by a survey, not applied unconditionally. The checked pass
-//! rebuilds the index from what the *backend lists*, and one thing the plain
-//! index does that this cannot is keep an entry for a pack the backend no longer
-//! has — an entry the local metadata cache can still serve
+//! Adoption is fenced by a survey, not applied unconditionally. One thing the
+//! plain index does that adoption must preserve is keep an entry for a pack the
+//! backend no longer has — an entry the local metadata cache can still serve
 //! (`crates/chat-stasher/tests/search_cache_windows_shape_test.rs:271` pins
 //! that). So an open adopts only when the backend has packs the index does not
 //! name **and** the index names no pack the backend lacks. A repository whose
@@ -49,13 +50,8 @@
 //! which is what rustic's own `repair index` does and why its `check` labels an
 //! unreferenced pack "can be a parallel backup job".
 //!
-//! A header read is not a verification, and the checked pass reads no further
-//! than the header: it parses the encrypted header and compares the lengths in
-//! it with the file size, so a pack whose *blob bytes* were damaged in place —
-//! with the header and the length left intact — would be indexed, and a later
-//! backup would skip uploading blobs no reader can decrypt. `verify_unindexed`
-//! therefore reads each such pack's header *and every blob that header names*,
-//! before the checked pass runs: the header must decrypt with the repository
+//! `verify_unindexed` reads each such pack's header *and every blob that header
+//! names*: the header must decrypt with the repository
 //! key, every blob must decrypt and decompress to the length the header gives,
 //! and every blob's plaintext must hash to the id the header names. The pack's
 //! bytes must also hash to the id the pack is stored under — a pack's id is the
@@ -66,20 +62,16 @@
 //! archive. `crate::packcheck` holds the format and crypto reading, and the
 //! reason it does not call rustic's own `check_pack`.
 //!
-//! The checked pass is *given* the verified set, not merely preceded by it: the
-//! backend's pack listing is compared before and after it, and any difference —
-//! a pack that appeared or vanished while the open ran — refuses the adoption
-//! instead of letting a pack this open never read into the index. rustic offers
-//! no way to hand it a pack set (`into_indexed_with_index`, `GlobalIndex` and
-//! `Indexer` are all `pub(crate)`), so the listing is what is enforced; the one
-//! state that escapes is a pack that appears *and* is deleted again inside the
-//! open, which needs an out-of-band deletion of the backend.
+//! The adoption path compares the unindexed set before and after verification,
+//! then passes the verified `IndexPack`s to a small pinned-rustic API that reads
+//! index files and adds only those entries. No second pack listing occurs, so a
+//! pack appearing at that point cannot enter the in-memory index.
 //!
 //! `docs-dev/orphan-packs.md` carries the safety argument in full.
 
 use crate::store::StoreConfig;
 use anyhow::Context;
-use rustic_core::repofile::{IndexFile, MasterKey};
+use rustic_core::repofile::{IndexFile, IndexPack, MasterKey};
 use rustic_core::{
     Credentials, FileType, IndexedFullStatus, Open, ReadBackend, Repository, RepositoryBackends,
 };
@@ -98,8 +90,16 @@ pub struct OrphanReport {
     pub unindexed: Vec<(String, u64)>,
     /// Hex ids of packs an index file names that the backend does not list.
     /// These are what the plain index can still serve out of the local metadata
-    /// cache, and what the checked index would drop.
+    /// cache, and what rebuilding without a refusal would drop.
     pub missing: Vec<String>,
+}
+
+/// The exact repository inventory captured by one survey.
+struct Survey {
+    report: OrphanReport,
+    listed: BTreeSet<String>,
+    indexed: BTreeSet<String>,
+    indexed_packs: Vec<IndexPack>,
 }
 
 impl OrphanReport {
@@ -128,12 +128,11 @@ pub enum IndexAdoption {
     /// The adopting index was *not* built, so packs no index file names stay
     /// unreachable. `why` says which of the three fences stopped it: a pack that
     /// does not read back as the bytes it is stored under, an index that names a
-    /// pack the backend does not have, or the checked pass failing on a pack
+    /// pack the backend does not have, or verification failing on a pack
     /// whose header it could not use.
     Refused {
         /// Human-readable reason, naming the pack when one pack refused the
-        /// open, and carrying rustic's own context chain when the checked pass
-        /// itself failed.
+        /// open, and carrying the verifier's reason when a pack failed.
         why: String,
     },
 }
@@ -192,16 +191,25 @@ pub fn survey<S: Open>(
     repo: &Repository<S>,
     backends: &RepositoryBackends,
 ) -> anyhow::Result<OrphanReport> {
+    Ok(survey_inventory(repo, backends)?.report)
+}
+
+fn survey_inventory<S: Open>(
+    repo: &Repository<S>,
+    backends: &RepositoryBackends,
+) -> anyhow::Result<Survey> {
     let listed = backends
         .repository()
         .list_with_size(FileType::Pack)
         .context("list packs in the repository")?;
     let mut indexed = BTreeSet::new();
+    let mut indexed_packs = Vec::new();
     for file in repo
         .stream_files::<IndexFile>()
         .context("stream index files")?
     {
         let (_, index) = file.context("read an index file")?;
+        indexed_packs.extend(index.packs.iter().cloned());
         for pack in index.packs.iter().chain(index.packs_to_delete.iter()) {
             indexed.insert(pack.id.to_hex().to_string());
         }
@@ -217,7 +225,12 @@ pub fn survey<S: Open>(
         .collect();
     unindexed.sort();
     let missing: Vec<String> = indexed.difference(&listed_ids).cloned().collect();
-    Ok(OrphanReport { unindexed, missing })
+    Ok(Survey {
+        report: OrphanReport { unindexed, missing },
+        listed: listed_ids,
+        indexed,
+        indexed_packs,
+    })
 }
 
 /// Read every pack the index does not name — its header and every blob that
@@ -239,12 +252,12 @@ fn verify_unindexed(
     backends: &RepositoryBackends,
     unindexed: &[(String, u64)],
     mk: &MasterKey,
-) -> Result<(), String> {
+) -> Result<Vec<IndexPack>, String> {
     let be = backends.repository();
-    for (hex, listed) in unindexed {
-        crate::packcheck::verify_pack(&be, hex, *listed, mk)?;
-    }
-    Ok(())
+    unindexed
+        .iter()
+        .map(|(hex, listed)| crate::packcheck::verify_pack(&be, hex, *listed, mk))
+        .collect()
 }
 
 /// A test-only rendezvous, for the one window an outside process cannot
@@ -258,6 +271,30 @@ fn verify_unindexed(
 /// reads nothing, and costs one environment lookup.
 fn hold_after_survey() {
     let Ok(dir) = std::env::var("CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "A test rendezvous that cannot be staged leaves the test to time out, which is the failure it should report."
+    )]
+    let _ = std::fs::create_dir_all(dir);
+    #[allow(
+        clippy::let_underscore_must_use,
+        reason = "As above: the test that did not observe `reached` is the report."
+    )]
+    let _ = std::fs::write(dir.join("reached"), b"");
+    let go = dir.join("go");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !go.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Test-only rendezvous at the point where rustic previously listed packs
+/// again, after this open has verified its exact adoption set.
+fn hold_after_verification() {
+    let Ok(dir) = std::env::var("CHAT_STASHER_TEST_HOLD_OPEN_AFTER_VERIFICATION") else {
         return;
     };
     let dir = Path::new(&dir);
@@ -293,7 +330,7 @@ pub fn open_adopting(
         .context("build repository")?
         .open(&Credentials::Masterkey(mk.clone()))
         .context("open existing repository")?;
-    index_adopting(opened, cfg, backends, mk)
+    index_adopting(opened, backends, mk)
 }
 
 /// The plain-index fallback every refusal returns: the index this repository had
@@ -317,26 +354,19 @@ fn refused<S: Open>(
     ))
 }
 
-/// Build the in-memory index of an already-opened repository, reaching every
-/// pack in the backend — including packs no index file names.
-///
-/// The repository is consumed, and `to_indexed_checked` takes it by value, so
-/// the paths that refuse *after* it rebuild the open state from `cfg` and
-/// `backends`. That re-open does not carry the caller's
-/// [`ProgressBars`](rustic_core::ProgressBars), which only those rare paths can
-/// notice.
+/// Build the in-memory index of an already-opened repository, including verified
+/// packs no index file names.
 ///
 /// # Errors
 ///
-/// If the survey cannot read the index, or the repository cannot be re-opened on
-/// the refusal path.
+/// If the survey or index construction cannot read repository data.
 pub fn index_adopting<S: Open>(
     repo: Repository<S>,
-    cfg: &StoreConfig,
     backends: &RepositoryBackends,
     mk: &MasterKey,
 ) -> anyhow::Result<(Repository<IndexedFullStatus>, OrphanOutcome)> {
-    let report = survey(&repo, backends)?;
+    let initial = survey_inventory(&repo, backends)?;
+    let report = initial.report;
     if report.unindexed.is_empty() {
         // The index and the backend agree. Take the plain index: it is what
         // every read path took before this module existed, and it keeps entries
@@ -352,8 +382,8 @@ pub fn index_adopting<S: Open>(
     }
 
     // Refuse to adopt over an index that already names a pack the backend does
-    // not have: the checked pass rebuilds the index from the backend's listing,
-    // so it would drop that entry and take the cache-served reads with it. The
+    // not have: rebuilding from only the backend's listing would drop that
+    // entry and take the cache-served reads with it. The
     // safe direction is to leave the index alone and re-upload; the caller
     // reports the refusal.
     if !report.missing.is_empty() {
@@ -367,68 +397,43 @@ pub fn index_adopting<S: Open>(
         );
     }
 
-    // Nothing enters the dedup index unverified. The checked pass validates each
-    // pack's *header* and the lengths declared in it against the file's size; it
-    // never reads a blob, so a pack damaged in place — header and length intact,
-    // ciphertext not — passes it, and a later backup would then skip uploading
-    // blobs no reader can decrypt. Reading the header of every pack the index
-    // does not name, and every blob that header declares, is what makes that
-    // impossible rather than unlikely. The refusal is the whole adoption, not the
-    // one pack: a partial adoption would leave which blobs are reachable decided
-    // by which packs happened to verify, which is a state nothing downstream
-    // could reason about.
-    if let Err(why) = verify_unindexed(backends, &report.unindexed, mk) {
-        return refused(repo, report, why);
-    }
+    // Verify every header and blob, and keep the exact IndexPacks produced by
+    // that verification. Rustic receives these entries directly; it must not
+    // list packs again after verification, because a pack appearing in that
+    // second listing would otherwise enter the dedup index unread.
+    let verified = match verify_unindexed(backends, &report.unindexed, mk) {
+        Ok(verified) => verified,
+        Err(why) => return refused(repo, report, why),
+    };
 
-    // The adopting pass lists the packs itself and cannot be handed this open's
-    // set (`into_indexed_with_index`, `GlobalIndex` and `Indexer` are all
-    // `pub(crate)`), so the guarantee is enforced on the listing instead: the set
-    // of packs *no index file names* is recomputed on both sides of the pass and
-    // has to be the same one that was verified. Anything else — a pack that
-    // appeared while this open ran, or one that vanished and would leave the
-    // index pointing at bytes that are gone — refuses the adoption rather than
-    // letting an unread pack into the index. The test that parks an open here and
-    // injects an index file is
+    // Recheck for an index file that arrived after the first survey, then pin
+    // the test hook at the former relisting point. Anything arriving after this
+    // point is excluded because rustic receives only `verified`.
+    // The test that parks an open here and injects an index file is
     // `an_index_file_injected_between_the_survey_and_the_adopting_pass_...`; a
-    // pack injected here is what `a_pack_that_appears_while_the_open_runs_...`
-    // refuses.
+    // pack injected here is covered by the regression test for verified-set
+    // adoption below.
     hold_after_survey();
-    if survey(&repo, backends)?.unindexed != report.unindexed {
+    let after_verification = survey_inventory(&repo, backends)?;
+    if after_verification.report.unindexed != report.unindexed
+        || after_verification.listed != initial.listed
+        || after_verification.indexed != initial.indexed
+    {
         return refused(
             repo,
             report.clone(),
             "packs no index file names appeared after the survey".to_string(),
         );
     }
-
-    match repo.to_indexed_checked() {
-        Ok(repo) => {
-            let unindexed = survey(&repo, backends)?.unindexed;
-            if unindexed != report.unindexed {
-                let why = "the packs no index file names changed while this open ran".to_string();
-                return refused(repo.drop_index(), report, why);
-            }
-            Ok((
-                repo,
-                OrphanOutcome {
-                    report,
-                    adoption: Some(IndexAdoption::Adopted),
-                },
-            ))
-        }
-        Err(err) => {
-            // An unreadable pack is what refuses this in practice: the adopting
-            // pass reads the header of every pack the index does not name and
-            // gives up rather than index a pack whose bytes it cannot validate.
-            // Nothing readable is lost by falling back — the pack that refused
-            // the pass is one no index names, so no snapshot can reach it.
-            let why = format!("{err:#}");
-            let reopened = Repository::new(&cfg.repository_options(), backends)
-                .context("re-open the repository")?
-                .open(&Credentials::Masterkey(mk.clone()))
-                .context("re-open the repository")?;
-            refused(reopened, report, why)
-        }
-    }
+    hold_after_verification();
+    let repo = repo
+        .to_indexed_with_packs(initial.indexed_packs, verified)
+        .context("index repository with verified unindexed packs")?;
+    Ok((
+        repo,
+        OrphanOutcome {
+            report,
+            adoption: Some(IndexAdoption::Adopted),
+        },
+    ))
 }

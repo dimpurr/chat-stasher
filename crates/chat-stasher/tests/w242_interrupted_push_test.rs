@@ -16,10 +16,10 @@
 //!   index references them is a few tens of milliseconds wide locally (it is
 //!   the pack-write time, so it scales with the payload and with the network on
 //!   a remote destination).
-//! * A kill inside that window leaves the packs stranded, and they can never be
-//!   reused: every stored object's id covers bytes carrying a fresh random
-//!   AEAD nonce, so a later push of the same plaintext produces **different**
-//!   bytes and therefore a different id. The re-run reported
+//! * Before W245, a kill inside that window left packs stranded and they could
+//!   not be reused: every stored object's id covers bytes carrying a fresh
+//!   random AEAD nonce, so a later push of the same plaintext produced
+//!   **different** bytes and therefore a different id. The re-run reported
 //!   `files_unmodified=0` and re-uploaded the whole payload every time.
 //! * Killing after the index and snapshot have landed costs nothing — the
 //!   retry reports `files_unmodified=<n>` and `data_added=0`.
@@ -33,24 +33,21 @@
 //! | 5 packs finalized | 171.3 MB | 560 MB (100 %) | 592 MB, read 300/300, verify OK |
 //! | 10 packs finalized | 343.0 MB | 560 MB (100 %) | 764 MB, read 300/300, verify OK |
 //!
-//! The permanent cost is therefore bounded by "everything uploaded before the
-//! index was written", i.e. up to the whole packed payload minus one pack, and
-//! it is never reclaimed — there is no `prune` subcommand (ADR-016 Decision 4
-//! took that as a proposal; the CLI confirms it), and an orphan cannot be
-//! deduplicated against because ids are not reproducible.
+//! Before W245, the permanent cost was bounded by "everything uploaded before
+//! the index was written", i.e. up to the whole packed payload minus one pack.
+//! This test still ensures that packs are never deleted, while W245 adopts their
+//! verified contents instead of uploading a second copy.
 //!
 //! What the tests below pin, at sizes that keep the gate fast:
 //!
 //! * the **safety** property, which holds wherever the kill lands — an
 //!   interrupted push never leaves a repository that hands back bytes
 //!   differing from what was staged, and the retry restores full coverage;
-//! * the **cost** property — a retry after an interrupted push reuses nothing
-//!   from the partial upload and re-sends the whole payload.
+//! * the **append-only** property — a retry after an interrupted push leaves
+//!   the partial upload's packs on disk and reuses their verified contents.
 //!
-//! The cost test is written to state the measurement, not to bless it: it is a
-//! defect that cannot be fixed inside this crate (the index is written by
-//! `rustic_core` at the end of a backup), and it is recorded here so that the
-//! `files_unmodified` premise is never silently re-adopted.
+//! The interrupted-push cost test lives in
+//! `w245_interrupted_push_test.rs`, including pack verification and adoption.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -492,18 +489,16 @@ fn packs_stranded_without_an_index_are_never_reclaimed() {
             "the stranded pack {name} disappeared; nothing in this design may reclaim it"
         );
     }
-    // And the whole payload was uploaded again on top of it.
+    // The complete stranded packs are reused, never deleted or rewritten.
     let grew = repo_bytes(&sb.repo) - before;
     assert!(
-        grew > before / 2,
-        "the retry added only {grew} bytes over a stranded {before}-byte repository, which is \
-         not a second full copy"
+        grew < before / 2,
+        "the retry added {grew} bytes over a stranded {before}-byte repository instead of reusing its verified content"
     );
+    assert_eq!(summary_field(&stdout, "data_blobs"), Some(0));
 
-    // Reported, not asserted on: this is the quantity the write-up carries,
-    // and a future rustic that started reclaiming packs would show it moving.
     eprintln!(
-        "W242: stranded={before} bytes, second push added {grew} bytes; payload was {} bytes",
+        "W245: stranded={before} bytes, retry added {grew} bytes; payload was {} bytes",
         sb.staged.values().map(Vec::len).sum::<usize>()
     );
 

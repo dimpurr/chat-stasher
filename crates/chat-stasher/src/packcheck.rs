@@ -43,8 +43,8 @@
 
 use aes256ctr_poly1305aes::{aead::Aead, Aes256CtrPoly1305Aes, Key as AeadKey, Nonce};
 use binrw::BinRead;
-use rustic_core::repofile::{HeaderEntry, MasterKey};
-use rustic_core::{FileType, Id, ReadBackend, WriteBackend};
+use rustic_core::repofile::{HeaderEntry, IndexBlob, IndexPack, MasterKey};
+use rustic_core::{BlobLocation, BlobType, FileType, Id, PackId, ReadBackend, WriteBackend};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::num::NonZeroU32;
@@ -69,6 +69,8 @@ const COMP_OVERHEAD: u64 = 32;
 struct Blob {
     /// The id the header names, i.e. the SHA-256 of the blob's plaintext.
     id: Id,
+    /// Whether the blob is tree metadata or content.
+    tpe: BlobType,
     /// Where the blob's ciphertext starts, counted from the pack's first byte.
     offset: u64,
     /// How long that ciphertext is, nonce and tag included.
@@ -95,7 +97,7 @@ pub fn verify_pack(
     hex: &str,
     listed: u64,
     mk: &MasterKey,
-) -> Result<(), String> {
+) -> Result<IndexPack, String> {
     let short = hex.get(..12).unwrap_or(hex);
     let id: Id = hex
         .parse()
@@ -218,7 +220,30 @@ pub fn verify_pack(
         ));
     }
 
-    Ok(())
+    let blobs = blobs
+        .into_iter()
+        .map(|blob| {
+            Ok(IndexBlob {
+                id: blob.id.into(),
+                tpe: blob.tpe,
+                location: BlobLocation {
+                    offset: u32::try_from(blob.offset)
+                        .map_err(|err| format!("pack {short} has an invalid blob offset: {err}"))?,
+                    length: u32::try_from(blob.length)
+                        .map_err(|err| format!("pack {short} has an invalid blob length: {err}"))?,
+                    uncompressed_length: blob.uncompressed,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let size = u32::try_from(listed)
+        .map_err(|err| format!("pack {short} has an invalid listed size: {err}"))?;
+    Ok(IndexPack {
+        id: PackId::from(id),
+        blobs,
+        time: None,
+        size: Some(size),
+    })
 }
 
 /// A pack's own id, recomputed from the bytes that were read: SHA-256, which is
@@ -272,15 +297,23 @@ fn parse_header(plaintext: &[u8]) -> Result<(Vec<Blob>, u64), String> {
             Err(err) if err.is_eof() => break,
             Err(err) => return Err(format!("it could not be read as pack entries: {err}")),
         };
-        let (id, length, uncompressed, entry_len) = match entry {
-            HeaderEntry::Data { len, id } => (id, len, None, ENTRY_LEN),
-            HeaderEntry::Tree { len, id } => (id, len, None, ENTRY_LEN),
-            HeaderEntry::CompData { len, len_data, id } => {
-                (id, len, NonZeroU32::new(len_data), ENTRY_LEN_COMPRESSED)
-            }
-            HeaderEntry::CompTree { len, len_data, id } => {
-                (id, len, NonZeroU32::new(len_data), ENTRY_LEN_COMPRESSED)
-            }
+        let (id, tpe, length, uncompressed, entry_len) = match entry {
+            HeaderEntry::Data { len, id } => (id, BlobType::Data, len, None, ENTRY_LEN),
+            HeaderEntry::Tree { len, id } => (id, BlobType::Tree, len, None, ENTRY_LEN),
+            HeaderEntry::CompData { len, len_data, id } => (
+                id,
+                BlobType::Data,
+                len,
+                NonZeroU32::new(len_data),
+                ENTRY_LEN_COMPRESSED,
+            ),
+            HeaderEntry::CompTree { len, len_data, id } => (
+                id,
+                BlobType::Tree,
+                len,
+                NonZeroU32::new(len_data),
+                ENTRY_LEN_COMPRESSED,
+            ),
         };
         let length = u64::from(length);
         offset = offset
@@ -289,6 +322,7 @@ fn parse_header(plaintext: &[u8]) -> Result<(Vec<Blob>, u64), String> {
         entries += entry_len;
         blobs.push(Blob {
             id,
+            tpe,
             offset: offset - length,
             length,
             uncompressed,

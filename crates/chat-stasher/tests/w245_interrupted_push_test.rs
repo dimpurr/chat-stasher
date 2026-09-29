@@ -18,9 +18,9 @@
 //! stranded copy. The stranded bytes were permanent: `append_only:true` blocks
 //! `repair index` and `prune`, and there is no other reclamation path.
 //!
-//! What changed: every open now builds its index with
-//! `Repository::to_indexed_checked()`, which reads the header of any pack the
-//! index does not name, so a backup's dedup test
+//! What changed: every open verifies the headers and blobs of unindexed packs,
+//! builds index entries from those verified headers, and passes those entries
+//! to rustic without allowing a second pack listing. A backup's dedup test
 //! (`archiver/file_archiver.rs:154`, a plain `index.has_data`) finds those blobs
 //! already present and uploads none of them. See
 //! `docs-dev/orphan-packs.md` for the safety argument, and `src/orphans.rs` for
@@ -256,6 +256,35 @@ impl Sandbox {
                 Instant::now() < deadline,
                 "the open never reached its rendezvous; a run without the hold would have \
                  finished, and this window cannot be tested by waiting"
+            );
+            sleep(Duration::from_millis(2));
+        }
+        inject();
+        fs::write(rendezvous.join("go"), b"").unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// Park immediately after verification and the last pre-adoption survey,
+    /// exactly where rustic used to relist packs, then inject a valid new pack.
+    fn push_parked_after_verification(&self, inject: impl FnOnce()) -> Output {
+        let rendezvous = self.dir.path().join("verified-rendezvous");
+        let child = self
+            .command()
+            .env(
+                "CHAT_STASHER_TEST_HOLD_OPEN_AFTER_VERIFICATION",
+                &rendezvous,
+            )
+            .args(self.push_args())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reached = rendezvous.join("reached");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !reached.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the open never reached the post-verification rendezvous"
             );
             sleep(Duration::from_millis(2));
         }
@@ -585,7 +614,7 @@ fn a_completed_push_makes_the_next_push_a_no_op() {
          got {unmodified}: {stdout}"
     );
     assert_eq!(
-        summary_field(&stdout, "data_added"),
+        summary_field(&stdout, "data_blobs"),
         Some(0),
         "a second push of an unchanged stage must upload no data: {stdout}"
     );
@@ -878,12 +907,10 @@ fn a_pack_with_damaged_blob_bytes_is_not_adopted_and_its_content_is_re_uploaded(
         );
     }
 
-    // And their content was uploaded again. The measure is `data_added` — the
-    // plaintext bytes of the blobs this push added — rather than the repository's
-    // growth on disk, which depends on where the chunker's boundaries fall (two
-    // uploads of the same bytes can differ twofold in stored size). This is the
-    // assertion that says the refusal cost a re-upload rather than a silent skip:
-    // a dedup hit against the damaged packs would have left it at zero.
+    // And their content was uploaded again. `data_added` includes plaintext
+    // bytes from both data and tree packers, so compare it with a threshold well
+    // below the staged payload. Repository growth is a poor measure because
+    // chunk boundaries can change packed size.
     let grew = repo_bytes(&sb.repo) - before;
     let payload: usize = sb.staged.values().map(Vec::len).sum();
     let added = summary_field(&stdout, "data_added").unwrap_or_default();
@@ -1119,12 +1146,9 @@ fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
     );
 
     // The content went up again, and the archive still reads back byte-perfect.
-    // The measure is `data_added` — the plaintext bytes of the blobs this push
-    // added — and not the repository's growth on disk: how a payload packs
-    // depends on where the chunker's boundaries fall, so two uploads of the same
-    // bytes can differ by a factor of two in stored size, while "did it upload
-    // the payload again" is exactly what `data_added` answers. The refusal is
-    // what is being read here: a dedup hit would have left it at zero.
+    // `data_added` includes tree metadata, so compare it with a threshold well
+    // below the staged payload. Repository growth is a poor measure because
+    // chunk boundaries can change packed size.
     let grew = repo_bytes(&sb.repo) - before;
     let payload: usize = sb.staged.values().map(Vec::len).sum();
     let added = summary_field(&stdout, "data_added").unwrap_or_default();
@@ -1156,11 +1180,11 @@ fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
 /// still upload no data.
 ///
 /// The window this test cannot pin is the *arrival* of the file: whether the
-/// index lands before the survey or between the survey and the checked pass is
-/// not something an outside process can schedule, and both are the same state
-/// from inside the open — the survey and the checked pass each read the index
-/// files at their own time. `an_index_file_written_while_the_open_runs` below
-/// injects it during the open for the same reason.
+/// index lands before the survey or between the survey and the final inventory
+/// check is not something an outside process can schedule. The open compares
+/// both inventories and refuses adoption if this index arrives during that
+/// window. `an_index_file_written_while_the_open_runs` below injects it during
+/// the open for the same reason.
 #[test]
 fn an_index_file_that_appears_after_the_packs_were_stranded_is_not_double_counted() {
     let sb = Sandbox::opendal_fs(4, 500_000);
@@ -1184,7 +1208,7 @@ fn an_index_file_that_appears_after_the_packs_were_stranded_is_not_double_counte
     );
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert_eq!(
-        summary_field(&stdout, "data_added"),
+        summary_field(&stdout, "data_blobs"),
         Some(0),
         "the index names every pack, so nothing may be uploaded again: {stdout}"
     );
@@ -1292,16 +1316,14 @@ fn an_index_file_injected_between_the_survey_and_the_adopting_pass_is_not_double
 /// A pack that appears while the open runs is not adopted: the adopting pass is
 /// only allowed to index the set this open verified.
 ///
-/// `to_indexed_checked()` lists the packs itself and rustic offers no way to
-/// hand it a set, so the window between the survey and that pass is real; what
-/// closes it is the set comparison on both sides of the pass. This is the
-/// deterministic form of that race — a pack file written into the repository
-/// while the open is parked in the window — and the push must fall back to the
-/// plain index and say so, then upload the payload again.
+/// The final inventory check closes the gap between verification and adoption.
+/// This is the deterministic form of that race — a pack file written into the
+/// repository while the open is parked before the final check — and the push
+/// must fall back to the plain index and say so, then upload the payload again.
 ///
 /// The injected file is a *copy* of a stranded pack under a different name,
-/// which is enough for the fence: it is never read. The fence is about the set
-/// the backend lists, and it is checked before any bytes are.
+/// which is enough for the fence: it is never read. The fence is about the full
+/// inventory captured by the survey and checked before adoption.
 #[test]
 fn a_pack_that_appears_while_the_open_runs_is_not_adopted() {
     let sb = Sandbox::opendal_fs(4, 400_000);
@@ -1360,6 +1382,96 @@ fn a_pack_that_appears_while_the_open_runs_is_not_adopted() {
         assert_no_mismatched_content(&sb, "after a pack appeared mid-open"),
         sb.staged.len()
     );
+}
+
+/// A valid pack that appears after the verification set is fixed must stay out
+/// of this open's index. The pack contains different staged content, so a push
+/// that adopts it would report no new data blobs.
+#[test]
+fn a_pack_that_appears_at_the_former_relisting_point_is_not_adopted() {
+    let mut sb = Sandbox::new(4, 180_000);
+    assert!(sb.push().status.success());
+    let stranded = strand_packs(&sb);
+    assert!(
+        !stranded.is_empty(),
+        "the first push wrote no stranded packs"
+    );
+
+    // Build a second valid pack set under the same repository key, with
+    // different content from the stranded set. It will appear only after the
+    // retry has verified its exact candidate set.
+    let source = Sandbox::new(4, 260_000);
+    fs::create_dir_all(&source.repo).unwrap();
+    fs::copy(sb.repo.join("config"), source.repo.join("config")).unwrap();
+    let target_keys = sb.repo.join("keys");
+    let source_keys = source.repo.join("keys");
+    fs::create_dir_all(&source_keys).unwrap();
+    for entry in fs::read_dir(target_keys).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_file() {
+            fs::copy(entry.path(), source_keys.join(entry.file_name())).unwrap();
+        }
+    }
+    fs::copy(&sb.key, &source.key).unwrap();
+    assert!(
+        source.push().status.success(),
+        "the source push with the shared repository key failed"
+    );
+    let source_packs = pack_paths(&source.repo);
+    assert!(!source_packs.is_empty(), "the source push wrote no packs");
+
+    // Replace the retry's staged payload with the source payload. Session ids
+    // are stable between these fixtures; the bytes differ by size and seed.
+    for (session, bytes) in &source.staged {
+        let path = sb
+            .stage
+            .join("sessions/mbp-interrupted")
+            .join(session)
+            .join("000/000001.jsonl");
+        fs::write(path, bytes).unwrap();
+    }
+    sb.staged = source.staged.clone();
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    let before = repo_bytes(&sb.repo);
+
+    let injected = sb.push_parked_after_verification(|| {
+        for pack in &source_packs {
+            let relative = pack.strip_prefix(&source.repo).unwrap();
+            let target = sb.repo.join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(pack, target).unwrap();
+        }
+    });
+    assert!(
+        injected.status.success(),
+        "a pack appearing at the former relisting point must not fail the push: {}",
+        String::from_utf8_lossy(&injected.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&injected.stdout);
+    assert_eq!(
+        summary_field(&stdout, "data_blobs"),
+        Some(4),
+        "only the previously verified set may be adopted; the newly visible packs hold the new content and must be uploaded: {stdout}"
+    );
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    assert!(
+        added as usize >= payload / 2,
+        "the retry added {added} bytes for a {payload}-byte payload: the new packs were treated as already stored"
+    );
+    for pack in source_packs {
+        let target = sb.repo.join(pack.strip_prefix(&source.repo).unwrap());
+        assert!(
+            target.exists(),
+            "the injected pack was removed: {}",
+            target.display()
+        );
+    }
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after a pack appeared at the former relisting point"),
+        sb.staged.len()
+    );
+    assert!(repo_bytes(&sb.repo) > before);
+    assert!(!stranded.is_empty());
 }
 
 /// Damaged ciphertext, *and* a pack renamed to the hash of its damaged bytes:

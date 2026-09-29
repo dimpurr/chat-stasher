@@ -1527,7 +1527,7 @@ pub fn inspect_reclaim(config: &Config) -> ReclaimCheck {
             }
         }
     };
-    let repo = match crate::orphans::index_adopting(repo, &cfg, &backends, &mk) {
+    let repo = match crate::orphans::index_adopting(repo, &backends, &mk) {
         Ok((r, _adoption)) => r,
         Err(e) => {
             return ReclaimCheck::OpenFailed {

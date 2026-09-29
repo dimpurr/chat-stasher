@@ -3924,8 +3924,6 @@ checksum = "fbcebf2228827bc4b61cb54dfd84cf43aacf06ca2dfe4c014b136a0e32b876e2"
 [[package]]
 name = "rustic_core"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d44b5077fe2f68a056bfac60255e661e84175ac5b138f3c5601e91fa2903d3e5"
 dependencies = [
  "aes256ctr_poly1305aes",
  "backon",

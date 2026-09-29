@@ -393,7 +393,7 @@ impl BackupStore {
         let creds = Credentials::Masterkey(mk.clone());
         if self.repo_exists(&backends)? {
             let opened = repo.open(&creds).context("open existing repository")?;
-            let (r, outcome) = crate::orphans::index_adopting(opened, &self.cfg, &backends, mk)?;
+            let (r, outcome) = crate::orphans::index_adopting(opened, &backends, mk)?;
             Ok((r, false, Some(outcome)))
         } else {
             let config_opts = ConfigOptions::default().set_append_only(true);
