@@ -327,8 +327,8 @@ The local full-text index behind `/search` and `search --text`. It is **plaintex
 
 | Subcommand | Effect |
 |---|---|
-| `index build --destination <name>` | Reads sessions that changed since the last build and updates the index. |
-| `index check --destination <name>` | Validates the index and counts what it holds, without contacting the archive. |
+| `index build --destination <name>` | Reads sessions that changed since the last build and updates the index. A session that cannot be read is named as not indexable with its reason and the rest are still indexed, so one malformed shard does not put the whole archive out of reach. A session whose re-read fails keeps the text the earlier build stored, but stops counting as covered: `index check` reports `partial`, and `search` says the index is behind rather than answering "no match" for text it never read. |
+| `index check --destination <name>` | Validates the index, counts what it holds and reports the last build's outcome, without contacting the archive. `state=valid` means a build finished with every read session indexed; `state=partial` names how many were not indexable; `state=incomplete` means no build has finished, so the index answers nothing. |
 | `index clear --destination <name>` | Deletes that destination's index. |
 
 ### `cache`

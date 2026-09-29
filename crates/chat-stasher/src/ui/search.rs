@@ -209,13 +209,17 @@ impl Coverage {
 
     fn of(summary: &crate::fts::IndexSummary, data: &UiData) -> Self {
         let in_view = archive_document_ids(data);
-        // This view's sessions that the index holds a document for — the exact
-        // set, which is what `summary.ids` reports and what `complete()` is a
-        // statement about.
+        // This view's sessions the index can answer for — [`IndexSummary::covers`],
+        // which is both "the index holds a document for it" and "the last build
+        // did not fail to re-read it". A session the index holds only text from
+        // an *earlier* read of is a hole in this view, not a session it can
+        // answer for, and counting it here is what would let a zero-hit query be
+        // reported as a complete answer for text the current shard never
+        // supplied.
         let indexed_ids = count_by_machine_id(
             in_view
                 .iter()
-                .filter(|id| summary.ids.contains(*id))
+                .filter(|id| summary.covers(id))
                 .map(String::as_str),
         );
         let mut behind: Vec<(String, usize, usize)> = Vec::new();
@@ -958,9 +962,9 @@ fn no_hit_html(
             Some(coverage) => format!(
                 "<div class=warn><b>UNKNOWN — not \"not there\".</b> The index covers \
                  <b>{indexed}</b> of the <b>{total}</b> session(s) in this view, so \
-                 <b>{missing}</b> session(s) are <i>not searchable</i>: a session that is not in \
-                 the index cannot be looked up, which is not the same as looking and not finding \
-                 it.<ul>{machines}</ul></div>\n",
+                 <b>{missing}</b> session(s) are <i>not searchable</i>: a session the index \
+                 cannot answer for cannot be looked up, which is not the same as looking and not \
+                 finding it.<ul>{machines}</ul></div>\n",
                 indexed = coverage.indexed,
                 total = coverage.total,
                 missing = coverage.not_searchable(),
@@ -1228,6 +1232,78 @@ mod tests {
             !html.contains("Not in the indexed archive"),
             "an unfinished read must never render as absence: {html}"
         );
+    }
+
+    /// The index's own re-read of a session can fail too. The row the index
+    /// holds for it is then text from an **earlier** read: the session is still
+    /// in the index — an unreadable read is not evidence that it is gone — but
+    /// the index cannot vouch that what it holds is what the archive now says.
+    /// Coverage must count it as not searchable, or a zero-hit query is
+    /// reported as a complete answer for text the current shard never supplied.
+    #[test]
+    fn a_session_whose_latest_reload_failed_is_not_counted_as_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = crate::fts::Index::at(dir.path().join("index"));
+        let ids = [ON_M1, DEEPSEEK_M1, ON_M2, HIDDEN_M2];
+        let body_of = |id: &str| crate::fts::LoadedDoc {
+            text: crate::fts::DocText {
+                title: "synthetic title".to_string(),
+                body: format!("the quiet hedgehog walks in {id}"),
+                message_offsets: Vec::new(),
+            },
+            bytes_read: 7,
+        };
+        let sources: Vec<crate::fts::SourceDoc> = ids
+            .iter()
+            .map(|id| {
+                crate::fts::SourceDoc::fingerprinted((*id).to_string(), "source-v1".to_string())
+            })
+            .collect();
+        index.build(&sources, |id| Ok(body_of(id))).unwrap();
+        // The fixture premise: every session in this view is indexed, so a zero
+        // here would be read as a proven absence.
+        let coverage = Coverage::of(&index.summary().unwrap(), &fixture::data());
+        assert!(coverage.complete(), "every row of the view is indexed");
+
+        // One session's shard changes, the re-read of it fails, and the text
+        // the earlier build stored for it stays in the index.
+        let reloaded: Vec<crate::fts::SourceDoc> = ids
+            .iter()
+            .map(|id| {
+                crate::fts::SourceDoc::fingerprinted(
+                    (*id).to_string(),
+                    if *id == ON_M2 {
+                        "source-v2"
+                    } else {
+                        "source-v1"
+                    }
+                    .to_string(),
+                )
+            })
+            .collect();
+        let stats = index
+            .build(&reloaded, |id| {
+                if id == ON_M2 {
+                    return Err(crate::fts::LoadFailure::new(
+                        0,
+                        anyhow::anyhow!("invalid archived JSONL record at line 1"),
+                    ));
+                }
+                Ok(body_of(id))
+            })
+            .unwrap();
+        assert_eq!(stats.not_indexable.len(), 1);
+        let summary = index.summary().unwrap();
+        assert!(
+            summary.ids.contains(ON_M2),
+            "the earlier text is still searchable; the failure does not delete it"
+        );
+        let coverage = Coverage::of(&summary, &fixture::data());
+        assert!(
+            !coverage.complete(),
+            "a session the index could not re-read must not be counted as covered"
+        );
+        assert_eq!(coverage.not_searchable(), 1);
     }
 
     /// Only a complete index over a complete, fully covered read earns the

@@ -1865,11 +1865,18 @@ pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndexCheck> {
                 .map(|digest| format!("destination-{}", &digest[..8.min(digest.len())]))
                 .unwrap_or_else(|| "destination-unknown".to_string());
             match index.check() {
-                Ok(documents) => FtsIndexCheck {
-                    destination,
-                    state: "valid",
-                    documents: Some(documents),
-                },
+                Ok(report) => {
+                    let state = match report.status {
+                        crate::fts::CheckStatus::Valid { .. } => "valid",
+                        crate::fts::CheckStatus::Partial { .. } => "partial",
+                        crate::fts::CheckStatus::Incomplete => "incomplete",
+                    };
+                    FtsIndexCheck {
+                        destination,
+                        state,
+                        documents: Some(report.documents),
+                    }
+                }
                 Err(error) => FtsIndexCheck {
                     destination,
                     state: if format!("{error:#}").contains("no local index has been built") {

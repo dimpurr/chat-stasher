@@ -342,9 +342,19 @@ impl TextIndex for MergedTextIndex {
             let mut ids: BTreeSet<String> = BTreeSet::new();
             let mut written: Option<i64> = None;
             let mut all_dated = true;
+            // Per id: how many readable parts hold it, and how many of those
+            // could not re-read it in their last build.
+            let mut holders: BTreeMap<String, (usize, usize)> = BTreeMap::new();
             for state in &states {
                 if let IndexState::Ready(summary) = state {
                     ids.extend(summary.ids.iter().cloned());
+                    for id in &summary.ids {
+                        let entry = holders.entry(id.clone()).or_insert((0, 0));
+                        entry.0 += 1;
+                        if summary.not_indexable.contains(id) {
+                            entry.1 += 1;
+                        }
+                    }
                     match (written, summary.written_unix) {
                         (_, None) => all_dated = false,
                         (None, Some(t)) => written = Some(t),
@@ -352,6 +362,17 @@ impl TextIndex for MergedTextIndex {
                     }
                 }
             }
+            // An id is unanswerable only when **every** part that holds it
+            // failed to re-read it: one destination's stale copy does not make
+            // the union stale, and dropping the id then would report a hole
+            // where the merged index can in fact answer. A part that never
+            // mentioned the id does not hold it, so it does not vote either
+            // way — the absence of a row is not a failure to read one.
+            let not_indexable: BTreeSet<String> = holders
+                .iter()
+                .filter(|(_, (holding, failing))| holding == failing)
+                .map(|(id, _)| id.clone())
+                .collect();
             // The merged index is only as fresh as its oldest part, and if any
             // part records no write time at all, the union has none either: the
             // alternative is to stamp the newest part's time on text that came
@@ -359,6 +380,7 @@ impl TextIndex for MergedTextIndex {
             // there to prevent.
             return IndexState::Ready(fts::IndexSummary {
                 ids,
+                not_indexable,
                 written_unix: if all_dated { written } else { None },
             });
         }
@@ -737,9 +759,8 @@ mod index_tests {
         let index = Index::at(root.to_path_buf());
         let sources: Vec<SourceDoc> = docs
             .iter()
-            .map(|(id, body)| SourceDoc {
-                id: (*id).to_string(),
-                source_sha256: format!("sha-{id}-{body}"),
+            .map(|(id, body)| {
+                SourceDoc::fingerprinted((*id).to_string(), format!("sha-{id}-{body}"))
             })
             .collect();
         let bodies: std::collections::BTreeMap<String, &str> = docs
@@ -748,10 +769,13 @@ mod index_tests {
             .collect();
         index
             .build(&sources, |id| {
-                Ok(doc(
-                    "synthetic title",
-                    bodies.get(id).copied().unwrap_or("synthetic"),
-                ))
+                Ok(fts::LoadedDoc {
+                    text: doc(
+                        "synthetic title",
+                        bodies.get(id).copied().unwrap_or("synthetic"),
+                    ),
+                    bytes_read: 0,
+                })
             })
             .unwrap();
         index
@@ -764,10 +788,7 @@ mod index_tests {
         let index = Index::at(root.to_path_buf());
         let sources: Vec<SourceDoc> = docs
             .iter()
-            .map(|(id, _)| SourceDoc {
-                id: (*id).to_string(),
-                source_sha256: format!("sha-{id}"),
-            })
+            .map(|(id, _)| SourceDoc::fingerprinted((*id).to_string(), format!("sha-{id}")))
             .collect();
         let bodies: std::collections::BTreeMap<String, &[&str]> = docs
             .iter()
@@ -783,7 +804,10 @@ mod index_tests {
                     text.message_offsets.push(text.body.chars().count());
                     text.body.push_str(message);
                 }
-                Ok(text)
+                Ok(fts::LoadedDoc {
+                    text,
+                    bytes_read: 0,
+                })
             })
             .unwrap();
         index
