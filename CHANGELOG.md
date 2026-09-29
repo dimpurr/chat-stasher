@@ -205,6 +205,17 @@ under its own heading below.
   because a damaged pack either re-sent silently or entered the index so a
   later backup skipped bytes no reader can decrypt. Nothing is deleted, moved
   or rewritten.
+- **A push of an unchanged stage adds no bytes.** A second push of a stage
+  nothing had changed in could still upload tree bytes, so on Windows every
+  scheduled no-op push grew the archive a little while reporting every staged
+  file unmodified and no content blob written. The bytes came from stored
+  fields no change in the files had touched: a file's `ctime` — on Windows,
+  the creation time the platform reports — and a directory's own times, which
+  the platform can report differently to two consecutive walks of one
+  unchanged directory. A push stores neither any more; a value that never
+  measured anything does not belong in the stored tree. A file's mtime is
+  kept, because that is what change detection reads, so a changed stage still
+  re-uploads and an unchanged one still reports every file unmodified.
 - **A truncated pack is refused instead of crashing or hanging.** A metadata
   pack shorter than the index records made `read` panic (exit 101) and
   `verify` never return, on a repository with the default metadata cache; both
@@ -241,6 +252,19 @@ under its own heading below.
   declaration is an attestation about a file that has to exist before it can be
   made — and still exits 2, without running the archive pass, the remote step
   or the scheduler.
+- **The installer's PATH advice names the directory the binary went to.**
+  `install.sh` printed the same advice for every reader — add `~/.local/bin`
+  to your `PATH` — even when `CHAT_STASHER_INSTALL_DIR` had put the binary
+  somewhere else, and its closing line then said to run a bare
+  `chat-stasher doctor`, the one command a reader who followed that advice
+  could not run. The advice now names the directory the binary is in — the
+  default is still spelled `$HOME/.local/bin`, so the line a reader pastes
+  into their shell profile also survives a moved home directory — the closing
+  line gives the binary's full path whenever that directory is not on `PATH`,
+  and an install directory given with a trailing slash no longer reads as
+  off-`PATH` or prints a doubled slash. The README's Quick start carries the
+  same export line, so its instructions no longer stop at a command that
+  would not be found.
 
 #### Security
 
@@ -450,7 +474,10 @@ on `PATH`, and macOS 13 or newer.
   it stopped comes from its own observed cadence. Open dashboard starts
   `chat-stasher ui`. A failed refresh keeps the last good result visible with
   an Offline label, and an unknown count stays unknown on screen, never a
-  zero.
+  zero. A machine with no activity index is its own condition on both
+  surfaces: the popover says how many machines are missing one and that the
+  coverage is incomplete, and the bar's health line counts those machines as
+  needing attention rather than as silent.
 - **Destination choice in Settings.** With several destinations configured,
   the app checks each one and shows the worst state by default; Settings can
   pin it to one named destination instead, a launch-time environment
@@ -503,7 +530,9 @@ Nothing here is in the shipped binary.
   instead, so the cell records its provenance in words: no vendor doc, the key
   carried from a third-party implementation, the source in the installer, the
   date it was read, and that it is not linked. The tier it sits in is unchanged
-  on purpose.
+  on purpose. A cell with nothing recorded holds one plain hyphen rather than
+  the typographic dash the tables carried, so the value survives any font or
+  pipeline a copied table lands in and can be searched as text.
 - Two registry steps the `0.5.0-rc.2` run tripped over are fixed. The crates
   registry's documented data-access refusal (HTTP 403) is no longer read as
   "that version is not published", which was the misread that could publish
