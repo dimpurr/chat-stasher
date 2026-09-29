@@ -193,6 +193,14 @@ MD
 
 The fixture's threat model.
 MD
+  cat > "$1/docs-dev/node-metadata.md" <<'MD'
+# Node metadata
+
+Present for the same reason as orphan-packs.md: it is in the drift checker's
+scan set, and a document the scan set names but the fixture lacks makes every
+run below refuse on the fixture itself. No citation, so no probe's count of
+relocated ranges changes.
+MD
   (
     cd "$1" || exit 2
     git init -q .

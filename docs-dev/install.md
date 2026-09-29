@@ -561,9 +561,9 @@ read the repository and key file you select in config or arguments
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1293-1295`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1308-1310`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1393-1401`).
+(`crates/chat-stasher/src/store.rs:1408-1416`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -584,7 +584,7 @@ the first write.
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:310-314`, `:1571-1576`; the config
+(`crates/chat-stasher/src/store.rs:153-156`, `:310-314`, `:1586-1591`; the config
 field itself is `crates/chat-stasher/src/config.rs:268-269`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -674,7 +674,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:1571-1576`; the field itself is
+(`crates/chat-stasher/src/store.rs:153-156`, `:1586-1591`; the field itself is
 `crates/chat-stasher/src/config.rs:268-269`), so the option names below belong
 to the backend, not to this tool.
 
@@ -1021,7 +1021,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1293-1300`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1308-1315`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

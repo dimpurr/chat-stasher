@@ -31,9 +31,9 @@ use rayon::ThreadPoolBuilder;
 use rustic_backend::BackendOptions;
 use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
 use rustic_core::{
-    BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions, LsOptions,
-    NoProgressBars, ParentOptions, PathList, ProgressBars, Repository, RepositoryBackends,
-    RepositoryOptions, SnapshotOptions,
+    BackupOptions, ConfigOptions, Credentials, FileType, IndexedFullStatus, KeyOptions,
+    LocalSourceSaveOptions, LsOptions, NoProgressBars, ParentOptions, PathList, ProgressBars,
+    Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions, TimeOption,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -443,11 +443,26 @@ impl BackupStore {
         .context("parse stage root")?
         .sanitize()
         .context("sanitize stage root")?;
-        let build_opts = BackupOptions::default().parent_opts(
-            ParentOptions::default()
-                .ignore_ctime(true)
-                .ignore_inode(true),
-        );
+        // The node metadata policy, in both halves. The parent options say which
+        // fields may differ without a file counting as changed; the save options
+        // say which fields the node stores at all. Both are needed, because a
+        // field the comparison is told to ignore while the node still carries it
+        // leaves the tree's bytes resting on a value this project has declared
+        // irrelevant — and Windows reports a file's creation time as `ctime`, so
+        // it moves between two walks of an untouched stage and re-serializes the
+        // tree on every push. `docs-dev/node-metadata.md` records the
+        // measurement, and why ctime is dropped rather than pinned to mtime.
+        let build_opts = BackupOptions::default()
+            .ignore_save_opts(
+                LocalSourceSaveOptions::default()
+                    .set_atime(TimeOption::Mtime)
+                    .set_ctime(TimeOption::No),
+            )
+            .parent_opts(
+                ParentOptions::default()
+                    .ignore_ctime(true)
+                    .ignore_inode(true),
+            );
         let snap = r
             .backup(&build_opts, &source, snap)
             .context("run rustic backup")?;

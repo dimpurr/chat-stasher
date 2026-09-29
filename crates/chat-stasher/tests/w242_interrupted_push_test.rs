@@ -22,12 +22,14 @@
 //!   **different** bytes and therefore a different id. The re-run reported
 //!   `files_unmodified=0` and re-uploaded the whole payload every time.
 //! * Killing after the index and snapshot have landed costs nothing — the
-//!   retry reports `files_unmodified=<n>` and uploads no content blob. The
-//!   counter that says so is `data_blobs`, not `data_added`: the latter also
-//!   counts *tree* blobs, and on Windows a no-op re-push re-serializes one tree
-//!   while every field the change comparison reads stays equal (measured there:
-//!   `data_blobs=0 data_added=1690`, with every staged file unmodified). See
-//!   `a_completed_push_makes_the_next_push_a_no_op` for the full note.
+//!   retry reports `files_unmodified=<n>` and adds no bytes at all, content or
+//!   tree. The content claim is `data_blobs`, not `data_added`, because the
+//!   latter also counts *tree* blobs; the tree claim is that it too is zero.
+//!   Windows reported `files_unmodified=13 data_blobs=0 data_added=1690` before
+//!   the storage policy in `store.rs` was pinned: one tree re-serialized
+//!   because a node's stored `ctime` moved while every field the change
+//!   comparison reads stayed equal. See
+//!   `a_completed_push_makes_the_next_push_a_no_op`.
 //!
 //! A 560 MB payload was used to measure the quantities, because the window has
 //! to be hit deliberately:
@@ -214,6 +216,28 @@ fn parse_session_shas(stdout: &str) -> BTreeMap<String, String> {
     found
 }
 
+/// Every file under `root`, depth-first and sorted, so two walks of one tree
+/// produce the same list in the same order.
+fn stage_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 /// Read the `key=value` pairs out of the `[push] summary:` line.
 fn summary_field(stdout: &str, field: &str) -> Option<u64> {
     let line = stdout.lines().find(|l| l.contains("summary:"))?;
@@ -324,30 +348,34 @@ fn an_interrupted_push_never_leaves_a_corrupt_archive() {
 /// the same stage is a genuine no-op — dedup works. It is only the interrupted
 /// case that cannot reuse anything.
 ///
-/// **The claim is `data_blobs`, not `data_added`.** They are different counts:
-/// `rustic_core` adds `summary.data_added += self.data` for *both* its packers
-/// and `summary.data_blobs += self.blobs` only for the data one
-/// (`rustic_core-0.12.0` `src/blob/packer.rs`, `PackerStats::apply`), so
-/// `data_added` counts tree blobs as well as content. Asserting
-/// `data_added == 0` therefore asserts something stronger than "no content was
-/// uploaded" — it asserts that not one *node's metadata* moved either — and
-/// that holds on macOS and Linux but not on Windows, where this test failed
-/// with `files_unmodified=13 data_blobs=0 data_added=1690`: every staged file
-/// byte-identical and unre-written, no content blob written, and one tree
-/// re-serialized because a node's creation time (Windows `ctime` is
-/// `created()`; `rustic_core-0.12.0` `src/backend/ignore/mapper.rs:249-253`)
-/// moved while every field the change comparison reads — type, size, mtime,
-/// and ctime/inode, which this crate's push sets `ignore_ctime`/`ignore_inode`
-/// for (`src/store.rs`) — stayed equal. Which node that was is not established
-/// from a Unix host; the counter is metadata either way, and the property under
-/// test is about content. `w245_interrupted_push_test.rs` carries this same
-/// test with the same distinction.
+/// **"No-op" means no bytes at all, content or tree.** `data_blobs` is the
+/// content claim; `data_added` is the stronger one, because `rustic_core` adds
+/// `summary.data_added += self.data` for *both* its packers and
+/// `summary.data_blobs += self.blobs` only for the data one (crate
+/// `vendor/rustic_core/src/blob/packer.rs`, `PackerStats::apply`), so tree bytes land in
+/// `data_added` alone. Tree bytes are not churn to be tolerated here: the nodes
+/// in that tree are written by this project, and a field that moves on its own
+/// re-serializes the tree on every scheduled push.
+///
+/// This crate used to tolerate exactly that on Windows, where a second push of
+/// an unchanged stage reported `files_unmodified=13 data_blobs=0
+/// data_added=1690`: every staged file byte-identical and unre-written, no
+/// content blob written, and one tree re-serialized because the nodes' stored
+/// `ctime` — the file's creation time on Windows, where Unix has an inode
+/// change time — moved between the two walks while every field the change
+/// comparison reads (type, size, mtime) stayed equal. `store.rs` now pins the
+/// storage side of the metadata policy as well as the comparison side, so a
+/// no-op push adds nothing on any platform. The Windows cell is where the
+/// platform itself is exercised;
+/// `a_metadata_field_the_archive_does_not_use_cannot_re_serialize_a_tree` below
+/// reproduces the same event on a host that does not have to be Windows, and
+/// `w245_interrupted_push_test.rs` carries a copy of this test.
 ///
 /// Nothing here is weakened by that reading: `data_blobs == 0` is what fails if
-/// a changed stage is re-uploaded, the tree bytes a no-op push may rewrite are
-/// bounded well below the payload, and the stage itself is asserted to come out
-/// of the second push untouched — the product half of "no-op", which the
-/// counters above can only describe from the repository's side.
+/// a changed stage is re-uploaded, `data_added == 0` is what fails if a stored
+/// node's metadata moves, and the stage itself is asserted to come out of the
+/// second push untouched — the product half of "no-op", which the counters
+/// above can only describe from the repository's side.
 #[test]
 fn a_completed_push_makes_the_next_push_a_no_op() {
     let sb = Sandbox::new(12, 2_000_000);
@@ -365,32 +393,21 @@ fn a_completed_push_makes_the_next_push_a_no_op() {
     // untestable from the stage's side.
     let stage_state = |sb: &Sandbox| -> BTreeMap<String, (u64, std::time::SystemTime, String)> {
         let mut state = BTreeMap::new();
-        let mut stack = vec![sb.stage.clone()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else {
-                    let meta = fs::metadata(&path).unwrap();
-                    let rel = path
-                        .strip_prefix(&sb.stage)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
-                    state.insert(
-                        rel,
-                        (
-                            meta.len(),
-                            meta.modified().unwrap(),
-                            sha256_hex(&fs::read(&path).unwrap()),
-                        ),
-                    );
-                }
-            }
+        for path in stage_files(&sb.stage) {
+            let meta = fs::metadata(&path).unwrap();
+            let rel = path
+                .strip_prefix(&sb.stage)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            state.insert(
+                rel,
+                (
+                    meta.len(),
+                    meta.modified().unwrap(),
+                    sha256_hex(&fs::read(&path).unwrap()),
+                ),
+            );
         }
         state
     };
@@ -410,23 +427,95 @@ fn a_completed_push_makes_the_next_push_a_no_op() {
         "a second push of an unchanged stage must report every staged file unmodified, \
          got {unmodified}: {stdout}"
     );
-    let added = summary_field(&stdout, "data_added").unwrap_or_default();
     assert_eq!(
         summary_field(&stdout, "data_blobs"),
         Some(0),
         "a second push of an unchanged stage must upload no content: {stdout}"
     );
-    assert!(
-        added < (sb.staged.values().map(Vec::len).sum::<usize>() as u64) / 4,
-        "a second push of an unchanged stage added {added} bytes, which is far past the \
-         tree metadata a re-serialized tree can account for — that is the payload again: \
-         {stdout}"
+    assert_eq!(
+        summary_field(&stdout, "data_added"),
+        Some(0),
+        "a second push of an unchanged stage must add no bytes at all, tree included; bytes \
+         here mean a stored node's metadata moved between the two pushes: {stdout}"
     );
     assert_eq!(
         stage_state(&sb),
         before,
         "a second push of an unchanged stage rewrote a stage file (size, mtime or bytes \
          differ); a no-op push must leave the stage exactly as it found it: {stdout}"
+    );
+}
+
+/// A field the change comparison does not read may still sit in the node the
+/// push stores, and then the tree carrying it is re-serialized whenever that
+/// field moves — with no content change and no counter that separates it from
+/// real work. This is the Windows failure reproduced on a host that can run it.
+///
+/// The Windows push that was not a no-op reported `files_unmodified=13
+/// data_blobs=0 data_added=1690`: every file unmodified, no content blob, and
+/// one tree re-serialized. The comparison reads type, size and mtime, so the
+/// field that moved was one it never reads — and `ctime` is the only stored
+/// field left, every other one being pinned to a value the comparison validates
+/// or overwritten by the mapper (`docs-dev/node-metadata.md` has the
+/// elimination). On Windows that field is the file's *creation* time, which the
+/// OS is free to report differently on a later walk; on Unix it is the inode
+/// change time, which does not move on its own — which is why the same push is
+/// a no-op on macOS and Linux and was not one on Windows.
+///
+/// `chmod` to the mode a file already has is that event on Unix: POSIX requires
+/// it to bump `st_ctime`, and it leaves `st_mtime`, the mode itself and every
+/// byte untouched. So by the comparison's own rules the stage is unchanged —
+/// every file comes back `files_unmodified` and no content blob is written —
+/// and the push must therefore add nothing at all. Before `store.rs` pinned the
+/// storage policy this test failed on this host with `data_blobs=0` and a
+/// non-zero `data_added`: the Windows report of
+/// `a_completed_push_makes_the_next_push_a_no_op`, reproduced locally.
+#[test]
+fn a_metadata_field_the_archive_does_not_use_cannot_re_serialize_a_tree() {
+    let sb = Sandbox::new(4, 200_000);
+    let first = sb.push();
+    assert!(
+        first.status.success(),
+        "the first push failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // Same mode, same bytes, same mtime — only ctime moves.
+    let mut bumped = 0usize;
+    for path in stage_files(&sb.stage) {
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, permissions).unwrap();
+        bumped += 1;
+    }
+    assert!(
+        bumped > 0,
+        "the first push left no staged files whose ctime could be moved"
+    );
+
+    let second = sb.push();
+    assert!(
+        second.status.success(),
+        "the second push failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let unmodified = summary_field(&stdout, "files_unmodified")
+        .unwrap_or_else(|| panic!("no files_unmodified in the summary: {stdout}"));
+    assert!(
+        unmodified >= bumped as u64,
+        "the comparison is told to ignore ctime, so every staged file must still come back \
+         unmodified after one: got {unmodified} of {bumped}: {stdout}"
+    );
+    assert_eq!(
+        summary_field(&stdout, "data_blobs"),
+        Some(0),
+        "moving ctime must not make the push re-read a file: {stdout}"
+    );
+    assert_eq!(
+        summary_field(&stdout, "data_added"),
+        Some(0),
+        "moving a field the archive does not use for change detection re-serialized a tree; \
+         the node this push stores must not carry such a field: {stdout}"
     );
 }
 

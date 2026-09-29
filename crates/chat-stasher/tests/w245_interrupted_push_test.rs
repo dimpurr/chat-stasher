@@ -721,10 +721,10 @@ fn a_push_over_stranded_packs_reuses_them_instead_of_re_uploading_them() {
 /// two apart: this test failed there with `data_blobs=0 data_added=1690` — not
 /// one byte of content was uploaded, and a tree (metadata) was re-serialized —
 /// so the assertion was reading tree bytes as content. Which tree that platform
-/// rewrote is *not* established from here: macOS and Linux report 0, and so does
-/// a parentless retry over an index file naming the same packs, and the
-/// difference is in a node's freshly-read metadata rather than in the packs. It
-/// is metadata either way, and this test is about content.
+/// rewrote, and which stored field moved, is what W252 established: only `ctime`
+/// is stored, never compared, and unpinned, so `store.rs` no longer writes it
+/// (`docs-dev/node-metadata.md`). The counter is metadata either way, and this
+/// test is about content.
 #[test]
 fn content_from_an_adopted_pack_reads_back_through_the_read_command() {
     let sb = Sandbox::new(2, 300_000);

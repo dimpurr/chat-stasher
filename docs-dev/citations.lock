@@ -739,21 +739,23 @@ crates/chat-stasher/src/store.rs:310-314  bd0dae8980fe  lines=5
   <- docs-dev/install.md:587  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
 crates/chat-stasher/src/store.rs:366  43a7a775bbdc  lines=1
   <- docs-dev/orphan-packs.md:95  :: pub fn open_indexed(
-crates/chat-stasher/src/store.rs:1168-1253  d1b806878c20  lines=86
+crates/chat-stasher/src/store.rs:455-465  12c7a3a11e8a  lines=11
+  <- docs-dev/node-metadata.md:58  :: let build_opts = BackupOptions::default()
+crates/chat-stasher/src/store.rs:1183-1268  d1b806878c20  lines=86
   <- docs-dev/privacy.md:537, docs-dev/threat-model.md:80  :: // error, so reaching here means the entry list is provably…
-crates/chat-stasher/src/store.rs:1255-1259  6b4ff2db82f4  lines=5
+crates/chat-stasher/src/store.rs:1270-1274  6b4ff2db82f4  lines=5
   <- docs-dev/privacy.md:849  :: machine: &str,
-crates/chat-stasher/src/store.rs:1293-1295  d158bc9afb0e  lines=3
+crates/chat-stasher/src/store.rs:1308-1310  d158bc9afb0e  lines=3
   <- docs-dev/install.md:564, docs-dev/threat-model.md:619  :: machine: &str,
-crates/chat-stasher/src/store.rs:1293-1300  38aff1df8680  lines=8
+crates/chat-stasher/src/store.rs:1308-1315  38aff1df8680  lines=8
   <- docs-dev/install.md:1024, docs-dev/privacy.md:849  :: machine: &str,
-crates/chat-stasher/src/store.rs:1335-1420  9ee679c8a89b  lines=86
+crates/chat-stasher/src/store.rs:1350-1435  9ee679c8a89b  lines=86
   <- docs-dev/privacy.md:852, docs-dev/threat-model.md:124, docs-dev/threat-model.md:613  :: let file_type = entry.file_type()?;
-crates/chat-stasher/src/store.rs:1393-1401  2fd9234448bb  lines=9
+crates/chat-stasher/src/store.rs:1408-1416  2fd9234448bb  lines=9
   <- docs-dev/install.md:566  :: }
-crates/chat-stasher/src/store.rs:1422-1426  e915d9a10309  lines=5
+crates/chat-stasher/src/store.rs:1437-1441  e915d9a10309  lines=5
   <- docs-dev/threat-model.md:621  :: }
-crates/chat-stasher/src/store.rs:1571-1576  4a031ff70c84  lines=6
+crates/chat-stasher/src/store.rs:1586-1591  4a031ff70c84  lines=6
   <- docs-dev/install.md:587, docs-dev/install.md:677  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
 crates/chat-stasher/src/ui/extension_profile.rs:146-177  fb34362ebddf  lines=32
   <- docs-dev/privacy.md:657  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…
@@ -769,5 +771,13 @@ crates/chat-stasher/src/view.rs:246  5ac58701d728  lines=1
   <- docs-dev/threat-model.md:163  :: fn ct_eq(a: &str, b: &str) -> bool {
 crates/chat-stasher/src/view.rs:343-376  22c308f15652  lines=34
   <- docs-dev/threat-model.md:163  :: if method != "GET" {
+crates/chat-stasher/tests/w242_interrupted_push_test.rs:474  1824099c1a3b  lines=1
+  <- docs-dev/node-metadata.md:111  :: fn a_metadata_field_the_archive_does_not_use_cannot_re_seri…
 crates/chat-stasher/tests/w245_interrupted_push_test.rs:613-616  39de3f3ac88f  lines=4
   <- docs-dev/orphan-packs.md:92  :: "a second push of an unchanged stage must report every stag…
+vendor/rustic_core/src/archiver/parent.rs:172-190  6dbf6c0f1c56  lines=19
+  <- docs-dev/node-metadata.md:29  :: p_node
+vendor/rustic_core/src/archiver/tree_archiver.rs:195-197  68988662a972  lines=3
+  <- docs-dev/node-metadata.md:12  :: if !self.index.has_tree(&id) {
+vendor/rustic_core/src/backend/ignore/mapper.rs:249-253  d9bff18ce4c7  lines=5
+  <- docs-dev/node-metadata.md:43  :: #[cfg(windows)]
