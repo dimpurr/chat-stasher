@@ -843,12 +843,12 @@ export async function hello(options: { timeoutMs?: number } = {}): Promise<Hello
 /**
  * Persist a content-free per-install backfill status snapshot in the local stage.
  *
- * EXT-13 · `report_seq` is stamped here, under the shared sequence lock, for the
- * reason `lib/report-seq.ts` gives: the host can only compare what it receives
- * in the order it receives it, so this instance's values have to leave in order
- * or a slow arrival would look like a copy. Absent (`undefined`) means the
- * sequence could not be read, which the host accepts as "seq unknown" — it is
- * never sent as a number.
+ * EXT-13 · The report is stamped here, under the shared sequence lock, for the
+ * reason `lib/report-seq.ts` gives: the sequence is evidence only together with
+ * the nonce minted for it, so both are reserved and persisted before this
+ * message is built. Absent means no stamp could be reserved — unreadable
+ * storage, or no random source — which the host accepts as "seq unknown": it is
+ * never sent as a number, and a nonce is never sent without its sequence.
  */
 export async function reportInstallStatus(status: {
   install_id: string;
@@ -860,13 +860,15 @@ export async function reportInstallStatus(status: {
 }): Promise<boolean> {
   const requestId = newRequestId();
   if (!requestId) return false;
-  const outcome = await withReportSeq(async (seq) => sendOnce(
+  const outcome = await withReportSeq(async (stamp) => sendOnce(
     getRuntime(),
     {
       protocol: PROTOCOL,
       type: 'status',
       request_id: requestId,
-      status: seq === null ? status : { ...status, report_seq: seq },
+      status: stamp === null
+        ? status
+        : { ...status, report_seq: stamp.seq, report_nonce: stamp.nonce },
     },
     REQUEST_TIMEOUT_MS,
   ));
@@ -1070,12 +1072,13 @@ export async function openDashboard(options: { timeoutMs?: number } = {}): Promi
  * The only success is a matching `ack`. Everything else — including a response
  * that merely *looks* like an ack — comes back as `{delivered: false}`.
  *
- * 🔴 EXT-13 · The send is stamped with this instance's `report_seq` and goes out
- *    under the shared sequence lock (`lib/report-seq.ts`), because a delivery is
- *    wire traffic too: an install whose backfill is switched off never sends a
- *    status report, so this is the only place its sequence reaches the host. The
- *    field is omitted when the sequence cannot be read, which is the "seq
- *    unknown" the host accepts — never a number this side invented.
+ * 🔴 EXT-13 · The send is stamped with this instance's next `(report_seq,
+ *    report_nonce)` and goes out under the shared sequence lock
+ *    (`lib/report-seq.ts`), because a delivery is wire traffic too: an install
+ *    whose backfill is switched off never sends a status report, so this is the
+ *    only place its sequence reaches the host. Both fields are omitted when no
+ *    stamp could be reserved, which is the "seq unknown" the host accepts —
+ *    never a number or a nonce this side invented.
  */
 export async function deliver(
   name: string,
@@ -1097,7 +1100,7 @@ export async function deliver(
     };
   }
 
-  const outcome = await withReportSeq(async (seq) => sendOnce(
+  const outcome = await withReportSeq(async (stamp) => sendOnce(
     getRuntime(),
     {
       protocol: PROTOCOL,
@@ -1108,7 +1111,7 @@ export async function deliver(
       sha256,
       ...(fingerprint === null ? {} : { fingerprint }),
       ...(accountId ? { account_id: accountId } : {}),
-      ...(seq === null ? {} : { report_seq: seq }),
+      ...(stamp === null ? {} : { report_seq: stamp.seq, report_nonce: stamp.nonce }),
     },
     REQUEST_TIMEOUT_MS,
   ));

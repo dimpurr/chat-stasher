@@ -127,7 +127,8 @@ Request:
  "sha256": "<64 lowercase hex chars: SHA-256 of the UTF-8 bytes of payload>",
  "fingerprint": "<optional; 64 lowercase hex chars>",
  "account_id": "<optional transient platform account id>",
- "report_seq": "<optional; non-negative integer>"}
+ "report_seq": "<optional; non-negative integer>",
+ "report_nonce": "<optional; 1-128 chars of [A-Za-z0-9_-]>"}
 ```
 
 - `payload` is a **string**, byte-for-byte what a bundle file would contain.
@@ -143,15 +144,14 @@ Request:
   persists the raw id, and stores the derived key as sealed shard metadata.
   Older extensions and captures without a visible account id omit it.
 - `report_seq` is **optional** and is EXT-13's monotonic per-instance counter,
-  the same one a `status` report carries (ADR-045). The host records it against
-  `(machine, install_id)` and treats a value at or below the recorded
-  high-water mark as proof that two live writers share that id — the only
-  positive evidence of a copied profile the protocol has, because a copy carries
-  the install id, the salt and the profile label along with the rest of
-  `storage.local`. Absent means the sender could not read its counter: an older
-  extension, or unreadable storage. Absence is recorded as *unknown*, never as
-  zero, because zero is a value a writer can send. The sequence is not persisted
-  on the shard: it is a property of the writer, not of the conversation.
+  the same one a `status` report carries (ADR-045). It is meaningful only beside
+  `report_nonce`, and the two are described together below §6.7. Absent means the
+  sender could not read its counter: an older extension, or unreadable storage.
+  Absence is recorded as *unknown*, never as zero, because zero is a value a
+  writer can send. The sequence is not persisted on the shard: it is a property
+  of the writer, not of the conversation.
+- `report_nonce` is **optional**, and §6.7 defines what it means. A nonce with no
+  `report_seq` is `bad-request`: it names an allocation that was never named.
 - A delivery for an id the host already knows is shared is refused `nack`
   `identity-conflict`, and nothing is written. Delivery is where an install
   whose backfill is switched off reaches the host at all — such an install runs
@@ -187,7 +187,7 @@ bytes were already sealed; `shard` names the existing one).
 | `integrity` | item | true | `sha256` does not match `payload`. |
 | `invalid-bundle` | item | false | `payload` is not a valid inbox bundle. |
 | `install-conflict` | item | false | The bundle's install identity (`install_id` + browser + user-named `profile_label`) conflicts with the provenance this machine's stage has already sealed under the same `install_id`. This is the D4 copied-install refusal: the fix — regenerating the installing profile's identity — lives in the *browser*, so nothing on the host can ever make these bytes deliverable. `detail` names the fix for the person reading it. |
-| `identity-conflict` | item | **true** | EXT-13. Two live writers have been observed sharing this `install_id`: their `report_seq` values diverged. The bytes are not wrong, they are unattributable — so unlike `install-conflict` this refusal is **retryable**, and the capture stays queued until a person gives one of the copies its own identity (ADR-045 §3). Also the answer to a `coordination` `claim`/`token` for such an id, because backfill is the one path that issues bulk requests against a platform. `detail` names the repair. |
+| `identity-conflict` | item | **true** | EXT-13. Two live writers have been observed sharing this `install_id`: one `report_seq` reached the host under two different `report_nonce` values. The bytes are not wrong, they are unattributable — so unlike `install-conflict` this refusal is **retryable**, and the capture stays queued until a person gives one of the copies its own identity (ADR-045 §3). Also the answer to a `coordination` `claim`/`token` for such an id, because backfill is the one path that issues bulk requests against a platform. `detail` names the repair. |
 | `config` | host | false | No `[native_host] stage`, config unreadable, or machine id unresolvable. `detail` names the fix command. |
 | `stage-unavailable` | host | true | Stage missing, not a directory, not writable, or lock wait timed out. |
 | `io` | host | true | Sealing failed. Nothing was acknowledged; the retry is safe. |
@@ -544,10 +544,44 @@ least three reports spaced 18–30 hours apart and remains true thereafter; shor
 intervals do not break the streak, while a gap over 30 hours resets the streak
 before it qualifies.
 
-`status` may also carry an optional `report_seq`, EXT-13's monotonic per-instance
-counter, described in full under §6.2. The record keeps it against
-`(machine, install_id)`; a value at or below the recorded high-water mark marks
-that id `identity-conflict` in the host's own state.
+`status` may also carry an optional `report_seq` and its `report_nonce`, EXT-13's
+per-instance counter and the token minted with it. They are the same two fields
+`deliver` carries (§6.2), and they are **evidence only as a pair**: the rule
+below is the whole of what the host concludes from them.
+
+**What the pair means.** A copied browser profile carries `storage.local`, so it
+carries the same `install_id` and the same counter; two live writers on one id
+therefore eventually *allocate the same sequence*. What a copy cannot carry is
+the original's nonce: each instance mints a fresh random `report_nonce` when it
+allocates a sequence and persists the two together, before the message that
+carries them is built. So:
+
+| What arrives | What the host concludes |
+|---|---|
+| A sequence it has not recorded | Recorded. A first value establishes the key; a higher one advances it. Nothing is concluded about order. |
+| The same `(seq, nonce)` again | One allocation arriving twice — a replayed frame, a retry whose response was lost. Idempotent, and not a conflict. |
+| One sequence under a **different** nonce | **`identity-conflict`.** Two allocations of one number, which no single writer produces. |
+| A sequence below everything the host retains | Accepted **without judgement**: there is no recorded nonce to compare against. |
+| Either field absent, or a sequence whose recorded nonce is absent | Unknown. The host compares what it was told; a side that is absent is not a second value, so nothing is judged. |
+
+A sequence is therefore never compared as a number on its own, and **ordering is
+not evidence**: a report that arrives late, a send that is retried, and a worker
+that restarts between allocating a sequence and sending it all produce values of
+their own, and each of them was read as a copy by the rule this table replaced
+(CTO decision, 2026-09-29).
+
+**How much of the past is compared.** The host retains the newest
+`IDENTITY_SEQ_WINDOW` (64) `(seq, nonce)` pairs per `(machine, install_id)`,
+alongside the highest sequence it has recorded. The window is bounded because a
+host is not an archive of every number a browser ever sent; 64 is far more than
+the reordering and retries a legitimate repeat can span. A sequence below it is
+accepted without judgement — the host says it cannot tell, rather than reporting
+that it checked.
+
+The record keeps the highest recorded sequence against `(machine, install_id)`,
+and one collision marks that id `identity-conflict` in the host's own state. The
+flag is **sticky**: a later, well-ordered report is the *other* copy reporting,
+not evidence that the id became unique again. Only a new install id clears it.
 
 **Migration.** A host older than EXT-13 wrote `ext-status/<install_id>.json`,
 with the machine only inside the record. That file is read as a **legacy
@@ -630,10 +664,11 @@ Successful response:
 ```
 
 `identity_conflict` is `true` when two live writers have been observed sharing
-this install id (their `report_seq` diverged), and `false` when no divergence has
-been observed. **`false` is not proof that only one copy exists**: until the first
-divergent report two copies are indistinguishable, and ADR-045 says so in as many
-words. An install the host has never heard of answers `false`.
+this install id (one `report_seq` arrived under two different `report_nonce`
+values, §6.7), and `false` when no such collision has been observed. **`false` is
+not proof that only one copy exists**: until both copies have allocated the same
+sequence they are indistinguishable, and ADR-045 says so in as many words. An
+install the host has never heard of answers `false`.
 
 The host returns no other install's data, and the caller does not learn which
 machine or profile the other copy is.

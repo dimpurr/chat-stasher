@@ -64,7 +64,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:1115-1124`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:1118-1127`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:440-455`). There is no "probably delivered".
@@ -300,11 +300,11 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:1898-1973`).
+  install (`crates/chat-stasher/src/nativehost.rs:2048-2123`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3151-3161`, `:2888`).
+  (`crates/chat-stasher/src/nativehost.rs:3434-3444`, `:3171`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -321,13 +321,28 @@ no profile coordinate either (only the caller origin, and a window handle on
 Windows). Two copies with identical storage therefore look exactly like one
 install from every side of the wire.
 
-**They are indistinguishable until their first divergent report.** Each instance
-keeps a counter of its own reports and deliveries
-(`apps/extension/lib/report-seq.ts`), and two live copies advance it
-independently — so once both have reported, one of them will eventually send a
-value the host has already seen. That divergence is the first and only evidence
-the host gets, and it is what the protocol is built on. Before it, a copied
-profile is not detected, and this document does not claim otherwise.
+**They are indistinguishable until they allocate the same number.** Each
+instance keeps a counter of its own reports and deliveries, and mints a random
+token alongside every value it reserves
+(`apps/extension/lib/report-seq.ts`) — the two are stored together, on disk,
+before the message carrying them is built. Two live copies advance their
+counters independently, so both eventually reserve the same number; each does it
+with a token of its own, and the host reading the same number under two tokens
+has proof that two writers share the identity. That collision is the first and
+only evidence the host gets, and it is what the protocol is built on. Before it,
+a copied profile is not detected, and this document does not claim otherwise.
+
+The counter alone is not evidence, and **the order in which values arrive is
+evidence of nothing at all**. A report can reach the host late, a send that times
+out is retried, and a service worker can restart between reserving a value and
+sending it — every one of those produces a sequence of its own from a single
+honest install. The token is what separates them: a repeat of a value *and* its
+token is one reservation arriving twice, which is answered as the duplicate it
+is, while the same value under a different token is two reservations of one
+number. The host remembers the last 64 values per identity (`report_seq` and
+`report_nonce` in `contracts/nativehost-protocol.md` §6.7); a value older than
+those is accepted without judgement, because there is nothing left to compare it
+against. That the host cannot tell is *not* reported as having checked.
 
 After it, the host marks the identity `identity-conflict` and stops accepting it:
 backfill claims for it are refused and its captures stay **queued** rather than
@@ -391,7 +406,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:1961-1972`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:2111-2122`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -416,7 +431,7 @@ sentence the surrounding documents have to get right:
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
   (`crates/chat-stasher/src/main.rs:1981-1996`;
-  `crates/chat-stasher/src/nativehost.rs:1898-1973`). So several installs deliver
+  `crates/chat-stasher/src/nativehost.rs:2048-2123`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
@@ -504,7 +519,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1961-1972`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:2111-2122`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -516,10 +531,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1180-1208`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1906-1973`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2056-2123`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:2688-2690`, `:2696`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:2958-2960`, `:2966-2968`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -529,7 +544,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:1978-2007`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:2128-2157`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once

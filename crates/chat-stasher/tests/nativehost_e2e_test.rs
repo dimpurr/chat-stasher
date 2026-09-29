@@ -19,6 +19,7 @@
 //! pass: a schema that grows a keyword the test cannot check must show up as a
 //! red test, not as a silent hole.
 
+use chat_stasher::nativehost::IDENTITY_SEQ_WINDOW;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -2126,17 +2127,29 @@ fn the_shapes_the_new_queries_produce_match_the_committed_schema() {
 // ADR-045 (accepted 2026-09-29): an `install_id` names an installation
 // *lineage*, not a live browser profile, and a copied profile carries the same
 // `install_id` with no other field that could tell the two apart. The
-// host-observable signal is the **sequence** those two writers produce: each
-// instance keeps a monotonic `report_seq` and increments it for every status
-// report and every capture delivery, so two live writers on one
-// `(machine, install_id)` eventually send a repeated or regressing value.
+// host-observable signal is the **sequence and its nonce**: each instance keeps
+// a monotonic `report_seq`, incremented for every status report and every
+// capture delivery, and mints a fresh random `report_nonce` with each sequence
+// and persists the pair. Two live writers on one `(machine, install_id)`
+// eventually *allocate the same number*, and a sequence the host has already
+// recorded with one nonce arriving under another is two allocations of one
+// number — which no single writer can produce.
 //
-// These tests pin the three host behaviours the ADR makes load-bearing:
+// The CTO decision of 2026-09-29 replaced an earlier rule that read a
+// *regression* as the signal. Reports legitimately arrive out of order, a send
+// that times out is retried, and a service worker restarts between allocating a
+// sequence and sending it — none of which a second writer is required to
+// explain, so the old rule accused honest installs. `report_seq` in the tests
+// below is therefore never compared as a number on its own.
+//
+// These tests pin the host behaviours the ADR makes load-bearing:
 // ① status is stored per `(machine, install_id)` and the legacy flat
 //    `ext-status/<install_id>.json` is read as a legacy observation of this
-//    machine and never lost; ② a repeated/regressing `report_seq` marks the id
-//    `identity-conflict`; ③ a conflicted id claims no lease and delivers
-//    nothing **retryably** — the item stays queued instead of being dropped or
+//    machine and never lost; ② one sequence under two different nonces marks
+//    the id `identity-conflict`, while a repeat of the *same* pair, a higher
+//    sequence, an out-of-order one, and one the host no longer retains are all
+//    accepted; ③ a conflicted id claims no lease and delivers nothing
+//    **retryably** — the item stays queued instead of being dropped or
 //    rejected. An extension that sends no `report_seq` stays accepted as
 //    "seq unknown" and can neither create nor clear a conflict.
 
@@ -2152,11 +2165,15 @@ fn read_status_record(stage: &Path, machine: &str, install_id: &str) -> Value {
 }
 
 /// A `status` request shaped like `reportInstallStatus` serialises it.
+///
+/// `stamp` is the `(report_seq, report_nonce)` pair the extension allocates as
+/// one unit; `None` is an extension older than both fields, which sends
+/// neither.
 fn status_request(
     request_id: &str,
     install_id: &str,
     reported_at: &str,
-    seq: Option<u64>,
+    stamp: Option<(u64, &str)>,
 ) -> Value {
     let mut status = json!({
         "install_id": install_id,
@@ -2171,8 +2188,9 @@ fn status_request(
             "paused_reason": null,
         }],
     });
-    if let Some(seq) = seq {
+    if let Some((seq, nonce)) = stamp {
         status["report_seq"] = json!(seq);
+        status["report_nonce"] = json!(nonce);
     }
     json!({"protocol": 1, "type": "status", "request_id": request_id, "status": status})
 }
@@ -2182,9 +2200,9 @@ fn report_status(
     request_id: &str,
     install_id: &str,
     at: &str,
-    seq: Option<u64>,
+    stamp: Option<(u64, &str)>,
 ) -> Value {
-    let output = fixture.chrome(&frame(&status_request(request_id, install_id, at, seq)));
+    let output = fixture.chrome(&frame(&status_request(request_id, install_id, at, stamp)));
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
     let response = one_frame(&output.stdout);
     assert_matches_schema(&response);
@@ -2208,12 +2226,21 @@ fn identity_state(fixture: &Fixture, request_id: &str, install_id: &str) -> Valu
     response
 }
 
-/// ② A copy starts from the same `report_seq` and races the original, so the
-/// second writer's value comes back at or below the one already recorded. That
-/// is the only positive evidence of cloning the protocol has, and it must be
-/// enough to mark the id and to keep the *whole* id out of the archive.
+/// `true` when the host reports the id shared, asserted so a test cannot read a
+/// missing field as a quiet `false`.
+fn is_conflicted(fixture: &Fixture, request_id: &str, install_id: &str) -> bool {
+    let state = identity_state(fixture, request_id, install_id);
+    assert_eq!(state["ok"], true, "{state}");
+    state["identity_conflict"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("identity_conflict is not a boolean: {state}"))
+}
+
+/// ② Two copies allocate the same number and mint different nonces, which is
+/// the only positive evidence of cloning the protocol has. It must mark the id,
+/// put the evidence on the record, and keep the *whole* id out of the archive.
 #[test]
-fn a_regressing_report_seq_marks_the_install_identity_conflicted() {
+fn one_sequence_under_two_nonces_marks_the_install_identity_conflicted() {
     let fixture = Fixture::new();
     fixture.configure_stage();
     let machine = first_machine(&fixture);
@@ -2224,12 +2251,11 @@ fn a_regressing_report_seq_marks_the_install_identity_conflicted() {
         "w248-1",
         install,
         "2026-09-29T10:00:00Z",
-        Some(10),
+        Some((10, "nonce-original")),
     );
     assert_eq!(first["type"], "status");
-    assert_eq!(
-        identity_state(&fixture, "w248-a", install)["identity_conflict"],
-        false,
+    assert!(
+        !is_conflicted(&fixture, "w248-a", install),
         "one writer is not a conflict"
     );
     assert_eq!(
@@ -2237,37 +2263,169 @@ fn a_regressing_report_seq_marks_the_install_identity_conflicted() {
         10
     );
 
-    // The copy: same `storage.local`, so it starts from 10 and has only reached
-    // 7 of its own reports by the time the original is at 10.
-    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(7));
-    assert_eq!(
-        identity_state(&fixture, "w248-b", install)["identity_conflict"],
-        true,
-        "a regressing report_seq is proof that two writers share this install id"
+    // The copy: same `storage.local`, so it starts from the same counter and
+    // mints a nonce of its own for the number it allocates.
+    report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:05:00Z",
+        Some((10, "nonce-copy")),
+    );
+    assert!(
+        is_conflicted(&fixture, "w248-b", install),
+        "one sequence under two nonces is proof that two writers share this install id"
     );
     let record = read_status_record(&fixture.stage, &machine, install);
     assert_eq!(record["identity_conflict"], true);
     assert_eq!(
-        record["report_seq"], 7,
+        record["report_seq"], 10,
         "the staged record is a report and carries what that report said; the \
-         host's own high-water mark lives in its state, not in the report"
+         host's own record of it lives in its state, not in the report"
     );
     assert!(
         record.get("identity_conflict_evidence").is_some(),
         "the record says which observation set the flag: {record}"
     );
+}
 
-    // An equal value is the same evidence, not a no-op.
+/// ② The rule is about nonces, and **not** about order. A late arrival, a
+/// retried send, and an out-of-order delivery all carry sequences of their own,
+/// and every one of them used to be read as a copy. This is the regression the
+/// CTO decision replaced.
+#[test]
+fn distinct_sequences_that_arrive_out_of_order_are_not_a_conflict() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let install = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    // Ascending first, so the host has a record to regress against.
+    report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some((5, "nonce-5")),
+    );
+    report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:01:00Z",
+        Some((6, "nonce-6")),
+    );
+    // Now a frame the host never saw arrives after them — the first send failed
+    // at the transport, the retry went out with a fresh allocation, and the
+    // original then turns up late.
     report_status(
         &fixture,
         "w248-3",
         install,
-        "2026-09-29T10:10:00Z",
-        Some(10),
+        "2026-09-29T10:02:00Z",
+        Some((4, "nonce-4")),
+    );
+    assert!(
+        !is_conflicted(&fixture, "w248-a", install),
+        "a lower sequence the host has never seen is not a second allocation"
+    );
+    // And a restarted worker resuming past the value it had already reserved.
+    report_status(
+        &fixture,
+        "w248-4",
+        install,
+        "2026-09-29T10:03:00Z",
+        Some((7, "nonce-7")),
+    );
+    assert!(
+        !is_conflicted(&fixture, "w248-b", install),
+        "the window is what a repeat is compared against, not the highest value"
+    );
+}
+
+/// ② The same pair again is one allocation arriving twice — a replayed frame, a
+/// retry whose response was lost — and it is answered as the duplicate it is
+/// rather than as a second writer.
+#[test]
+fn the_same_sequence_and_nonce_again_is_an_idempotent_retry() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let install = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+    let first = report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some((9, "nonce-9")),
+    );
+    assert_eq!(first["type"], "status");
+    let replayed = report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:05:00Z",
+        Some((9, "nonce-9")),
     );
     assert_eq!(
-        identity_state(&fixture, "w248-c", install)["identity_conflict"],
-        true
+        replayed["type"], "status",
+        "the retry is accepted, not refused: {replayed}"
+    );
+    assert!(
+        !is_conflicted(&fixture, "w248-a", install),
+        "one allocation seen twice is not two writers"
+    );
+}
+
+/// ② The window is bounded, and a sequence older than everything it retains is
+/// accepted **without judgement** — the host has no recorded nonce to compare
+/// it against, and "we cannot tell" must not be reported as "we checked". This
+/// pins both the bound and what happens past it.
+#[test]
+fn a_sequence_below_the_retained_window_is_accepted_without_judgement() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let install = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    // More allocations than the window keeps, so sequence 1 is forgotten.
+    let newest = IDENTITY_SEQ_WINDOW as u64 + 5;
+    for seq in 1..=newest {
+        report_status(
+            &fixture,
+            &format!("w248-fill-{seq}"),
+            install,
+            "2026-09-29T10:00:00Z",
+            Some((seq, "nonce-fill")),
+        );
+    }
+    assert!(
+        !is_conflicted(&fixture, "w248-a", install),
+        "one writer filling its own window is not a conflict"
+    );
+    // A different nonce for a sequence the host no longer retains is *not*
+    // judged: it is below the window, which the contract says is accepted.
+    report_status(
+        &fixture,
+        "w248-b",
+        install,
+        "2026-09-29T10:10:00Z",
+        Some((1, "nonce-someone-else")),
+    );
+    assert!(
+        !is_conflicted(&fixture, "w248-c", install),
+        "a sequence below the retained window cannot be compared, so it must not be judged"
+    );
+    // A sequence the window *does* retain is judged, and this is the same
+    // observation that would have been a conflict above the bound.
+    report_status(
+        &fixture,
+        "w248-d",
+        install,
+        "2026-09-29T10:11:00Z",
+        Some((newest, "nonce-someone-else")),
+    );
+    assert!(
+        is_conflicted(&fixture, "w248-d2", install),
+        "the retained window is what a repeat is judged against"
     );
 }
 
@@ -2287,9 +2445,16 @@ fn a_conflicted_install_neither_seals_nor_claims_the_lease() {
         "w248-1",
         install,
         "2026-09-29T10:00:00Z",
-        Some(10),
+        Some((10, "nonce-original")),
     );
-    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+    report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:05:00Z",
+        Some((10, "nonce-copy")),
+    );
+    assert!(is_conflicted(&fixture, "w248-a", install));
 
     let payload = identity_bundle("sess-a", "hello a", install, "Chrome", "Personal");
     let output = fixture.chrome(&frame(&deliver_request(
@@ -2327,6 +2492,48 @@ fn a_conflicted_install_neither_seals_nor_claims_the_lease() {
     assert_eq!(claim["kind"], "identity-conflict");
 }
 
+/// ③ A **delivery** is wire traffic too, and for an install whose backfill is
+/// switched off it is the only wire traffic there is: that install never runs a
+/// tick, so it never sends a status report. Two such copies must still be told
+/// apart, and neither copy's bytes may be filed under an id that has just been
+/// proved ambiguous.
+#[test]
+fn a_delivery_can_establish_the_conflict_it_is_then_refused_by() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+
+    let original = identity_bundle("sess-a", "hello a", install, "Chrome", "Personal");
+    let mut request = deliver_request("w248-1", "deepseek-sess-a.json", &original);
+    request["report_seq"] = json!(3);
+    request["report_nonce"] = json!("nonce-original");
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    assert_eq!(one_frame(&output.stdout)["type"], "ack");
+    assert!(fixture.session_dir(&machine, "deepseek.sess-a").exists());
+    assert!(!is_conflicted(&fixture, "w248-state-1", install));
+
+    // The copy's delivery is what proves the id is shared — and it is refused on
+    // that same observation, so nothing of its bytes reaches the stage.
+    let copy = identity_bundle("sess-b", "hello b", install, "Chrome", "Personal");
+    let mut request = deliver_request("w248-2", "deepseek-sess-b.json", &copy);
+    request["report_seq"] = json!(3);
+    request["report_nonce"] = json!("nonce-copy");
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "identity-conflict", "{response}");
+    assert_eq!(response["retryable"], true, "{response}");
+    assert!(
+        !fixture.session_dir(&machine, "deepseek.sess-b").exists(),
+        "the delivery that established the conflict must not also archive"
+    );
+    assert!(is_conflicted(&fixture, "w248-state-2", install));
+}
+
 /// ② The flag is sticky: once the id is known to be shared, a later
 /// well-ordered report from the *other* writer must not clear it. Otherwise the
 /// first copy to report a higher value would silently re-legitimise the id.
@@ -2342,20 +2549,23 @@ fn a_higher_report_seq_does_not_forget_a_known_conflict() {
         "w248-1",
         install,
         "2026-09-29T10:00:00Z",
-        Some(10),
+        Some((10, "nonce-original")),
     );
-    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+    report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:05:00Z",
+        Some((10, "nonce-copy")),
+    );
     report_status(
         &fixture,
         "w248-3",
         install,
         "2026-09-29T10:10:00Z",
-        Some(11),
+        Some((11, "nonce-original")),
     );
-    assert_eq!(
-        identity_state(&fixture, "w248-a", install)["identity_conflict"],
-        true
-    );
+    assert!(is_conflicted(&fixture, "w248-a", install));
     assert_eq!(
         read_status_record(&fixture.stage, &machine, install)["identity_conflict"],
         true
@@ -2364,7 +2574,8 @@ fn a_higher_report_seq_does_not_forget_a_known_conflict() {
 
 /// ② An extension that predates `report_seq` stays accepted, as "seq unknown".
 /// Unknown is not a value: it can neither manufacture a conflict from a single
-/// writer nor erase one that a sequence already proved.
+/// writer nor erase one that a sequence already proved — and it cannot arrive
+/// as a nonce with no sequence, which is not an unknown but a broken message.
 #[test]
 fn an_extension_without_report_seq_is_accepted_as_seq_unknown() {
     let fixture = Fixture::new();
@@ -2379,33 +2590,43 @@ fn an_extension_without_report_seq_is_accepted_as_seq_unknown() {
         record.get("report_seq").is_none(),
         "an unrecorded sequence is absent, never zero: {record}"
     );
-    assert_eq!(
-        identity_state(&fixture, "w248-a", install)["identity_conflict"],
-        false
-    );
+    assert!(!is_conflicted(&fixture, "w248-a", install));
 
-    // A second unknown-sequence report is not a repeat: nothing was counted.
+    // A second report with no sequence is not a repeat: nothing was counted,
+    // and nothing was compared.
     report_status(&fixture, "w248-2", install, "2026-09-29T10:30:00Z", None);
-    assert_eq!(
-        identity_state(&fixture, "w248-b", install)["identity_conflict"],
-        false
-    );
+    assert!(!is_conflicted(&fixture, "w248-b", install));
 
-    // A sequence that diverges still marks it, and an old extension reporting
-    // afterwards must not clear the flag it cannot see.
+    // A nonce on its own names no allocation. It is a malformed message rather
+    // than the "unknown" the host is willing to record.
+    let mut request = status_request("w248-3", install, "2026-09-29T10:40:00Z", None);
+    request["status"]["report_nonce"] = json!("nonce-with-no-sequence");
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack", "{response}");
+    assert_eq!(response["kind"], "bad-request", "{response}");
+    assert!(!is_conflicted(&fixture, "w248-b2", install));
+
+    // A collision still marks it, and an old extension reporting afterwards must
+    // not clear the flag it cannot see.
     report_status(
         &fixture,
-        "w248-3",
+        "w248-4",
         install,
         "2026-09-29T11:00:00Z",
-        Some(10),
+        Some((10, "nonce-original")),
     );
-    report_status(&fixture, "w248-4", install, "2026-09-29T11:05:00Z", Some(2));
-    report_status(&fixture, "w248-5", install, "2026-09-29T11:10:00Z", None);
-    assert_eq!(
-        identity_state(&fixture, "w248-c", install)["identity_conflict"],
-        true
+    report_status(
+        &fixture,
+        "w248-5",
+        install,
+        "2026-09-29T11:05:00Z",
+        Some((10, "nonce-copy")),
     );
+    report_status(&fixture, "w248-6", install, "2026-09-29T11:10:00Z", None);
+    assert!(is_conflicted(&fixture, "w248-c", install));
 }
 
 /// ① Status is stored under `(machine, install_id)`, and a legacy flat
@@ -2442,7 +2663,13 @@ fn legacy_status_is_migrated_as_a_legacy_observation_and_never_deleted() {
     // Twenty hours later — inside the 18–30h band, so the legacy streak is
     // *advanced* rather than inherited unchanged. A record with no predecessor
     // would read 1 here, which is what makes this number evidence.
-    report_status(&fixture, "w248-1", install, "2026-09-29T06:00:00Z", Some(1));
+    report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T06:00:00Z",
+        Some((1, "nonce-legacy")),
+    );
 
     let record = read_status_record(&fixture.stage, &machine, install);
     assert_eq!(
@@ -2469,7 +2696,12 @@ fn a_status_report_carrying_a_foreign_machine_is_refused() {
     fixture.configure_stage();
     let install = "88888888-8888-4888-8888-888888888888";
 
-    let mut request = status_request("w248-1", install, "2026-09-29T10:00:00Z", Some(1));
+    let mut request = status_request(
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some((1, "nonce-foreign")),
+    );
     request["status"]["machine"] = json!("some-other-machine");
     let output = fixture.chrome(&frame(&request));
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
@@ -2502,9 +2734,15 @@ fn identity_state_names_a_conflict_no_status_report_has_declared() {
         "w248-1",
         install,
         "2026-09-29T10:00:00Z",
-        Some(10),
+        Some((10, "nonce-original")),
     );
-    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+    report_status(
+        &fixture,
+        "w248-2",
+        install,
+        "2026-09-29T10:05:00Z",
+        Some((10, "nonce-copy")),
+    );
     assert_eq!(
         identity_state(&fixture, "w248-answer", install)["identity_conflict"],
         true

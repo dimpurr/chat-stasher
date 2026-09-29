@@ -559,15 +559,13 @@ multiTest('(a) two profiles capture one conversation: one conversation, one reco
   const firstDelivery = host.delivered()[0];
   if (!firstDelivery) throw new Error('no delivery was recorded');
   const before = readStage(host).map((record) => record.shard);
-  // 🔴 EXT-13 · The replay drops `report_seq`, and that is the correction rather
-  //    than a convenience. A replayed frame is not a retry: `deliver()` re-stamps
-  //    the sequence on **every** attempt, so a real retry carries a fresh value,
-  //    while this probe replays a recorded frame byte-for-byte — including the
-  //    sequence that writer has already used. Sending that would be a claim that
-  //    two writers share the id, which the host answers `identity-conflict`, and
-  //    this case is about idempotency of the *payload*, not about provenance.
-  const { report_seq: _replayedSeq, ...replay } = firstDelivery as Record<string, unknown>;
-  const again = await host.ask({ ...replay });
+  // 🔴 EXT-13 · The replay goes out **verbatim**, sequence and nonce included,
+  //    and that is the point rather than a convenience. A replayed frame is one
+  //    reservation arriving twice, which the host answers as the duplicate it
+  //    is: the same `report_seq` under the same `report_nonce` is evidence of
+  //    nothing, while the same sequence under a *different* nonce is two copies
+  //    of a profile — which is the case below, and not this one.
+  const again = await host.ask({ ...(firstDelivery as Record<string, unknown>) });
   expect(again.type).toBe('ack');
   expect(again.status).toBe('duplicate');
   expect(readStage(host).map((record) => record.shard)).toEqual(before);
@@ -753,7 +751,7 @@ multiTest('(d) two host processes seal into one conversation directory: both rec
 
 /**
  * EXT-13 · **Copying a profile copies its identity, and the two copies are
- * invisible to each other until their sequences diverge.**
+ * invisible to each other until they reserve the same sequence.**
  *
  * This is the case the whole EXT-13 mechanism exists for, and it is the one case
  * that cannot be written against a stubbed storage layer, because the thing
@@ -763,11 +761,11 @@ multiTest('(d) two host processes seal into one conversation directory: both rec
  *  · the copy carries `cs_install_identity_v1` verbatim, so both profiles report
  *    the same install id — the assertion that makes this a copy case rather than
  *    a second profile;
- *  · neither carries a report sequence yet, so both start at the same value and
- *    their first deliveries carry the *same* one. That is the divergence: the
- *    host has already recorded it from the original, and a value at or below the
- *    high-water mark is the only positive evidence of a second writer the
- *    protocol has (ADR-045);
+ *  · neither carries a counter yet, so both start at the same value and reserve
+ *    the *same* number for their first delivery. Each mints a token of its own
+ *    for it, and the host has already recorded the original's: the same sequence
+ *    under a second token is two reservations of one number, which is the only
+ *    positive evidence of a second writer the protocol has (ADR-045);
  *  · the copy's capture is therefore refused `identity-conflict`, **retryably** —
  *    it stays queued rather than being rejected or dropped, and nothing of it
  *    reaches the stage;
@@ -803,13 +801,18 @@ multiTest('(e) a shared install id: the capture stays queued, and the repair let
     //    deliveries never reach it. Neither is a property of the product.
     //
     //    What the host sees here is therefore what it would see from a copy: a
-    //    delivery carrying **this** install id, a **different** conversation, and
-    //    a `report_seq` at the value this profile has already used. That is the
-    //    divergence ADR-045 detects. Everything below — the queued capture, the
-    //    popup's question, the repair, the recovery — is the product's own code
-    //    against the real host.
+    //    delivery carrying **this** install id, a **different** conversation,
+    //    and a `report_seq` at the number this profile has already reserved —
+    //    under a token the copy minted for it, because that is what makes it a
+    //    copy rather than this profile's own frame arriving twice. Everything
+    //    below — the queued capture, the popup's question, the repair, the
+    //    recovery — is the product's own code against the real host.
     const first = host.delivered()[0];
     if (!first) throw new Error('no delivery was recorded');
+    // A copy of an untouched profile starts where the original did, so its first
+    // reservation is the number this profile has already sent.
+    expect(first.report_seq).toBe(1);
+    expect(typeof first.report_nonce).toBe('string');
     const sessionOf = (payload: string, session: string): string => {
       const bundle = JSON.parse(payload) as Record<string, unknown>;
       bundle.sessionId = session;
@@ -823,7 +826,8 @@ multiTest('(e) a shared install id: the capture stays queued, and the repair let
       name: 'chatgpt-w248-second-copy-session.json',
       payload: secondCopyPayload,
       sha256: createHash('sha256').update(secondCopyPayload, 'utf8').digest('hex'),
-      report_seq: 1,
+      report_seq: first.report_seq,
+      report_nonce: 'w248-second-copy-nonce',
     });
     expect(otherCopy).toMatchObject({ type: 'nack', kind: 'identity-conflict', retryable: true });
     // Nothing of the second copy's bytes was archived: the refusal is total.
@@ -918,9 +922,16 @@ multiTest('(e) a shared install id: the capture stays queued, and the repair let
     //
     // The second copy is not in this list: it was sent by this case, through the
     // harness, not by the extension.
-    expect(host.forwarded
-      .filter((message) => message.type === 'deliver')
-      .map((message) => message.report_seq)).toEqual([1, 2, 1]);
+    const sent = host.forwarded.filter((message) => message.type === 'deliver');
+    expect(sent.map((message) => message.report_seq)).toEqual([1, 2, 1]);
+    // Every message this profile sent carried a token of its own, and the
+    // second copy's is not among them: the case's frame named a sequence this
+    // profile reserved, and a different token, which is exactly the collision.
+    // (The last two are `1` again because the repair restarts the counter, not
+    // because a token was reused.)
+    const tokens = sent.map((message) => message.report_nonce);
+    expect(new Set(tokens).size).toBe(tokens.length);
+    expect(tokens).not.toContain('w248-second-copy-nonce');
 
     // A popup that threw while painting would leave the repair invisible with
     // nothing to show for it; this is the one place a real popup page runs.

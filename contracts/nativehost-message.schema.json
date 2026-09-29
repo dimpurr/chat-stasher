@@ -70,6 +70,10 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{1,128}$"
     },
+    "reportNonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
@@ -209,7 +213,11 @@
         "report_seq": {
           "type": "integer",
           "minimum": 0,
-          "description": "EXT-13 optional. The sender's monotonic per-instance report sequence, incremented for every status report and every capture delivery (ADR-045). The host records it against (machine, install_id) and treats a value at or below the recorded high-water mark as proof that two live writers share the id. Absent — an older extension, or storage that could not be read — is recorded as unknown and is never sent as zero, because zero is a value a writer can send."
+          "description": "EXT-13 optional. The sender's monotonic per-instance report sequence, incremented for every status report and every capture delivery (ADR-045). The host records it against (machine, install_id), together with `report_nonce`: one sequence under two different nonces is proof that two live writers share the id, and a repeat of the same pair is one allocation arriving twice. Absent — an older extension, or storage that could not be read — is recorded as unknown and is never sent as zero, because zero is a value a writer can send."
+        },
+        "report_nonce": {
+          "$ref": "#/$defs/reportNonce",
+          "description": "EXT-13 optional. The token minted with `report_seq` and persisted beside it, which is what makes a repeated sequence mean something: two copies of a profile allocate the same numbers, but each mints its own random nonce, so a sequence the host has already recorded under one nonce arriving under another is two allocations of one number. A repeat of the same pair is an idempotent retry. Meaningless without `report_seq`, and refused as malformed beside no sequence."
         }
       },
       "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
@@ -729,7 +737,7 @@
         "request_id": { "$ref": "#/$defs/requestId" },
         "identity_conflict": {
           "type": "boolean",
-          "description": "True when two live writers have been observed sharing this install id, which their diverging `report_seq` proves. False means no divergence has been observed yet — not proof that only one copy exists: two copies are indistinguishable until their first divergent report (ADR-045)."
+          "description": "True when two live writers have been observed sharing this install id, which one `report_seq` arriving under two different `report_nonce` values proves. False means no collision has been observed yet — not proof that only one copy exists: two copies are indistinguishable until they allocate the same sequence (ADR-045)."
         }
       },
       "description": "EXT-13. Whether this install id is known to be shared by more than one live copy. No other install's data is returned."
