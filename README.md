@@ -148,18 +148,18 @@ The first line is the verdict, for example `[run-once] Healthy: last run 12 minu
 
 ## Support at a glance
 
-These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the tool actually scans and registers. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the month of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made.
+These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the tool actually scans and registers. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the date of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made. A date older than 90 days is shown as **needs re-check (DATE)** instead — the recorded run is real, but it has been long enough that nothing should rely on it being still true.
 
 <!-- support-matrix:short:start -->
 **5+ platforms.** Local AI coding tools and web chats, archived the same way.
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
-| Local | Claude Code | supported | - |
-| Local | OpenAI Codex CLI | supported | - |
-| Local | Gemini CLI | supported | - |
-| Local | opencode | supported | - |
-| Local | Cursor | supported | - |
+| Local | Claude Code | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok (xAI CLI) | supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
@@ -167,15 +167,15 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Zed | supported | - |
 | Local | Continue | supported | - |
 | Local | Kimi Code | supported | - |
-| Web | deepseek | supported | - |
+| Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
-| Web | chatgpt | supported | - |
-| Web | gemini | supported | - |
-| Web | claude | supported | - |
+| Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
+| Web | gemini | verified end-to-end (2026-09-24) | 2026-09-24 |
+| Web | claude | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | kimi | experimental | - |
-| Web | grok | supported | - |
+| Web | grok | verified end-to-end (2026-09-24) | 2026-09-24 |
 
-Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check.
+Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check; a date older than 90 days is shown as needs re-check (DATE).
 
 **Browsers.** Native host registration, per browser and per OS:
 

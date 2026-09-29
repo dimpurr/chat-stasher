@@ -2,21 +2,21 @@
 
 | Harness | OS | Session path template | Format | Confidence | Status | Source |
 |---|---|---|---|---|---|---|
-| Claude Code | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | supported | https://code.claude.com/docs/en/claude-directory |
-| Claude Code | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | supported | https://code.claude.com/docs/en/claude-directory |
-| Claude Code | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | supported | https://code.claude.com/docs/en/claude-directory |
-| OpenAI Codex CLI | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | supported | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
-| OpenAI Codex CLI | Linux | `$CODEX_HOME/sessions/` | jsonl / jsonl.zst | source-confirmed | supported | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
-| OpenAI Codex CLI | Windows | `%CODEX_HOME%\sessions\` | jsonl / jsonl.zst | source-confirmed | supported | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
-| Gemini CLI | macOS | `~/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
-| Gemini CLI | Linux | `$HOME/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
-| Gemini CLI | Windows | `%USERPROFILE%\.gemini\tmp\<projectId>\chats\` | json / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
-| opencode | macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
-| opencode | Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
-| opencode | Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
-| Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | supported | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
-| Cursor | Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | uncertain (unverified) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
-| Cursor | Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | uncertain (unverified) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
+| Claude Code | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| OpenAI Codex CLI | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI | Linux | `$CODEX_HOME/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI | Windows | `%CODEX_HOME%\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| Gemini CLI | macOS | `~/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
+| Gemini CLI | Linux | `$HOME/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
+| Gemini CLI | Windows | `%USERPROFILE%\.gemini\tmp\<projectId>\chats\` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
+| opencode | macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
+| opencode | Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
+| opencode | Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
+| Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
+| Cursor | Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
+| Cursor | Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Grok (xAI CLI) | macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
@@ -43,13 +43,37 @@
 
 | Platform | Origins | Channel | Capture credibility | Status |
 |---|---|---|---|---|
-| deepseek | https://chat.deepseek.com | stable | from-source | supported |
+| deepseek | https://chat.deepseek.com | stable | from-source | verified end-to-end (2026-09-24) |
 | perplexity | https://www.perplexity.ai | experimental | from-source | experimental |
-| chatgpt | https://chatgpt.com, https://chat.openai.com | stable | from-source | supported |
-| gemini | https://gemini.google.com | stable | from-source | supported |
-| claude | https://claude.ai | stable | from-source | supported |
+| chatgpt | https://chatgpt.com, https://chat.openai.com | stable | from-source | verified end-to-end (2026-09-24) |
+| gemini | https://gemini.google.com | stable | from-source | verified end-to-end (2026-09-24) |
+| claude | https://claude.ai | stable | from-source | verified end-to-end (2026-09-24) |
 | kimi | https://www.kimi.com | experimental | from-source | experimental |
-| grok | https://grok.com | stable | from-source | supported |
+| grok | https://grok.com | stable | from-source | verified end-to-end (2026-09-24) |
+
+### Last verified, dev priority and known issues
+
+| Surface | Tool or platform | Last verified | Dev priority | Known issue |
+|---|---|---|---|---|
+| Local | Claude Code | 2026-09-25 | high | on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear; the drive-letter and backslash sanitization of short paths is still unmeasured |
+| Local | OpenAI Codex CLI | 2026-09-25 | normal | - |
+| Local | Gemini CLI | 2026-09-25 | normal | the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often |
+| Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
+| Local | Cursor | 2026-09-25 | normal | - |
+| Local | Grok (xAI CLI) | - | low | a real local store was read but no session has been archived end to end (git 2294f04) |
+| Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | Zed | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | Kimi Code | - | normal | a real local store was read but no session has been archived end to end (git 2294f04) |
+| Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
+| Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
+| Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |
+| Web | gemini | 2026-09-24 | normal | a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md) |
+| Web | claude | 2026-09-24 | normal | two accounts inside one organization are not yet distinguished by the organization check (see issue #4) |
+| Web | kimi | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
+| Web | grok | 2026-09-24 | normal | the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md) |
 
 ### Browsers (native messaging host registration)
 
@@ -87,5 +111,7 @@
 | Firefox | Windows | supported | https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging |
 
 `supported` means the path or route has a source and the scanner/extension will act on it; `verified end-to-end` additionally means a real session was archived on a real machine and the date is recorded. `unascertained` cells are not scanned and are rendered as `not supported`.
+
+`Last verified` is the date a recorded run archived a real conversation end to end on a real machine; - means no run is recorded, and a date older than 90 days is shown as `needs re-check (DATE)`. Both `Dev priority` (`high` / `normal` / `low`, an editorial statement of where maintainer attention is) and `Known issue` (one short caveat, with a pointer to where it is tracked) are written by hand in the registry and the extension's platform table, which is why a change to them re-derives these tables too.
 
 `supported` is the promised tier: the discovery path, and on Windows the registry key, is documented and `install-native-host` registers it. `unverified` is the best-effort tier: registration is attempted and reported, never promised. `no native build` means the browser itself ships no build for that OS, so there is nothing to register. Firefox is carried as supported outside these Chromium-family tiers, on paths from Mozilla's own documentation. One registration serves every profile of a browser on a machine; the extension itself still needs loading once per profile.

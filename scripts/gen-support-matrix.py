@@ -48,6 +48,39 @@ and must not collapse into one glyph:
     not supported                no scannable cell at all (every OS cell is
                                  `unascertained`), or the platform has no cell.
 
+Editorial overlay (SB-1). Both sources also carry three hand-written fields
+per row — one vocabulary under each spelling — and all three are validated by
+this script before any table is rendered from them:
+
+    `verified` (harnesses) /    `{date, version?, scope}`. Recorded only from
+    `lastVerified` (platforms)  dated public evidence that a real conversation
+                               was archived end to end on a real machine: a
+                               commit message, a release note, or a document in
+                               this repository. NEVER inferred from `confidence`
+                               or `credibility`, which say where the routes were
+                               read from, not that an archive ever ran. Absent
+                               means no such run is recorded, and renders as
+                               ABSENT — not as "never worked".
+    `dev_priority` /           one of `high` / `normal` / `low`: an editorial
+    `devPriority`              statement of where maintainer attention is,
+                               written by hand, never derived from capture
+                               behaviour.
+    `known_issue` /            one short public-safe caveat plus a pointer to
+    `knownIssue`               where it is tracked (an issue number, a commit
+                               hash, or a repository document). Never a private
+                               path, never a private number.
+
+Freshness rule (ADR-041, decision 7). A recorded verification date that is
+more than 90 days old renders as `needs re-check (DATE)` in the Last verified
+column, and nothing else changes: the Status column keeps the historical fact
+that a verification happened. Because every table is a derived artifact, the
+day a recorded date crosses the threshold this check itself goes red ("stale
+table") until the tables are re-derived — that red is the expiry signal
+working: re-deriving bakes the `needs re-check` marker into the public tables,
+and only a new dated verification (or 90 days of it, now freshly recorded)
+turns the row back into a plain date. Silencing it by deleting the date is the
+one forbidden move.
+
 The browser × OS section carries its own tier vocabulary, because a browser
 tier answers a different question than a platform status ("can the native
 host register this browser on this OS?"), and collapsing the two vocabularies
@@ -87,7 +120,7 @@ Usage:
     python3 scripts/gen-support-matrix.py --emit full        # ... or the other
     python3 scripts/gen-support-matrix.py --update-fixtures  # rewrite the committed tables
     python3 scripts/gen-support-matrix.py --write-readme README.md
-    python3 scripts/gen-support-matrix.py --write-docs docs-dev/support.md
+    python3 scripts/gen-support-matrix.py --write-docs docs/support.md
     python3 scripts/gen-support-matrix.py --check            # verify committed tables
     python3 scripts/gen-support-matrix.py --selftest         # prove the check can fail
 
@@ -97,6 +130,7 @@ Exit codes: 0 = ok · 1 = stale / mismatch · 2 = usage or input error.
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 import os
 import re
@@ -141,6 +175,25 @@ STATUS_EXPERIMENTAL = "experimental"
 STATUS_UNCERTAIN = "uncertain (unverified)"
 STATUS_UNSUPPORTED = "not supported"
 
+# The freshness threshold of a recorded verification (ADR-041, decision 7). A
+# date older than this many days renders prefixed with RECHECK_LABEL in the
+# Last verified column, and the gate goes red until the tables are re-derived.
+# See the module docstring for why that red is the mechanism, not a failure
+# of it. "Older than" is strict: a date exactly RECHECK_DAYS old still renders
+# as a plain date, so the threshold is testable on both sides of one day.
+RECHECK_DAYS = 90
+RECHECK_LABEL = "needs re-check"
+
+# The editorial priority vocabulary. A closed set, so a typo in the data is an
+# error, never a value that renders as if it meant something.
+VALID_DEV_PRIORITY = frozenset({"high", "normal", "low"})
+
+# A recorded verification date is a full ISO day. A month ("2026-09") cannot
+# answer "is this older than 90 days", so it is not accepted; if a weaker
+# record is all the evidence there is, the row simply carries no verified
+# record until a dated one exists.
+VERIFIED_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # Browser tiers, from the registry's `browsers` section. These answer "can the
 # native host register this browser on this OS?" and are deliberately their own
 # vocabulary, not a reuse of the platform statuses above: a browser's cell is a
@@ -182,6 +235,74 @@ def default_root() -> str:
 
 
 # --------------------------------------------------------------------------
+# Editorial-field validation (SB-1)
+#
+# The three hand-written fields a row may carry are validated where the row is
+# read, so a malformed record is an input error (exit 2), never a rendered
+# guess. `owner` names the row for the error message ("registry: harness
+# `x`" / "contract: platform `y`").
+# --------------------------------------------------------------------------
+
+REJECTED_STATIC_DATE = date(1970, 1, 1)
+
+
+def validated_verified(owner: str, value: Any) -> dict[str, Any] | None:
+    """Normalize a `verified` / `lastVerified` record, or None when absent.
+
+    All three fields are checked here so both loaders stay interchangeable:
+    the registry's `verified` and the contract's `lastVerified` are the same
+    shape, and a divergence between them must be caught at load time.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SupportMatrixError(f"{owner}: `verified` must be an object with `date` and `scope`")
+    d = value.get("date")
+    if not isinstance(d, str) or not VERIFIED_DATE_RE.match(d):
+        raise SupportMatrixError(
+            f"{owner}: `verified.date` must be a full ISO day (YYYY-MM-DD), not {d!r}"
+        )
+    try:
+        when = date.fromisoformat(d)
+    except ValueError:
+        raise SupportMatrixError(f"{owner}: `verified.date` {d!r} is not a real calendar date") from None
+    if when < REJECTED_STATIC_DATE:
+        raise SupportMatrixError(f"{owner}: `verified.date` {d!r} is before 1970")
+    # A calendar date far in the past is accepted (it is a fact about a fact):
+    # the freshness rule below is what makes it visibly stale. A date in the
+    # future cannot be verified yet, and is refused rather than rendered.
+    if when > date.today():
+        raise SupportMatrixError(f"{owner}: `verified.date` {d!r} is in the future")
+    scope = value.get("scope")
+    if not isinstance(scope, str) or not scope.strip():
+        raise SupportMatrixError(f"{owner}: `verified.scope` must be a non-empty string")
+    version = value.get("version")
+    if version is not None and not isinstance(version, str):
+        raise SupportMatrixError(f"{owner}: `verified.version` must be a string or absent")
+    return {"date": d, "version": version, "scope": scope}
+
+
+def validated_dev_priority(owner: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in VALID_DEV_PRIORITY:
+        raise SupportMatrixError(
+            f"{owner}: `dev_priority` must be one of {sorted(VALID_DEV_PRIORITY)}, not {value!r}"
+        )
+    return value
+
+
+def validated_known_issue(owner: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SupportMatrixError(f"{owner}: `known_issue` must be a non-empty string when present")
+    if "\n" in value:
+        raise SupportMatrixError(f"{owner}: `known_issue` must be one line")
+    return value
+
+
+# --------------------------------------------------------------------------
 # Reading the two sources
 # --------------------------------------------------------------------------
 
@@ -203,6 +324,13 @@ def load_harnesses(root: str) -> list[dict[str, Any]]:
         hid = h.get("id")
         if not isinstance(hid, str) or not hid:
             raise SupportMatrixError(f"{REGISTRY_REL}: a harness has no string `id`")
+        owner = f"{REGISTRY_REL}: harness `{hid}`"
+        # The editorial overlay is normalized in place: validated_* return
+        # None for "absent", which the renderers render as ABSENT rather than
+        # as a guess, and raise on anything malformed.
+        h["verified"] = validated_verified(owner, h.get("verified"))
+        h["dev_priority"] = validated_dev_priority(owner, h.get("dev_priority"))
+        h["known_issue"] = validated_known_issue(owner, h.get("known_issue"))
         out.append(h)
     return out
 
@@ -268,6 +396,17 @@ _CONTRACT_ORIGINS_RE = re.compile(r"^\s+origins:\s*\[([^\]]*)\],?\s*$")
 _CONTRACT_CHANNEL_RE = re.compile(r"^\s+channel:\s*'([^']+)',\s*$")
 _CONTRACT_CRED_RE = re.compile(r"^\s+credibility:\s*'([^']+)',\s*$")
 _QUOTED_RE = re.compile(r"'([^']*)'")
+# The editorial overlay (SB-1). `devPriority` and `knownIssue` are one line
+# each; `lastVerified` opens an object that is read until its closing line,
+# which is the same `},` every other multi-line field in this table closes
+# with, so the only lines consumed here are the ones inside the object.
+_CONTRACT_PRIORITY_RE = re.compile(r"^\s+devPriority:\s*'([^']*)',\s*$")
+_CONTRACT_ISSUE_RE = re.compile(r"^\s+knownIssue:\s*'([^']*)',\s*$")
+_CONTRACT_VERIFIED_OPEN_RE = re.compile(r"^\s+lastVerified:\s*\{\s*$")
+_CONTRACT_VERIFIED_CLOSE_RE = re.compile(r"^\s*\},?\s*$")
+_CONTRACT_VERIFIED_DATE_RE = re.compile(r"^\s+date:\s*'([^']*)',\s*$")
+_CONTRACT_VERIFIED_VERSION_RE = re.compile(r"^\s+version:\s*'([^']*)',\s*$")
+_CONTRACT_VERIFIED_SCOPE_RE = re.compile(r"^\s+scope:\s*'([^']*)',\s*$")
 
 
 def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
@@ -296,13 +435,48 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
 
     platforms: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    # Inside a platform's `lastVerified: {` object: its `date:` / `version:` /
+    # `scope:` lines are collected, and its closing line ends the object.
+    verified_open = False
+    verified: dict[str, Any] | None = None
     for raw in lines[start + 1 : end]:
         stripped = raw.lstrip()
+        if verified_open:
+            if _CONTRACT_VERIFIED_CLOSE_RE.match(raw):
+                verified_open = False
+                continue
+            m = _CONTRACT_VERIFIED_DATE_RE.match(raw)
+            if m:
+                verified["date"] = m.group(1)
+                continue
+            m = _CONTRACT_VERIFIED_VERSION_RE.match(raw)
+            if m:
+                verified["version"] = m.group(1)
+                continue
+            m = _CONTRACT_VERIFIED_SCOPE_RE.match(raw)
+            if m:
+                verified["scope"] = m.group(1)
+                continue
+            # A line inside the object that names none of its fields is a
+            # malformed record, not a satisfiable one: an unrecognized line
+            # silently skipped here would let a broken `lastVerified` render
+            # as if it held what it does not.
+            raise SupportMatrixError(
+                f"{CONTRACT_REL}: unrecognized line inside a `lastVerified` object: {stripped!r}"
+            )
         if stripped.startswith("//"):
             continue
         m_id = _CONTRACT_ID_RE.match(raw)
         if m_id:
-            current = {"id": m_id.group(1), "origins": [], "channel": None, "credibility": None}
+            current = {
+                "id": m_id.group(1),
+                "origins": [],
+                "channel": None,
+                "credibility": None,
+                "devPriority": None,
+                "knownIssue": None,
+                "lastVerified": None,
+            }
             platforms.append(current)
             continue
         if current is None:
@@ -319,7 +493,24 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
         if m_cred:
             current["credibility"] = m_cred.group(1)
             continue
+        m_priority = _CONTRACT_PRIORITY_RE.match(raw)
+        if m_priority:
+            current["devPriority"] = m_priority.group(1)
+            continue
+        m_issue = _CONTRACT_ISSUE_RE.match(raw)
+        if m_issue:
+            current["knownIssue"] = m_issue.group(1)
+            continue
+        if _CONTRACT_VERIFIED_OPEN_RE.match(raw):
+            verified = {}
+            current["lastVerified"] = verified
+            verified_open = True
+            continue
 
+    if verified_open:
+        raise SupportMatrixError(
+            f"{CONTRACT_REL}: a `lastVerified` object is still open at the end of `ALL_PLATFORMS`"
+        )
     if not platforms:
         raise SupportMatrixError(f"{CONTRACT_REL}: parsed no platforms from `ALL_PLATFORMS`")
     for p in platforms:
@@ -337,6 +528,12 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
             raise SupportMatrixError(
                 f"{CONTRACT_REL}: platform `{p['id']}` has unknown credibility `{p['credibility']}`"
             )
+        # The editorial overlay is validated to the same rules as the
+        # registry's, so one shape answers on both families.
+        owner = f"{CONTRACT_REL}: platform `{p['id']}`"
+        p["lastVerified"] = validated_verified(owner, p["lastVerified"])
+        p["devPriority"] = validated_dev_priority(owner, p["devPriority"] or None)
+        p["knownIssue"] = validated_known_issue(owner, p["knownIssue"] or None)
     return platforms
 
 
@@ -404,6 +601,13 @@ def harness_status(h: dict[str, Any]) -> str:
 
 
 def web_status(p: dict[str, Any]) -> str:
+    # A recorded verification outranks the channel and credibility readings,
+    # exactly as a `verified` record outranks them for a harness: it is the
+    # strongest fact the row carries. The date travels inside the status as the
+    # historical fact; the freshness judgement on it is rendered separately in
+    # the Last verified column.
+    if p.get("lastVerified") is not None:
+        return f"{STATUS_VERIFIED} ({p['lastVerified']['date']})"
     if p["channel"] == "experimental":
         return STATUS_EXPERIMENTAL
     if p["credibility"] == "unverified":
@@ -411,9 +615,41 @@ def web_status(p: dict[str, Any]) -> str:
     return STATUS_SUPPORTED
 
 
-def verified_date(status: str) -> str:
-    m = re.search(r"\(([^)]+)\)$", status)
-    return m.group(1) if m and status.startswith(STATUS_VERIFIED) else ABSENT
+def resolve_as_of(as_of: date | None) -> date:
+    """The day the freshness rule is judged against.
+
+    Real runs leave this as None (today). The self-test pins an explicit date
+    so its probes never depend on the calendar the day they happen to run;
+    determinism in the fixtures is what keeps the gate's own tests honest.
+    """
+    return as_of if as_of is not None else date.today()
+
+
+def last_verified_cell(record: dict[str, Any] | None, as_of: date) -> str:
+    """Render the Last verified cell for one `verified` record.
+
+    Four states, never collapsed into each other:
+
+      record is None            ABSENT — no run is recorded. That is "nothing
+                                was written down", not "never worked" and not
+                                "failed"; the status column stays in charge of
+                                what the row claims.
+      age <= RECHECK_DAYS       the date, plain.
+      age >  RECHECK_DAYS       `needs re-check (DATE)`: the recorded run is
+                                older than the freshness threshold, so the date
+                                is displayed as a question rather than as a
+                                fact.
+      date in the future        impossible from the loaders (they refuse it) and
+                                rendered as the date itself here; the function
+                                never invents a judgement.
+    """
+    if record is None:
+        return ABSENT
+    when = date.fromisoformat(record["date"])
+    age = (as_of - when).days
+    if age > RECHECK_DAYS:
+        return f"{RECHECK_LABEL} ({record['date']})"
+    return record["date"]
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +682,9 @@ def render_short(
     harnesses: list[dict[str, Any]],
     platforms: list[dict[str, Any]],
     browsers: list[dict[str, Any]],
+    as_of: date | None = None,
 ) -> str:
+    as_of = resolve_as_of(as_of)
     out: list[str] = []
     out.append("**5+ platforms.** Local AI coding tools and web chats, archived the same way.")
     out.append("")
@@ -454,16 +692,19 @@ def render_short(
     out.append("|---|---|---|---|")
     for h in harnesses:
         st = harness_status(h)
+        cell = last_verified_cell(harness_verified(h), as_of)
         out.append(
-            f"| Local | {esc(h.get('display_name') or h['id'])} | {esc(st)} | {esc(verified_date(st))} |"
+            f"| Local | {esc(h.get('display_name') or h['id'])} | {esc(st)} | {esc(cell)} |"
         )
     for p in platforms:
         st = web_status(p)
-        out.append(f"| Web | {esc(p['id'])} | {esc(st)} | {esc(verified_date(st))} |")
+        cell = last_verified_cell(p.get("lastVerified"), as_of)
+        out.append(f"| Web | {esc(p['id'])} | {esc(st)} | {esc(cell)} |")
     out.append("")
     out.append(
         "Verified means a maintainer archived a real session end to end on their own machine. "
-        "Formats change, so a date is recorded instead of a permanent check."
+        "Formats change, so a date is recorded instead of a permanent check; a date older "
+        f"than {RECHECK_DAYS} days is shown as {RECHECK_LABEL} (DATE)."
     )
     out.append("")
     out.append("**Browsers.** Native host registration, per browser and per OS:")
@@ -482,8 +723,10 @@ def render_full(
     harnesses: list[dict[str, Any]],
     platforms: list[dict[str, Any]],
     browsers: list[dict[str, Any]],
+    as_of: date | None = None,
 ) -> str:
     out: list[str] = []
+    as_of = resolve_as_of(as_of)
     out.append("### Local AI coding tools")
     out.append("")
     out.append("| Harness | OS | Session path template | Format | Confidence | Status | Source |")
@@ -530,6 +773,33 @@ def render_full(
             )
         )
     out.append("")
+    # The editorial overlay (SB-1). One section for both families, because a
+    # reader asking "how fresh is this, who is working on it, what is known to
+    # bite" asks that about the Local row and the Web row in one breath, and
+    # the same field answers on both.
+    out.append("### Last verified, dev priority and known issues")
+    out.append("")
+    out.append("| Surface | Tool or platform | Last verified | Dev priority | Known issue |")
+    out.append("|---|---|---|---|---|")
+    for h in harnesses:
+        out.append(
+            "| Local | {name} | {when} | {prio} | {issue} |".format(
+                name=esc(h.get("display_name") or h["id"]),
+                when=esc(last_verified_cell(harness_verified(h), as_of)),
+                prio=esc(h.get("dev_priority") or ABSENT),
+                issue=esc(h.get("known_issue") or ABSENT),
+            )
+        )
+    for p in platforms:
+        out.append(
+            "| Web | {name} | {when} | {prio} | {issue} |".format(
+                name=esc(p["id"]),
+                when=esc(last_verified_cell(p.get("lastVerified"), as_of)),
+                prio=esc(p.get("devPriority") or ABSENT),
+                issue=esc(p.get("knownIssue") or ABSENT),
+            )
+        )
+    out.append("")
     out.append("### Browsers (native messaging host registration)")
     out.append("")
     out.append("| Browser | OS | Status | Source |")
@@ -555,18 +825,28 @@ def render_full(
         "not scanned and are rendered as `not supported`."
     )
     out.append("")
+    out.append(
+        "`Last verified` is the date a recorded run archived a real conversation end to "
+        f"end on a real machine; {ABSENT} means no run is recorded, and a date older than "
+        f"{RECHECK_DAYS} days is shown as `{RECHECK_LABEL} (DATE)`. Both `Dev priority` "
+        "(`high` / `normal` / `low`, an editorial statement of where maintainer attention "
+        "is) and `Known issue` (one short caveat, with a pointer to where it is tracked) "
+        "are written by hand in the registry and the extension's platform table, which is "
+        "why a change to them re-derives these tables too."
+    )
+    out.append("")
     out.append(browser_legend_short())
     return "\n".join(out) + "\n"
 
 
-def render(kind: str, root: str) -> str:
+def render(kind: str, root: str, as_of: date | None = None) -> str:
     harnesses = load_harnesses(root)
     platforms = parse_contract_platforms(root)
     browsers = load_browsers(root)
     if kind == "short":
-        return render_short(harnesses, platforms, browsers)
+        return render_short(harnesses, platforms, browsers, as_of)
     if kind == "full":
-        return render_full(harnesses, platforms, browsers)
+        return render_full(harnesses, platforms, browsers, as_of)
     raise SupportMatrixError(f"unknown rendering kind: {kind}")
 
 
@@ -627,11 +907,19 @@ def markdown_docs(root: str) -> list[str]:
     return docs
 
 
-def check(root: str) -> tuple[list[str], list[str]]:
-    """Return (failures, notes). A failure is always an exit-1 condition."""
+def check(root: str, as_of: date | None = None) -> tuple[list[str], list[str]]:
+    """Return (failures, notes). A failure is always an exit-1 condition.
+
+    `as_of` is the day the freshness rule judges against; real runs leave it as
+    today. When a recorded verification crosses the 90-day threshold, the
+    expected renderings change with no change to the sources, so this check's
+    going red is the expiry signal itself: the fix is to re-derive the tables
+    (baking the `needs re-check` marker into them), or to record a new dated
+    verification — never to delete the date.
+    """
     failures: list[str] = []
     notes: list[str] = []
-    expected = {"short": render("short", root), "full": render("full", root)}
+    expected = {"short": render("short", root, as_of), "full": render("full", root, as_of)}
 
     fixtures = {"short": SHORT_FIXTURE_REL, "full": FULL_FIXTURE_REL}
     for kind, rel in fixtures.items():
@@ -678,9 +966,9 @@ def check(root: str) -> tuple[list[str], list[str]]:
     return failures, notes
 
 
-def run_check(root: str) -> int:
+def run_check(root: str, as_of: date | None = None) -> int:
     try:
-        failures, notes = check(root)
+        failures, notes = check(root, as_of)
     except SupportMatrixError as exc:
         print(f"[support-matrix] cannot render the matrix: {exc}", file=sys.stderr)
         return 2
@@ -705,9 +993,9 @@ def run_check(root: str) -> int:
 # --------------------------------------------------------------------------
 
 
-def update_fixtures(root: str) -> int:
+def update_fixtures(root: str, as_of: date | None = None) -> int:
     try:
-        expected = {"short": render("short", root), "full": render("full", root)}
+        expected = {"short": render("short", root, as_of), "full": render("full", root, as_of)}
     except SupportMatrixError as exc:
         print(f"[support-matrix] cannot render the matrix: {exc}", file=sys.stderr)
         return 2
@@ -721,7 +1009,7 @@ def update_fixtures(root: str) -> int:
     return 0
 
 
-def write_into_file(root: str, rel_path: str, kind: str) -> int:
+def write_into_file(root: str, rel_path: str, kind: str, as_of: date | None = None) -> int:
     start_marker, end_marker, fixture_kind = {
         "short": (SHORT_START, SHORT_END, "short"),
         "full": (FULL_START, FULL_END, "full"),
@@ -740,7 +1028,7 @@ def write_into_file(root: str, rel_path: str, kind: str) -> int:
         )
         return 2
     try:
-        content = render(fixture_kind, root)
+        content = render(fixture_kind, root, as_of)
     except SupportMatrixError as exc:
         print(f"[support-matrix] cannot render the matrix: {exc}", file=sys.stderr)
         return 2
@@ -798,6 +1086,8 @@ _SELFTEST_REGISTRY = {
         {
             "id": "alpha",
             "display_name": "Alpha",
+            "dev_priority": "normal",
+            "known_issue": "a caveat with a | pipe, to prove escaping",
             "paths": {
                 "macos": {
                     "template": "~/.alpha/<uuid>.jsonl",
@@ -810,6 +1100,7 @@ _SELFTEST_REGISTRY = {
         {
             "id": "beta",
             "display_name": "Beta",
+            "dev_priority": "low",
             "paths": {
                 "macos": {
                     "template": "~/Library/Beta/sessions",
@@ -834,7 +1125,7 @@ _SELFTEST_REGISTRY = {
         {
             "id": "delta",
             "display_name": "Delta",
-            "verified": {"date": "2026-09", "version": "1.2.3", "scope": "one real session"},
+            "verified": {"date": "2026-09-15", "version": "1.2.3", "scope": "one real session"},
             "paths": {
                 "macos": {
                     "template": "~/.delta/<id>.jsonl",
@@ -852,12 +1143,20 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'p-stable',
     origins: ['https://stable.example'],
+    devPriority: 'normal',
+    knownIssue: 'one caveat | with a pipe',
+    lastVerified: {
+      date: '2026-09-15',
+      version: '1.2.3',
+      scope: 'one real conversation on a real page',
+    },
     credibility: 'from-source',
     channel: 'stable',
   },
   {
     id: 'p-exp',
     origins: ['https://exp.example'],
+    devPriority: 'low',
     credibility: 'from-source',
     channel: 'experimental',
   },
@@ -869,6 +1168,18 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
   },
 ];
 """
+
+# The day every self-test rendering is judged against. A fixed date, so the
+# probes never depend on the calendar of the day they run: the fixture dates
+# above are fresh against it, and the freshness probes below pick dates at
+# both edges of the threshold relative to it. The real gate keeps using the
+# real today (see `resolve_as_of`); only these tests are pinned.
+SELFTEST_AS_OF = date(2026, 10, 1)
+# Exactly 90 days old on SELFTEST_AS_OF: the threshold day itself, which must
+# still render as a plain date ("older than" is strict).
+SELFTEST_FRESH_90 = "2026-07-03"
+# 91 days old on SELFTEST_AS_OF: the first stale day.
+SELFTEST_STALE_91 = "2026-07-02"
 
 # Two browsers exercise every part of the browser section's shape live inside
 # _SELFTEST_REGISTRY above ("browsers"): one whose three cells share the
@@ -925,22 +1236,134 @@ def selftest() -> int:
         probe("all-unascertained cell is not supported", harness_status(by_id["gamma"]) == STATUS_UNSUPPORTED)
         probe(
             "verified record wins and carries its date",
-            harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09)",
+            harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
         )
         web = {p["id"]: p for p in platforms}
-        probe("stable + from-source is supported", web_status(web["p-stable"]) == STATUS_SUPPORTED)
+        probe(
+            "a platform with a recorded verification outranks its channel and credibility",
+            web_status(web["p-stable"]) == f"{STATUS_VERIFIED} (2026-09-15)",
+        )
+        probe(
+            "a stable from-source platform without a verified record stays supported",
+            web_status({"channel": "stable", "credibility": "from-source", "lastVerified": None})
+            == STATUS_SUPPORTED,
+        )
         probe("experimental channel is experimental", web_status(web["p-exp"]) == STATUS_EXPERIMENTAL)
         probe("unverified credibility is uncertain", web_status(web["p-unver"]) == STATUS_UNCERTAIN)
 
-        short = render_short(harnesses, platforms, browsers)
-        full = render_full(harnesses, platforms, browsers)
+        # The editorial overlay is read out of both sources with the same
+        # shape: registry `verified`/`dev_priority`/`known_issue` beside the
+        # harness id, contract `lastVerified`/`devPriority`/`knownIssue` beside
+        # the platform row. A field that is absent must come back None, which
+        # renders as ABSENT — never as a guess.
+        probe(
+            "registry editorial fields are parsed per harness",
+            by_id["alpha"]["dev_priority"] == "normal"
+            and by_id["alpha"]["known_issue"] == "a caveat with a | pipe, to prove escaping"
+            and by_id["beta"]["known_issue"] is None
+            and by_id["gamma"]["dev_priority"] is None,
+        )
+        probe(
+            "the contract's resolved lastVerified object is parsed field by field",
+            web["p-stable"]["lastVerified"] == {
+                "date": "2026-09-15",
+                "version": "1.2.3",
+                "scope": "one real conversation on a real page",
+            },
+        )
+        probe(
+            "contract editorial fields are parsed per platform, absent where missing",
+            web["p-exp"]["devPriority"] == "low"
+            and web["p-exp"]["knownIssue"] is None
+            and web["p-exp"]["lastVerified"] is None
+            and web["p-unver"]["devPriority"] is None,
+        )
+
+        # The freshness rule (ADR-041, decision 7), on both sides of the
+        # threshold. Known-answer probes first, on dates picked relative to
+        # SELFTEST_AS_OF: 90 days old is still a plain date ("older than" is
+        # strict), 91 days old is the first stale day, and "no record" is the
+        # placeholder, a third state that is neither.
+        probe(
+            "a date exactly 90 days old still renders as the plain date",
+            last_verified_cell({"date": SELFTEST_FRESH_90, "scope": "x"}, SELFTEST_AS_OF)
+            == SELFTEST_FRESH_90,
+        )
+        probe(
+            "a date 91 days old renders as needing a re-check with its date",
+            last_verified_cell({"date": SELFTEST_STALE_91, "scope": "x"}, SELFTEST_AS_OF)
+            == f"{RECHECK_LABEL} ({SELFTEST_STALE_91})",
+        )
+        probe(
+            "no record renders the absent placeholder",
+            last_verified_cell(None, SELFTEST_AS_OF) == ABSENT,
+        )
+        stale_platform = {
+            "id": "p-stale",
+            "origins": ["https://stale.example"],
+            "channel": "stable",
+            "credibility": "from-source",
+            "lastVerified": {"date": SELFTEST_STALE_91, "scope": "an old run"},
+        }
+        stale_short = render_short([], [stale_platform], [], SELFTEST_AS_OF)
+        probe(
+            "a stale record is flagged in the short table's Last verified column",
+            f"| p-stale | {STATUS_VERIFIED} ({SELFTEST_STALE_91}) "
+            f"| {RECHECK_LABEL} ({SELFTEST_STALE_91}) |" in stale_short,
+        )
+        probe(
+            "the status keeps the historical fact while the column carries the flag",
+            f"{STATUS_VERIFIED} ({SELFTEST_STALE_91})" in stale_short,
+        )
+        stale_full = render_full([], [stale_platform], [], SELFTEST_AS_OF)
+        probe(
+            "a stale record is flagged in the editorial section",
+            f"| Web | p-stale | {RECHECK_LABEL} ({SELFTEST_STALE_91}) |" in stale_full,
+        )
+        probe(
+            "the same record is flagged when judged against a day past the threshold",
+            f"{RECHECK_LABEL} ({SELFTEST_FRESH_90})" in render_short(
+                [],
+                [{**stale_platform, "lastVerified": {"date": SELFTEST_FRESH_90, "scope": "x"}}],
+                [],
+                date(2026, 10, 3),
+            ),
+        )
+
+        short = render_short(harnesses, platforms, browsers, SELFTEST_AS_OF)
+        full = render_full(harnesses, platforms, browsers, SELFTEST_AS_OF)
         probe("short table carries the fixed 5+ platforms headline", "5+ platforms" in short)
         probe("short table has no generated count in prose", not re.search(r"\b\d+ (?:platform|harness|tool)", short))
         probe("short table renders every status word", all(
             s in short for s in (STATUS_SUPPORTED, STATUS_UNCERTAIN, STATUS_UNSUPPORTED, STATUS_EXPERIMENTAL)
         ))
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
-        probe("full table carries the verified date", "(2026-09)" in full)
+        probe("full table carries the verified date", "(2026-09-15)" in full)
+        probe(
+            "the short legend names the re-check rule beside its threshold",
+            f"a date older than {RECHECK_DAYS} days is shown as {RECHECK_LABEL} (DATE)" in short,
+        )
+
+        # The editorial section: one row per tool and per platform, the same
+        # three fields both families carry, and the placeholder wherever a
+        # field was not written. A pipe in a known issue must not break the
+        # table cell it renders into.
+        probe(
+            "the editorial section renders a row with every field present",
+            "| Web | p-stable | 2026-09-15 | normal | one caveat \\| with a pipe |" in full,
+        )
+        probe(
+            "the editorial section renders a verified harness with no priority or issue",
+            f"| Local | Delta | 2026-09-15 | {ABSENT} | {ABSENT} |" in full,
+        )
+        probe(
+            "the editorial section keeps the absent placeholder for unwritten fields",
+            f"| Local | Beta | {ABSENT} | low | {ABSENT} |" in full,
+        )
+        probe(
+            "the editorial section escapes a pipe inside a known issue",
+            "a caveat with a \\| pipe, to prove escaping" in full,
+        )
 
         # The browser grid: one row per browser, one cell per OS, in the row
         # order the registry carries (tier-grouped, never alphabetical, so a
@@ -994,11 +1417,11 @@ def selftest() -> int:
         ]
         probe(
             "every short-table row without a verification date ends in the placeholder",
-            bool(data_rows) and all(ln.endswith(f"| {ABSENT} |") for ln in data_rows if "2026-09" not in ln),
+            bool(data_rows) and all(ln.endswith(f"| {ABSENT} |") for ln in data_rows if "2026-09-15" not in ln),
         )
         probe(
             "a verified row keeps its date instead of the placeholder",
-            any(ln.endswith("| 2026-09 |") for ln in data_rows),
+            any(ln.endswith("| 2026-09-15 |") for ln in data_rows),
         )
         probe(
             "a full-table cell with no registry entry renders the placeholder",
@@ -1020,6 +1443,7 @@ def selftest() -> int:
             ],
             [],
             [],
+            SELFTEST_AS_OF,
         )
         probe(
             "a cell with no format recorded renders the placeholder",
@@ -1032,8 +1456,8 @@ def selftest() -> int:
         )
 
         # --update-fixtures makes a fresh checkout pass the check.
-        probe("fixtures update cleanly", update_fixtures(tmp) == 0)
-        probe("fresh fixtures pass the check", run_check(tmp) == 0)
+        probe("fixtures update cleanly", update_fixtures(tmp, SELFTEST_AS_OF) == 0)
+        probe("fresh fixtures pass the check", run_check(tmp, SELFTEST_AS_OF) == 0)
 
         # A stale committed table must fail.
         short_path = os.path.join(tmp, SHORT_FIXTURE_REL)
@@ -1041,7 +1465,7 @@ def selftest() -> int:
             original_short = fh.read()
         with open(short_path, "w", encoding="utf-8") as fh:
             fh.write(original_short.replace("supported", "SUPPORTED", 1))
-        probe("a corrupted fixture fails the check", run_check(tmp) == 1)
+        probe("a corrupted fixture fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
         with open(short_path, "w", encoding="utf-8") as fh:
             fh.write(original_short)
 
@@ -1053,11 +1477,70 @@ def selftest() -> int:
         changed = json.loads(json.dumps(_SELFTEST_REGISTRY))
         changed["harnesses"][0]["paths"]["macos"]["template"] = "~/.alpha/changed/<uuid>.jsonl"
         _scaffold(tmp, registry=changed)
-        probe("a changed registry fails the check", run_check(tmp) == 1)
+        probe("a changed registry fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
         changed_browsers = json.loads(json.dumps(_SELFTEST_REGISTRY))
         changed_browsers["browsers"][0]["tiers"]["windows"] = {"tier": "unverified"}
         _scaffold(tmp, registry=changed_browsers)
-        probe("a changed browser tier fails the check", run_check(tmp) == 1)
+        probe("a changed browser tier fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        _scaffold(tmp)
+
+        # A changed editorial field is the same failure as a changed path cell
+        # or a changed tier: the tables claim to be derived from the overlay,
+        # so an edit that does not re-derive them must go red. One probe per
+        # family of source, plus one per field kind, because a renderer that
+        # silently dropped one field would otherwise pass its sibling's probe.
+        edited_issue = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        edited_issue["harnesses"][0]["known_issue"] = "a changed caveat"
+        _scaffold(tmp, registry=edited_issue)
+        probe("a changed known_issue fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        edited_priority = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        edited_priority["harnesses"][1]["dev_priority"] = "high"
+        _scaffold(tmp, registry=edited_priority)
+        probe("a changed dev_priority fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        edited_verified = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        edited_verified["harnesses"][3]["verified"] = {
+            "date": "2026-08-01",
+            "scope": "a different run",
+        }
+        _scaffold(tmp, registry=edited_verified)
+        probe("a changed verified record fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace(
+            "date: '2026-09-15',",
+            "date: '2026-08-01',",
+        ))
+        probe("a changed platform lastVerified fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        _scaffold(tmp)
+
+        # A malformed editorial record is an input error (exit 2), never a
+        # rendered guess: a priority outside the vocabulary, a date that is
+        # not a full day, a date nobody could have verified yet, a record
+        # with no scope, and a line the parser does not recognize inside a
+        # lastVerified object. Each is its own probe because each is caught
+        # by its own validation, and a regression would otherwise be covered
+        # by whichever sibling still fires.
+        bad_priority = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        bad_priority["harnesses"][0]["dev_priority"] = "urgent"
+        _scaffold(tmp, registry=bad_priority)
+        probe("an unknown dev_priority in the registry is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        bad_date = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        bad_date["harnesses"][3]["verified"] = {"date": "2026-09", "scope": "one real session"}
+        _scaffold(tmp, registry=bad_date)
+        probe("a verified date that is not a full ISO day is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        bad_future = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        bad_future["harnesses"][3]["verified"] = {"date": "2066-01-01", "scope": "one real session"}
+        _scaffold(tmp, registry=bad_future)
+        probe("a verified date in the future is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        no_scope = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        no_scope["harnesses"][3]["verified"] = {"date": "2026-09-15"}
+        _scaffold(tmp, registry=no_scope)
+        probe("a verified record with no scope is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace("devPriority: 'low'", "devPriority: 'urgent'"))
+        probe("an unknown devPriority in the contract is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace(
+            "      version: '1.2.3',",
+            "      vversion: '1.2.3',",
+        ))
+        probe("an unrecognized line inside a lastVerified object is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         _scaffold(tmp)
 
         # A browsers section that cannot be read at all is an error, never a
@@ -1067,43 +1550,43 @@ def selftest() -> int:
         no_browsers = json.loads(json.dumps(_SELFTEST_REGISTRY))
         del no_browsers["browsers"]
         _scaffold(tmp, registry=no_browsers)
-        probe("a registry with no browsers section is an error", run_check(tmp) == 2)
+        probe("a registry with no browsers section is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         gappy = json.loads(json.dumps(_SELFTEST_REGISTRY))
         del gappy["browsers"][1]["tiers"]["linux"]
         _scaffold(tmp, registry=gappy)
-        probe("a browser row missing an OS cell is an error", run_check(tmp) == 2)
+        probe("a browser row missing an OS cell is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         weird_tier = json.loads(json.dumps(_SELFTEST_REGISTRY))
         weird_tier["browsers"][0]["tiers"]["linux"] = {"tier": "probably-fine"}
         _scaffold(tmp, registry=weird_tier)
-        probe("an unknown browser tier is an error", run_check(tmp) == 2)
+        probe("an unknown browser tier is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         _scaffold(tmp)
 
         # Markers in a document are checked, and a half pair is loud.
         readme = os.path.join(tmp, "README.md")
         with open(readme, "w", encoding="utf-8") as fh:
-            fh.write(f"# t\n\n{SHORT_START}\n{render_short(harnesses, platforms, browsers).strip()}\n{SHORT_END}\n")
-        probe("a correct in-document block passes", run_check(tmp) == 0)
+            fh.write(f"# t\n\n{SHORT_START}\n{render_short(harnesses, platforms, browsers, SELFTEST_AS_OF).strip()}\n{SHORT_END}\n")
+        probe("a correct in-document block passes", run_check(tmp, SELFTEST_AS_OF) == 0)
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nwrong\n{SHORT_END}\n")
-        probe("a stale in-document block fails", run_check(tmp) == 1)
+        probe("a stale in-document block fails", run_check(tmp, SELFTEST_AS_OF) == 1)
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nno end marker\n")
-        probe("a half marker pair fails loudly", run_check(tmp) == 1)
+        probe("a half marker pair fails loudly", run_check(tmp, SELFTEST_AS_OF) == 1)
 
         # --write-* refuses to create or guess.
-        probe("write refuses when markers are absent", write_into_file(tmp, "README.md", "short") == 2)
+        probe("write refuses when markers are absent", write_into_file(tmp, "README.md", "short", SELFTEST_AS_OF) == 2)
         with open(readme, "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{SHORT_START}\nold\n{SHORT_END}\n")
-        probe("write replaces between markers", write_into_file(tmp, "README.md", "short") == 0)
-        probe("write result passes the check", run_check(tmp) == 0)
-        probe("write refuses a missing file", write_into_file(tmp, "NOPE.md", "short") == 2)
+        probe("write replaces between markers", write_into_file(tmp, "README.md", "short", SELFTEST_AS_OF) == 0)
+        probe("write result passes the check", run_check(tmp, SELFTEST_AS_OF) == 0)
+        probe("write refuses a missing file", write_into_file(tmp, "NOPE.md", "short", SELFTEST_AS_OF) == 2)
 
         # Malformed inputs must fail loudly, never render a partial matrix.
         _scaffold(tmp, contract="export const ALL_PLATFORMS: readonly ChatPlatform[] = [\n"
                                  "  {\n    id: 'p',\n    origins: ['https://x.example'],\n  },\n];\n")
-        probe("a platform with no channel is an error", run_check(tmp) == 2)
+        probe("a platform with no channel is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         os.remove(os.path.join(tmp, REGISTRY_REL))
-        probe("a missing registry is an error", run_check(tmp) == 2)
+        probe("a missing registry is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
 
         # Advice a failure text prints is only advice if the CLI accepts it.
         # Stale the fixtures, a short block and a full block at once, so the
@@ -1111,7 +1594,7 @@ def selftest() -> int:
         # flags back out of those messages and hold them against argparse. This
         # is the guard for the day one of them named a flag that does not exist.
         _scaffold(tmp)
-        update_fixtures(tmp)
+        update_fixtures(tmp, SELFTEST_AS_OF)
         with open(short_path, "w", encoding="utf-8") as fh:
             fh.write("stale\n")
         with open(readme, "w", encoding="utf-8") as fh:
@@ -1120,7 +1603,7 @@ def selftest() -> int:
         with open(os.path.join(tmp, "docs-dev", "support.md"), "w", encoding="utf-8") as fh:
             fh.write(f"# t\n\n{FULL_START}\nwrong\n{FULL_END}\n")
         printed_flags = {
-            flag for text in check(tmp)[0] for flag in re.findall(r"--[a-z][a-z-]*", text)
+            flag for text in check(tmp, SELFTEST_AS_OF)[0] for flag in re.findall(r"--[a-z][a-z-]*", text)
         }
         probe(
             "the stale-text probes reached every remediation flag",
