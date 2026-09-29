@@ -2,11 +2,11 @@
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
-| Local | Claude Code | supported | - |
-| Local | OpenAI Codex CLI | supported | - |
-| Local | Gemini CLI | supported | - |
-| Local | opencode | supported | - |
-| Local | Cursor | supported | - |
+| Local | Claude Code | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok (xAI CLI) | supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
@@ -14,15 +14,15 @@
 | Local | Zed | supported | - |
 | Local | Continue | supported | - |
 | Local | Kimi Code | supported | - |
-| Web | deepseek | supported | - |
+| Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
-| Web | chatgpt | supported | - |
-| Web | gemini | supported | - |
-| Web | claude | supported | - |
+| Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
+| Web | gemini | verified end-to-end (2026-09-24) | 2026-09-24 |
+| Web | claude | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | kimi | experimental | - |
-| Web | grok | supported | - |
+| Web | grok | verified end-to-end (2026-09-24) | 2026-09-24 |
 
-Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check.
+Verified means a maintainer archived a real session end to end on their own machine. Formats change, so a date is recorded instead of a permanent check; a date older than 90 days is shown as needs re-check (DATE).
 
 **Browsers.** Native host registration, per browser and per OS:
 

@@ -281,6 +281,31 @@ export interface ResponseShape {
   requiredTextIncludes?: readonly string[];
 }
 
+/**
+ * Where the maintainers' attention is, stated per row of the support tables.
+ * Editorial: it is written by hand and never derived from capture behaviour.
+ */
+export type DevPriority = 'high' | 'normal' | 'low';
+
+/**
+ * 🔴 One recorded end-to-end verification of this platform.
+ *
+ * Record it only from dated evidence: a real conversation was captured on a
+ * real machine and archived end to end on the date named here. This is a
+ * different fact from `credibility` (which says where the capture ROUTES were
+ * read from, never that a conversation was archived), and the two must not be
+ * migrated into each other: the public tables show the date only when a human
+ * ran the whole pipeline and wrote down when.
+ */
+export interface PlatformVerification {
+  /** The ISO day (YYYY-MM-DD) of the recorded end-to-end run. */
+  date: string;
+  /** The build the verification ran on, when the record names one. */
+  version?: string;
+  /** What the recorded run established, for the reader of the tables. */
+  scope: string;
+}
+
 /** Data-only description of one capturable platform. */
 export interface ChatPlatform {
   id: PlatformId;
@@ -308,6 +333,19 @@ export interface ChatPlatform {
    * because it is the only switch that makes us read frame payloads at all.
    */
   webSocketCapture?: boolean;
+  /**
+   * 🔴 The editorial facts of the generated support tables (SB-1). None of the
+   * three fields below is read by the extension's own code; they live in this
+   * table because `scripts/gen-support-matrix.py` derives the public README and
+   * docs tables from it, and editorial data kept beside the capture rows cannot
+   * drift from the row it describes. Absent means "nothing recorded", which
+   * the tables render as a dash — never as a guess.
+   */
+  devPriority?: DevPriority;
+  /** One short public-safe caveat with a pointer (issue number, commit, doc). */
+  knownIssue?: string;
+  /** Present only where a dated end-to-end run of a real conversation exists. */
+  lastVerified?: PlatformVerification;
 }
 
 /**
@@ -363,6 +401,17 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
+    devPriority: 'normal',
+    // Live acceptance of the 2026-09-24 build (main e71eb33, extension
+    // 0.1.0.18): real conversations were archived end to end on a real
+    // machine on all five stable-channel platforms. Perplexity and kimi were
+    // inert in that stable build, so they carry no lastVerified record.
+    lastVerified: {
+      date: '2026-09-24',
+      version: 'extension 0.1.0.18',
+      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+    },
+    knownIssue: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
   {
     id: 'perplexity',
@@ -432,6 +481,8 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     credibility: 'from-source',
     channel: 'experimental',
     webSocketCapture: false,
+    devPriority: 'low',
+    knownIssue: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
   {
     id: 'chatgpt',
@@ -449,6 +500,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
+    devPriority: 'high',
+    lastVerified: {
+      date: '2026-09-24',
+      version: 'extension 0.1.0.18',
+      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+    },
+    knownIssue: 'a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4)',
   },
   {
     id: 'gemini',
@@ -491,6 +549,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
+    devPriority: 'normal',
+    lastVerified: {
+      date: '2026-09-24',
+      version: 'extension 0.1.0.18',
+      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+    },
+    knownIssue: 'a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md)',
   },
   {
     id: 'claude',
@@ -550,6 +615,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
+    devPriority: 'normal',
+    lastVerified: {
+      date: '2026-09-24',
+      version: 'extension 0.1.0.18',
+      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+    },
+    knownIssue: 'two accounts inside one organization are not yet distinguished by the organization check (see issue #4)',
   },
   {
     id: 'kimi',
@@ -678,6 +750,8 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // No shipped row observes WebSocket frames. Stated explicitly, not left to
     // the default, so that "did anyone turn this on?" is one grep away.
     webSocketCapture: false,
+    devPriority: 'low',
+    knownIssue: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
   {
     id: 'grok',
@@ -766,6 +840,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     //    found" is the honest state; turning this switch on would claim we know
     //    how to read those frames, which we do not.
     webSocketCapture: false,
+    devPriority: 'normal',
+    lastVerified: {
+      date: '2026-09-24',
+      version: 'extension 0.1.0.18',
+      scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
+    },
+    knownIssue: 'the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md)',
   },
 ];
 

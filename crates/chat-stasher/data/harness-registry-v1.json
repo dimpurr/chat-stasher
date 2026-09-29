@@ -5,6 +5,12 @@
     {
       "id": "claude-code",
       "display_name": "Claude Code",
+      "verified": {
+        "date": "2026-09-25",
+        "scope": "real sessions read back and rendered from the real archive on a real machine (git 41db2bf); the founding pass sealed 91 real sessions and matched the read-back hash (git 52c2e00)"
+      },
+      "dev_priority": "high",
+      "known_issue": "on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear; the drive-letter and backslash sanitization of short paths is still unmeasured",
       "paths": {
         "macos": {
           "template": "~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl",
@@ -42,6 +48,11 @@
     {
       "id": "codex",
       "display_name": "OpenAI Codex CLI",
+      "verified": {
+        "date": "2026-09-25",
+        "scope": "real sessions read back and rendered from the real archive on a real machine (git 41db2bf); the founding pass sealed 91 real claude-code and codex sessions and matched the read-back hash (git 52c2e00)"
+      },
+      "dev_priority": "normal",
       "paths": {
         "macos": {
           "template": "~/.codex/sessions/",
@@ -83,6 +94,12 @@
     {
       "id": "gemini-cli",
       "display_name": "Gemini CLI",
+      "verified": {
+        "date": "2026-09-25",
+        "scope": "the archived bytes of every real session were read back through the real binary and the on-disk document shape pinned (git 58233aa, git 41db2bf)"
+      },
+      "dev_priority": "normal",
+      "known_issue": "the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often",
       "paths": {
         "macos": {
           "template": "~/.gemini/tmp/<projectId>/chats/",
@@ -125,6 +142,12 @@
     {
       "id": "opencode",
       "display_name": "opencode",
+      "verified": {
+        "date": "2026-09-25",
+        "scope": "the whole real store was exported into shards in one measured pass (git 1595419, git a908a00) and real sessions read back and rendered from the real archive (git 41db2bf)"
+      },
+      "dev_priority": "normal",
+      "known_issue": "a one-line change still re-exports the whole session as a new full snapshot (git a908a00)",
       "paths": {
         "macos": {
           "template": "$XDG_DATA_HOME/opencode/opencode.db",
@@ -164,6 +187,11 @@
     {
       "id": "cursor",
       "display_name": "Cursor",
+      "verified": {
+        "date": "2026-09-25",
+        "scope": "all real sessions of this store are held by the real archive and read back and rendered by the reader (git 41db2bf)"
+      },
+      "dev_priority": "normal",
       "paths": {
         "macos": {
           "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
@@ -215,6 +243,8 @@
     {
       "id": "grok",
       "display_name": "Grok (xAI CLI)",
+      "dev_priority": "low",
+      "known_issue": "a real local store was read but no session has been archived end to end (git 2294f04)",
       "paths": {
         "macos": {
           "template": "~/.grok/sessions/session_search.sqlite",
@@ -260,6 +290,8 @@
     {
       "id": "github-copilot-cli",
       "display_name": "GitHub Copilot CLI",
+      "dev_priority": "low",
+      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "~/.copilot/",
@@ -298,6 +330,8 @@
     {
       "id": "aider",
       "display_name": "aider",
+      "dev_priority": "low",
+      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "$CWD/.aider.chat.history.md",
@@ -337,6 +371,8 @@
     {
       "id": "crush",
       "display_name": "crush",
+      "dev_priority": "low",
+      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "$CWD/.crush/crush.db",
@@ -375,6 +411,8 @@
     {
       "id": "zed",
       "display_name": "Zed",
+      "dev_priority": "low",
+      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "~/Library/Application Support/Zed/threads/threads.db",
@@ -413,6 +451,8 @@
     {
       "id": "continue",
       "display_name": "Continue",
+      "dev_priority": "low",
+      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "~/.continue/sessions/<id>.json + sessions.json",
@@ -449,6 +489,8 @@
     {
       "id": "kimi-code",
       "display_name": "Kimi Code",
+      "dev_priority": "normal",
+      "known_issue": "a real local store was read but no session has been archived end to end (git 2294f04)",
       "paths": {
         "macos": {
           "template": "~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",

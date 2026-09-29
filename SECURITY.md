@@ -62,7 +62,7 @@ actually claims (each is derived from code in `docs-dev/threat-model.md`):
 1. Conversation content reaching a network destination the user did not
    configure.
 2. The extension capturing traffic outside its declared platform origins
-   (`apps/extension/lib/contract.ts:285-311`, `:799-812`).
+   (`apps/extension/lib/contract.ts:310-349`, `:880-893`).
 3. The CLI writing to, or otherwise mutating, a harness's own session store,
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
    `:1373-1376`).

@@ -8,6 +8,15 @@ short and full tables from the two sources of truth
   * `crates/chat-stasher/data/harness-registry-v1.json`, and
   * `apps/extension/lib/contract.ts`'s `ALL_PLATFORMS`,
 
+including the hand-written editorial fields both carry — the `verified` /
+`lastVerified` record (a dated end-to-end archive), `dev_priority` /
+`devPriority`, and `known_issue` / `knownIssue` — which are validated by the
+same loaders before anything renders, and whose own freshness rule applies:
+a recorded verification date older than 90 days renders as `needs re-check
+(DATE)`, so the day a date crosses that threshold this gate goes red until the
+tables are re-derived. That red is the expiry signal working, not a failure
+of the gate.
+
 and fails when either differs from what is committed:
 
   * the committed tables under `scripts/support-matrix/`, and
