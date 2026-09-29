@@ -683,16 +683,24 @@ crates/chat-stasher/src/nativehost.rs:2704-2714  7a213899b5c2  lines=11
   <- docs-dev/install.md:307  :: fn summary(request_id: Option<String>) -> serde_json::Value…
 crates/chat-stasher/src/nativehost.rs:3089-3123  6e78c5dd7bec  lines=35
   <- docs-dev/privacy.md:728, docs-dev/threat-model.md:174, docs-dev/threat-model.md:432  :: pub fn detect_launch(argv: &[std::ffi::OsString]) -> Launch…
-crates/chat-stasher/src/orphans.rs:176  742d70807be5  lines=1
-  <- docs-dev/orphan-packs.md:129  :: pub fn survey<S: Open>(
-crates/chat-stasher/src/orphans.rs:233  3a21d2f444c5  lines=1
-  <- docs-dev/orphan-packs.md:68  :: fn verify_unindexed(
-crates/chat-stasher/src/orphans.rs:309  1da6da7eb8e8  lines=1
-  <- docs-dev/orphan-packs.md:83  :: pub fn index_adopting<S: Open>(
-crates/chat-stasher/src/orphans.rs:336  7b73748c9b45  lines=1
-  <- docs-dev/orphan-packs.md:131  :: if !report.missing.is_empty() {
-crates/chat-stasher/src/orphans.rs:360  b9194636e55f  lines=1
-  <- docs-dev/orphan-packs.md:111  :: if let Err(why) = verify_unindexed(backends, &report.uninde…
+crates/chat-stasher/src/orphans.rs:191  742d70807be5  lines=1
+  <- docs-dev/orphan-packs.md:145  :: pub fn survey<S: Open>(
+crates/chat-stasher/src/orphans.rs:238  3a21d2f444c5  lines=1
+  <- docs-dev/orphan-packs.md:69  :: fn verify_unindexed(
+crates/chat-stasher/src/orphans.rs:259  8aef83aaa45e  lines=1
+  <- docs-dev/orphan-packs.md:242  :: fn hold_after_survey() {
+crates/chat-stasher/src/orphans.rs:305  a78846deb972  lines=1
+  <- docs-dev/orphan-packs.md:126  :: fn refused<S: Open>(
+crates/chat-stasher/src/orphans.rs:333  1da6da7eb8e8  lines=1
+  <- docs-dev/orphan-packs.md:97  :: pub fn index_adopting<S: Open>(
+crates/chat-stasher/src/orphans.rs:359  7b73748c9b45  lines=1
+  <- docs-dev/orphan-packs.md:147  :: if !report.missing.is_empty() {
+crates/chat-stasher/src/orphans.rs:397  98a1a74a771b  lines=1
+  <- docs-dev/orphan-packs.md:82  :: if survey(&repo, backends)?.unindexed != report.unindexed {
+crates/chat-stasher/src/orphans.rs:408  ce11301e94c9  lines=1
+  <- docs-dev/orphan-packs.md:82  :: if unindexed != report.unindexed {
+crates/chat-stasher/src/packcheck.rs:93  bda148c6d69d  lines=1
+  <- docs-dev/orphan-packs.md:68  :: pub fn verify_pack(
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs-dev/threat-model.md:80, docs-dev/threat-model.md:520  :: //! Connection reaping for remote SSH backends.
 crates/chat-stasher/src/remote_err.rs:101-112  8dc19707e181  lines=12
@@ -728,7 +736,7 @@ crates/chat-stasher/src/store.rs:275-349  a6debb9ea9c7  lines=75
 crates/chat-stasher/src/store.rs:310-314  bd0dae8980fe  lines=5
   <- docs-dev/install.md:527  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
 crates/chat-stasher/src/store.rs:366  43a7a775bbdc  lines=1
-  <- docs-dev/orphan-packs.md:84  :: pub fn open_indexed(
+  <- docs-dev/orphan-packs.md:98  :: pub fn open_indexed(
 crates/chat-stasher/src/store.rs:1164-1249  d1b806878c20  lines=86
   <- docs-dev/privacy.md:523, docs-dev/threat-model.md:80  :: // error, so reaching here means the entry list is provably…
 crates/chat-stasher/src/store.rs:1251-1255  6b4ff2db82f4  lines=5
@@ -759,5 +767,5 @@ crates/chat-stasher/src/view.rs:246  5ac58701d728  lines=1
   <- docs-dev/threat-model.md:163  :: fn ct_eq(a: &str, b: &str) -> bool {
 crates/chat-stasher/src/view.rs:343-376  22c308f15652  lines=34
   <- docs-dev/threat-model.md:163  :: if method != "GET" {
-crates/chat-stasher/tests/w245_interrupted_push_test.rs:578  f4c7f9dbf2be  lines=1
-  <- docs-dev/orphan-packs.md:81  :: fn a_push_over_stranded_packs_reuses_them_instead_of_re_upl…
+crates/chat-stasher/tests/w245_interrupted_push_test.rs:610  f4c7f9dbf2be  lines=1
+  <- docs-dev/orphan-packs.md:95  :: fn a_push_over_stranded_packs_reuses_them_instead_of_re_upl…

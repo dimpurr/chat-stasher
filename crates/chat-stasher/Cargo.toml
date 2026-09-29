@@ -62,6 +62,16 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # notes above.
 bytes = "1"
 tempfile = "3"
+# `src/packcheck.rs` reads a pack's own header: the entry list in it is
+# `rustic_core`'s `HeaderEntry`, parsed with the `binrw` reader that type derives
+# (rustic's own `PackHeader::from_binary` is `pub(crate)`), and the AEAD call it
+# cannot borrow is the crate `rustic_core` encrypts with — its 64-byte key layout
+# is rustic's own, and this is the cipher, at the version the pinned rustic
+# depends on. Both are already in the lock file as that crate's dependencies, so
+# they add no package to the build graph — only the direct edges. Appended, not
+# inserted, for the same citation-stability reason as the entries above.
+binrw = "0.15"
+aes256ctr_poly1305aes = "0.2.1"
 
 [dev-dependencies]
 # The protocol tests have to compute the SHA-256 the extension would send, from

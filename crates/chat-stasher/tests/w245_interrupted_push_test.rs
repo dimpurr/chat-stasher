@@ -45,7 +45,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -230,6 +229,39 @@ impl Sandbox {
             "--keep-ssh-masters".to_string(),
         ]);
         self.command().args(args).output().unwrap()
+    }
+
+    /// Push with the open parked in the window an outside process cannot
+    /// schedule: between the survey's pack listing and the adopting pass's.
+    ///
+    /// The open writes `reached` into `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
+    /// and waits for `go` (`orphans::hold_after_survey`), so whatever `inject`
+    /// does is what the adopting pass — and nothing before it — sees. That makes
+    /// the index-arrival window a fixture instead of a 100 ms race, and it is the
+    /// only way to put a *pack* there.
+    fn push_parked_between_survey_and_adoption(&self, inject: impl FnOnce()) -> Output {
+        let rendezvous = self.dir.path().join("rendezvous");
+        let child = self
+            .command()
+            .env("CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY", &rendezvous)
+            .args(self.push_args())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reached = rendezvous.join("reached");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !reached.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the open never reached its rendezvous; a run without the hold would have \
+                 finished, and this window cannot be tested by waiting"
+            );
+            sleep(Duration::from_millis(2));
+        }
+        inject();
+        fs::write(rendezvous.join("go"), b"").unwrap();
+        child.wait_with_output().unwrap()
     }
 }
 
@@ -646,24 +678,62 @@ fn a_push_over_stranded_packs_reuses_them_instead_of_re_uploading_them() {
 /// reads only index files then fails with "cannot ls tree" and exit 3. The read
 /// path opens the way `push` does.
 ///
-/// The `data_added == 0` assertion is what makes this test falsifiable: without
-/// it the test would pass on the unfixed code too, because there the payload is
-/// re-uploaded into freshly indexed packs and every blob is reachable. It fails
-/// against the unfixed code (measured there: `data_added=2009841`).
+/// The assertion is `data_blobs == 0`, which is what makes this test falsifiable:
+/// without it the test would pass on the unfixed code too, because there the
+/// payload is re-uploaded into freshly indexed packs and every blob is
+/// reachable. It fails against the unfixed code (measured there:
+/// `data_added=2009841`).
+///
+/// **Why `data_blobs` and not `data_added`.** They are different counts:
+/// `rustic_core` adds `summary.data_added += self.data` for *both* packers and
+/// `summary.data_blobs += self.blobs` only for the data one
+/// (`rustic_core-0.12.0` `src/blob/packer.rs:389-400`, `PackerStats::apply`), so
+/// `data_added` counts tree blobs as well. The Windows CI run is what showed the
+/// two apart: this test failed there with `data_blobs=0 data_added=1690` — not
+/// one byte of content was uploaded, and a tree (metadata) was re-serialized —
+/// so the assertion was reading tree bytes as content. Which tree that platform
+/// rewrote is *not* established from here: macOS and Linux report 0, and so does
+/// a parentless retry over an index file naming the same packs, and the
+/// difference is in a node's freshly-read metadata rather than in the packs. It
+/// is metadata either way, and this test is about content.
 #[test]
 fn content_from_an_adopted_pack_reads_back_through_the_read_command() {
     let sb = Sandbox::new(2, 300_000);
     assert!(sb.push().status.success());
     let stranded = strand_packs(&sb);
     assert!(!stranded.is_empty(), "the first push wrote no packs");
+    let before = pack_paths(&sb.repo);
     let second = sb.push();
     assert!(second.status.success());
     let stdout = String::from_utf8_lossy(&second.stdout);
-    assert_eq!(
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    eprintln!(
+        "W245: adopted-pack retry: data_blobs={:?} data_added={:?} packed={:?} books_new={} \
+         packs_before={:?} packs_after={:?}",
+        summary_field(&stdout, "data_blobs"),
         summary_field(&stdout, "data_added"),
+        summary_field(&stdout, "data_added_packed"),
+        pack_paths(&sb.repo).len().saturating_sub(before.len()),
+        before
+            .iter()
+            .map(|p| (unix_rel(p, &sb.repo), fs::metadata(p).unwrap().len()))
+            .collect::<Vec<_>>(),
+        pack_paths(&sb.repo)
+            .iter()
+            .map(|p| (unix_rel(p, &sb.repo), fs::metadata(p).unwrap().len()))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        summary_field(&stdout, "data_blobs"),
         Some(0),
-        "the retry must add no data pack at all, so the content exists only in the \
+        "the retry must add no data blob at all, so the content exists only in the \
          stranded packs: {stdout}"
+    );
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    assert!(
+        added < payload as u64 / 4,
+        "the retry added {added} bytes of data for a {payload}-byte payload: that is not the \
+         tree metadata a retry may rewrite, it is the payload again: {stdout}"
     );
 
     let read = sb.read_archive();
@@ -1145,74 +1215,65 @@ fn an_index_file_that_appears_after_the_packs_were_stranded_is_not_double_counte
     );
 }
 
-/// The same index file, arriving *while* the open is running: written from
-/// another process, against a repository whose packs are stranded, and read by
-/// whichever phase of the open lists the index directory next.
+/// The same index file, but *injected* into the window the timing version had
+/// to race: written after the survey has listed the packs and before the
+/// adopting pass lists them again.
 ///
-/// What is asserted is the end state, not which phase saw it, because the phase
-/// is not schedulable from outside the process: the survey and the checked pass
-/// both list the index files, so an index that lands between them is one the
-/// checked pass reads and the survey did not. Either way the packs must not be
-/// counted twice (no second copy of the payload on disk, no data added), the
-/// bytes must read back, and no pack or index file may be modified.
+/// `push_parked_between_survey_and_adoption` parks the open there, so there is
+/// no sleep to lose and no "which phase saw it" to report: the survey cannot
+/// have read this file (it did not exist when it ran), and the adopting pass
+/// cannot have missed it.
+///
+/// What has to hold is the same as when the index is there from the start: the
+/// packs it names are not adopted a second time, nothing is uploaded again, no
+/// second copy appears on disk, and the index file is left exactly as the other
+/// client wrote it.
 #[test]
-fn an_index_file_written_while_the_open_runs_is_not_double_counted() {
-    let sb = Sandbox::opendal_fs(8, 1_000_000);
+fn an_index_file_injected_between_the_survey_and_the_adopting_pass_is_not_double_counted() {
+    let sb = Sandbox::opendal_fs(4, 500_000);
     assert!(sb.push().status.success());
     let index = dir_files(&sb.repo.join("index"));
     assert!(!index.is_empty(), "the first push wrote no index file");
     let stranded = strand_packs(&sb);
     let before = repo_bytes(&sb.repo);
-
     let index_dir = sb.repo.join("index");
-    let injected = index.clone();
-    let writer = thread::spawn(move || {
-        // Long enough that the open is under way — its verification reads every
-        // stranded pack, which is the part of the open this window sits in — and
-        // short enough that a loaded machine still has the push running.
-        sleep(Duration::from_millis(100));
+
+    let second = sb.push_parked_between_survey_and_adoption(|| {
         fs::create_dir_all(&index_dir).unwrap();
-        for (name, bytes) in &injected {
+        for (name, bytes) in &index {
             fs::write(index_dir.join(name), bytes).unwrap();
         }
     });
-
-    let second = sb.push();
-    writer.join().unwrap();
     assert!(
         second.status.success(),
-        "a push racing an index file must succeed: {}",
+        "a push whose open is injected an index file must succeed: {}",
         String::from_utf8_lossy(&second.stderr)
     );
     let stdout = String::from_utf8_lossy(&second.stdout);
-    // Which phase saw the injected index, for the log: a push that reports no
-    // stranded packs is one whose *survey* read the file, and one that reports
-    // an adoption is one whose survey did not (whether the checked pass read it
-    // instead is not visible from here — either way the packs are not adopted a
-    // second time, which is what the assertions below are for).
-    eprintln!(
-        "W245: index injected 100 ms into the open; the survey {} it: {:?}",
-        if stranded_lines(&stdout).is_empty() {
-            "read"
-        } else {
-            "did not read"
-        },
-        stranded_lines(&stdout),
+    // The survey ran before the injection, so it reported the packs as
+    // stranded — which is the state this window is made of: the survey's set
+    // and the adopting pass's set are not the same set of *files*, and the pass
+    // is the one that reads the index.
+    assert!(
+        stranded_lines(&stdout)
+            .iter()
+            .any(|line| line.contains("named by no index file")),
+        "the survey ran before the injection and must report the stranded packs: {stdout}"
     );
 
-    // Whichever phase read the index, the packs it names were not uploaded
-    // again and nothing was counted twice.
-    assert_eq!(
-        summary_field(&stdout, "data_added"),
-        Some(0),
-        "the payload is named by the index or adopted from its packs: neither may upload it \
-         again: {stdout}"
-    );
+    // No second copy of the payload, and no content uploaded again: the index
+    // file names every pack, so the dedup hit is the same one the from-the-start
+    // case gets.
     let grew = repo_bytes(&sb.repo) - before;
     let payload: usize = sb.staged.values().map(Vec::len).sum();
+    assert_eq!(
+        summary_field(&stdout, "data_blobs"),
+        Some(0),
+        "an index file that names every pack must leave the retry with nothing to upload: {stdout}"
+    );
     assert!(
         grew < payload as u64 / 4,
-        "the retry added {grew} bytes for a {payload}-byte payload that was already stored"
+        "the retry added {grew} bytes for a {payload}-byte payload the index already names"
     );
     for pack in &stranded {
         assert!(pack.exists(), "{} disappeared", pack.display());
@@ -1223,7 +1284,186 @@ fn an_index_file_written_while_the_open_runs_is_not_double_counted() {
         "the index file the other client wrote must be left as it was"
     );
     assert_eq!(
-        assert_no_mismatched_content(&sb, "after an index file arrived mid-open"),
+        assert_no_mismatched_content(&sb, "after an index file was injected mid-open"),
+        sb.staged.len()
+    );
+}
+
+/// A pack that appears while the open runs is not adopted: the adopting pass is
+/// only allowed to index the set this open verified.
+///
+/// `to_indexed_checked()` lists the packs itself and rustic offers no way to
+/// hand it a set, so the window between the survey and that pass is real; what
+/// closes it is the set comparison on both sides of the pass. This is the
+/// deterministic form of that race — a pack file written into the repository
+/// while the open is parked in the window — and the push must fall back to the
+/// plain index and say so, then upload the payload again.
+///
+/// The injected file is a *copy* of a stranded pack under a different name,
+/// which is enough for the fence: it is never read. The fence is about the set
+/// the backend lists, and it is checked before any bytes are.
+#[test]
+fn a_pack_that_appears_while_the_open_runs_is_not_adopted() {
+    let sb = Sandbox::opendal_fs(4, 400_000);
+    assert!(sb.push().status.success());
+    let stranded = strand_packs(&sb);
+    let before = repo_bytes(&sb.repo);
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+
+    // A name the backend lists: `data/<xx>/<64 hex>`, the same shape a pack
+    // this repository wrote would carry.
+    let name = "0123456789abcdef".repeat(4);
+    let injected = sb.repo.join("data").join(&name[..2]).join(&name);
+    let source = stranded.first().unwrap().clone();
+    let source_bytes = fs::read(&source).unwrap();
+
+    let second = sb.push_parked_between_survey_and_adoption(|| {
+        fs::create_dir_all(injected.parent().unwrap()).unwrap();
+        fs::write(&injected, &source_bytes).unwrap();
+    });
+    assert!(
+        second.status.success(),
+        "a pack appearing mid-open must not fail the push: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let said = stranded_lines(&stdout);
+    assert!(
+        said.iter().any(|line| line.contains("NOT adopted")),
+        "the push must refuse an adoption over a pack it never verified: {stdout}"
+    );
+    assert!(
+        !said.iter().any(|line| line.contains("adopted -")),
+        "no pack may be reported as adopted when one appeared mid-open: {stdout}"
+    );
+
+    // The refusal costs the reuse, not the archive: the payload is uploaded
+    // again, the injected file is left exactly as it was found, and the content
+    // still reads back.
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    assert!(
+        added as usize >= payload / 2,
+        "the retry added {added} bytes of data for a {payload}-byte payload: the stranded packs \
+         were treated as holding content that was already stored"
+    );
+    assert_eq!(
+        fs::read(&injected).unwrap(),
+        source_bytes,
+        "the pack that appeared mid-open must not be modified"
+    );
+    let grew = repo_bytes(&sb.repo) - before;
+    assert!(
+        grew > 0,
+        "the retry uploaded the payload again, so the store grew"
+    );
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after a pack appeared mid-open"),
+        sb.staged.len()
+    );
+}
+
+/// Damaged ciphertext, *and* a pack renamed to the hash of its damaged bytes:
+/// the name is not the check.
+///
+/// `a_pack_with_damaged_blob_bytes_…` damages the whole blob region and leaves
+/// the file under its old name, so comparing the file with the id it is stored
+/// under catches it. That comparison is not verification: it answers "are these
+/// the bytes the name claims", and a pack that was damaged and then renamed
+/// answers yes. What is left is the pack's own *header*: it is AEAD ciphertext
+/// under the repository key, it still parses, and it names a blob whose
+/// ciphertext no longer decrypts. Only reading that blob and recomputing its id
+/// from the plaintext can tell the difference, which is what
+/// `crate::packcheck::verify_pack` does before anything is adopted
+/// (`crates/chat-stasher/src/orphans.rs:verify_unindexed`).
+///
+/// One byte is flipped, in the middle of the pack's blob region — inside some
+/// blob's ciphertext, since the blobs tile that region — and the pack is
+/// renamed to the SHA-256 of its new bytes. The file is left exactly as it was
+/// written, the refusal is reported, and the payload goes up again.
+#[test]
+fn a_damaged_pack_renamed_to_its_new_hash_is_not_adopted_and_its_content_is_re_uploaded() {
+    let sb = Sandbox::new(4, 400_000);
+    assert!(sb.push().status.success());
+    let stranded = strand_packs(&sb);
+    let before = repo_bytes(&sb.repo);
+
+    // The largest stranded pack holds the content; its blob region is everything
+    // before the encrypted header, which the trailing length field locates.
+    let victim = stranded
+        .iter()
+        .max_by_key(|pack| fs::metadata(pack).unwrap().len())
+        .unwrap()
+        .clone();
+    let mut bytes = fs::read(&victim).unwrap();
+    let region = pack_blob_region(&bytes);
+    assert!(
+        region > 0,
+        "{} has no blob region to damage",
+        victim.display()
+    );
+    bytes[region / 2] ^= 0xff;
+    let damaged = bytes.clone();
+
+    // Rename it to the id its damaged bytes hash to, which is what a store that
+    // moved the pack after damaging it — or an attacker — leaves behind. A pack
+    // lives at `data/<first two hex of its id>/<id>`, so the rename is a move
+    // between prefixes as well as names.
+    let renamed = victim.parent().unwrap().parent().unwrap().join({
+        let name = sha256_hex(&damaged);
+        format!("{}/{name}", &name[..2])
+    });
+    assert_ne!(
+        renamed, victim,
+        "the damage must move the pack's own hash, or this test is not testing a rename"
+    );
+    fs::create_dir_all(renamed.parent().unwrap()).unwrap();
+    fs::write(&renamed, &damaged).unwrap();
+    fs::remove_file(&victim).unwrap();
+
+    let second = sb.push();
+    assert!(
+        second.status.success(),
+        "a damaged and renamed pack must not fail the push: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let said = stranded_lines(&stdout);
+    assert!(
+        said.iter().any(|line| line.contains("NOT adopted")),
+        "the push must report the refusal rather than reuse bytes it could not read: {stdout}"
+    );
+    assert!(
+        !said.iter().any(|line| line.contains("adopted -")),
+        "a pack whose blobs cannot be read must never be reported as adopted: {stdout}"
+    );
+
+    // The renamed file is left exactly as it was found: nothing here deletes or
+    // rewrites a pack, damaged or not.
+    assert_eq!(
+        fs::read(&renamed).unwrap(),
+        damaged,
+        "{} must not be modified",
+        renamed.display()
+    );
+
+    // And the content went up again. `data_blobs` is the count of data blobs the
+    // retry had to write, which is the claim: a dedup hit against the damaged
+    // pack would have left it at zero.
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    let blobs = summary_field(&stdout, "data_blobs").unwrap_or_default();
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    eprintln!(
+        "W245: damaged and renamed: payload={payload} blobs={blobs} data_added={added} \
+         grew={}",
+        repo_bytes(&sb.repo) - before
+    );
+    assert!(
+        added as usize >= payload / 2,
+        "the retry added {added} bytes of data for a {payload}-byte payload: the damaged pack \
+         was treated as holding content that was already stored"
+    );
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after a refused adoption of a damaged, renamed pack"),
         sb.staged.len()
     );
 }
