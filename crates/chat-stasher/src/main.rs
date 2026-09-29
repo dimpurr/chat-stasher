@@ -7788,8 +7788,41 @@ fn cmd_index(action: IndexAction) -> ExitCode {
     let index = chat_stasher::fts::Index::for_destination(&cache_root, &identity);
     match operation {
         "check" => match index.check() {
-            Ok(documents) => {
-                println!("[index] state=valid documents={documents}");
+            Ok(report) => {
+                let documents = report.documents;
+                // `documents` is what the index holds; the `last_build_*` fields
+                // are what the most recent build did, which is not the same
+                // number: a build that changed nothing reads no sessions, and
+                // reporting its `indexed=0` beside a full `documents` would read
+                // as an empty index. Counters are named for their scope so the
+                // two cannot be confused.
+                match report.status {
+                    chat_stasher::fts::CheckStatus::Valid {
+                        indexed,
+                        empty_body,
+                        bytes_read,
+                    } => println!(
+                        "[index] state=valid documents={documents} \
+                         last_build_indexed={indexed} last_build_empty_body={empty_body} \
+                         last_build_bytes_read={bytes_read}"
+                    ),
+                    chat_stasher::fts::CheckStatus::Partial {
+                        indexed,
+                        not_indexable,
+                        empty_body,
+                        bytes_read,
+                    } => println!(
+                        "[index] state=partial documents={documents} \
+                         last_build_not_indexable={not_indexable} \
+                         last_build_indexed={indexed} last_build_empty_body={empty_body} \
+                         last_build_bytes_read={bytes_read}"
+                    ),
+                    chat_stasher::fts::CheckStatus::Incomplete => println!(
+                        "[index] state=incomplete documents={documents} \
+                         (no build has recorded a completed outcome; run `chat-stasher index build`, \
+                         which does not re-read sessions that are unchanged)"
+                    ),
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -7956,20 +7989,34 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         repo.dump(&entries_all[*idx].1, &mut raw)
                             .context("read changed archived document")?;
                     }
+                    let bytes_read = raw.len() as u64;
                     let extracted = chat_stasher::fts::extract_index_document(&raw)?;
-                    Ok(chat_stasher::fts::DocText {
-                        title: titles.get(id).cloned().unwrap_or(extracted.title),
-                        body: extracted.body,
-                        message_offsets: extracted.message_offsets,
+                    Ok(chat_stasher::fts::LoadedDoc {
+                        text: chat_stasher::fts::DocText {
+                            title: titles.get(id).cloned().unwrap_or(extracted.title),
+                            body: extracted.body,
+                            message_offsets: extracted.message_offsets,
+                        },
+                        bytes_read,
                     })
                 })
             })();
             match build_result {
                 Ok(stats) => {
                     println!(
-                        "[index] documents={} read={} unchanged={} removed={}",
-                        stats.documents, stats.read, stats.unchanged, stats.removed
+                        "[index] documents={} read={} indexed={} not_indexable={} empty_body={} unchanged={} removed={} bytes_read={}",
+                        stats.documents,
+                        stats.read,
+                        stats.indexed,
+                        stats.not_indexable.len(),
+                        stats.empty_body,
+                        stats.unchanged,
+                        stats.removed,
+                        stats.bytes_read
                     );
+                    for (id, reason) in &stats.not_indexable {
+                        println!("[index] not indexable `{id}`: {reason}");
+                    }
                     reap_remote(&cfg, args.keep_ssh_masters);
                     ExitCode::SUCCESS
                 }

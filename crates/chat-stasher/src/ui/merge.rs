@@ -748,10 +748,13 @@ mod index_tests {
             .collect();
         index
             .build(&sources, |id| {
-                Ok(doc(
-                    "synthetic title",
-                    bodies.get(id).copied().unwrap_or("synthetic"),
-                ))
+                Ok(fts::LoadedDoc {
+                    text: doc(
+                        "synthetic title",
+                        bodies.get(id).copied().unwrap_or("synthetic"),
+                    ),
+                    bytes_read: 0,
+                })
             })
             .unwrap();
         index
@@ -783,7 +786,10 @@ mod index_tests {
                     text.message_offsets.push(text.body.chars().count());
                     text.body.push_str(message);
                 }
-                Ok(text)
+                Ok(fts::LoadedDoc {
+                    text,
+                    bytes_read: 0,
+                })
             })
             .unwrap();
         index

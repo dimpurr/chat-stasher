@@ -113,13 +113,83 @@ pub struct DocText {
     pub message_offsets: Vec<usize>,
 }
 
+/// The text a build's load step produced, and how much of the archive it read
+/// to produce it.
+///
+/// `bytes_read` is what a build reports as its volume (C6): the plaintext bytes
+/// read for that source, in the same unit `FulltextCost::plaintext_bytes`
+/// estimates. A loader that synthesizes text reports the length of the source
+/// it stands in for.
+#[derive(Debug, Clone)]
+pub struct LoadedDoc {
+    pub text: DocText,
+    pub bytes_read: u64,
+}
+
 /// Result of an incremental build.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildStats {
     pub documents: usize,
+    /// Sources whose fingerprint changed and whose load was attempted. This is
+    /// `indexed + not_indexable.len()`: every changed source is either stored
+    /// or named as not indexable, never dropped silently.
     pub read: usize,
     pub unchanged: usize,
     pub removed: usize,
+    /// Sources whose load succeeded and whose text was stored (a subset of
+    /// `read`).
+    pub indexed: usize,
+    /// Sources whose load failed, in order, each with its reason. A malformed
+    /// or unreadable shard must not abort the rest of the archive's build, and
+    /// naming the session is what lets a user act on it (C1).
+    pub not_indexable: Vec<(String, String)>,
+    /// Sources whose load succeeded but whose extracted body was empty. They
+    /// are stored and counted as indexed, yet cannot match a query; a count
+    /// voices that false-negative instead of folding it into `indexed` (C2).
+    pub empty_body: usize,
+    /// Archive bytes read for the sources whose load succeeded.
+    pub bytes_read: u64,
+}
+
+/// What `index check` found: whether a build finished, and if so the health of
+/// what it left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckReport {
+    pub documents: usize,
+    pub status: CheckStatus,
+}
+
+/// The recorded result of the last build attempt, so `index check` does not
+/// call an index that never completed, or that only partially completed,
+/// "valid" (C7).
+///
+/// The counters below describe **the last build**, not the index as a whole: a
+/// build that changed nothing reads no sessions and reports zeroes while the
+/// index still holds every document. They are reported as `last_build_*` for
+/// that reason, and [`CheckReport::documents`] is the index's own size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// A build finished and committed, every source was indexed, and at least
+    /// one document exists.
+    Valid {
+        indexed: usize,
+        empty_body: usize,
+        bytes_read: u64,
+    },
+    /// A build finished but either left the archive not fully searchable (some
+    /// sources were not indexable) or indexed nothing at all. A zero-document
+    /// index is a completed measurement of emptiness, not a valid index.
+    Partial {
+        indexed: usize,
+        not_indexable: usize,
+        empty_body: usize,
+        bytes_read: u64,
+    },
+    /// No build has completed: the recorded state is missing or not
+    /// `completed`. An index written before this accounting existed lands here
+    /// too, because nothing recorded can vouch for it. The index is not usable
+    /// until a build records a completed outcome.
+    Incomplete,
 }
 
 /// One ranked match, complete enough to render: the label, the excerpt with
@@ -218,6 +288,13 @@ pub enum MatchPlace {
 pub struct Index {
     root: PathBuf,
     db_path: PathBuf,
+    /// The file mtime at which [`validate_schema`] last ran cleanly in this
+    /// process, shared across clones of this value. `None` until the first
+    /// full validation. Read paths consult this and skip the full integrity
+    /// scan while the file is unchanged, so a text query does not re-validate
+    /// a multi-gigabyte index on every call (C10); a rebuild changes the mtime
+    /// and forces the next read to re-validate exactly once.
+    validated_mtime: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
 }
 
 /// Extract only user/assistant text. Tool calls and tool results are not
@@ -350,6 +427,7 @@ impl Index {
         Self {
             db_path: root.join("index.sqlite3"),
             root,
+            validated_mtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -358,6 +436,7 @@ impl Index {
         Self {
             db_path: root.join("index.sqlite3"),
             root,
+            validated_mtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -369,32 +448,121 @@ impl Index {
         &self.db_path
     }
 
-    /// Open read-only and validate the schema. Missing remains distinct from
-    /// corrupt: callers can offer a build command only for the former.
-    pub fn check(&self) -> Result<usize> {
-        let connection = self.open_valid()?;
-        connection
+    /// The explicit maintenance read: validate the schema thoroughly and report
+    /// what a build left behind. Missing remains distinct from corrupt: callers
+    /// can offer a build command only for the former. This is the one path that
+    /// is *supposed* to run the full integrity scan, so it does not use the
+    /// mtime cache.
+    pub fn check(&self) -> Result<CheckReport> {
+        let connection = self.open_read_only()?;
+        validate_schema(&connection)?;
+        let documents: i64 = connection
             .query_row("SELECT count(*) FROM documents", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .map(|count| count as usize)
-            .context("count indexed documents")
+            .context("count indexed documents")?;
+        let completed: Option<String> = connection
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'build_status'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read FTS index build status")?;
+        let status = if completed.as_deref() != Some("completed") {
+            CheckStatus::Incomplete
+        } else {
+            let indexed = read_meta_count(&connection, "build_indexed")?;
+            let not_indexable = read_meta_count(&connection, "build_not_indexable")?;
+            let empty_body = read_meta_count(&connection, "build_empty_body")?;
+            let bytes_read = read_meta_count(&connection, "build_bytes_read")? as u64;
+            if documents > 0 && not_indexable == 0 {
+                CheckStatus::Valid {
+                    indexed,
+                    empty_body,
+                    bytes_read,
+                }
+            } else {
+                CheckStatus::Partial {
+                    indexed,
+                    not_indexable,
+                    empty_body,
+                    bytes_read,
+                }
+            }
+        };
+        Ok(CheckReport {
+            documents: documents as usize,
+            status,
+        })
     }
 
-    /// The read-only connection every reader of this index starts from: a
-    /// missing file and a corrupt one stay two different instructions, and
-    /// both are refused before any question is asked of the index.
-    fn open_valid(&self) -> Result<Connection> {
+    /// Open the database read-only without any validation, so the caller can
+    /// decide which kind of check the operation needs.
+    fn open_read_only(&self) -> Result<Connection> {
         if !self.db_path.exists() {
             bail!("no local index has been built; run `chat-stasher index build` (no archive read was performed)");
         }
         self.validate_owned_paths()?;
-        let connection =
-            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
-                "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
-            )?;
-        validate_schema(&connection)?;
+        Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
+            "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
+        )
+    }
+
+    /// The read-only connection every reader of this index starts from: a
+    /// missing file and a corrupt one stay two different instructions, and
+    /// both are refused before any question is asked of the index. Validation
+    /// is the cheap guard — schema version, a completed build, and one full
+    /// integrity scan per file mtime (C10) — not the per-query full scan of
+    /// old behavior.
+    fn open_valid(&self) -> Result<Connection> {
+        let connection = self.open_read_only()?;
+        self.cheap_validate(&connection)?;
         Ok(connection)
+    }
+
+    /// The cheap guard every read path runs: the schema is the expected
+    /// version, a build has completed, and — once per file mtime — the
+    /// database passed a full integrity scan. The full scan is cached by mtime,
+    /// so a query pays for it once per rebuild rather than once per query.
+    fn cheap_validate(&self, connection: &Connection) -> Result<()> {
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                anyhow!("invalid or corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
+            })?;
+        if version.parse::<i64>().ok() != Some(SCHEMA_VERSION) {
+            bail!(
+                "unsupported FTS index schema version; use `chat-stasher index clear` then rebuild"
+            );
+        }
+        let completed: Option<String> = connection
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'build_status'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                anyhow!("invalid or corrupt FTS index; use `chat-stasher index clear` then rebuild: {error}")
+            })?;
+        if completed.as_deref() != Some("completed") {
+            bail!("the local FTS index has no recorded completed build; run `chat-stasher index build` to record one (sessions that are unchanged are not re-read)");
+        }
+        let mtime = db_mtime(&self.db_path);
+        let mut validated = self
+            .validated_mtime
+            .lock()
+            .expect("FTS validation cache lock poisoned");
+        if *validated == mtime {
+            return Ok(());
+        }
+        validate_schema(connection)?;
+        *validated = mtime;
+        Ok(())
     }
 
     /// What the index holds, and when its file was last written.
@@ -451,11 +619,7 @@ impl Index {
                 minimum: MIN_QUERY_CHARS,
             }));
         }
-        let connection =
-            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
-                "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
-            )?;
-        validate_schema(&connection)?;
+        let connection = self.open_valid()?;
         // One row past the cap, so "the index held more" is an observation
         // rather than an inference from a full page.
         let mut statement = connection.prepare(
@@ -509,11 +673,7 @@ impl Index {
     /// and still answer [`MatchPlace::NotRelocated`] — which is why that state
     /// exists rather than being guessed into message 0.
     pub fn placements(&self, query: &str, ids: &[String]) -> Result<Vec<MatchPlace>> {
-        let connection =
-            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
-                "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
-            )?;
-        validate_schema(&connection)?;
+        let connection = self.open_valid()?;
         let mut statement = connection.prepare(
             "SELECT instr(lower(body), lower(?2)), instr(lower(title), lower(?2)), message_offsets \
              FROM documents WHERE id = ?1",
@@ -555,10 +715,17 @@ impl Index {
     }
 
     /// Build/update documents. `load` is called only for new or changed source
-    /// fingerprints. A failing read leaves the current transaction untouched.
+    /// fingerprints, and once per source.
+    ///
+    /// A failing `load` (a malformed or unreadable shard) does **not** abort the
+    /// build: the session is recorded in `BuildStats::not_indexable` with its
+    /// reason and the rest of the archive is still indexed (C1). The last build
+    /// outcome is recorded in `index_meta` so `index check` can tell a completed
+    /// build apart from one that never finished (C7). A commit failure still
+    /// rolls the transaction back, leaving the previous completed build intact.
     pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) -> Result<BuildStats>
     where
-        F: FnMut(&str) -> Result<DocText>,
+        F: FnMut(&str) -> Result<LoadedDoc>,
     {
         let existed = self.db_path.exists();
         self.validate_owned_paths_if_present()?;
@@ -627,7 +794,33 @@ impl Index {
                 stats.unchanged += 1;
                 continue;
             }
-            let text = load(&source.id).with_context(|| "read changed archived document")?;
+            stats.read += 1;
+            // A failing load names the session and moves on; one malformed shard
+            // must not put the whole archive out of reach (C1).
+            //
+            // Any row the previous build stored for this id is left alone rather
+            // than deleted: the unreadable read proves nothing about what the
+            // session now holds, and an abort of the whole build — the behavior
+            // this replaces — likewise kept the previous build's content for it.
+            // Deleting would let one transient read failure (a network hiccup on
+            // an object-store destination) shrink the index, so the failed
+            // session is named in `not_indexable` instead and `check` reports the
+            // build `Partial`. A session the build has *never* read has no row,
+            // so it is absent from the index and `search` counts it as missing.
+            let loaded = match load(&source.id) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    stats
+                        .not_indexable
+                        .push((source.id.clone(), format!("{error:#}")));
+                    continue;
+                }
+            };
+            stats.bytes_read += loaded.bytes_read;
+            let text = loaded.text;
+            if text.body.is_empty() {
+                stats.empty_body += 1;
+            }
             let content_sha = digest_text(&text.title, &text.body);
             let offsets: Vec<u64> = text
                 .message_offsets
@@ -652,7 +845,7 @@ impl Index {
                 "INSERT INTO documents_fts(id, title, body) VALUES (?1, ?2, ?3)",
                 params![source.id, text.title, text.body],
             )?;
-            stats.read += 1;
+            stats.indexed += 1;
         }
         let stale: Vec<String> = old
             .keys()
@@ -665,6 +858,7 @@ impl Index {
         }
         stats.removed = stale.len();
         stats.documents = sources.len();
+        record_build_outcome(&tx, &stats)?;
         tx.commit()?;
         set_file_private(&self.db_path)?;
         Ok(stats)
@@ -749,6 +943,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
         "BEGIN IMMEDIATE;
          CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          INSERT INTO index_meta(key, value) VALUES ('schema_version', '2');
+         INSERT INTO index_meta(key, value) VALUES ('build_status', 'incomplete');
          CREATE TABLE documents (
              id TEXT PRIMARY KEY,
              source_sha256 TEXT NOT NULL,
@@ -816,6 +1011,53 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Record the just-finished build in `index_meta`, in the same transaction that
+/// wrote the documents, so a committed `build_status = 'completed'` is atomic
+/// with the rows it describes. `index check` reads these to distinguish a
+/// completed build from an interrupted one, and to report what it left behind.
+fn record_build_outcome(connection: &Connection, stats: &BuildStats) -> Result<()> {
+    let put = |key: &str, value: &str| -> Result<()> {
+        connection.execute(
+            "INSERT INTO index_meta(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    };
+    put("build_status", "completed")?;
+    put("build_indexed", &stats.indexed.to_string())?;
+    put(
+        "build_not_indexable",
+        &stats.not_indexable.len().to_string(),
+    )?;
+    put("build_empty_body", &stats.empty_body.to_string())?;
+    put("build_bytes_read", &stats.bytes_read.to_string())?;
+    Ok(())
+}
+
+/// Read a numeric build-health counter recorded by a completed build.
+fn read_meta_count(connection: &Connection, key: &str) -> Result<usize> {
+    let value: String = connection
+        .query_row(
+            "SELECT value FROM index_meta WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .map_err(|error| anyhow!("corrupt FTS index build metadata: {error}"))?;
+    value
+        .parse::<usize>()
+        .map_err(|_| anyhow!("corrupt FTS index build metadata: non-numeric `{key}`"))
+}
+
+/// The index file's modification time, used as the key for the once-per-mtime
+/// full-integrity cache. `None` when the file cannot be statted; a caller then
+/// re-validates rather than trusting a stale stamp.
+fn db_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -874,6 +1116,11 @@ mod tests {
         text
     }
 
+    /// Wrap a `DocText` for a build closure, with a synthetic byte count.
+    fn the(text: DocText, bytes_read: u64) -> LoadedDoc {
+        LoadedDoc { text, bytes_read }
+    }
+
     #[test]
     fn incremental_build_reads_only_changed_sources() {
         let dir = tempfile::tempdir().unwrap();
@@ -892,7 +1139,7 @@ mod tests {
         index
             .build(&sources, |id| {
                 calls.set(calls.get() + 1);
-                Ok(doc(id, "synthetic"))
+                Ok(the(doc(id, "synthetic"), 0))
             })
             .unwrap();
         assert_eq!(calls.get(), 2);
@@ -910,7 +1157,7 @@ mod tests {
         let stats = index
             .build(&changed, |id| {
                 calls.set(calls.get() + 1);
-                Ok(doc(id, "synthetic changed"))
+                Ok(the(doc(id, "synthetic changed"), 0))
             })
             .unwrap();
         assert_eq!(calls.get(), 1);
@@ -927,13 +1174,17 @@ mod tests {
             id: "same-id".into(),
             source_sha256: "same-sha".into(),
         }];
-        one.build(&source, |_| Ok(doc("one", "synthetic hedgehog material")))
-            .unwrap();
-        two.build(&source, |_| Ok(doc("two", "synthetic blueberry material")))
-            .unwrap();
+        one.build(&source, |_| {
+            Ok(the(doc("one", "synthetic hedgehog material"), 0))
+        })
+        .unwrap();
+        two.build(&source, |_| {
+            Ok(the(doc("two", "synthetic blueberry material"), 0))
+        })
+        .unwrap();
         assert_ne!(one.root(), two.root());
-        assert_eq!(one.check().unwrap(), 1);
-        assert_eq!(two.check().unwrap(), 1);
+        assert_eq!(one.check().unwrap().documents, 1);
+        assert_eq!(two.check().unwrap().documents, 1);
         assert_eq!(one.matches("hedgehog").unwrap().unwrap().len(), 1);
         assert_eq!(one.matches("blueberry").unwrap().unwrap().len(), 0);
         assert_eq!(two.matches("blueberry").unwrap().unwrap().len(), 1);
@@ -944,7 +1195,9 @@ mod tests {
     fn corrupt_database_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let index = Index::at(dir.path().join("index"));
-        index.build(&[], |_| Ok(DocText::default())).unwrap();
+        index
+            .build(&[], |_| Ok(the(DocText::default(), 0)))
+            .unwrap();
         fs::write(index.db_path(), b"not sqlite").unwrap();
         let error = index.check().unwrap_err().to_string();
         assert!(error.contains("corrupt") || error.contains("invalid"));
@@ -959,7 +1212,9 @@ mod tests {
             source_sha256: "synthetic-source".into(),
         }];
         index
-            .build(&sources, |_| Ok(doc("synthetic title", "synthetic body")))
+            .build(&sources, |_| {
+                Ok(the(doc("synthetic title", "synthetic body"), 0))
+            })
             .unwrap();
         Connection::open(index.db_path())
             .unwrap()
@@ -971,7 +1226,7 @@ mod tests {
         let error = index
             .build(&sources, |_| {
                 read.set(true);
-                Ok(DocText::default())
+                Ok(the(DocText::default(), 0))
             })
             .unwrap_err();
         assert!(error.to_string().contains("corrupt"));
@@ -984,7 +1239,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let index = Index::at(dir.path().join("index"));
-        index.build(&[], |_| Ok(DocText::default())).unwrap();
+        index
+            .build(&[], |_| Ok(the(DocText::default(), 0)))
+            .unwrap();
         assert_eq!(
             fs::metadata(index.db_path()).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1001,7 +1258,12 @@ mod tests {
                     id: "synthetic/session".into(),
                     source_sha256: "synthetic-source".into(),
                 }],
-                |_| Ok(doc("synthetic title", "The quiet hedgehog walks at night.")),
+                |_| {
+                    Ok(the(
+                        doc("synthetic title", "The quiet hedgehog walks at night."),
+                        0,
+                    ))
+                },
             )
             .unwrap();
         let set = index.matches("hedgehog").unwrap().unwrap();
@@ -1030,19 +1292,22 @@ mod tests {
                     },
                 ],
                 |id| {
-                    Ok(match id {
-                        "synthetic/title-hit" => {
-                            doc("synthetic apricot title", "ordinary synthetic body")
-                        }
-                        "synthetic/body-hit" => doc("ordinary title", "synthetic indigo body"),
-                        // Written as escapes, not as the characters themselves:
-                        // T5 refuses literal CJK anywhere under `crates/`, and a
-                        // test of CJK matching is not an exception to that.
-                        _ => doc(
-                            "synthetic title",
-                            "\u{5408}\u{6210}\u{4e2d}\u{6587}\u{68c0}\u{7d22}\u{6837}\u{672c}",
-                        ),
-                    })
+                    Ok(the(
+                        match id {
+                            "synthetic/title-hit" => {
+                                doc("synthetic apricot title", "ordinary synthetic body")
+                            }
+                            "synthetic/body-hit" => doc("ordinary title", "synthetic indigo body"),
+                            // Written as escapes, not as the characters themselves:
+                            // T5 refuses literal CJK anywhere under `crates/`, and a
+                            // test of CJK matching is not an exception to that.
+                            _ => doc(
+                                "synthetic title",
+                                "\u{5408}\u{6210}\u{4e2d}\u{6587}\u{68c0}\u{7d22}\u{6837}\u{672c}",
+                            ),
+                        },
+                        0,
+                    ))
                 },
             )
             .unwrap();
@@ -1108,7 +1373,7 @@ mod tests {
                     id: "synthetic/session".into(),
                     source_sha256: "synthetic-source".into(),
                 }],
-                |_| Ok(text.clone()),
+                |_| Ok(the(text.clone(), 0)),
             )
             .unwrap();
         (dir, index)
@@ -1281,7 +1546,7 @@ mod tests {
             },
         ];
         index
-            .build(&sources, |id| Ok(doc(id, "synthetic body")))
+            .build(&sources, |id| Ok(the(doc(id, "synthetic body"), 0)))
             .unwrap();
         let summary = index.summary().unwrap();
         assert_eq!(
@@ -1361,5 +1626,357 @@ mod tests {
         // was recorded for the second message is 7 — the character one.
         assert_eq!(extracted.body[..13].chars().count(), 7);
         assert_eq!(extracted.message_offsets[1], 7);
+    }
+
+    /// One source reads with a malformed body and one reads fine. The build
+    /// must complete, record the bad one as not indexable with its reason, and
+    /// leave the good one searchable — the archive is not rendered unreadable
+    /// by a single unparsable session (C1).
+    #[test]
+    fn a_malformed_shard_is_recorded_not_indexable_and_the_build_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = vec![
+            SourceDoc {
+                id: "machine-one/good".into(),
+                source_sha256: "sha-good".into(),
+            },
+            SourceDoc {
+                id: "machine-one/bad".into(),
+                source_sha256: "sha-bad".into(),
+            },
+            SourceDoc {
+                id: "machine-one/good-later".into(),
+                source_sha256: "sha-later".into(),
+            },
+        ];
+        let stats = index
+            .build(&sources, |id| {
+                if id == "machine-one/bad" {
+                    return Err(anyhow::anyhow!("invalid archived JSONL record at line 1"));
+                }
+                Ok(the(doc(id, "the quiet hedgehog walks"), 21))
+            })
+            .unwrap();
+        // Failure of one session is captured, not fatal.
+        assert_eq!(stats.documents, 3);
+        assert_eq!(stats.read, 3);
+        assert_eq!(stats.indexed, 2);
+        assert_eq!(stats.bytes_read, 42);
+        assert_eq!(stats.not_indexable.len(), 1);
+        let (bad_id, reason) = &stats.not_indexable[0];
+        assert_eq!(bad_id, "machine-one/bad");
+        assert!(reason.contains("invalid archived JSONL record"), "{reason}");
+        // Both good sessions are indexed and searchable; the bad one is absent.
+        let set = index.matches("hedgehog").unwrap().unwrap();
+        let mut ids: Vec<&str> = set.matches.iter().map(|m| m.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["machine-one/good", "machine-one/good-later"]);
+        assert!(!index.summary().unwrap().ids.contains("machine-one/bad"));
+        assert!(
+            index.check().unwrap().status
+                == CheckStatus::Partial {
+                    indexed: 2,
+                    not_indexable: 1,
+                    empty_body: 0,
+                    bytes_read: 42,
+                }
+        );
+    }
+
+    /// A source that read fine once and then reads as malformed keeps the text
+    /// the earlier build stored, and the failed re-read is named rather than
+    /// silently deleting it. An unreadable read is not evidence that the
+    /// session is gone, so dropping the row would let one transient failure
+    /// shrink the index (C1).
+    #[test]
+    fn a_failed_reload_keeps_the_last_readable_text_and_names_the_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let first = [SourceDoc {
+            id: "machine-one/session".into(),
+            source_sha256: "sha-v1".into(),
+        }];
+        index
+            .build(&first, |_| Ok(the(doc("t", "the quiet hedgehog walks"), 7)))
+            .unwrap();
+        assert_eq!(index.matches("hedgehog").unwrap().unwrap().len(), 1);
+        // The shard changes and the re-read fails: the fingerprint differs, so
+        // the source is attempted and the attempt fails.
+        let second = [SourceDoc {
+            id: "machine-one/session".into(),
+            source_sha256: "sha-v2".into(),
+        }];
+        let stats = index
+            .build(&second, |_| {
+                Err(anyhow::anyhow!("invalid archived JSONL record at line 1"))
+            })
+            .unwrap();
+        assert_eq!(stats.read, 1);
+        assert_eq!(stats.indexed, 0);
+        assert_eq!(stats.not_indexable.len(), 1);
+        // The previous text is still searchable, so a failed re-read did not
+        // subtract from what the archive could already answer.
+        assert_eq!(index.matches("hedgehog").unwrap().unwrap().len(), 1);
+        assert!(index.summary().unwrap().ids.contains("machine-one/session"));
+        // And the build says so: one session could not be re-read.
+        assert_eq!(
+            index.check().unwrap().status,
+            CheckStatus::Partial {
+                indexed: 0,
+                not_indexable: 1,
+                empty_body: 0,
+                bytes_read: 0,
+            }
+        );
+    }
+
+    /// A source whose body extracts to nothing is stored and counted, but the
+    /// count is reported separately from `indexed` so coverage cannot call a
+    /// document "indexed" when it cannot match a query (C2).
+    #[test]
+    fn an_empty_body_is_counted_and_surfaced_by_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = vec![
+            SourceDoc {
+                id: "machine-one/empty".into(),
+                source_sha256: "sha-empty".into(),
+            },
+            SourceDoc {
+                id: "machine-one/full".into(),
+                source_sha256: "sha-full".into(),
+            },
+        ];
+        let stats = index
+            .build(&sources, |id| {
+                let body = if id == "machine-one/full" {
+                    "the quiet hedgehog walks"
+                } else {
+                    ""
+                };
+                Ok(the(doc(id, body), 10))
+            })
+            .unwrap();
+        assert_eq!(stats.indexed, 2);
+        assert_eq!(stats.empty_body, 1);
+        assert!(
+            index.check().unwrap().status
+                == CheckStatus::Valid {
+                    indexed: 2,
+                    empty_body: 1,
+                    bytes_read: 20,
+                }
+        );
+    }
+
+    /// `index check` must never call an index that did not finish a build
+    /// "valid": an interrupted build leaves `build_status` incomplete, and the
+    /// next check says so rather than reading the empty schema as healthy (C7).
+    #[test]
+    fn check_reports_an_interrupted_build_as_incomplete_not_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        // Simulate a build that created the schema but never committed a
+        // completed status: the schema exists, zero documents, and the meta
+        // marker is still the create-time default.
+        index
+            .build(&[], |_| Ok(the(DocText::default(), 0)))
+            .unwrap();
+        Connection::open(index.db_path())
+            .unwrap()
+            .execute(
+                "INSERT INTO index_meta(key, value) VALUES ('build_status', 'incomplete') \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        let report = index.check().unwrap();
+        assert_eq!(report.documents, 0);
+        assert_eq!(report.status, CheckStatus::Incomplete);
+        // The index is unusable for queries, with a message that names the
+        // rebuild, not a lie about being valid.
+        let err = index.matches("hedgehog").unwrap_err().to_string();
+        assert!(err.contains("no recorded completed build"), "{err}");
+        assert!(err.contains("index build"), "{err}");
+    }
+
+    /// Rebuilding the index changes the file's mtime, and only that change
+    /// forces a re-validation: the cheap guard must not hold on to a stale
+    /// validation across a rebuild any more than it must re-validate a quiet
+    /// index on every query (SRCH-6). A rebuild that swaps the body is seen by
+    /// the next read and the new text is searchable.
+    #[test]
+    fn a_rebuild_invalidates_the_validation_cache_and_new_text_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc {
+            id: "synthetic/session".into(),
+            source_sha256: "source-v1".into(),
+        }];
+        index
+            .build(&sources, |_| {
+                Ok(the(doc("t", "the quiet hedgehog walks"), 0))
+            })
+            .unwrap();
+        assert_eq!(index.matches("hedgehog").unwrap().unwrap().len(), 1);
+        // A second build changes the source fingerprint and the body; the mtime
+        // moves, so the cached validation is not trusted for the old content.
+        let updated = [SourceDoc {
+            id: "synthetic/session".into(),
+            source_sha256: "source-v2".into(),
+        }];
+        index
+            .build(&updated, |_| {
+                Ok(the(doc("t", "the blueberry bush stands"), 0))
+            })
+            .unwrap();
+        // The old term is gone from the rebuilt index and the new one is found:
+        // the cheap guard re-validated on the mtime change instead of trusting
+        // the pre-rebuild stamp.
+        let old_hits = index.matches("hedgehog").unwrap().unwrap();
+        assert_eq!(old_hits.len(), 0);
+        let new_hits = index.matches("blueberry").unwrap().unwrap();
+        assert_eq!(new_hits.len(), 1);
+    }
+
+    /// The marker word that makes document `n` findable on its own.
+    ///
+    /// Fixed width matters: the trigram tokenizer answers a quoted query as a
+    /// substring, so `marker1` would also match `marker10` and the query would
+    /// stop hitting exactly one document.
+    fn large_marker(n: usize) -> String {
+        format!("hedgehogmarker{n:04}")
+    }
+
+    /// Deterministic, varied, mostly-ASCII body of roughly `target_chars`,
+    /// carrying `keyword` exactly once so the large-index query can target one
+    /// document. Varied enough for the trigram tokenizer to build a realistic
+    /// index, deterministic enough to be reproducible.
+    fn large_body(seed: u64, target_chars: usize, keyword: &str) -> String {
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut next = || {
+            state = state.rotate_left(5).wrapping_mul(0x2545_F491_4F6C_DD1D);
+            (state >> 32) as usize
+        };
+        let words = [
+            "hedgehog",
+            "blueberry",
+            "alpine",
+            "stream",
+            "morning",
+            "sun",
+            "fir",
+            "quiet",
+            "pauses",
+            "beside",
+            "every",
+            "before",
+            "clears",
+            "walks",
+            "over",
+            "bush",
+            "tree",
+        ];
+        let keyword_at = next() % 997;
+        let mut out = String::with_capacity(target_chars + 8);
+        let mut i = 0usize;
+        while out.len() < target_chars {
+            let word = if i % 997 == keyword_at {
+                keyword
+            } else {
+                words[next() % words.len()]
+            };
+            out.push_str(word);
+            i += 1;
+            if out.len() < target_chars {
+                out.push(' ');
+            }
+        }
+        out
+    }
+
+    /// The SRCH-6 latency bound on a large index, run explicitly because it
+    /// builds a multi-gigabyte database:
+    ///
+    /// ```text
+    /// cargo test -p chat-stasher --lib fts:: -- --ignored query_latency_on_a_large_index_is_bounded
+    /// CS_FTS_LATENCY_MIB=256 cargo test -p chat-stasher --lib fts:: -- --ignored query_latency_on_a_large_index_is_bounded
+    /// ```
+    ///
+    /// A text query must answer without re-validating the whole index. The probe
+    /// is a query that matches exactly **one** document, because that is what
+    /// isolates the defect: a query matching many documents costs real work in
+    /// `snippet()`/`bm25()` proportional to matches × body length, which grows
+    /// with the *query* and is not the thing SRCH-6 is about. What grows with
+    /// index size regardless of the query is validation, and before SRCH-6 each
+    /// query re-ran the full integrity scan (W255 C10 measured >12 minutes per
+    /// query at archive scale). This bound is RED against that and GREEN now.
+    #[test]
+    #[ignore = "builds a large synthetic index; run explicitly with --ignored"]
+    fn query_latency_on_a_large_index_is_bounded() {
+        use std::time::Instant;
+        // MiB of body text to index. The default reaches a GiB — the scale
+        // W255 C10 measured against.
+        let total_mib: u64 = std::env::var("CS_FTS_LATENCY_MIB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+        let total_chars: usize = (total_mib as usize) * 1024 * 1024;
+        let docs = 512;
+        let per_doc = total_chars / docs;
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources: Vec<SourceDoc> = (0..docs)
+            .map(|n| SourceDoc {
+                id: format!("large/{n}"),
+                source_sha256: format!("source-{n}"),
+            })
+            .collect();
+        let started = Instant::now();
+        index
+            .build(&sources, |id| {
+                let n: usize = id.strip_prefix("large/").unwrap().parse().unwrap();
+                let body = large_body(n as u64, per_doc, &large_marker(n));
+                let chars = body.chars().count();
+                Ok(the(
+                    DocText {
+                        title: "synthetic title".to_string(),
+                        body,
+                        message_offsets: Vec::new(),
+                    },
+                    chars as u64,
+                ))
+            })
+            .unwrap();
+        let build_secs = started.elapsed().as_secs_f64();
+        // Every document is present, so the latency below is measured over a
+        // complete index rather than over whatever the build happened to finish.
+        assert_eq!(index.summary().unwrap().ids.len(), docs);
+        let query = large_marker(docs / 2);
+        // One warm query validates the index once and populates the mtime cache.
+        let warm = index.matches(&query).unwrap().unwrap();
+        assert_eq!(warm.len(), 1, "the marker is unique to one document");
+        const QUERIES: usize = 25;
+        let mut worst = 0.0f64;
+        for _ in 0..QUERIES {
+            let t = Instant::now();
+            let set = index.matches(&query).unwrap().unwrap();
+            assert_eq!(set.len(), 1);
+            worst = worst.max(t.elapsed().as_secs_f64());
+        }
+        // A per-query integrity_check over a several-GB database is measured in
+        // seconds to minutes (W255 C10); a validated query is milliseconds. 0.5 s
+        // is a generous ceiling for the line between the two.
+        const MAX_WORST_SECS: f64 = 0.5;
+        eprintln!(
+            "large-index latency: docs={docs} text_MiB={total_mib} \
+             build={build_secs:.1}s worst_query={worst:.4}s max={MAX_WORST_SECS}s"
+        );
+        assert!(
+            worst <= MAX_WORST_SECS,
+            "worst query over {total_mib} MiB took {worst:.4}s; \
+             a text query must not re-validate the whole index each time"
+        );
     }
 }
