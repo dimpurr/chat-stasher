@@ -73,7 +73,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::activity::{
     ActivityRow, ProjectProvenance, SessionTitle, TimeSource as ActivityTimeSource, TitleSource,
 };
-use crate::readback::{bucket_shard_path, newest_snapshot_per_host};
+use crate::readback::{bucket_shard_path, snapshots_by_host_newest_first};
 use crate::selector::{Selector, SessionMeta, TimeBounds, TimeWindow, UnplacedBy, Verdict};
 use crate::sidecar::{activity_index_machine, infer_harness};
 use crate::store::BackupStore;
@@ -312,7 +312,11 @@ pub struct SearchReport {
     pub destination: String,
     /// Snapshot files present in the repository.
     pub snapshots_in_repo: usize,
-    /// Snapshots whose tree was actually walked (newest per hostname).
+    /// Snapshots whose tree was actually walked. Cumulative since ADR-021's
+    /// rule reached this reader: every snapshot of every hostname is walked
+    /// unless it failed, so `snapshots_scanned < snapshots_in_repo` is exactly
+    /// the "a snapshot could not be scanned" state — see
+    /// [`SearchReport::scanned_all_snapshots`].
     pub snapshots_scanned: usize,
     /// Sessions seen at all, before the filter was applied.
     pub sessions_seen: usize,
@@ -595,19 +599,35 @@ impl SearchReport {
         self.unreadable.is_empty()
     }
 
+    /// Whether every snapshot in the repository was walked.
+    ///
+    /// A search enumerates a destination's sessions by walking snapshot trees,
+    /// so a snapshot that was never walked is a set of sessions that was never
+    /// looked for. Since the walk is cumulative ([`Self::complete`] covers the
+    /// snapshots it *tried*), this is the second half of "did we look
+    /// everywhere": `complete()` says no walk failed, this says there was no
+    /// walk left undone. Both are needed — a search that stopped early, or a
+    /// repository the snapshot listing under-counts, is not a destination that
+    /// was read in full.
+    pub fn scanned_all_snapshots(&self) -> bool {
+        self.snapshots_scanned >= self.snapshots_in_repo
+    }
+
     /// Whether the query was answered for **every** session seen.
     ///
     /// This is stricter than [`Self::complete`]: a destination can be read in
     /// full and still not answer the question, because some session's
-    /// conversation time is unknown. When that happens, `hits.is_empty()`
-    /// proves nothing — hence the separate name, so a caller cannot pick the
-    /// weaker one by accident.
+    /// conversation time is unknown, or because a snapshot was never walked
+    /// (see [`Self::scanned_all_snapshots`]). When either happens,
+    /// `hits.is_empty()` proves nothing — hence the separate name, so a caller
+    /// cannot pick the weaker one by accident.
     ///
     /// A session with **no conversation content** (ADR-035) does not block the
     /// answer: there is no conversation to be in the window, so "not matched"
     /// is a proven result for it, not an unproven absence.
     pub fn answer_complete(&self) -> bool {
         self.complete()
+            && self.scanned_all_snapshots()
             && self
                 .unplaced
                 .iter()
@@ -623,15 +643,20 @@ impl SearchReport {
             .count()
     }
 
-    /// The one terminal line for "your query matched nothing". The two cases
-    /// are deliberately different sentences.
+    /// The one terminal line for "your query matched nothing". The cases are
+    /// deliberately different sentences, and only the last one may say the
+    /// session is not here.
     pub fn no_hit_line(&self) -> String {
         if !self.complete() {
             format!(
-                "search: UNKNOWN — could not finish reading `{}` ({} of {} snapshots unreadable); 0 matched in the part I could read. This is NOT \"not there\".",
+                "search: UNKNOWN — could not finish reading `{}` ({} problem(s) recorded, see the list above); 0 matched in the part I could read. This is NOT \"not there\".",
                 self.destination,
                 self.unreadable.len(),
-                self.snapshots_scanned
+            )
+        } else if !self.scanned_all_snapshots() {
+            format!(
+                "search: UNKNOWN — 0 of {} sessions matched in `{}`, but only {} of {} snapshots were scanned, and a snapshot that was not scanned is a set of sessions that was not looked for. This is NOT \"not there\".",
+                self.sessions_seen, self.destination, self.snapshots_scanned, self.snapshots_in_repo,
             )
         } else if self.unplaced_leaving_answer_open() > 0 {
             format!(
@@ -642,8 +667,8 @@ impl SearchReport {
             )
         } else {
             format!(
-                "search: not in this destination — 0 of {} sessions matched in `{}` ({} snapshots read, all readable)",
-                self.sessions_seen, self.destination, self.snapshots_scanned
+                "search: not in this destination — 0 of {} sessions matched in `{}` (all {} of {} snapshots scanned, all readable)",
+                self.sessions_seen, self.destination, self.snapshots_scanned, self.snapshots_in_repo,
             )
         }
     }
@@ -746,6 +771,10 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
         "answer_complete": report.answer_complete(),
         "snapshots_scanned": report.snapshots_scanned,
         "snapshots_in_repo": report.snapshots_in_repo,
+        // Read `answer_complete` before concluding anything from `sessions`
+        // being empty: a destination whose snapshots were not all scanned is
+        // not a destination where the session is absent.
+        "snapshots_all_scanned": report.scanned_all_snapshots(),
         "sessions_seen": report.sessions_seen,
         "time_window": report.window.as_ref().map(|w| serde_json::json!({
             "how": match w.how {
@@ -873,15 +902,36 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     }
 }
 
+/// One session as a **single** snapshot holds it: how many shards, how many
+/// bytes, and which snapshot that was.
+///
+/// The snapshot is carried because a cumulative search reports a session
+/// against the newest snapshot that holds it, which is not the same snapshot
+/// for every session of a machine whose stage has been reclaimed.
+#[derive(Debug, Clone)]
+struct SessionSlot {
+    shard_count: usize,
+    bytes: u64,
+    data_blobs: usize,
+    snapshot_id: String,
+    archive_time_unix: i64,
+}
+
 /// Metadata-tier search over one destination.
 ///
 /// Reuses the read path `readback` already established: open fresh, group
-/// snapshots by hostname, take the newest per hostname, `ls` its tree and
-/// bucket shard paths with [`bucket_shard_path`]. The one difference — and it
-/// is the whole point — is that this walk never dumps a **session shard**, so
-/// no conversation blob is fetched or decrypted. Each machine's activity
-/// sidecar is read in the same pass, because that is where the conversation
-/// times live.
+/// snapshots by hostname, `ls` their trees and bucket shard paths with
+/// [`bucket_shard_path`]. The one difference — and it is the whole point — is
+/// that this walk never dumps a **session shard**, so no conversation blob is
+/// fetched or decrypted. Each machine's activity sidecar is read in the same
+/// pass, because that is where the conversation times live.
+///
+/// The walk is **cumulative over every snapshot of a hostname**, newest first,
+/// with the first appearance of a session winning (ADR-021) — the same rule,
+/// through the same function, that `read --all-machines` and `verify` L3 use.
+/// Looking only at the newest snapshot is what made a reclaimed machine's older
+/// conversations invisible; see the walk's own comment for the measurement that
+/// motivated it.
 ///
 /// Errors that make the answer partial are collected into
 /// [`SearchReport::unreadable`] instead of being swallowed — including an
@@ -902,12 +952,14 @@ pub fn search_sessions(
         .get_all_snapshots()
         .context("list snapshots for search")?;
     let snapshots_in_repo = snaps.len();
-    let newest = newest_snapshot_per_host(snaps);
 
     let mut report = SearchReport {
         destination: store.cfg.repo_root.clone(),
         snapshots_in_repo,
-        snapshots_scanned: newest.len(),
+        // Counted as the trees are really walked, so it can only ever be short
+        // of `snapshots_in_repo` for the same reason a snapshot is in
+        // `unreadable` — never a second count that could drift from that list.
+        snapshots_scanned: 0,
         sessions_seen: 0,
         window: selector.window.clone(),
         hits: Vec::new(),
@@ -926,10 +978,13 @@ pub fn search_sessions(
     // existed. Machine-level state; see the report field of the same name.
     let mut legacy_index_machines: BTreeSet<String> = BTreeSet::new();
 
-    for snap in newest {
-        let snapshot_id = snap.id.to_hex().as_str().to_string();
-        let archive_time_unix = snap.time.timestamp().as_second();
-        let host = snap.hostname.clone();
+    for (host, host_snaps) in snapshots_by_host_newest_first(snaps) {
+        // The machine-level identity comes from the host's **newest** snapshot
+        // (which run this host's row describes, and when it ran). The sessions
+        // come from all of them.
+        let newest = &host_snaps[0];
+        let snapshot_id = newest.id.to_hex().as_str().to_string();
+        let archive_time_unix = newest.time.timestamp().as_second();
 
         // The host is listed before anything can fail, so a machine whose tree
         // could not be walked still appears — with `index_read_ok == false` and
@@ -945,52 +1000,109 @@ pub fn search_sessions(
         });
         let host_entry = report.hosts.len() - 1;
 
-        let root = match repo.node_from_snapshot_and_path(&snap, "") {
-            Ok(node) => node,
-            Err(e) => {
-                report.unreadable.push(format!(
-                    "host `{host}`: snapshot {} tree root unreadable: {e}",
-                    &snapshot_id[..8.min(snapshot_id.len())]
-                ));
-                continue;
-            }
-        };
-        let entries = match repo
-            .ls(&root, &LsOptions::default())
-            .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-        {
-            Ok(entries) => entries,
-            Err(e) => {
-                report.unreadable.push(format!(
-                    "host `{host}`: snapshot {} tree walk failed: {e}",
-                    &snapshot_id[..8.min(snapshot_id.len())]
-                ));
-                continue;
-            }
-        };
-
-        // One pass over the tree collects both halves: the shard paths that
-        // say which sessions exist, and the index files that say when they
-        // were active.
-        let mut sessions: BTreeMap<(String, String), (usize, u64, usize)> = BTreeMap::new();
-        let mut index_nodes: BTreeMap<String, _> = BTreeMap::new();
+        // ---- cumulative session enumeration (ADR-021) -----------------------
+        //
+        // `reclaim-stage` deletes a session's shard bodies from the stage once
+        // every declared destination has proved it holds them, so the newest
+        // snapshot of a busy machine holds only the last push's batch: in the
+        // W253 field test `mac`'s newest snapshot held 16 sessions against the
+        // 3178 its activity index records, and the other 3162 bodies were in
+        // older snapshots. Looking only at the newest snapshot therefore
+        // answered "not in this destination" about a destination that holds the
+        // session. Every snapshot is walked here instead.
+        //
+        // Newest first, and the first appearance of a session wins: a session
+        // is reported against the newest snapshot that holds it. That is the
+        // same rule `read --all-machines` / `verify` L3 apply, resolved by the
+        // same function ([`snapshots_by_host_newest_first`]), so the readers
+        // cannot disagree about where a session lives.
+        //
+        // Tree metadata only: no shard is ever dumped here, which is why
+        // `data_blobs_read` stays 0. A snapshot that cannot be walked is
+        // recorded in `unreadable` and skipped — an older snapshot we could not
+        // read might hold a session we did not find, so that makes the answer
+        // partial, never empty.
+        let mut sessions: BTreeMap<(String, String), SessionSlot> = BTreeMap::new();
+        // Owned, not borrowed: each snapshot's entry list is scoped to its own
+        // turn of the loop, while the index node has to outlive it until the
+        // sidecar is read below.
+        let mut index_nodes: BTreeMap<String, rustic_core::repofile::Node> = BTreeMap::new();
         let mut partial_indexes: BTreeSet<String> = BTreeSet::new();
         let mut machines_with_missing_rows: BTreeSet<String> = BTreeSet::new();
-        for (path, node) in &entries {
-            if node.node_type != NodeType::File {
-                continue;
-            }
-            if let Some(machine) = activity_index_machine(path) {
-                index_nodes.insert(machine, node);
-                continue;
-            }
-            let Some((machine, session, _shard)) = bucket_shard_path(path) else {
-                continue;
+        for (depth, snap) in host_snaps.iter().enumerate() {
+            let snap_id = snap.id.to_hex().as_str().to_string();
+            let snap_time_unix = snap.time.timestamp().as_second();
+
+            let root = match repo.node_from_snapshot_and_path(snap, "") {
+                Ok(node) => node,
+                Err(e) => {
+                    report.unreadable.push(format!(
+                        "host `{host}`: snapshot {} tree root unreadable: {e}",
+                        &snap_id[..8.min(snap_id.len())]
+                    ));
+                    continue;
+                }
             };
-            let entry = sessions.entry((machine, session)).or_insert((0, 0, 0));
-            entry.0 += 1;
-            entry.1 += node.meta.size;
-            entry.2 += node.content.as_ref().map_or(0, Vec::len);
+            let entries = match repo
+                .ls(&root, &LsOptions::default())
+                .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+            {
+                Ok(entries) => entries,
+                Err(e) => {
+                    report.unreadable.push(format!(
+                        "host `{host}`: snapshot {} tree walk failed: {e}",
+                        &snap_id[..8.min(snap_id.len())]
+                    ));
+                    continue;
+                }
+            };
+            report.snapshots_scanned += 1;
+
+            // One pass over this snapshot's tree collects both halves: the
+            // shard paths that say which sessions it holds, and — in the newest
+            // snapshot only — the index files that say when they were active.
+            let mut snap_sessions: BTreeMap<(String, String), (usize, u64, usize)> =
+                BTreeMap::new();
+            for (path, node) in &entries {
+                if node.node_type != NodeType::File {
+                    continue;
+                }
+                // The activity index is read from the newest snapshot alone.
+                // `activity-index` rebuilds it cumulatively on every run — a
+                // reclaimed session keeps its row, with `line_count: 0` — so
+                // the newest index already names every session the machine ever
+                // recorded. Reading all of them would re-fetch the same rows
+                // once per snapshot and add no session the first one missed.
+                // The older snapshots are walked for *bodies*, which is exactly
+                // what the index cannot tell us about.
+                if depth == 0 {
+                    if let Some(machine) = activity_index_machine(path) {
+                        index_nodes.insert(machine, node.clone());
+                        continue;
+                    }
+                }
+                let Some((machine, session, _shard)) = bucket_shard_path(path) else {
+                    continue;
+                };
+                let entry = snap_sessions.entry((machine, session)).or_insert((0, 0, 0));
+                entry.0 += 1;
+                entry.1 += node.meta.size;
+                entry.2 += node.content.as_ref().map_or(0, Vec::len);
+            }
+
+            for (key, (shard_count, bytes, data_blobs)) in snap_sessions {
+                // `or_insert`, not `+=`: a snapshot holds a full (deduplicated)
+                // copy of the stage at its own moment, so a session's body is
+                // not spread across snapshots and the older appearances must
+                // not be added to the newest one's counts.
+                sessions.entry(key).or_insert(SessionSlot {
+                    shard_count,
+                    bytes,
+                    data_blobs,
+                    snapshot_id: snap_id.clone(),
+                    archive_time_unix: snap_time_unix,
+                });
+            }
         }
 
         // ---- the activity sidecars, read before any verdict is reached -----
@@ -1076,7 +1188,7 @@ pub fn search_sessions(
             && machines_with_index.contains(&host)
             && !partial_indexes.contains(&host);
 
-        for ((machine, session_id), (shard_count, bytes, data_blobs)) in sessions {
+        for ((machine, session_id), slot) in sessions {
             report.sessions_seen += 1;
             let harness = infer_harness(&session_id);
             let indexed = times.get(&(machine.clone(), session_id.clone()));
@@ -1165,14 +1277,17 @@ pub fn search_sessions(
                     machine,
                     session_id,
                     harness,
-                    shard_count,
-                    bytes,
-                    snapshot_id: snapshot_id.clone(),
-                    archive_time_unix,
+                    shard_count: slot.shard_count,
+                    bytes: slot.bytes,
+                    // The snapshot named here is the newest one that holds this
+                    // session, not necessarily the host's newest — see the
+                    // cumulative walk above.
+                    snapshot_id: slot.snapshot_id,
+                    archive_time_unix: slot.archive_time_unix,
                     first_unix,
                     last_unix,
                     time_why,
-                    data_blobs,
+                    data_blobs: slot.data_blobs,
                     line_count,
                     time_source,
                     title,
@@ -1199,10 +1314,10 @@ pub fn search_sessions(
                         machine,
                         session_id,
                         harness,
-                        shard_count,
-                        bytes,
-                        snapshot_id: snapshot_id.clone(),
-                        archive_time_unix,
+                        shard_count: slot.shard_count,
+                        bytes: slot.bytes,
+                        snapshot_id: slot.snapshot_id,
+                        archive_time_unix: slot.archive_time_unix,
                         dimension,
                         why,
                         line_count,

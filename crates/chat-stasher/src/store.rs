@@ -692,6 +692,13 @@ impl BackupStore {
 
     /// Re-open the repository (fresh, so the index reflects everything stored)
     /// and return it plus the newest snapshot for `self.machine`.
+    ///
+    /// Only [`Self::read_session_readback`] still uses this. It is the
+    /// stage-addressed reader — the one that takes the *archiving* machine's
+    /// absolute stage root — and it is not on the CLI's path any more: `read
+    /// --session` resolves the copy from the archive by `(machine, session id)`
+    /// through [`Self::read_session_concat`], which needs no local prefix and
+    /// reads cumulatively. See that function for why.
     fn open_with_newest_snapshot(
         &self,
         mk: &MasterKey,
@@ -786,19 +793,30 @@ impl BackupStore {
         Ok((concat, hashes))
     }
 
-    /// Read one session's sealed shards back out of **the newest snapshot for
-    /// `machine`**, in global sequence order, as `(concat, [(name, sha256)])`.
+    /// Read one session's sealed shards back out of **the newest snapshot that
+    /// holds them**, in global sequence order, as `(concat, [(name, sha256)])`.
     ///
     /// Unlike [`Self::read_session_readback`] this needs no local stage root:
-    /// the dashboard addresses a session by `(machine, session id)`, which is
-    /// exactly the partition the archive path already carries
-    /// ([`crate::readback::bucket_shard_path`]). Reconstructing an absolute
-    /// stage prefix just to strip it again would add a way to be wrong — the
-    /// archived prefix is the source machine's, not this one's.
+    /// the dashboard (and `read --session`) addresses a session by
+    /// `(machine, session id)`, which is exactly the partition the archive path
+    /// already carries ([`crate::readback::bucket_shard_path`]). Reconstructing
+    /// an absolute stage prefix just to strip it again would add a way to be
+    /// wrong — the archived prefix is the source machine's, not this one's —
+    /// and would put the *archiving* machine's filesystem layout in the way of
+    /// reading a lost machine's conversation back.
+    ///
+    /// The search is cumulative over `machine`'s snapshots, newest first
+    /// (ADR-021). It has to be: `reclaim-stage` deletes a session's bodies from
+    /// the stage once every destination has proved it holds them, and every
+    /// snapshot taken afterwards therefore holds the session's directory but no
+    /// shards. On m3 that is 3162 of 3178 sessions in the newest snapshot, all
+    /// of them present in older ones. A snapshot that cannot be opened is
+    /// **not** skipped silently — it is carried into the final error, because
+    /// "not in any snapshot I could read" and "not in any snapshot" are
+    /// different answers.
     ///
     /// Payload tier: this is the one call that fetches and decrypts conversation
-    /// bytes. A session the newest snapshot does not hold is an `Err`, never an
-    /// empty result.
+    /// bytes. A session no snapshot holds is an `Err`, never an empty result.
     pub fn read_session_concat(
         &self,
         machine: &str,
@@ -810,34 +828,62 @@ impl BackupStore {
             .context("open repository for session content")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
-        let Some(snap) = crate::readback::newest_snapshot_per_host(snaps)
+        let Some(host_snaps) = crate::readback::snapshots_by_host_newest_first(snaps)
             .into_iter()
-            .find(|s| s.hostname == machine)
+            .find(|(host, _)| host == machine)
+            .map(|(_, snaps)| snaps)
         else {
             return Err(anyhow!(
                 "no snapshot for machine `{machine}` in this repository"
             ));
         };
-        let root = repo
-            .node_from_snapshot_and_path(&snap, "")
-            .context("read snapshot root for session content")?;
-        let entries = repo
-            .ls(&root, &LsOptions::default())
-            .context("ls snapshot root for session content")?
-            .collect::<rustic_core::RusticResult<Vec<_>>>()
-            .context("collect snapshot entries for session content")?;
 
-        let shards = session_shard_slots(&entries, machine, session_id);
-        if shards.is_empty() {
-            return Err(anyhow!(
-                "session `{}` is not in the newest snapshot for machine `{machine}` — \
-                 this is not an empty session",
-                crate::id::short_session_id(session_id)
-            ));
+        let mut unreadable: Vec<String> = Vec::new();
+        for snap in host_snaps {
+            let snap_id = snap.id.to_hex().as_str().to_string();
+            let short = &snap_id[..8.min(snap_id.len())];
+            let root = match repo.node_from_snapshot_and_path(&snap, "") {
+                Ok(root) => root,
+                Err(e) => {
+                    unreadable.push(format!("snapshot {short} tree root: {e}"));
+                    continue;
+                }
+            };
+            let entries = match repo
+                .ls(&root, &LsOptions::default())
+                .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+            {
+                Ok(entries) => entries,
+                Err(e) => {
+                    unreadable.push(format!("snapshot {short} tree walk: {e}"));
+                    continue;
+                }
+            };
+
+            let shards = session_shard_slots(&entries, machine, session_id);
+            if shards.is_empty() {
+                continue;
+            }
+            let (concat, hashes) =
+                dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
+            return Ok((concat, hashes));
         }
-        let (concat, hashes) =
-            dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
-        Ok((concat, hashes))
+
+        let could_not_read = if unreadable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — and {} snapshot(s) could not be read at all ({}), so this is not a complete \
+                 answer about the destination either",
+                unreadable.len(),
+                unreadable.join("; ")
+            )
+        };
+        Err(anyhow!(
+            "session `{}` holds no shards in any scanned snapshot for machine `{machine}`{}",
+            crate::id::short_session_id(session_id),
+            could_not_read
+        ))
     }
 
     /// Dump the sealed shards of **several** selected sessions in one repository
@@ -850,10 +896,16 @@ impl BackupStore {
     /// paths share [`session_shard_slots`] and [`dump_shard_slots`], which is
     /// what keeps their bytes identical — the property `export`'s tests pin.
     ///
-    /// A session in `wanted` that the newest snapshot of its machine does not
-    /// hold is **absent** from the result, never present with zero bytes; the
-    /// caller must treat "asked for, not returned" as a failure, exactly like
+    /// A session in `wanted` that no snapshot of its machine holds is
+    /// **absent** from the result, never present with zero bytes; the caller
+    /// must treat "asked for, not returned" as a failure, exactly like
     /// [`Self::dump_machine_sessions`].
+    ///
+    /// Cumulative for the same reason, and by the same rule, as
+    /// [`Self::read_session_concat`]: `export` writes what `search` found, and
+    /// a search that can find a reclaimed session while the export silently
+    /// drops it would be a worse inconsistency than the one this fixes. The
+    /// walk stops as soon as every wanted session of a machine has been found.
     pub fn read_selected_sessions(
         &self,
         mk: &MasterKey,
@@ -869,9 +921,8 @@ impl BackupStore {
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
 
-        for snap in crate::readback::newest_snapshot_per_host(snaps) {
-            let machine = snap.hostname.clone();
-            let wanted_here: BTreeSet<&str> = wanted
+        for (machine, host_snaps) in crate::readback::snapshots_by_host_newest_first(snaps) {
+            let mut wanted_here: BTreeSet<&str> = wanted
                 .iter()
                 .filter(|(m, _)| m == &machine)
                 .map(|(_, s)| s.as_str())
@@ -879,22 +930,35 @@ impl BackupStore {
             if wanted_here.is_empty() {
                 continue;
             }
-            let root = repo
-                .node_from_snapshot_and_path(&snap, "")
-                .with_context(|| format!("read snapshot root for machine `{machine}`"))?;
-            let entries = repo
-                .ls(&root, &LsOptions::default())
-                .with_context(|| format!("ls snapshot root for machine `{machine}`"))?
-                .collect::<rustic_core::RusticResult<Vec<_>>>()
-                .with_context(|| format!("collect snapshot entries for machine `{machine}`"))?;
-            for session_id in wanted_here {
-                let shards = session_shard_slots(&entries, &machine, session_id);
-                if shards.is_empty() {
-                    continue;
+            for snap in host_snaps {
+                if wanted_here.is_empty() {
+                    break;
                 }
-                let (concat, hashes) =
-                    dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
-                out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
+                let root = repo
+                    .node_from_snapshot_and_path(&snap, "")
+                    .with_context(|| format!("read snapshot root for machine `{machine}`"))?;
+                let entries = repo
+                    .ls(&root, &LsOptions::default())
+                    .with_context(|| format!("ls snapshot root for machine `{machine}`"))?
+                    .collect::<rustic_core::RusticResult<Vec<_>>>()
+                    .with_context(|| format!("collect snapshot entries for machine `{machine}`"))?;
+                // Newest first: the first snapshot that holds a session's
+                // shards supplies them, and that session is then out of the
+                // wanted set so the older snapshots are not walked for it.
+                let mut resolved = Vec::new();
+                for session_id in &wanted_here {
+                    let shards = session_shard_slots(&entries, &machine, session_id);
+                    if shards.is_empty() {
+                        continue;
+                    }
+                    let (concat, hashes) =
+                        dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
+                    out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
+                    resolved.push(*session_id);
+                }
+                for session_id in resolved {
+                    wanted_here.remove(session_id);
+                }
             }
         }
         Ok(out)

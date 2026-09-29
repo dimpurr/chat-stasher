@@ -22,10 +22,31 @@ const SESSION: &str = "opencode.b79-fixture.019bf00d-97b6-7eb2-9bf8-eacbacc09765
 /// quietly — and the delta was checked before it was bumped: removing exactly
 /// that one line from the canonical report reproduces the previous digest
 /// (`c378728e…`), so nothing else about the report moved.
+///
+/// W257 · bumped again, and the delta checked the same way. These two fixtures
+/// run their commands with `--keep-ssh-masters`, and the ssh-master teardown
+/// line (`[reap] skipped (--keep-ssh-masters)`) used to be written to **stdout**
+/// — so it was part of what these digests pinned. It is housekeeping, not the
+/// report, and it now goes to stderr (W253 C1: it made `search --json` /
+/// `overview --json` unparseable). Neither digest is a re-derivation of a
+/// changed claim: re-inserting exactly that one line at the position the old
+/// output had it (last, for `read`; immediately before `[verify] RESULT` for
+/// `verify`) reproduces the previous digest byte for byte, so nothing else in
+/// either report moved. These constants now double as a regression test for
+/// that: any future stdout pollution lands in the digest.
+///
+/// W257 · the read digest moved a third time, and the delta checked the same
+/// way: `read --all-machines` now says `all-machines (every snapshot,
+/// cumulatively)` where it said `all-machines (newest snapshot per hostname)`.
+/// The implementation had been cumulative since ADR-021, so the old header was
+/// the last place still claiming the wrong behaviour (W253 C5). Substituting
+/// the old header text back reproduces the previous digest exactly
+/// (`3e031951…`), so that one line is the whole delta. The verify digest did
+/// not move, which is the same check from the other side.
 const READ_DEFAULT_REPORT_SHA256: &str =
-    "a891cf802567c57b1d10aafcdfeb419d96394d48486518f7eae4d54da1312160";
+    "73adef7e6f72091247bdf19cdca8031b00e4004369074d2a316a1269fafd29b0";
 const VERIFY_DEFAULT_REPORT_SHA256: &str =
-    "97a18d6a512cc34f9e7a678525ed0c61dec92e3a1d6fe30fd0205212965d6353";
+    "f62693877a728e95bef872ef4bd419bea21f6f643b833d3edd1da130efdb29d7";
 
 struct Fixture {
     sandbox: tempfile::TempDir,
