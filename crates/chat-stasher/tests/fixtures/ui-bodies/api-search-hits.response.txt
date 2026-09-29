@@ -10,6 +10,7 @@ content-type: application/json; charset=utf-8
     "in_view": 4,
     "indexed": 4,
     "machines_behind": [],
+    "not_indexable": [],
     "not_searchable": 0
   },
   "destination": "dest-under-test",

@@ -3879,18 +3879,30 @@ fn cmd_search_text(
                     let found = dumped.len();
                     for (session, shards) in dumped {
                         let raw: Vec<u8> = shards.into_iter().flatten().collect();
-                        match chat_stasher::fts::extract_index_text(&raw) {
-                            Ok((fallback_title, body)) => {
+                        let id = format!("{machine}/{session}");
+                        let extracted = chat_stasher::fts::extract_index_document_for(
+                            chat_stasher::fts::harness_of_document_id(&id),
+                            &raw,
+                        );
+                        match extracted {
+                            Ok(extracted) if extracted.is_indexable() => {
                                 let title = titles
-                                    .get(&format!("{machine}/{session}"))
+                                    .get(&id)
                                     .map(String::as_str)
-                                    .unwrap_or(&fallback_title);
-                                let searchable = format!("{title}\n{body}").to_lowercase();
+                                    .unwrap_or(&extracted.title);
+                                let searchable =
+                                    format!("{title}\n{}", extracted.body).to_lowercase();
                                 if searchable.contains(&query_lower) {
-                                    matches.insert(format!("{machine}/{session}"));
+                                    matches.insert(id);
                                 }
                             }
-                            Err(_) => read_failures += 1,
+                            // A shard in a format this build cannot read was not
+                            // searched, so it is counted with the sessions whose
+                            // text could not be read at all. Both are the same
+                            // statement to the reader of this line — this
+                            // session's text was never looked at — and neither
+                            // is "read, and the query is not there".
+                            Ok(_) | Err(_) => read_failures += 1,
                         }
                     }
                     read_failures += sessions.len().saturating_sub(found);
@@ -3912,14 +3924,28 @@ fn cmd_search_text(
                 return ExitCode::from(3);
             }
         };
+        // Three states over the same set, and they partition it: a session the
+        // index holds text for (`covers`), a session whose shard it holds but
+        // could not read (`not indexable: <format>`), and a session it holds
+        // nothing for. Counting the middle one as covered is what let 2,048
+        // sessions be reported as indexed while no query could ever match them
+        // (W255 C2).
+        //
         // `covers`, not membership in `ids`: a session whose last re-read failed
         // keeps the text an earlier build stored for it, so it is in the index
         // while no longer being text the index can vouch for. Counting it as
         // covered would report a zero-hit answer as complete over a session the
         // current shard never supplied — and would leave the exit code at 0.
         let indexed = selected.iter().filter(|id| summary.covers(id)).count();
-        let missing = selected.len().saturating_sub(indexed);
-        index_coverage = Some((indexed, missing));
+        let unreadable: Vec<String> = selected
+            .iter()
+            .filter_map(|id| summary.not_indexable.get(id).cloned())
+            .collect();
+        let missing = selected
+            .len()
+            .saturating_sub(indexed)
+            .saturating_sub(unreadable.len());
+        index_coverage = Some((indexed, missing, unreadable));
         if query.chars().count() < chat_stasher::fts::MIN_QUERY_CHARS {
             suggestion = true;
         } else {
@@ -3945,7 +3971,7 @@ fn cmd_search_text(
 
     if json {
         let fulltext_cost = report.fulltext_cost();
-        let coverage = index_coverage;
+        let coverage = index_coverage.as_ref();
         println!(
             "{}",
             serde_json::json!({
@@ -3957,6 +3983,12 @@ fn cmd_search_text(
                 "read_failures": read_failures,
                 "index_covered": coverage.map(|coverage| coverage.0),
                 "index_missing": coverage.map(|coverage| coverage.1),
+                // Named apart from `index_missing`, which says the index holds
+                // nothing for the session. These are held and unreadable, and
+                // the format is what a reader can act on.
+                "index_not_indexable": coverage.map(|coverage| coverage.2.len()),
+                "index_not_indexable_formats": coverage
+                    .map(|coverage| format_counts(&coverage.2)),
                 "index_truncated": index_truncated,
                 "metadata_unreadable_parts": report.unreadable.len(),
                 "unplaceable_sessions": report.unplaced.len(),
@@ -3976,11 +4008,23 @@ fn cmd_search_text(
         if suggestion {
             println!("[search] suggestion: use a query of at least 3 characters");
         }
-        if let Some(coverage) = index_coverage {
+        if let Some(coverage) = index_coverage.as_ref() {
             println!("[search] index_covered={}", coverage.0);
             println!("[search] index_missing={}", coverage.1);
+            println!(
+                "[search] index_not_indexable={} ({})",
+                coverage.2.len(),
+                format_counts(&coverage.2)
+            );
             if coverage.1 > 0 {
                 println!("[search] index is behind the selected archive sessions; run `chat-stasher index build`");
+            }
+            if !coverage.2.is_empty() {
+                println!(
+                    "[search] the index holds those sessions but cannot read their archived \
+                     format, so their text was not searched: a session that was not read is not \
+                     a session the query is absent from"
+                );
             }
         }
         println!("[search] index_truncated={index_truncated}");
@@ -4004,8 +4048,13 @@ fn cmd_search_text(
             );
         }
     }
+    // `3` is "did not finish reading": sessions whose shard this build cannot
+    // read are part of that, because a query that did not run over them cannot
+    // prove their text is absent.
     if read_failures > 0
-        || index_coverage.is_some_and(|coverage| coverage.1 > 0)
+        || index_coverage
+            .as_ref()
+            .is_some_and(|coverage| coverage.1 > 0 || !coverage.2.is_empty())
         || index_truncated
         || !report.answer_complete()
     {
@@ -7792,12 +7841,19 @@ fn cmd_index(action: IndexAction) -> ExitCode {
         "check" => match index.check() {
             Ok(report) => {
                 let documents = report.documents;
+                let unread_lines = report.unread_lines;
                 // `documents` is what the index holds; the `last_build_*` fields
                 // are what the most recent build did, which is not the same
                 // number: a build that changed nothing reads no sessions, and
                 // reporting its `indexed=0` beside a full `documents` would read
                 // as an empty index. Counters are named for their scope so the
                 // two cannot be confused.
+                //
+                // `last_build_unread_lines` is not a fourth kind of failure
+                // beside them: the text around those lines *was* stored and is
+                // searchable, so they are not a session that could not be read —
+                // but the bytes behind them were never searched, and a build
+                // that reported only what it stored would be silent about them.
                 match report.status {
                     chat_stasher::fts::CheckStatus::Valid {
                         indexed,
@@ -7806,7 +7862,8 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     } => println!(
                         "[index] state=valid documents={documents} \
                          last_build_indexed={indexed} last_build_empty_body={empty_body} \
-                         last_build_bytes_read={bytes_read}"
+                         last_build_bytes_read={bytes_read} \
+                         last_build_unread_lines={unread_lines}"
                     ),
                     chat_stasher::fts::CheckStatus::Partial {
                         indexed,
@@ -7817,7 +7874,8 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         "[index] state=partial documents={documents} \
                          last_build_not_indexable={not_indexable} \
                          last_build_indexed={indexed} last_build_empty_body={empty_body} \
-                         last_build_bytes_read={bytes_read}"
+                         last_build_bytes_read={bytes_read} \
+                         last_build_unread_lines={unread_lines}"
                     ),
                     chat_stasher::fts::CheckStatus::Incomplete => println!(
                         "[index] state=incomplete documents={documents} \
@@ -7825,7 +7883,26 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                          which does not re-read sessions that are unchanged)"
                     ),
                 }
-                ExitCode::SUCCESS
+                // The state line says how many sources the last build could not
+                // index; this says which format each of them is in, which is the
+                // fact a reader can check against the archive. Read as its own
+                // summary because the reasons live there, and an index `check`
+                // has just validated is not a read to take chances with: a
+                // failure here is reported as one, not swallowed.
+                match index.summary() {
+                    Ok(summary) => {
+                        println!(
+                            "[index] not_indexable={} ({})",
+                            summary.not_indexable.len(),
+                            summary.unreadable_summary()
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("index: {error:#}");
+                        ExitCode::FAILURE
+                    }
+                }
             }
             Err(error) => {
                 eprintln!("index: {error:#}");
@@ -7971,18 +8048,28 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             ));
                         }
                     }
+                    // The shard was read in full before it was handed to the
+                    // extractor, so those bytes are part of what this build read
+                    // whatever comes back (C6). Only a *read* that failed is
+                    // returned as a failure: a shard in a format no reader of
+                    // this build knows is a document state, and it must not put
+                    // the rest of the archive out of reach (W255 C1).
                     let bytes_read = raw.len() as u64;
-                    let extracted = match chat_stasher::fts::extract_index_document(&raw) {
-                        Ok(extracted) => extracted,
-                        // The shard was read in full before it failed to parse:
-                        // those bytes are part of what this build read (C6).
-                        Err(error) => return Err(LoadFailure::new(bytes_read, error)),
-                    };
+                    let extracted = chat_stasher::fts::extract_index_document_for(
+                        chat_stasher::fts::harness_of_document_id(id),
+                        &raw,
+                    )
+                    .map_err(|error| LoadFailure::new(bytes_read, error))?;
                     Ok(chat_stasher::fts::LoadedDoc {
                         text: chat_stasher::fts::DocText {
+                            // The machine's activity index names the session;
+                            // the shard's own label is the fallback for a
+                            // destination whose activity index is missing.
                             title: titles.get(id).cloned().unwrap_or(extracted.title),
                             body: extracted.body,
                             message_offsets: extracted.message_offsets,
+                            not_indexable: extracted.not_indexable,
+                            unread_lines: extracted.unread_lines,
                         },
                         bytes_read,
                     })
@@ -8015,6 +8102,29 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             }
         }
     }
+}
+
+/// Count a set of archived formats into one line: `sqlite 141, jsonl 3`, or
+/// `none` when the set is empty.
+///
+/// The count per format is what makes an unreadable session actionable — a
+/// total says how much is missing, the format says which archived shape this
+/// build cannot read, and the format is the part that can be worked on.
+fn format_counts(formats: &[String]) -> String {
+    if formats.is_empty() {
+        // reason: nothing was marked unreadable, so there is no group to print.
+        // "none" is that measurement rather than a count that failed.
+        return "none".to_string();
+    }
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for format in formats {
+        *counts.entry(format.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(format, count)| format!("{format} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn index_identity(

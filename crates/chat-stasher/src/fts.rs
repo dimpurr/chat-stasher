@@ -21,6 +21,14 @@ use std::path::{Path, PathBuf};
 /// empty this module refuses. There is no honest reading of a version-2 index
 /// as version 3, so it is refused by version and the reader is told to rebuild,
 /// which is what `validate_schema` already does for every older layout.
+///
+/// The key holds an id -> reason map rather than a bare id list: the reason is
+/// the format the shard could not be read as (`sqlite`, `jsonl`, ...) for a
+/// shard this build has no reader for, and the read failure itself for a source
+/// the archive could not hand over. A caller that groups the unreadable
+/// sessions has nowhere else to get it, and the ids — the part a coverage claim
+/// is made over — are the map's keys, so there is still one representation of
+/// them.
 const SCHEMA_VERSION: i64 = 3;
 const MARKER: &str = ".chat-stasher-fts";
 const MARKER_CONTENT: &[u8] = b"chat-stasher fts index v1\n";
@@ -158,6 +166,40 @@ pub struct DocText {
     pub title: String,
     pub body: String,
     pub message_offsets: Vec<usize>,
+    /// `Some(format)` when the archived shard is in a format this build cannot
+    /// read message text out of — `sqlite`, `jsonl`, `json`, `text` or
+    /// `binary`. Callers render it with [`not_indexable_label`], so the phrase
+    /// a reader sees is written in exactly one place.
+    ///
+    /// A third state, not a flavoured empty body. `body` being empty is a
+    /// measurement — the session was read and holds no conversation prose —
+    /// while this is "we could not look", and the two must not be stored as
+    /// one (`CLAUDE.md` #1). It is carried on the document rather than being
+    /// turned into an error because one unreadable shard must not abort the
+    /// build of every other session in the archive (W255 C1).
+    pub not_indexable: Option<String>,
+    /// Lines this document's reader was handed and could not parse, when some
+    /// other lines did parse.
+    ///
+    /// Not a fourth document state but a count beside the states above, and the
+    /// one that is easiest to lose. The text that was understood *is* indexed —
+    /// a partial read is worth more than none — so this document is not
+    /// `not_indexable` and its body is not an empty measurement. What the count
+    /// says is that the bytes behind those lines were never searched, and a
+    /// build that reported only what it stored would be silent about them. The
+    /// reader view names the lines themselves for one session
+    /// (`ui/reader.rs`'s coverage warning); this is the archive-wide total.
+    /// A whole shard that does not parse is `not_indexable` instead.
+    pub unread_lines: usize,
+}
+
+impl DocText {
+    /// True when this document's text came out of the shard, so a query may be
+    /// answered against it. An empty body here is a measured zero; see the
+    /// field's own documentation.
+    pub fn is_indexable(&self) -> bool {
+        self.not_indexable.is_none()
+    }
 }
 
 /// The text a build's load step produced, and how much of the archive it read
@@ -219,6 +261,14 @@ pub struct BuildStats {
     /// Archive bytes read for every source the build read — including the ones
     /// whose load then failed, which were read too (C6).
     pub bytes_read: u64,
+    /// Lines the build's readers were handed and could not parse, across every
+    /// shard it read (see [`DocText::unread_lines`]).
+    ///
+    /// Counted beside `indexed` rather than folded into it: the text around
+    /// those lines *is* searchable, so this is not a fourth kind of failure,
+    /// but the bytes behind them were never searched and a build that stored
+    /// only what it understood would report the archive read in full.
+    pub unread_lines: usize,
 }
 
 /// What `index check` found: whether a build finished, and if so the health of
@@ -227,6 +277,11 @@ pub struct BuildStats {
 pub struct CheckReport {
     pub documents: usize,
     pub status: CheckStatus,
+    /// Lines the last build could not parse, across every shard it read. On the
+    /// report rather than on [`CheckStatus`] because it is not a property of the
+    /// build's *outcome*: a build can have indexed every source and still have
+    /// been handed lines it could not read.
+    pub unread_lines: usize,
 }
 
 /// The recorded result of the last build attempt, so `index check` does not
@@ -327,7 +382,9 @@ pub struct IndexSummary {
     /// ([`crate::ui::machine_of_document_id`]), so there is one representation
     /// of what the index holds and it cannot disagree with itself.
     pub ids: std::collections::BTreeSet<String>,
-    /// The ids the **last build attempt** named not indexable.
+    /// The ids the **last build attempt** named not indexable, each with the
+    /// reason it was named: the format the shard could not be read as
+    /// (`sqlite`, `jsonl`, ...), or the read failure itself.
     ///
     /// A session here is one the index cannot vouch for: either it has no row
     /// at all (the build never read it) or the row it has is text from an
@@ -336,12 +393,14 @@ pub struct IndexSummary {
     /// exclude them — the same distinction [`Index::check`] draws when it calls
     /// such a build `partial`.
     ///
-    /// It is a set of ids and not a count because a coverage made of counts
-    /// cannot say *which* session is unanswerable; replace one session by
-    /// another on the same machine and every count stays equal. An id here may
-    /// or may not also appear in `ids` — an unreadable source that a previous
-    /// build had read is still in the index.
-    pub not_indexable: std::collections::BTreeSet<String>,
+    /// A map of ids and not a count because a coverage made of counts cannot
+    /// say *which* session is unanswerable; replace one session by another on
+    /// the same machine and every count stays equal. Its **keys** are what that
+    /// coverage claim is made over, and an id may or may not also appear in
+    /// `ids` — an unreadable source that a previous build had read is still in
+    /// the index. The value is the reason, because "not searchable" names no
+    /// cause while the format names the one thing a reader can act on.
+    pub not_indexable: std::collections::BTreeMap<String, String>,
     /// The index file's last modification time. This is a **file mtime**, not a
     /// recorded build time — the index records no build time of its own, and
     /// reporting a computed one would be inventing a fact about when the text
@@ -358,7 +417,51 @@ impl IndexSummary {
     /// failed as covered, and a query that found nothing would then be reported
     /// as a complete answer for text the current shard never supplied.
     pub fn covers(&self, id: &str) -> bool {
-        self.ids.contains(id) && !self.not_indexable.contains(id)
+        self.ids.contains(id) && !self.not_indexable.contains_key(id)
+    }
+
+    /// Sessions this index can answer a query about: every document it holds
+    /// that is not marked unreadable. The number a reader may read a zero
+    /// against.
+    pub fn indexable(&self) -> usize {
+        self.ids.len().saturating_sub(self.not_indexable.len())
+    }
+
+    /// How many sessions this index cannot answer for, grouped by the reason it
+    /// could not, largest group first.
+    ///
+    /// Grouped so the count is actionable: "144 sessions are not searchable"
+    /// names no cause, while "sqlite 141, jsonl 3" names which archived format
+    /// cannot be read and how much of the archive that is. Ordered by count,
+    /// then by reason, so two runs over one index print the same order.
+    pub fn unreadable_by_reason(&self) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for reason in self.not_indexable.values() {
+            *counts.entry(reason.as_str()).or_insert(0) += 1;
+        }
+        let mut grouped: Vec<(String, usize)> = counts
+            .into_iter()
+            .map(|(reason, count)| (reason.to_string(), count))
+            .collect();
+        grouped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        grouped
+    }
+
+    /// [`Self::unreadable_by_reason`] as one line: `sqlite 141, jsonl 3`, or
+    /// `none` when every session the index holds was read.
+    pub fn unreadable_summary(&self) -> String {
+        let grouped = self.unreadable_by_reason();
+        if grouped.is_empty() {
+            // reason: no session was marked unreadable, so the list of groups
+            // is empty because there is nothing to group — not because a count
+            // failed. "none" is that measurement.
+            return "none".to_string();
+        }
+        grouped
+            .into_iter()
+            .map(|(reason, count)| format!("{reason} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -411,27 +514,461 @@ pub fn extract_index_text(raw: &[u8]) -> Result<(String, String)> {
 /// to no message and a match on it can only ever be [`MatchPlace::NotRelocated`]
 /// (the literal is not in the text) rather than being attributed to a
 /// neighbour.
+///
+/// The harness is not known here, so the shard's own shape decides how it is
+/// read (see [`extract_index_document_for`]).
 pub fn extract_index_document(raw: &[u8]) -> Result<DocText> {
-    let raw = std::str::from_utf8(raw).context("archived conversation is not UTF-8 JSONL")?;
-    let mut title = String::new();
+    extract_index_document_for("", raw)
+}
+
+/// The harness a document id names.
+///
+/// A document id is `<machine>/<harness>.<machine>.<native-id>`
+/// (`models.rs`'s `SessionRecord::id`, joined to its machine by
+/// `readback::bucket_shard_path`), so the harness is the first dotted component
+/// of the session part. An id that is not that shape yields `""`, the harness
+/// this module treats as unidentified — never a guessed one.
+pub fn harness_of_document_id(id: &str) -> &str {
+    id.split_once('/')
+        .map_or(id, |(_machine, session)| session)
+        .split('.')
+        .next()
+        .unwrap_or("")
+}
+
+/// Extract the indexable text of one session's archived shards, read as the
+/// format `harness` archives.
+///
+/// There is one arm per harness in the support registry
+/// (`data/harness-registry-v1.json`), and each arm is either **verified** —
+/// this build has read that harness's archived format — or unverified, in which
+/// case the shard is walked structurally and, if that finds no text, reported
+/// [`not_indexable`](DocText::not_indexable) instead of indexed as an empty
+/// body. That distinction is the whole point of the function: an empty body is
+/// a measurement, and a shard in a format nobody has read is not one.
+///
+/// Nothing read here fails the build. A shard whose text cannot be recovered is
+/// a per-document state, because one such shard must not abort the index of
+/// every other session in the archive (W255 C1).
+pub fn extract_index_document_for(harness: &str, raw: &[u8]) -> Result<DocText> {
+    let text = String::from_utf8_lossy(raw);
+    let shape = shard_shape(&text);
+    let read = match shape {
+        // An export this tool wrote for one SQLite row says what it is; the
+        // row's own table outranks the id's harness component.
+        ShardShape::Export => {
+            // The export names its own reader through its schema and table, and
+            // only a table whose reader this build has is read that way. The
+            // id's harness is not consulted: `grok` names two harnesses (its
+            // CLI's SQLite row and the browser extension's bundle), and handing
+            // a CLI export to the bundle reader is how a session came back
+            // "indexed" with an empty body.
+            match export_reader(&text).and_then(|reader| reader_document(&reader, &text)) {
+                Some(document) => document,
+                None => structural_walk(harness, &text, shape),
+            }
+        }
+        ShardShape::Jsonl | ShardShape::Json => match reader_document(harness, &text) {
+            Some(document) => document,
+            None => structural_walk(harness, &text, shape),
+        },
+        ShardShape::Text => plain_text(harness, &text, raw),
+    };
+    Ok(DocText {
+        title: title_of(&text),
+        ..read
+    })
+}
+
+/// The shape of one archived shard, decided from the shard's own bytes.
+///
+/// Two kinds of shard exist. A **source shard** is a byte range of the file a
+/// harness keeps (`claude-code`/`codex`/`kimi-code` JSONL, one whole `aider`
+/// markdown file, a `continue` JSON file, a `codex` rollout already decoded
+/// from its zstd frame by `collect`), so its shape is the file's shape. An
+/// **export** is one SQLite row this tool itself wrote
+/// (`sqlite_probe.rs`'s `chat-stasher.*.session.v1` envelopes), and it declares
+/// its own schema.
+///
+/// The shape is read off the bytes rather than off the document id because a
+/// shard is read as what it is: an id-derived format would be a claim about a
+/// file that may have been archived by an older build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShardShape {
+    /// One `chat-stasher.*` SQLite row export, one line per export.
+    Export,
+    /// One JSON object per non-blank line.
+    Jsonl,
+    /// One JSON document, or several run together (`gemini-cli`).
+    Json,
+    /// Not JSON at all: a transcript, a text file, or bytes no reader of this
+    /// build has a shape for.
+    Text,
+}
+
+impl ShardShape {
+    /// The format word a `not indexable:` reason carries. Each is a statement
+    /// about the shard a reader can check against the archive itself.
+    fn format(self) -> &'static str {
+        match self {
+            ShardShape::Export => FORMAT_SQLITE,
+            ShardShape::Jsonl => FORMAT_JSONL,
+            ShardShape::Json => FORMAT_JSON,
+            ShardShape::Text => FORMAT_TEXT,
+        }
+    }
+}
+
+/// The format words the reasons use, one per shard shape plus the two formats a
+/// shard can be in without being text at all.
+const FORMAT_JSONL: &str = "jsonl";
+const FORMAT_JSON: &str = "json";
+const FORMAT_TEXT: &str = "text";
+const FORMAT_SQLITE: &str = "sqlite";
+const FORMAT_BINARY: &str = "binary";
+
+/// The source format each local harness in the support registry archives
+/// (`data/harness-registry-v1.json`), used only where the shard itself gives no
+/// shape to name — a binary shard, which is a database archived whole.
+///
+/// The table is kept in step with the registry by
+/// `harness_formats_match_the_support_registry`, which reads the registry file
+/// and fails when an id appears on one side only: a harness added to the
+/// registry without an arm here would otherwise be read structurally and
+/// reported as an unknown format.
+const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
+    ("claude-code", "jsonl"),
+    ("codex", "jsonl"),
+    ("gemini-cli", "json"),
+    ("opencode", FORMAT_SQLITE),
+    ("cursor", FORMAT_SQLITE),
+    ("grok", FORMAT_SQLITE),
+    ("github-copilot-cli", "jsonl"),
+    ("aider", "markdown"),
+    ("crush", FORMAT_SQLITE),
+    ("zed", FORMAT_SQLITE),
+    ("continue", "json"),
+    ("kimi-code", "jsonl"),
+];
+
+fn declared_format(harness: &str) -> Option<&'static str> {
+    HARNESS_SOURCE_FORMATS
+        .iter()
+        .find(|(id, _)| *id == harness)
+        .map(|(_, format)| *format)
+}
+
+/// The reason string for a shard this build could not read message text out of.
+fn not_indexable(format: &str) -> DocText {
+    DocText {
+        not_indexable: Some(format.to_string()),
+        ..DocText::default()
+    }
+}
+
+/// How a reader is told that a session's archived format could not be read.
+///
+/// One phrase, in one place, because it is the sentence that keeps an unread
+/// session out of the count of indexed ones and it appears on every surface
+/// that has to distinguish "not there" from "not looked at".
+pub fn not_indexable_label(format: &str) -> String {
+    format!("not indexable: {format}")
+}
+
+fn shard_shape(raw: &str) -> ShardShape {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // reason: an empty shard holds no bytes of any format, and `Text` is
+        // the shape that claims nothing about JSON. A session that archived
+        // nothing has an empty body, which is a measurement.
+        return ShardShape::Text;
+    }
+    if !trimmed.starts_with(['{', '[']) {
+        return ShardShape::Text;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return if export_schema(&value).is_some() {
+            ShardShape::Export
+        } else {
+            ShardShape::Json
+        };
+    }
+    // Not one JSON value. A first line that parses on its own is JSONL; any
+    // other shard that opens as JSON is a stream of values run together, which
+    // the document reader walks value by value rather than line by line.
+    match raw_non_blank_lines(trimmed).next() {
+        Some(line) if serde_json::from_str::<serde_json::Value>(line).is_ok() => ShardShape::Jsonl,
+        // reason: the alternative is `Text`, and a shard that opens with `{`
+        // is not text in any sense a text extractor could use.
+        _ => ShardShape::Json,
+    }
+}
+
+fn raw_non_blank_lines(raw: &str) -> impl Iterator<Item = &str> {
+    raw.lines().filter(|line| !line.trim().is_empty())
+}
+
+/// The `schema` string of an export this tool wrote, if the value is one.
+fn export_schema(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .filter(|schema| schema.starts_with("chat-stasher."))
+}
+
+/// Which harness's reader reads an export, from the row it holds.
+///
+/// The schema names the shape and, for the single-row export, the `table`
+/// names which SQLite store the row came from — that is the fact this module
+/// needs, and it is written into the shard by the same code that read it
+/// (`sqlite_probe.rs`). `None` for a table no reader of this build knows, so
+/// the caller keeps the id's harness rather than inventing one.
+fn export_reader(raw: &str) -> Option<String> {
+    let first = raw_non_blank_lines(raw).next()?;
+    let value = serde_json::from_str::<serde_json::Value>(first).ok()?;
+    match export_schema(&value)? {
+        "chat-stasher.opencode.session.v1" => Some("opencode".to_string()),
+        "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
+        "chat-stasher.sqlite.session.v1" => {
+            match value.get("table").and_then(serde_json::Value::as_str) {
+                Some("cursorDiskKV") => Some("cursor".to_string()),
+                Some("session_docs") => Some("grok".to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Read a shard with the harness's reader in `crate::normalize`, or `None` when
+/// this build has no reader for that harness.
+///
+/// `None` covers two different things, and both mean the same to the caller:
+/// the reader answered [`Provenance::RawOnly`](crate::normalize::Provenance)
+/// (no extractor exists for this harness), or it read no message **and** could
+/// not parse a single record it was handed — a framing the reader does not
+/// know, which is not a session with nothing in it. Either way the caller falls
+/// back to the structural walk, and a walk that also finds nothing is reported
+/// as an unreadable format rather than as an empty session.
+fn reader_document(harness: &str, body: &str) -> Option<DocText> {
+    if harness.is_empty() {
+        // An empty harness is not a harness: no id named one, so there is no
+        // archived format to claim this build has read. The reader's own arm
+        // for it is a structural attempt, which is exactly what the walk below
+        // does — and doing it here instead would report a shape it merely did
+        // not recognise as a session with nothing in it.
+        return None;
+    }
+    let conversation = crate::normalize::normalize(harness, body);
+    if matches!(
+        conversation.provenance,
+        crate::normalize::Provenance::RawOnly { .. }
+    ) {
+        return None;
+    }
+    if conversation.messages.is_empty()
+        && (conversation.unrecognized_lines > 0
+            // A web-bundle harness reads the platform's own body out of an
+            // inbox bundle, and its generic arm will hand back an empty
+            // conversation for any value at all. A bundle it could not render
+            // a single message from is a framing it does not know — which is
+            // the difference between this and a `claude-code` shard of nothing
+            // but `summary` records, where an empty body is the measurement
+            // the reader actually made.
+            || (crate::activity::WEB_HARNESSES.contains(&harness)
+                && conversation.unrendered_lines > 0))
+    {
+        return None;
+    }
+    let mut document = document_from_messages(
+        conversation
+            .messages
+            .iter()
+            .map(message_text)
+            .collect::<Vec<_>>(),
+    );
+    // Lines the reader was handed and could not parse, carried out rather than
+    // dropped. This is the mixed case the `is_empty()` branch above excludes:
+    // some records were understood, so the text is indexed, but the bytes
+    // behind these lines were never searched and the build must be able to say
+    // so. `unrendered_lines` is not counted here — those lines *were*
+    // understood (a `summary` record is one) and nothing in them is text a
+    // reader asked to search.
+    document.unread_lines = conversation.unrecognized_lines;
+    Some(document)
+}
+
+/// The indexable text of one reader message.
+///
+/// Prose, thinking and code are the text a person wrote or was shown; tool
+/// calls and attachments are not indexed — a tool call is a name and an
+/// argument summary, and indexing them would put harness bookkeeping in the
+/// results of a search over conversation text (the rule this module has always
+/// had). A message none of whose blocks is indexable contributes nothing, which
+/// is not the same as the message not existing.
+fn message_text(message: &crate::normalize::Message) -> String {
+    use crate::normalize::Block;
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text(text) | Block::Thinking(text) => Some(text.as_str()),
+            Block::CodeBlock { code, .. } => Some(code.as_str()),
+            Block::ToolCall { .. } | Block::AttachmentRef(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The structural walk: the shapes this build has no reader for.
+///
+/// This is the walk the extractor has always done — roles named `user` /
+/// `assistant` (and their `author.role` spelling) with their `content`, in
+/// whatever nesting a shard happens to use. It is kept for the harnesses whose
+/// archived format has not been read, and the rule for it is the same one
+/// [`extract_index_document_for`] states: text found is indexed, and nothing
+/// found is reported as an unreadable format rather than as an empty body.
+fn structural_walk(harness: &str, raw: &str, shape: ShardShape) -> DocText {
     let mut messages = Vec::new();
-    for (line_number, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(line).with_context(|| {
-            format!("invalid archived JSONL record at line {}", line_number + 1)
-        })?;
-        if title.is_empty() {
-            title = value
-                .get("title")
-                .or_else(|| value.get("name"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-        }
+    let mut unread_lines = 0;
+    for value in json_values(raw, &mut unread_lines) {
         collect_turn_text(&value, &mut messages);
     }
+    let messages = messages
+        .into_iter()
+        .filter(|message| !message.trim().is_empty())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return not_indexable(unreadable_format(harness, shape));
+    }
+    let mut document = document_from_messages(messages);
+    // The structural walk reads value by value, so a line that is not a value
+    // is dropped where it is met. Those lines are counted out, not discarded:
+    // the same statement the reader path makes (see
+    // [`DocText::unread_lines`]), and the only place this walk can make it.
+    document.unread_lines = unread_lines;
+    document
+}
+
+/// The format a shard that could not be read is named by.
+///
+/// Usually the shape it was read as. The one ambiguity is a shard that opens as
+/// JSON and does not parse: that is a JSONL record for a harness whose source
+/// is JSONL and a JSON document for the others, and the registry says which —
+/// the reason is compared against a file the reader knows, so it uses the
+/// source's own word.
+fn unreadable_format(harness: &str, shape: ShardShape) -> &'static str {
+    match shape {
+        ShardShape::Json if declared_format(harness) == Some(FORMAT_JSONL) => FORMAT_JSONL,
+        other => other.format(),
+    }
+}
+
+/// A shard that is not JSON: `aider`'s `.aider.chat.history.md` transcript, or
+/// bytes no reader of this build has a shape for.
+fn plain_text(harness: &str, raw: &str, bytes: &[u8]) -> DocText {
+    // A shard with no bytes in it holds no bytes of any format. It is read in
+    // full and found to contain nothing, which is the measurement an empty body
+    // is for — reporting it as a format nobody could read would invert exactly
+    // the distinction this module exists to keep (`CLAUDE.md` #1). Reached
+    // through a whitespace-only source file, which `collect` does not filter
+    // the way it filters a zero-byte one.
+    if raw.trim().is_empty() {
+        return document_from_messages(Vec::new());
+    }
+    if std::str::from_utf8(bytes).is_err() {
+        // A shard that is not UTF-8 at all is a source file archived whole — a
+        // SQLite database, a compressed frame. Nothing in it is text, and the
+        // format to name is the source's own, not "text": `crush` and `zed`
+        // archive a database, and reporting that as a text shard would send a
+        // reader looking for a transcript that does not exist.
+        return not_indexable(declared_format(harness).unwrap_or(FORMAT_BINARY));
+    }
+    // `aider` archives its chat history as a markdown transcript, so the shard
+    // *is* the conversation text and one line is the unit the rest of the tool
+    // counts it in (`activity::analyze_session` reads it the same way).
+    if harness == "aider" {
+        let lines: Vec<String> = raw_non_blank_lines(raw).map(str::to_string).collect();
+        return document_from_messages(lines);
+    }
+    // Text no reader of this build has a shape for. The format to name is the
+    // source's own where the registry declares one, the same way
+    // [`unreadable_format`] names an unparsable JSON shard: `crush` and `zed`
+    // archive a database, and a small one whose pages happen to be all ASCII is
+    // still a database — calling it `text` would send a reader looking for a
+    // transcript the archive never held.
+    not_indexable(declared_format(harness).unwrap_or(FORMAT_TEXT))
+}
+
+/// Every JSON value a shard holds, read tolerantly: one document, one value per
+/// line, or a stream of values run together. An unparseable line contributes
+/// nothing here — whether that is a defect of the shard or of the framing is
+/// decided by the caller, which is the one that knows which format it expected.
+fn json_values(raw: &str, unread_lines: &mut usize) -> Vec<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return vec![value];
+    }
+    let mut unparsed = 0usize;
+    let per_line: Vec<serde_json::Value> = raw_non_blank_lines(trimmed)
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                unparsed += 1;
+                None
+            }
+        })
+        .collect();
+    if !per_line.is_empty() {
+        *unread_lines += unparsed;
+        return per_line;
+    }
+    let mut values = Vec::new();
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    // Stops at the first value the stream cannot read: a stream that errors
+    // once is not a stream whose remainder is worth guessing at. `unread_lines`
+    // is left alone here: this framing has no lines to count, and a number
+    // derived from the values a stream happened to yield would be a guess
+    // wearing the clothes of a measurement.
+    while let Some(Ok(value)) = stream.next() {
+        values.push(value);
+    }
+    values
+}
+
+/// The first label the shard carries, if it carries one.
+///
+/// The archive's own title comes from the machine's activity index and is
+/// preferred by the caller; this is the fallback for a destination whose
+/// activity index is missing, and it reads a title only where a harness writes
+/// one (a `title` or `name` field, or an export's session row).
+fn title_of(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => value,
+        Err(_) => match raw_non_blank_lines(trimmed).next() {
+            Some(line) => match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(value) => value,
+                Err(_) => return String::new(),
+            },
+            None => return String::new(),
+        },
+    };
+    value
+        .get("title")
+        .or_else(|| value.get("name"))
+        .or_else(|| value.pointer("/session/title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Join indexed messages into the one body a document stores, recording where
+/// each message starts.
+fn document_from_messages(messages: Vec<String>) -> DocText {
     let mut body = String::new();
     let mut message_offsets = Vec::with_capacity(messages.len());
     for message in &messages {
@@ -441,11 +978,13 @@ pub fn extract_index_document(raw: &[u8]) -> Result<DocText> {
         message_offsets.push(body.chars().count());
         body.push_str(message);
     }
-    Ok(DocText {
-        title,
+    DocText {
+        title: String::new(),
         body,
         message_offsets,
-    })
+        not_indexable: None,
+        unread_lines: 0,
+    }
 }
 
 fn collect_turn_text(value: &serde_json::Value, out: &mut Vec<String>) {
@@ -589,9 +1128,18 @@ impl Index {
                 }
             }
         };
+        // No build has run at all when the status is `Incomplete`, so there is
+        // no line count to read — and reading a missing key as zero would be
+        // reporting "every line was read" for a build that does not exist.
+        let unread_lines = if matches!(status, CheckStatus::Incomplete) {
+            0
+        } else {
+            read_meta_count(&connection, "build_unread_lines")?
+        };
         Ok(CheckReport {
             documents: documents as usize,
             status,
+            unread_lines,
         })
     }
 
@@ -680,7 +1228,11 @@ impl Index {
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()?;
-        let not_indexable = read_meta_ids(&connection, "build_not_indexable_ids")?;
+        // The unreadable ids and their reasons, from the one key the last
+        // completed build wrote. They are read from that key rather than from
+        // the rows because a source the build could not read at all has no row:
+        // deriving this from the rows would leave it looking answerable.
+        let not_indexable = read_meta_reasons(&connection, "build_not_indexable_ids")?;
         let written_unix = fs::metadata(&self.db_path)
             .and_then(|metadata| metadata.modified())
             .ok()
@@ -758,8 +1310,44 @@ impl Index {
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let truncated = rows.len() > cap;
         let mut matches = rows;
+        // A session id is not conversation text, so a document whose *id*
+        // carries the query can be invisible to `documents_fts` however much
+        // text it holds — and asking for a session by its own id is the first
+        // thing a reader does with an id they already have (W255 C5). The ids
+        // are already a column of `documents`, so the substring is answered
+        // there: no second copy of the id is indexed, and a prefix of an id is
+        // found by the same statement as the whole one.
+        let known: std::collections::BTreeSet<String> =
+            matches.iter().map(|found| found.id.clone()).collect();
+        let mut statement = connection.prepare(
+            "SELECT id, title FROM documents WHERE instr(lower(id), lower(?1)) > 0 ORDER BY id",
+        )?;
+        let by_id = statement
+            .query_map(params![query], |row| {
+                Ok(RankedMatch {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    // The id is what matched, so there is no excerpt *of the
+                    // match* to report: `None` is the state that says so (see
+                    // the field's own documentation) and the caller renders the
+                    // session's label.
+                    snippet: None,
+                    // reason: a document found by its id is appended after
+                    // every document whose text matched, in id order among
+                    // themselves. 0.0 is not a bm25 score and no rank is
+                    // claimed for it — the list it lands in is already sorted,
+                    // and this value only keeps it at the end of that list.
+                    rank: 0.0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for found in by_id {
+            if !known.contains(&found.id) {
+                matches.push(found);
+            }
+        }
+        let truncated = matches.len() > cap;
         matches.truncate(cap);
         Ok(Ok(MatchSet { matches, truncated }))
     }
@@ -941,9 +1529,19 @@ impl Index {
             };
             stats.bytes_read += loaded.bytes_read;
             let text = loaded.text;
-            if text.body.is_empty() {
+            // The three outcomes are counted apart because they are three
+            // different statements about the archive: a shard whose format this
+            // build cannot read was never looked at, a shard read in full that
+            // holds no prose is a measured emptiness, and the lines a partial
+            // read could not parse are bytes nobody searched. Folding the first
+            // into `indexed` is what let 2,048 sessions be reported searchable
+            // that no query could ever match (W255 C2).
+            if let Some(reason) = text.not_indexable.clone() {
+                stats.not_indexable.push((id.to_owned(), reason));
+            } else if text.body.is_empty() {
                 stats.empty_body += 1;
             }
+            stats.unread_lines += text.unread_lines;
             let content_sha = digest_text(&text.title, &text.body);
             let offsets: Vec<u64> = text
                 .message_offsets
@@ -968,7 +1566,9 @@ impl Index {
                 "INSERT INTO documents_fts(id, title, body) VALUES (?1, ?2, ?3)",
                 params![id, text.title, text.body],
             )?;
-            stats.indexed += 1;
+            if text.not_indexable.is_none() {
+                stats.indexed += 1;
+            }
         }
         let stale: Vec<String> = old
             .keys()
@@ -1162,30 +1762,35 @@ fn record_build_outcome(connection: &Connection, stats: &BuildStats) -> Result<(
     // many sessions it could not read, and the ids are what a reader needs to
     // tell whether *this* session is one of them. A count alone cannot answer
     // that, and answering it with "not one of them" would turn a hole into a
-    // proven absence (C1/C7).
+    // proven absence (C1/C7). Each id carries its reason — the format it could
+    // not be read as, or the read failure — because that is what the dashboard
+    // groups the unreadable sessions by.
     put(
         "build_not_indexable_ids",
         &serde_json::to_string(
             &stats
                 .not_indexable
                 .iter()
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<String>>(),
+                .cloned()
+                .collect::<std::collections::BTreeMap<String, String>>(),
         )
         .context("serialise the not-indexable source ids")?,
     )?;
     put("build_empty_body", &stats.empty_body.to_string())?;
     put("build_bytes_read", &stats.bytes_read.to_string())?;
+    put("build_unread_lines", &stats.unread_lines.to_string())?;
     Ok(())
 }
 
-/// Read the list of source ids a completed build named not indexable, in the
-/// order it named them.
+/// Read the ids a completed build named not indexable, each with its reason.
 ///
 /// The key is written by every completed build, so its absence is not "no
 /// session failed" — it is an index from a version that did not record them,
 /// and that index is refused by its schema version before it gets here.
-fn read_meta_ids(connection: &Connection, key: &str) -> Result<std::collections::BTreeSet<String>> {
+fn read_meta_reasons(
+    connection: &Connection,
+    key: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
     let value: String = connection
         .query_row(
             "SELECT value FROM index_meta WHERE key = ?1",
@@ -1194,7 +1799,7 @@ fn read_meta_ids(connection: &Connection, key: &str) -> Result<std::collections:
         )
         .map_err(|error| anyhow!("corrupt FTS index build metadata: {error}"))?;
     serde_json::from_str(&value).map_err(|error| {
-        anyhow!("corrupt FTS index build metadata: `{key}` is not a JSON array of ids: {error}")
+        anyhow!("corrupt FTS index build metadata: `{key}` is not a JSON object of ids: {error}")
     })
 }
 
@@ -1308,6 +1913,18 @@ mod tests {
             title: title.into(),
             body: body.into(),
             message_offsets: Vec::new(),
+            not_indexable: None,
+            unread_lines: 0,
+        }
+    }
+
+    /// The same document as a build closure's answer, with the number of bytes
+    /// the loader reports having read beside it (C6). The number is not what
+    /// these tests assert; that it travels with the text is.
+    fn loaded(title: &str, body: &str) -> LoadedDoc {
+        LoadedDoc {
+            text: doc(title, body),
+            bytes_read: 7,
         }
     }
 
@@ -1543,9 +2160,451 @@ mod tests {
         assert!(!body.contains("synthetic tool output"));
     }
 
+    /// A shard **none** of whose records parse is neither indexed as the text
+    /// it happens to contain nor indexed as an empty body.
+    ///
+    /// This test used to require `Err`, which is the behaviour that made one
+    /// unreadable shard abort the whole build — on the field-test archive that
+    /// was 7,203 sessions lost to one bad line (W255 C1). What changed is that
+    /// the shard is now *named* (`not indexable: jsonl`) instead of being an
+    /// error that aborted everything and named nothing.
+    ///
+    /// The scope of the claim is exact: this is the shard that yielded nothing,
+    /// not every shard that yielded less than all of itself. The mixed case is
+    /// the next test, and it is a different answer on purpose — the records
+    /// that *did* parse are text a reader asked to search, so they are indexed,
+    /// and what the reader was not given is counted out beside them.
     #[test]
-    fn extraction_refuses_malformed_jsonl_instead_of_indexing_partial_text() {
-        assert!(extract_index_text(b"{bad json}\n").is_err());
+    fn extraction_never_indexes_a_partial_read_as_the_session() {
+        let extracted = extract_index_document(b"{bad json}\n").unwrap();
+        assert!(extracted.body.is_empty());
+        assert!(!extracted.is_indexable());
+        assert!(
+            !extracted.body.contains("bad json"),
+            "the shard's own bytes were indexed as conversation text"
+        );
+        // The harness decides which word names the failure: an unidentifiable
+        // shard that opens as JSON is reported as JSON, and a harness whose
+        // source is JSONL reports the format its own files are in.
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+        let named = extract_index_document_for("claude-code", b"{bad json}\n").unwrap();
+        assert_eq!(named.not_indexable.as_deref(), Some(FORMAT_JSONL));
+        assert_eq!(not_indexable_label(FORMAT_JSONL), "not indexable: jsonl");
+    }
+
+    /// A shard that parses **some** of its lines is read for those lines and
+    /// says how much of it was not read.
+    ///
+    /// The text that was understood is indexed — a partial read is worth more
+    /// than none, and refusing it would put a session out of reach over one bad
+    /// line (the failure W255 C1 was filed for). What must not happen is
+    /// silence about the rest: the lines nobody could parse are bytes no query
+    /// searched, so the document carries their count and the build reports it.
+    /// Neither `not_indexable` (nothing was readable) nor an empty body (a
+    /// measured emptiness) is this state.
+    #[test]
+    fn a_partly_read_shard_is_indexed_and_says_how_much_it_could_not_read() {
+        let raw = b"{\"role\":\"user\",\"content\":\"synthetic question\"}\n{not json\n{\"role\":\"assistant\",\"content\":\"synthetic answer\"}\n";
+        let extracted = extract_index_document_for("claude-code", raw).unwrap();
+        assert!(
+            extracted.is_indexable(),
+            "the lines that did parse are text a reader asked to search"
+        );
+        assert!(extracted.body.contains("synthetic question"));
+        assert!(extracted.body.contains("synthetic answer"));
+        assert_eq!(extracted.unread_lines, 1);
+        // The count is of *lines*, not of documents: a shard from which nothing
+        // was read is the other state, and carries no line count at all.
+        let nothing = extract_index_document_for("claude-code", b"{not json\n").unwrap();
+        assert!(!nothing.is_indexable());
+        assert_eq!(nothing.unread_lines, 0);
+        // And a shard read in full says so with a zero that is a measurement.
+        let whole = extract_index_document_for(
+            "claude-code",
+            b"{\"role\":\"user\",\"content\":\"synthetic question\"}\n",
+        )
+        .unwrap();
+        assert_eq!(whole.unread_lines, 0);
+
+        // The count reaches the surfaces a build is read from, or the reader
+        // has no way to learn that part of the archive was never searched: the
+        // report the build returns, and the `index check` that re-reads it.
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let stats = index
+            .build(
+                &[SourceDoc::fingerprinted("machine-one/torn", "sha-torn")],
+                |_id| {
+                    let text = extract_index_document_for("claude-code", raw)
+                        .map_err(|error| LoadFailure::new(raw.len() as u64, error))?;
+                    Ok(LoadedDoc {
+                        text,
+                        bytes_read: raw.len() as u64,
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(stats.unread_lines, 1);
+        // The session is indexed, not failed: the property `Partial` would
+        // wrongly claim is that its text is out of reach.
+        assert_eq!(stats.indexed, 1);
+        assert!(stats.not_indexable.is_empty());
+        assert_eq!(index.check().unwrap().unread_lines, 1);
+    }
+
+    /// A reader that was handed nothing it could parse is not a reader that
+    /// read an empty session, and the two must not produce the same document.
+    #[test]
+    fn a_decode_failure_is_not_a_read_of_an_empty_session() {
+        let failed = extract_index_document_for("claude-code", b"\xff\xfe\x00binary\n").unwrap();
+        assert!(!failed.is_indexable());
+        // A session whose every line the reader understood and which holds no
+        // message is the other state: an empty body that is a measurement.
+        let metadata_only = extract_index_document_for(
+            "claude-code",
+            b"{\"type\":\"summary\",\"summary\":\"synthetic\"}\n",
+        )
+        .unwrap();
+        assert!(metadata_only.is_indexable());
+        assert!(metadata_only.body.is_empty());
+    }
+
+    /// What an archived shard of one harness must produce.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Expected {
+        /// Indexable conversation text, containing this substring.
+        Text(&'static str),
+        /// No text this build can read, reported as this format.
+        Format(&'static str),
+    }
+
+    /// One archived shard per harness in the support registry
+    /// (`data/harness-registry-v1.json`), in the shape that harness's own
+    /// reader fixtures pin — synthetic, and no other project's text.
+    ///
+    /// The table is the point of the change: before it, three of these twelve
+    /// arms existed, and a session in any of the other nine was indexed with an
+    /// empty body and counted as indexed. Every row is one harness, so a
+    /// harness whose format is not read fails here by name instead of
+    /// disappearing into a coverage line that says the view is complete.
+    #[test]
+    fn every_local_harness_is_read_or_reported_by_format() {
+        let copilot_jsonl = concat!(
+            r#"{"event":"session.start","data":{"id":"synthetic"}}"#,
+            "\n",
+            r#"{"event":"session.end","data":{}}"#,
+        );
+        // A SQLite database archived whole: the bytes of the file, not text.
+        let sqlite_bytes: &[u8] = b"SQLite format 3\0\x00\x01\x02\x03\xff\xfe";
+
+        let rows: &[(&str, &[u8], Expected)] = &[
+            (
+                "claude-code",
+                br#"{"type":"user","message":{"role":"user","content":"synthetic question"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"synthetic answer"}]}}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                "codex",
+                br#"{"timestamp":1736944496,"payload":{"message":{"role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}}}"#,
+                Expected::Text("synthetic answer"),
+            ),
+            (
+                // Pretty-printed JSON documents run together, never JSONL.
+                "gemini-cli",
+                br#"{"sessionId":"s1",
+ "messages":[{"type":"user","content":[{"text":"synthetic question"}]},
+             {"type":"gemini","content":[{"text":"synthetic answer"}]}]}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                // The journal's own record for the turn the human sent; its
+                // `turn.prompt` mirror is not rendered as a second copy.
+                "kimi-code",
+                br#"{"type":"context.append_message","time":1770000000000,"message":{"role":"user","origin":{"kind":"user"},"content":[{"type":"text","text":"synthetic question"}]}}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                "opencode",
+                br#"{"schema":"chat-stasher.opencode.session.v1","session":{"id":"s1","time_created":1770000000000,"time_updated":1770000000001},"messages":[{"id":"m1","session_id":"s1","time_created":1770000000000,"time_updated":1770000000000,"data":{"role":"user"},"parts":[{"id":"p1","message_id":"m1","session_id":"s1","time_created":1770000000000,"time_updated":1770000000000,"data":{"type":"text","text":"synthetic question"}}]}],"orphan_parts":[]}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                "cursor",
+                br#"{"schema":"chat-stasher.cursor.legacy.session.v1","session":{"composerId":"legacy-ok","createdAt":1751779149032,"conversation":[{"type":1,"bubbleId":"b1","text":"synthetic question"}]}}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                // The CLI's row is a SQLite search-index row: the conversation
+                // body lives in a separate per-session directory this archive
+                // does not hold, so there is no text here to index — and that
+                // is a format this build cannot read, not an empty session.
+                "grok",
+                br#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765}}"#,
+                Expected::Format(FORMAT_SQLITE),
+            ),
+            (
+                "github-copilot-cli",
+                copilot_jsonl.as_bytes(),
+                Expected::Format(FORMAT_JSONL),
+            ),
+            (
+                // aider's chat history *is* a markdown transcript.
+                "aider",
+                b"# aider chat started at 2026-09-25 10:00:00\n\n#### synthetic question\n\nsynthetic answer\n",
+                Expected::Text("synthetic question"),
+            ),
+            ("crush", sqlite_bytes, Expected::Format(FORMAT_SQLITE)),
+            ("zed", sqlite_bytes, Expected::Format(FORMAT_SQLITE)),
+            (
+                "continue",
+                br#"{"messages":[{"role":"user","content":"synthetic question"}]}"#,
+                Expected::Text("synthetic question"),
+            ),
+        ];
+
+        // Every harness in the registry appears exactly once, so a harness
+        // added to the registry without a row here is a failure of this test
+        // rather than of a user's archive.
+        let registry: Vec<String> = registry_harness_ids();
+        let mut listed: Vec<&str> = rows.iter().map(|(harness, _, _)| *harness).collect();
+        listed.sort_unstable();
+        assert_eq!(listed, registry, "one row per registry harness, no extras");
+
+        for (harness, shard, expected) in rows {
+            let extracted = extract_index_document_for(harness, shard).unwrap();
+            match expected {
+                Expected::Text(needle) => {
+                    assert!(
+                        extracted.is_indexable(),
+                        "`{harness}` was reported unreadable ({:?}) but its archived \
+                         format is one this build reads",
+                        extracted.not_indexable
+                    );
+                    assert!(
+                        extracted.body.contains(needle),
+                        "`{harness}`: the archived shard's text is not in the indexed body"
+                    );
+                    assert!(
+                        !extracted.message_offsets.is_empty(),
+                        "`{harness}`: an indexed body must record where its messages start"
+                    );
+                }
+                Expected::Format(format) => {
+                    assert_eq!(
+                        extracted.not_indexable.as_deref(),
+                        Some(*format),
+                        "`{harness}`: the shard must be reported by format, not indexed"
+                    );
+                    assert!(extracted.body.is_empty());
+                }
+            }
+        }
+    }
+
+    /// The browser-extension platforms are not in the registry's *local*
+    /// harness list, and 1,006 of the field test's 2,048 empty bodies were
+    /// theirs. They index through the reader's own extractors, which is the
+    /// same layer an archived local harness is read through.
+    #[test]
+    fn a_web_bundle_indexes_the_platform_body_it_carries() {
+        let body = concat!(
+            r#"{"current_node":"n2","mapping":{"root":{"message":null,"parent":null},"#,
+            r#""n1":{"message":{"author":{"role":"user"},"content":{"parts":["synthetic question"]}},"parent":"root"},"#,
+            r#""n2":{"message":{"author":{"role":"assistant"},"content":{"parts":["synthetic answer"]}},"parent":"n1"}}}"#,
+        );
+        let line = serde_json::json!({ "raw": { "text": body } }).to_string();
+        let extracted = extract_index_document_for("chatgpt", line.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic question"));
+        assert!(extracted.body.contains("synthetic answer"));
+        // A bundle whose payload this build cannot read is a format it names,
+        // not a session with nothing in it. Two lines, because that is what an
+        // archived web session holds — one bundle per capture.
+        let broken = serde_json::json!({ "raw": { "text": "not json" } }).to_string();
+        let shard = format!("{broken}\n{broken}\n");
+        let extracted = extract_index_document_for("chatgpt", shard.as_bytes()).unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
+    }
+
+    /// The registry ids, read from the same file the scanner loads.
+    fn registry_harness_ids() -> Vec<String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/harness-registry-v1.json");
+        let raw = std::fs::read_to_string(path).expect("read the support registry");
+        let registry: serde_json::Value = serde_json::from_str(&raw).expect("parse the registry");
+        let mut ids: Vec<String> = registry["harnesses"]
+            .as_array()
+            .expect("the registry lists harnesses")
+            .iter()
+            .filter_map(|harness| harness["id"].as_str().map(|id| id.to_string()))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The format table this module names an unreadable shard by is kept in
+    /// step with the registry it describes.
+    ///
+    /// A harness added to the registry without a row here would be read
+    /// structurally and reported as an unknown format, which is the state this
+    /// test exists to refuse.
+    #[test]
+    fn harness_formats_match_the_support_registry() {
+        let mut table: Vec<&str> = HARNESS_SOURCE_FORMATS
+            .iter()
+            .map(|(harness, _)| *harness)
+            .collect();
+        table.sort_unstable();
+        assert_eq!(table, registry_harness_ids());
+        // Each row names a format the registry's own cell declares, so the two
+        // descriptions of one harness cannot drift apart.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/harness-registry-v1.json");
+        let raw = std::fs::read_to_string(path).expect("read the support registry");
+        let registry: serde_json::Value = serde_json::from_str(&raw).expect("parse the registry");
+        for (harness, format) in HARNESS_SOURCE_FORMATS {
+            let declared = registry["harnesses"]
+                .as_array()
+                .expect("the registry lists harnesses")
+                .iter()
+                .find(|entry| entry["id"].as_str() == Some(*harness))
+                .map(|entry| {
+                    entry["paths"]
+                        .as_object()
+                        .expect("a harness lists platform cells")
+                        .values()
+                        .filter_map(|cell| cell["format"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .expect("the harness is in the registry");
+            assert!(
+                declared.contains(format),
+                "`{harness}` is declared `{declared}` but this module names it `{format}`"
+            );
+        }
+    }
+
+    /// A document the index holds but cannot read is not a document it can
+    /// answer for, and the two travel together in the summary.
+    #[test]
+    fn an_unreadable_document_is_held_and_not_counted_as_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [
+            SourceDoc::fingerprinted("mac/claude-code.mac.readable", "sha-readable"),
+            SourceDoc::fingerprinted("mac/zed.mac.unreadable", "sha-unreadable"),
+        ];
+        index
+            .build(&sources, |id| {
+                if id.contains("claude-code") {
+                    return Ok(loaded("synthetic title", "synthetic indigo body"));
+                }
+                let mut text = doc("synthetic title", "");
+                text.not_indexable = Some(FORMAT_SQLITE.to_string());
+                Ok(LoadedDoc {
+                    text,
+                    bytes_read: 7,
+                })
+            })
+            .unwrap();
+
+        let summary = index.summary().unwrap();
+        assert_eq!(summary.ids.len(), 2, "the index holds both documents");
+        assert_eq!(
+            summary
+                .not_indexable
+                .get("mac/zed.mac.unreadable")
+                .map(String::as_str),
+            Some(FORMAT_SQLITE)
+        );
+        assert_eq!(summary.indexable(), 1);
+        assert_eq!(summary.unreadable_summary(), "sqlite 1");
+        assert_eq!(not_indexable_label(FORMAT_SQLITE), "not indexable: sqlite");
+
+        // The readable session still answers, so marking one document
+        // unreadable did not take the other one out of reach.
+        let set = index.matches("indigo").unwrap().unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.matches[0].id, "mac/claude-code.mac.readable");
+        // And the unreadable one is not an answer to a query over text: it
+        // holds none, which is the state the summary names rather than hides.
+        // (Its *id* is still findable — the id route answers "this session
+        // exists", and the summary above answers "and its text was not read".)
+        assert_eq!(index.matches("zebrawood").unwrap().unwrap().len(), 0);
+        assert!(index
+            .matches("zed")
+            .unwrap()
+            .unwrap()
+            .matches
+            .iter()
+            .all(|found| found.snippet.is_none()));
+    }
+
+    /// A session id, or any prefix of one, finds the session.
+    ///
+    /// The id is not conversation text, so before the id route existed the
+    /// prefix returned the sessions that *quote* the string and never the
+    /// session whose id it is — the one query a reader who already has an id
+    /// reaches for (W255 C5). The id here is fabricated: on the field-test
+    /// archive the session a prefix found was a real one, and a full archived
+    /// session id is not something this repository's shared material carries,
+    /// test or not.
+    #[test]
+    fn a_session_id_or_its_prefix_finds_the_session() {
+        let target = "mac/claude-code.mac.a5b0c0de-0000-4000-8000-00000000c0de";
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [
+            SourceDoc::fingerprinted(target, "sha-target"),
+            SourceDoc::fingerprinted("mac/codex.mac.quoting", "sha-quoting"),
+        ];
+        index
+            .build(&sources, |id| {
+                Ok(if id == target {
+                    loaded("synthetic title", "synthetic indigo body")
+                } else {
+                    // The quoting session mentions the id in its *text*, which
+                    // is the old answer to this query.
+                    loaded("synthetic title", "quoting a5b0c0de in passing")
+                })
+            })
+            .unwrap();
+
+        let ids = |query: &str| {
+            index
+                .matches(query)
+                .unwrap()
+                .unwrap()
+                .matches
+                .into_iter()
+                .map(|found| found.id)
+                .collect::<Vec<_>>()
+        };
+        for query in [
+            "a5b0c0de",
+            "a5b0c0de-0000",
+            "a5b0c0de-0000-4000-8000-00000000c0de",
+            // The archive's own id spelling is the document id, so a query
+            // with the machine and harness in it works too.
+            "mac/claude-code.mac.a5b0c0de",
+        ] {
+            let found = ids(query);
+            assert!(
+                found.contains(&target.to_string()),
+                "`{query}` did not find the session whose id it is: {found:?}"
+            );
+        }
+        // The id route adds no claim about the body: there is no excerpt to
+        // mark, so the hit carries none (the caller renders the session).
+        let by_id = index.matches("a5b0c0de-0000").unwrap().unwrap();
+        let hit = by_id
+            .matches
+            .iter()
+            .find(|found| found.id == target)
+            .expect("the id hit is in the answer");
+        assert!(hit.snippet.is_none());
+        // And a query that is in neither an id nor any text is still empty.
+        assert!(ids("zebrawood").is_empty());
     }
 
     /// Build one-session indexes for the placement tests below.
@@ -1889,7 +2948,7 @@ mod tests {
         // the text is from an earlier read, so the session is named as not
         // answerable and coverage must leave it out. `ids` holding it is not
         // enough — that is the state this distinction exists for.
-        assert!(summary.not_indexable.contains("machine-one/session"));
+        assert!(summary.not_indexable.contains_key("machine-one/session"));
         assert!(!summary.covers("machine-one/session"));
         // And the build says so: one session could not be re-read.
         assert_eq!(
@@ -2294,6 +3353,8 @@ mod tests {
                         title: "synthetic title".to_string(),
                         body,
                         message_offsets: Vec::new(),
+                        not_indexable: None,
+                        unread_lines: 0,
                     },
                     chars as u64,
                 ))

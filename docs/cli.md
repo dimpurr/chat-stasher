@@ -331,6 +331,23 @@ The local full-text index behind `/search` and `search --text`. It is **plaintex
 | `index check --destination <name>` | Validates the index, counts what it holds and reports the last build's outcome, without contacting the archive. `state=valid` means a build finished with every read session indexed; `state=partial` names how many were not indexable; `state=incomplete` means no build has finished, so the index answers nothing. |
 | `index clear --destination <name>` | Deletes that destination's index. |
 
+`index build` reads each archived session in the format its harness archives —
+one JSONL record per line for `claude-code`, `codex` and `kimi-code`, the
+pretty-printed document for `gemini-cli`, the exported SQLite row for
+`opencode`, `cursor`, `grok` and the rest, a markdown transcript for `aider`.
+Two states are kept apart, and `index check` and `search --text` both report
+the second one rather than folding it into the first:
+
+- a session whose archived format this build **cannot read** is counted as
+  `not indexable: <format>` (for example `not indexable: sqlite`), never as
+  indexed, and a query over a view holding one exits `3` — it was not read, so
+  a zero says nothing about it;
+- a session whose format *was* read and holds no conversation is an empty body,
+  which is a measurement.
+
+`search --text` also finds a session by its own id, or by any prefix of it, even
+though an id is not conversation text.
+
 ### `cache`
 
 The body cache: encrypted copies of conversations you have opened, so the next read is fast. Nothing in it is decrypted, and deleting it only costs speed.
