@@ -45,6 +45,16 @@
  *    The lock is taken before the duplicate scan precisely so that is true
  *    (`inbox.rs`); without it the two writers would allocate the same sequence
  *    number and the second rename would destroy the first record.
+ *  · **(e) one install id, two live writers.** A copy of a profile carries the
+ *    original's identity, and EXT-13 detects that from the sequences the two
+ *    writers produce (ADR-045). The profile's capture is then refused
+ *    **retryably** and stays queued rather than being rejected or dropped, the
+ *    host answers its popup "shared", and the repair mints a new identity that
+ *    lets the *next* capture through while the queued one stays queued. The
+ *    second writer is the one synthesized input in this file; the case says at
+ *    length why this harness cannot start one (`launchExtension` starts a profile
+ *    that was never copied, and both routes to a real copied profile were
+ *    measured and fail for harness reasons).
  *
  * ## Fabrication boundary
  *
@@ -63,6 +73,7 @@
  */
 
 import { expect, test as base } from '@playwright/test';
+import { OUTBOX_ALARM_NAME } from '../lib/outbox-alarm';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -71,7 +82,9 @@ import {
   fixture,
   installFakePlatforms,
   launchExtension,
+  readOutbox,
   readStorage,
+  seedOutbox,
   startNativeHost,
   waitForAlarm,
   waitForTickRecord,
@@ -117,9 +130,20 @@ interface Pair {
  * 429), not a property of the profile, and a name implying an order would read
  * as one.
  */
-const multiTest = base.extend<{ pair: Pair }>({
-  pair: async ({}, use) => {
+const multiTest = base.extend<{ pair: Pair; host: NativeHost }>({
+  // EXT-13 · The host on its own, for the cases that bring their own profiles —
+  // and only their own. Case (e) launches one profile, copies it, and runs the
+  // copy; it has no use for a pair, and starting two extra browsers to ignore
+  // them would make the case's cost say something untrue about what it drives.
+  host: async ({}, use) => {
     const host = startNativeHost();
+    try {
+      await use(host);
+    } finally {
+      host.close();
+    }
+  },
+  pair: async ({ host }, use) => {
     const a = await launchExtension({ host });
     const b = await launchExtension({ host });
     try {
@@ -129,7 +153,6 @@ const multiTest = base.extend<{ pair: Pair }>({
         await extension.context.close().catch(() => undefined);
         rmSync(extension.userDataDir, { recursive: true, force: true });
       }
-      host.close();
     }
   },
 });
@@ -266,6 +289,50 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
     });
   });
   return { log, list };
+}
+
+/**
+ * Wait for the host to have refused a delivery with this `kind`, and return it.
+ *
+ * The refusal is the event under test, so a timeout has to say what the host
+ * answered instead: "it was never asked", "it was asked and stored it" and "it
+ * was asked and refused for another reason" are three different outcomes, and a
+ * bare timeout reports none of them.
+ */
+async function waitForRefusal(
+  host: NativeHost,
+  kind: string,
+  timeoutMs = 30_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const refusal = host.answered.find((reply) => reply.type === 'nack' && reply.kind === kind);
+    if (refusal) return refusal;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `timed out waiting for a \`${kind}\` refusal; the host answered `
+        + JSON.stringify(host.answered.map((reply) => ({
+          type: reply.type, status: reply.status, kind: reply.kind, ok: reply.ok,
+        }))),
+      );
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+  }
+}
+
+/** The popup, as a real page. Its own entrypoint runs and does the rest. *//** The popup, as a real page. Its own entrypoint runs and does the rest. */
+async function openPopup(ext: Extension) {
+  const page = await ext.context.newPage();
+  await page.goto(`chrome-extension://${ext.extensionId}/popup.html`, { waitUntil: 'domcontentloaded' });
+  return page;
+}
+
+/** Is this element actually on screen? `hidden` is how this popup hides things. */
+async function visible(page: Awaited<ReturnType<typeof openPopup>>, id: string): Promise<boolean> {
+  return await page.evaluate((elementId: string) => {
+    const el = document.getElementById(elementId);
+    return el !== null && !(el as HTMLElement).hidden;
+  }, id);
 }
 
 /** Open the fixture page and wait for the capture the page's own hook reports. */
@@ -492,7 +559,15 @@ multiTest('(a) two profiles capture one conversation: one conversation, one reco
   const firstDelivery = host.delivered()[0];
   if (!firstDelivery) throw new Error('no delivery was recorded');
   const before = readStage(host).map((record) => record.shard);
-  const again = await host.ask({ ...firstDelivery });
+  // 🔴 EXT-13 · The replay drops `report_seq`, and that is the correction rather
+  //    than a convenience. A replayed frame is not a retry: `deliver()` re-stamps
+  //    the sequence on **every** attempt, so a real retry carries a fresh value,
+  //    while this probe replays a recorded frame byte-for-byte — including the
+  //    sequence that writer has already used. Sending that would be a claim that
+  //    two writers share the id, which the host answers `identity-conflict`, and
+  //    this case is about idempotency of the *payload*, not about provenance.
+  const { report_seq: _replayedSeq, ...replay } = firstDelivery as Record<string, unknown>;
+  const again = await host.ask({ ...replay });
   expect(again.type).toBe('ack');
   expect(again.status).toBe('duplicate');
   expect(readStage(host).map((record) => record.shard)).toEqual(before);
@@ -669,5 +744,189 @@ multiTest('(d) two host processes seal into one conversation directory: both rec
       .toEqual(new Set([await installIdOf(a), await installIdOf(b)]));
   } finally {
     fresh.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (e) A copied profile: one install id, two live copies
+// ---------------------------------------------------------------------------
+
+/**
+ * EXT-13 · **Copying a profile copies its identity, and the two copies are
+ * invisible to each other until their sequences diverge.**
+ *
+ * This is the case the whole EXT-13 mechanism exists for, and it is the one case
+ * that cannot be written against a stubbed storage layer, because the thing
+ * under test is what two *real* browser profiles do with their own
+ * `storage.local` after one of them was copied from the other:
+ *
+ *  · the copy carries `cs_install_identity_v1` verbatim, so both profiles report
+ *    the same install id — the assertion that makes this a copy case rather than
+ *    a second profile;
+ *  · neither carries a report sequence yet, so both start at the same value and
+ *    their first deliveries carry the *same* one. That is the divergence: the
+ *    host has already recorded it from the original, and a value at or below the
+ *    high-water mark is the only positive evidence of a second writer the
+ *    protocol has (ADR-045);
+ *  · the copy's capture is therefore refused `identity-conflict`, **retryably** —
+ *    it stays queued rather than being rejected or dropped, and nothing of it
+ *    reaches the stage;
+ *  · the popup of the copy shows the repair, and pressing it mints a new install
+ *    id, after which that profile's captures archive normally again.
+ *
+ * The profile is copied **while it is closed**, which is how a person copies one
+ * and the only way the copy is a coherent snapshot on disk.
+ */
+multiTest('(e) a shared install id: the capture stays queued, and the repair lets it through', async ({ host }) => {
+  const ext = await launchExtension({ host });
+  const pageErrors: string[] = [];
+  try {
+    const log = await servePlatform(ext);
+
+    // 1. A real capture from a real browser, archived under this profile's id.
+    await captureOn(ext);
+    await waitForStoredDeliveries(host, 1);
+    expect(log.log.escaped).toEqual([]);
+    const installId = await installIdOf(ext);
+    expect(readStage(host)[0]?.installId).toBe(installId);
+
+    // 2. The other live copy, at the **wire level**.
+    //
+    // 🔴 This is the one thing here that is synthesized, and it is synthesized
+    //    because this harness cannot produce it. Two live contexts on one profile
+    //    is exactly what a copied profile is, and `launchExtension` starts a
+    //    profile that has not been copied. Both ways of getting there were
+    //    measured, and neither works: a profile re-launched over its own
+    //    directory loses the harness's native bridge (`send-failed` on every
+    //    delivery), and a second browser started from a copy taken while the
+    //    first was running has a bridge that answers a direct fetch but whose own
+    //    deliveries never reach it. Neither is a property of the product.
+    //
+    //    What the host sees here is therefore what it would see from a copy: a
+    //    delivery carrying **this** install id, a **different** conversation, and
+    //    a `report_seq` at the value this profile has already used. That is the
+    //    divergence ADR-045 detects. Everything below — the queued capture, the
+    //    popup's question, the repair, the recovery — is the product's own code
+    //    against the real host.
+    const first = host.delivered()[0];
+    if (!first) throw new Error('no delivery was recorded');
+    const sessionOf = (payload: string, session: string): string => {
+      const bundle = JSON.parse(payload) as Record<string, unknown>;
+      bundle.sessionId = session;
+      return JSON.stringify(bundle);
+    };
+    const secondCopyPayload = sessionOf(String(first.payload), 'w248-second-copy-session');
+    const otherCopy = await host.ask({
+      protocol: 1,
+      type: 'deliver',
+      request_id: 'w248-second-copy',
+      name: 'chatgpt-w248-second-copy-session.json',
+      payload: secondCopyPayload,
+      sha256: createHash('sha256').update(secondCopyPayload, 'utf8').digest('hex'),
+      report_seq: 1,
+    });
+    expect(otherCopy).toMatchObject({ type: 'nack', kind: 'identity-conflict', retryable: true });
+    // Nothing of the second copy's bytes was archived: the refusal is total.
+    expect(readStage(host).length).toBe(1);
+
+    const verdict = await host.ask({
+      protocol: 1, type: 'identity_state', request_id: 'w248-verdict', install_id: installId,
+    });
+    expect(verdict.identity_conflict).toBe(true);
+
+    // 3. The popup is told, over its own message channel. This is the exact
+    //    message the repair card is gated on and the exact message its button
+    //    sends — `lib/popup-view.ts`'s `POPUP_REQUEST_IDENTITY_MESSAGE` — and a
+    //    popup page is a real page in a real browser, so the round trip is the
+    //    product's. What the card *looks like* once the answer is `true` is
+    //    asserted against the view layer instead (`tests/w248-*`), because this
+    //    file is about what the wire and the store do.
+    const popup = await openPopup(ext);
+    popup.on('pageerror', (error) => pageErrors.push(error.message));
+    const asked = await popup.evaluate(async () => await (globalThis as unknown as { chrome: { runtime: { sendMessage: (m: unknown) => Promise<unknown> } } }).chrome.runtime.sendMessage({ type: 'cs-request-identity' }));
+    expect(asked).toEqual({ ok: true, conflict: true });
+
+    // 4. A capture this profile takes now is refused **retryably** and stays
+    //    queued: not rejected, and nothing about it dropped.
+    const queuedPayload = sessionOf(String(first.payload), 'w248-queued-session');
+    await seedOutbox(ext, [{
+      sha256: createHash('sha256').update(queuedPayload, 'utf8').digest('hex'),
+      name: 'chatgpt-w248-queued-session.json',
+      payload: queuedPayload,
+      bytes: Buffer.byteLength(queuedPayload, 'utf8'),
+      enqueuedAt: Date.now(),
+      attempts: 0,
+      lastError: null,
+      lastAttemptAt: null,
+      state: 'pending',
+    }]);
+    await fireAlarm(ext, OUTBOX_ALARM_NAME);
+    await expect.poll(
+      async () => (await readOutbox(ext))[0]?.lastError,
+      { timeout: 30_000 },
+    ).toBe('nack:identity-conflict');
+    const held = (await readOutbox(ext))[0];
+    expect(held?.state).toBe('pending');
+    expect(held?.rejectKind).toBeUndefined();
+    expect(readStage(host).length).toBe(1);
+
+    // 5. The repair — the message the popup's button sends, sent from the popup.
+    //    It mints a new install id for this profile and nothing else does: the
+    //    refusal in step 4 rotated nothing by itself.
+    const repaired = await popup.evaluate(async () => await (globalThis as unknown as { chrome: { runtime: { sendMessage: (m: unknown) => Promise<unknown> } } }).chrome.runtime.sendMessage({ type: 'cs-rekey-identity' }));
+    const rekey = repaired as { ok?: boolean; install?: { install_id?: string } } | null;
+    expect(rekey?.ok).toBe(true);
+    const repairedId = rekey?.install?.install_id as string;
+    expect(repairedId).not.toBe(installId);
+    expect(await installIdOf(ext)).toBe(repairedId);
+
+    // 6. A capture this profile makes *after* the repair goes out under the new
+    //    identity. The one queued before it does not, and is not rewritten to:
+    //    its bundle names the identity this profile had when it was captured, and
+    //    re-stamping that would rewrite a capture's own provenance. It stays
+    //    queued and unchanged, which is the same "nothing dropped" rule that kept
+    //    it there — and the repair card says so before the user presses it.
+    const afterRepairPayload = sessionOf(String(first.payload), 'w248-after-repair');
+    const afterRepairBundle = JSON.parse(afterRepairPayload) as Record<string, unknown>;
+    afterRepairBundle.install_id = repairedId;
+    const afterRepair = JSON.stringify(afterRepairBundle);
+    await seedOutbox(ext, [{
+      sha256: createHash('sha256').update(afterRepair, 'utf8').digest('hex'),
+      name: 'chatgpt-w248-after-repair.json',
+      payload: afterRepair,
+      bytes: Buffer.byteLength(afterRepair, 'utf8'),
+      enqueuedAt: Date.now(),
+      attempts: 0,
+      lastError: null,
+      lastAttemptAt: null,
+      state: 'pending',
+    }]);
+    await fireAlarm(ext, OUTBOX_ALARM_NAME);
+    await waitForStoredDeliveries(host, 2);
+    const staged = readStage(host);
+    expect(new Set(staged.map((record) => record.installId)))
+      .toEqual(new Set([installId, repairedId]));
+    const stillQueued = (await readOutbox(ext)).map((entry) => entry.name);
+    expect(stillQueued).toEqual(['chatgpt-w248-queued-session.json']);
+
+    // The wire, in order, as this profile's own sequences: 1 for its first
+    // capture, 2 for the capture the conflict held, and then **1 again** for the
+    // capture made after the repair — because the repair mints a new identity and
+    // starts its sequence over. A repair that carried the old counter across
+    // would hand the new identity a value the host never recorded from it, which
+    // is what the reset exists to prevent.
+    //
+    // The second copy is not in this list: it was sent by this case, through the
+    // harness, not by the extension.
+    expect(host.forwarded
+      .filter((message) => message.type === 'deliver')
+      .map((message) => message.report_seq)).toEqual([1, 2, 1]);
+
+    // A popup that threw while painting would leave the repair invisible with
+    // nothing to show for it; this is the one place a real popup page runs.
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await ext.context.close().catch(() => undefined);
+    rmSync(ext.userDataDir, { recursive: true, force: true });
   }
 });

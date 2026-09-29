@@ -16,7 +16,16 @@ import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import type { DeliverResult, NackKind } from '../lib/native-host';
 
-const ITEM_SCOPE: NackKind[] = ['bad-request', 'too-large', 'integrity', 'invalid-bundle', 'install-conflict'];
+const ITEM_SCOPE: NackKind[] = [
+  'bad-request',
+  'too-large',
+  'integrity',
+  'invalid-bundle',
+  'install-conflict',
+  // EXT-13 · item-scope, but **retryable** — see the case below. It is the
+  // one kind where the two axes disagree, and the whole refusal turns on it.
+  'identity-conflict',
+];
 const HOST_SCOPE: NackKind[] = ['protocol-version', 'config', 'stage-unavailable', 'io'];
 
 function nack(kind: NackKind, retryable: boolean): DeliverResult {
@@ -28,6 +37,20 @@ function nack(kind: NackKind, retryable: boolean): DeliverResult {
 const INSTALL_CONFLICT_DETAIL = 'this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile';
 function installConflict(): DeliverResult {
   return { delivered: false, reason: 'nack', kind: 'install-conflict', retryable: false, detail: INSTALL_CONFLICT_DETAIL, requestId: 'r', sha256: 's' };
+}
+
+/**
+ * EXT-13 · the identity-conflict refusal: item-scope *and* retryable.
+ *
+ * The bytes are not wrong — they are unattributable, because two live copies
+ * share this install id. ADR-045 §3 says they stay queued until a person gives
+ * one copy its own identity, so this refusal may not reject the item: rejecting
+ * it would say a decision had been made about the capture when none has, and the
+ * user's only copy of it would sit in a list they were told to discard.
+ */
+const IDENTITY_CONFLICT_DETAIL = 'this install_id is shared by more than one live copy: report_seq diverged';
+function identityConflict(): DeliverResult {
+  return { delivered: false, reason: 'nack', kind: 'identity-conflict', retryable: true, detail: IDENTITY_CONFLICT_DETAIL, requestId: 'r', sha256: 's' };
 }
 
 beforeEach(() => {
@@ -168,6 +191,33 @@ describe('scope · drainOutbox', () => {
       rejectDetail: INSTALL_CONFLICT_DETAIL,
       lastError: 'nack:install-conflict',
     });
+  });
+
+  it('🔴 an identity-conflict nack leaves the item queued rather than rejected', async () => {
+    const ob = await import('../lib/outbox');
+    await ob.enqueue(NAME_A, PAYLOAD_A);
+    const deliver = vi.fn(async (): Promise<DeliverResult> => identityConflict());
+
+    const report = await ob.drainOutbox({ deliver });
+
+    // Neither rejected nor delivered: the refusal is real, but it is about the
+    // *identity*, not about these bytes, so the item stays exactly where it was.
+    // That is what "nothing is dropped" has to mean for a capture the host could
+    // not file — and it is the difference between this kind and
+    // `install-conflict`, which is non-retryable and lands the item in
+    // `rejected`. Nothing is retried in a loop either: every capture this
+    // profile holds carries the same install id, so continuing would only
+    // produce the same refusal, and the drain stops after the first.
+    expect(report).toMatchObject({ attempted: 1, rejected: 0, delivered: 0, stoppedBy: 'host-unavailable' });
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const entries = (await ob.listEntries())!;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: NAME_A,
+      state: 'pending',
+      lastError: 'nack:identity-conflict',
+    });
+    expect(entries[0]).not.toHaveProperty('rejectKind');
   });
 });
 

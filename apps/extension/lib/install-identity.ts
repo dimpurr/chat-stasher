@@ -1,23 +1,13 @@
 /** Per-profile extension identity. Browser APIs deliberately expose no profile name. */
+import { localStorageArea } from './local-storage';
+import { resetReportSeq } from './report-seq';
+
 export const INSTALL_IDENTITY_KEY = 'cs_install_identity_v1';
 
 export interface InstallIdentity {
   install_id: string;
   browser: string;
   profile_label: string | null;
-}
-
-interface StorageArea {
-  get(keys: Record<string, unknown>): Promise<Record<string, unknown>>;
-  set(items: Record<string, unknown>): Promise<void>;
-}
-
-function localStorageArea(): StorageArea | null {
-  const g = globalThis as {
-    browser?: { storage?: { local?: StorageArea } };
-    chrome?: { storage?: { local?: StorageArea } };
-  };
-  return g.browser?.storage?.local ?? g.chrome?.storage?.local ?? null;
 }
 
 export function browserLabel(userAgent = globalThis.navigator?.userAgent ?? '', vendor = globalThis.navigator?.vendor ?? ''): string {
@@ -76,6 +66,49 @@ export function getInstallIdentity(): Promise<InstallIdentity> {
     return identity;
   })();
   return identityPromise;
+}
+
+/**
+ * 🔴 ADR-045 §3 · **Give this profile its own identity** — the repair, and the
+ * only way an `identity-conflict` is ever lifted.
+ *
+ * It is called from exactly one place: the popup button the user presses after
+ * the host has reported that this install id is shared by more than one live
+ * copy. Nothing on an automatic path calls it, and that is the decision, not an
+ * oversight — the ADR rejects auto-rekey because a restored backup, a renamed
+ * profile, or an ambiguous "later" copy would then have the tool silently sever
+ * the wrong lineage, with the user reviewing nothing.
+ *
+ * What it does *not* do is as load-bearing as what it does: no already-sealed
+ * record is touched, no status history is rewritten, and the old install id
+ * keeps every capture and every report it was ever stamped on. The old id stays
+ * conflicted in the host's own state — it is genuinely ambiguous — and this
+ * profile's captures become attributable again under the new one.
+ *
+ * Order matters: the new id is written and confirmed **before** the sequence is
+ * reset. Resetting first would leave a hole in the old id's sequence, and a
+ * missing value reads to the host exactly like a regression.
+ */
+export async function rekeyInstallIdentity(): Promise<InstallIdentity> {
+  const storage = localStorageArea();
+  if (!storage) throw new Error('install identity storage unavailable');
+  const current = await getInstallIdentity();
+  const install_id = newInstallId();
+  if (!install_id) throw new Error('install identity random source unavailable');
+  const identity: InstallIdentity = {
+    install_id,
+    browser: current.browser,
+    profile_label: current.profile_label,
+  };
+  await storage.set({ [INSTALL_IDENTITY_KEY]: identity });
+  const confirmed = await storage.get({ [INSTALL_IDENTITY_KEY]: null });
+  const persisted = confirmed[INSTALL_IDENTITY_KEY] as Partial<InstallIdentity> | undefined;
+  if (persisted?.install_id !== install_id) {
+    throw new Error('install identity changed during rekey');
+  }
+  identityPromise = Promise.resolve(identity);
+  await resetReportSeq();
+  return identity;
 }
 
 export async function setProfileLabel(label: string): Promise<InstallIdentity> {

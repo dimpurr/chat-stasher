@@ -145,6 +145,18 @@ export const POPUP_START_BACKFILL_MESSAGE = 'cs-backfill-start-here';
  */
 export const POPUP_SYNC_ALARM_MESSAGE = 'cs-backfill-sync-alarm';
 
+/**
+ * 🔴 EXT-13 · Popup → background: "is the host holding this install id against
+ * me?" and "give this profile a new identity".
+ *
+ * Two messages rather than one because they are two different kinds of thing:
+ * the first is a question that can fail without changing anything, the second
+ * is the only action in this extension that rotates an identity. Keeping them
+ * apart is what makes "this profile was rekeyed" traceable to a press.
+ */
+export const POPUP_REQUEST_IDENTITY_MESSAGE = 'cs-request-identity';
+export const POPUP_REKEY_IDENTITY_MESSAGE = 'cs-rekey-identity';
+
 /** The runtime facts background hands back to the popup. */
 export interface BackfillRuntimeStatus {
   /**
@@ -242,6 +254,14 @@ export interface PopupModel {
   nativeHost?: HostStatusRecord | null;
   /** The last coordination probe found an older or unreachable native host. */
   coordinationUnavailable?: boolean;
+  /**
+   * 🔴 EXT-13 · What the host answered when asked whether this install id is
+   * shared. Three states, and absent is one of them: not asked, or asked and
+   * not answered. Only `true` shows the repair card — "we could not find out"
+   * must not be drawn as "your profile is duplicated", because the repair
+   * rotates an identity and cannot be undone from the popup.
+   */
+  identityConflict?: boolean;
   /**
    * 🔴 W2 · The outbox as it stands. null = could not be read (IndexedDB
    * unavailable) ⇒ say so as-is. Omitted ⇒ treat as empty: existing call sites
@@ -506,6 +526,21 @@ export interface PopupView {
    */
   onlyInBrowser: { title: string; reason: string } | null;
   /**
+   * 🔴 EXT-13 · The identity-conflict repair card, or null.
+   *
+   * Present only when the host *says* this install id is shared. It is never
+   * inferred here: the extension cannot see the other copy, and a card shown on
+   * a guess would ask the user to rotate an identity for a reason that does not
+   * exist — the one action in this popup that is not reversible from the UI.
+   */
+  identityRepair: {
+    title: string;
+    body: string;
+    kept: string;
+    history: string;
+    action: { label: string; visible: boolean };
+  } | null;
+  /**
    * 🔴 EXT-12 · The onboarding card, present when the extension has never
    * connected (`neverConnected`) and there is content waiting: what this is, why
    * a local helper, the one-line installer, and Export now. The `command` is the
@@ -706,6 +741,34 @@ export function onlyInBrowserView(model: PopupModel): PopupView['onlyInBrowser']
 }
 
 /**
+ * 🔴 EXT-13 · The repair card for an install id the host has proved is shared.
+ *
+ * All three sentences are load-bearing, and each answers a question a user will
+ * otherwise have to guess at:
+ *
+ * · what happened — the profile was copied (or restored) and now two live
+ *   copies report under one identity, so neither can be told from the other;
+ * · whether anything was lost — nothing was: the host refused the deliveries
+ *   rather than filing them under a profile it cannot name, so the captures are
+ *   still queued and go out once this profile has an identity of its own;
+ * · whether repairing rewrites history — it does not: everything already
+ *   archived keeps the identity it was stamped with.
+ *
+ * `visible` is always true when the card is present: the card *is* the offer,
+ * and a card without its button would state a problem with no way to act.
+ */
+export function identityRepairView(model: PopupModel): PopupView['identityRepair'] {
+  if (model.identityConflict !== true) return null;
+  return {
+    title: ui.identityConflictTitle(),
+    body: ui.identityConflictBody(),
+    kept: ui.identityConflictKept(),
+    history: ui.identityConflictHistory(),
+    action: { label: ui.identityRekeyLabel(), visible: true },
+  };
+}
+
+/**
  * 🔴 EXT-12 · The onboarding card. Present when the extension has never connected
  * and there is content waiting to be saved: it is the first thing a user in this
  * state needs — what this is, why a local helper, how to install it in one line,
@@ -813,6 +876,7 @@ export function renderPopup(model: PopupModel): PopupView {
       disabled: model.block === 'no-store',
     },
     onlyInBrowser: onlyInBrowserView(model),
+    identityRepair: identityRepairView(model),
     firstRun: firstRunView(model),
     outboxBar: outboxBarView(model),
     delivered: deliveredView(model),
@@ -1813,6 +1877,19 @@ export function popupText(view: PopupView): string {
   if (view.onlyInBrowser) {
     lines.push(view.onlyInBrowser.title);
     lines.push(view.onlyInBrowser.reason);
+  }
+  // 🔴 EXT-13 · The repair card sits with the other current-state facts, above
+  //    the first-run card: a user who sees "this profile shares its identity" has
+  //    to be able to act on it, and it is the one item here that stops the
+  //    archive accepting this profile's captures.
+  if (view.identityRepair) {
+    lines.push(view.identityRepair.title);
+    lines.push(view.identityRepair.body);
+    lines.push(view.identityRepair.kept);
+    lines.push(view.identityRepair.history);
+    if (view.identityRepair.action.visible) {
+      lines.push(t('popup.buttonTag', { label: view.identityRepair.action.label }));
+    }
   }
   if (view.outboxBar) {
     lines.push(view.outboxBar.caption);

@@ -983,6 +983,19 @@ pub fn check_bundle(bytes: &[u8]) -> Result<(), String> {
     check_bundle_parsed(bytes).map(|_| ())
 }
 
+/// The `install_id` a bundle declares, or `None` when it declares none.
+///
+/// EXT-13 · `nativehost::deliver` asks this before sealing, because an install
+/// id two live writers have been observed sharing must archive nothing. The
+/// value is read from the **payload**, not from the request envelope, on
+/// purpose: the bytes are what would be sealed, and a request field could
+/// disagree with the bundle it carries.
+pub fn bundle_install_id(bytes: &[u8]) -> Option<String> {
+    parse_bundle("(validation)", bytes)
+        .ok()
+        .and_then(|parsed| parsed.install_id)
+}
+
 /// [`check_bundle`], handing the parsed bundle back to the caller instead of
 /// throwing it away.
 ///

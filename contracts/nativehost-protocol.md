@@ -126,7 +126,8 @@ Request:
  "payload": "<the bundle, serialised with JSON.stringify>",
  "sha256": "<64 lowercase hex chars: SHA-256 of the UTF-8 bytes of payload>",
  "fingerprint": "<optional; 64 lowercase hex chars>",
- "account_id": "<optional transient platform account id>"}
+ "account_id": "<optional transient platform account id>",
+ "report_seq": "<optional; non-negative integer>"}
 ```
 
 - `payload` is a **string**, byte-for-byte what a bundle file would contain.
@@ -141,6 +142,21 @@ Request:
   uses it only to derive a masterkey-scoped account key, never returns or
   persists the raw id, and stores the derived key as sealed shard metadata.
   Older extensions and captures without a visible account id omit it.
+- `report_seq` is **optional** and is EXT-13's monotonic per-instance counter,
+  the same one a `status` report carries (ADR-045). The host records it against
+  `(machine, install_id)` and treats a value at or below the recorded
+  high-water mark as proof that two live writers share that id — the only
+  positive evidence of a copied profile the protocol has, because a copy carries
+  the install id, the salt and the profile label along with the rest of
+  `storage.local`. Absent means the sender could not read its counter: an older
+  extension, or unreadable storage. Absence is recorded as *unknown*, never as
+  zero, because zero is a value a writer can send. The sequence is not persisted
+  on the shard: it is a property of the writer, not of the conversation.
+- A delivery for an id the host already knows is shared is refused `nack`
+  `identity-conflict`, and nothing is written. Delivery is where an install
+  whose backfill is switched off reaches the host at all — such an install runs
+  no tick and so sends no `status` report — which is why the sequence travels
+  here as well as there.
 - `name` must match `^[a-z0-9]+-[^/\\]+\.json$`. It is recorded as the shard's
   `source_file` and is the fallback id source, as a file name is for `ingest`.
 - The host recomputes SHA-256 over the UTF-8 bytes of `payload`. A mismatch is
@@ -171,6 +187,7 @@ bytes were already sealed; `shard` names the existing one).
 | `integrity` | item | true | `sha256` does not match `payload`. |
 | `invalid-bundle` | item | false | `payload` is not a valid inbox bundle. |
 | `install-conflict` | item | false | The bundle's install identity (`install_id` + browser + user-named `profile_label`) conflicts with the provenance this machine's stage has already sealed under the same `install_id`. This is the D4 copied-install refusal: the fix — regenerating the installing profile's identity — lives in the *browser*, so nothing on the host can ever make these bytes deliverable. `detail` names the fix for the person reading it. |
+| `identity-conflict` | item | **true** | EXT-13. Two live writers have been observed sharing this `install_id`: their `report_seq` values diverged. The bytes are not wrong, they are unattributable — so unlike `install-conflict` this refusal is **retryable**, and the capture stays queued until a person gives one of the copies its own identity (ADR-045 §3). Also the answer to a `coordination` `claim`/`token` for such an id, because backfill is the one path that issues bulk requests against a platform. `detail` names the repair. |
 | `config` | host | false | No `[native_host] stage`, config unreadable, or machine id unresolvable. `detail` names the fix command. |
 | `stage-unavailable` | host | true | Stage missing, not a directory, not writable, or lock wait timed out. |
 | `io` | host | true | Sealing failed. Nothing was acknowledged; the retry is safe. |
@@ -514,14 +531,39 @@ Request:
 {"protocol":1,"type":"status","request_id":"<request id>","status":{"install_id":"<UUID>","browser":"Chrome","profile_label":"Personal","extension_version":"<version>","reported_at":"<RFC3339>","platforms":[{"platform":"chatgpt","captured_by_this_browser":12,"pending":3,"paused_reason":null,"account_fingerprint":"<per-install salted SHA-256>"}]}}
 ```
 
-The host writes one file atomically at `ext-status/<install_id>.json`, adding the
-local machine id and schema `chat-stasher/ext-status@1`. A later report from the
-same install replaces that file; reports from other installs have separate files.
-The `platforms` array contains no account ids or conversation identifiers.
-The host also retains a local `daily_report_streak` and `reported_daily` marker in
-that status record. The marker becomes true after at least three reports spaced
-18–30 hours apart and remains true thereafter; shorter intervals do not break
-the streak, while a gap over 30 hours resets the streak before it qualifies.
+The host writes one file atomically at `ext-status/<machine>/<install_id>.json`,
+adding the local machine id and schema `chat-stasher/ext-status@1`. The machine is
+a **path component**, so the key is `(machine, install_id)`: an install id names
+an installation *lineage*, and the same lineage reported from two machines is two
+records, neither of which may overwrite the other. A later report from the same
+install on the same machine replaces that file; reports from other installs have
+separate files. The `platforms` array contains no account ids or conversation
+identifiers. The host also retains a local `daily_report_streak` and
+`reported_daily` marker in that status record. The marker becomes true after at
+least three reports spaced 18–30 hours apart and remains true thereafter; shorter
+intervals do not break the streak, while a gap over 30 hours resets the streak
+before it qualifies.
+
+`status` may also carry an optional `report_seq`, EXT-13's monotonic per-instance
+counter, described in full under §6.2. The record keeps it against
+`(machine, install_id)`; a value at or below the recorded high-water mark marks
+that id `identity-conflict` in the host's own state.
+
+**Migration.** A host older than EXT-13 wrote `ext-status/<install_id>.json`,
+with the machine only inside the record. That file is read as a **legacy
+observation of this machine** — and only when the record's own `machine` field
+names the machine reading it, since a record written elsewhere is not this
+machine's observation of this install. Its daily-report history is carried into
+the keyed record, which says so with `"legacy_migration": true`. The legacy file
+itself is left where it is: the stage is not the archive, and deleting it would
+destroy the only local copy of a report whose successor may never be written.
+Readers therefore resolve the two layouts to one row per `(machine, install_id)`,
+preferring the keyed record; `overview --json` does this before publishing
+`installs[]`.
+
+The record also carries `identity_conflict`, and
+`identity_conflict_evidence` when it is true. A record written before this field
+existed has neither, which is *unknown* and not `false`.
 
 Successful response:
 
@@ -536,6 +578,13 @@ as `installs[]`, each with `reported_at`, `stale`, and `reported_daily`. Stale m
 invalid or more than 48 hours before the reader's current UTC time. The list is
 per install and pending counts are never added across installs. Archives written
 before this message simply have no `installs` records.
+
+**Cross-machine collisions.** A machine can only prove an `install_id` is shared
+by watching two writers diverge locally; two machines cannot see each other at
+all (§11 / ADR-045 D1). Aggregation is therefore the only place the same
+`install_id` appearing under two machines is visible, and `overview` marks
+**every** record carrying it with `identity_conflict: true` rather than choosing
+one as the original. The rows are never merged: each keeps its own counts.
 
 ### 6.8 `other_installs` — count archived extension instances
 
@@ -559,3 +608,32 @@ Successful response:
 ```
 
 The extension shows this count only when it is known and greater than zero.
+
+### 6.9 `identity_state` — is this install id shared?
+
+Request:
+
+```json
+{"protocol":1,"type":"identity_state","request_id":"<request id>","install_id":"<UUID>"}
+```
+
+**Read-only.** The host answers from its own coordination state and writes
+nothing — no stage file, no state row. That is what lets a popup ask on every
+open without reporting anything, and it is the only way the answer reaches an
+install whose backfill is switched off: such an install runs no tick, so it never
+sends a `status` report for a flag to ride on.
+
+Successful response:
+
+```json
+{"protocol":1,"type":"identity_state","ok":true,"request_id":"<same id>","identity_conflict":true}
+```
+
+`identity_conflict` is `true` when two live writers have been observed sharing
+this install id (their `report_seq` diverged), and `false` when no divergence has
+been observed. **`false` is not proof that only one copy exists**: until the first
+divergent report two copies are indistinguishable, and ADR-045 says so in as many
+words. An install the host has never heard of answers `false`.
+
+The host returns no other install's data, and the caller does not learn which
+machine or profile the other copy is.

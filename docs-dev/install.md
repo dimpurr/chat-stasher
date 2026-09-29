@@ -64,7 +64,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:1045-1054`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:1115-1124`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:440-455`). There is no "probably delivered".
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:237`;
-`apps/extension/entrypoints/background.ts:1139-1141`). That page does not have to
+`apps/extension/entrypoints/background.ts:1141-1143`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -180,7 +180,7 @@ backfill has been observed in a real browser, so read the row as *implemented,
 not verified*.
 
 The popup shows these three tiers in the same terms as the table above
-(`apps/extension/lib/popup-view.ts:1158-1171`).
+(`apps/extension/lib/popup-view.ts:1222-1235`).
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
@@ -268,7 +268,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:10619-10627,10637-10660`).
+(`crates/chat-stasher/src/main.rs:10305-10313,10323-10346`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -300,11 +300,56 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:1572-1647`).
+  install (`crates/chat-stasher/src/nativehost.rs:1898-1973`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:2704-2714`, `:2441`).
+  (`crates/chat-stasher/src/nativehost.rs:3151-3161`, `:2888`).
+
+### 3.0 🔴 Copying a browser profile copies its identity
+
+An extension installed in a profile mints a random **install identity** on first
+run and keeps it in that profile's `storage.local`
+(`apps/extension/lib/install-identity.ts:25-37`). Reinstalling after removing the
+extension mints a new one; an ordinary update does not.
+
+Copying a browser profile — or restoring one from a backup — copies that file
+along with the rest of `storage.local`, so the copy and the original report
+under **the same** identity. Nothing else distinguishes them: the browser exposes
+no profile path to the extension, and Chromium's native messaging gives the host
+no profile coordinate either (only the caller origin, and a window handle on
+Windows). Two copies with identical storage therefore look exactly like one
+install from every side of the wire.
+
+**They are indistinguishable until their first divergent report.** Each instance
+keeps a counter of its own reports and deliveries
+(`apps/extension/lib/report-seq.ts`), and two live copies advance it
+independently — so once both have reported, one of them will eventually send a
+value the host has already seen. That divergence is the first and only evidence
+the host gets, and it is what the protocol is built on. Before it, a copied
+profile is not detected, and this document does not claim otherwise.
+
+After it, the host marks the identity `identity-conflict` and stops accepting it:
+backfill claims for it are refused and its captures stay **queued** rather than
+being archived under an identity that cannot be attributed to one profile. The
+popup of **each** copy shows a "give this profile a new identity" button; nothing
+rotates an identity on its own, because a restored backup or a renamed profile
+would then have the tool silently reassign the wrong profile.
+
+Repairing **adds** an identity; it rewrites nothing. Captures and reports already
+archived keep the identity they were stamped with, and captures that were queued
+*before* the repair keep it too: a bundle names the instance that captured it, so
+those stay queued rather than being re-stamped. The captures this profile makes
+from then on go out under the new identity.
+
+**Nothing is dropped at any point**, but "nothing is dropped" is not the same as
+"everything is delivered": the captures queued under a conflicted identity are
+still waiting when the repair is pressed, and the card says so before you press
+it.
+
+If the two copies are on **two machines**, each machine sees only its own side;
+the collision appears in `chat-stasher overview` (and the dashboard's Extensions
+view), which flags every row carrying the shared id.
 
 **It is not yet on any app store** (see section 6 for details). Stable releases
 include a stable-channel extension zip named `chat-stasher-extension-X.Y.Z.zip`.
@@ -346,7 +391,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:1635-1646`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:1961-1972`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -364,20 +409,20 @@ sentence the surrounding documents have to get right:
   into the browser's own discovery directory, which is inside the browser's
   folder and beside its profile directories, not inside any one of them
   (`Google/Chrome/NativeMessagingHosts` on macOS), and every profile of that
-  browser reads the same file (`crates/chat-stasher/src/nativehost.rs:494-607`).
+  browser reads the same file (`crates/chat-stasher/src/nativehost.rs:499-612`).
   On Windows there is one JSON per browser plus a registry value that points at
-  it (`crates/chat-stasher/src/nativehost.rs:483-486`).
+  it (`crates/chat-stasher/src/nativehost.rs:488-491`).
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:2068-2083`;
-  `crates/chat-stasher/src/nativehost.rs:1572-1647`). So several installs deliver
+  (`crates/chat-stasher/src/main.rs:1981-1996`;
+  `crates/chat-stasher/src/nativehost.rs:1898-1973`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
-  (`crates/chat-stasher/src/main.rs:2010-2020`;
-  `crates/chat-stasher/src/nativehost.rs:765-767`). A browser you install later
+  (`crates/chat-stasher/src/main.rs:1923-1933`;
+  `crates/chat-stasher/src/nativehost.rs:770-772`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
   removes the manifest for every browser it knows in one pass (`--browser
@@ -403,7 +448,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:101-126`;
-`apps/extension/entrypoints/background.ts:696-712`).
+`apps/extension/entrypoints/background.ts:698-714`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
@@ -459,7 +504,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1635-1646`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:1961-1972`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -468,13 +513,13 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1167-1195`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1180-1208`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1580-1647`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:1906-1973`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:2241-2243`, `:2249`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:2688-2690`, `:2696`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -484,7 +529,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:1652-1681`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:1978-2007`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -513,8 +558,8 @@ copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
 `--masterkey-saved-elsewhere` creates the local repository and the key, reports
 the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:11836-11843`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:11407-11413`).
+remote step and the timer (`crates/chat-stasher/src/main.rs:11522-11529`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:11093-11099`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -536,11 +581,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:5170-5185`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:5146-5161`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:5175-5200`). An
+it does anything else (`crates/chat-stasher/src/main.rs:5151-5176`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -572,10 +617,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5184-5196`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5160-5172`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:5175-5183`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:5151-5159`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -835,12 +880,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:14415-14417`). This is the
+does not (`crates/chat-stasher/src/main.rs:14101-14103`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:14138-14166`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:13824-13852`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -856,7 +901,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:14417-14550`):
+(`crates/chat-stasher/src/main.rs:14103-14236`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -869,7 +914,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:14396-14401`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:14082-14087`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -879,7 +924,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:14094-14119`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:13780-13805`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -1045,7 +1090,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2242-2343`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2244-2345`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4826-4857`) is covered.
@@ -1127,7 +1172,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Item | Status |
 | --- | --- |
 | Whether Chrome shows the "communicate with cooperating native applications" note for this permission set | **Unverified** (the permission list is `apps/extension/wxt.config.ts:125`; we read the manifest, we did not install the build and look at the warnings Chrome renders) |
-| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:410-621`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
+| Whether every browser's discovery directory is where `install-native-host` looks for it | **Partly verified** (the per-OS layout is in `crates/chat-stasher/src/nativehost.rs:415-626`; the command prints every path it wrote, left alone, skipped or removed, so you can check the one your browser reads) |
 | Whether the popup's language follows your browser correctly on every browser | **Unverified** (the default locale is `en` with a `zh_CN` catalog, `apps/extension/wxt.config.ts:78`; we did not test every browser's locale resolution) |
 | Each browser's menu path for "Load unpacked extension" | **Unverified** |
 | The minimum Rust version to compile the CLI | **Unverified** (the repository does not declare `rust-version`) |

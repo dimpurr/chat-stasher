@@ -669,7 +669,8 @@ fn status_reports_replace_per_install_without_merging() {
     let output = fixture.chrome(&frame(&replacement));
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
     assert_eq!(one_frame(&output.stdout)["type"], "status");
-    let status_dir = fixture.stage.join("ext-status");
+    let machine = first_machine(&fixture);
+    let status_dir = fixture.stage.join("ext-status").join(&machine);
     for (index, id) in ids.iter().enumerate() {
         let raw = fs::read(status_dir.join(format!("{id}.json"))).expect("status persisted");
         let value: Value = serde_json::from_slice(&raw).expect("valid JSON status");
@@ -2118,4 +2119,394 @@ fn the_shapes_the_new_queries_produce_match_the_committed_schema() {
         "the wire shape is json_out::CountState's, verbatim: {summary}"
     );
     assert_matches_schema(&summary);
+}
+
+// ---------------------------------------------------------------- W248 / EXT-13
+//
+// ADR-045 (accepted 2026-09-29): an `install_id` names an installation
+// *lineage*, not a live browser profile, and a copied profile carries the same
+// `install_id` with no other field that could tell the two apart. The
+// host-observable signal is the **sequence** those two writers produce: each
+// instance keeps a monotonic `report_seq` and increments it for every status
+// report and every capture delivery, so two live writers on one
+// `(machine, install_id)` eventually send a repeated or regressing value.
+//
+// These tests pin the three host behaviours the ADR makes load-bearing:
+// ① status is stored per `(machine, install_id)` and the legacy flat
+//    `ext-status/<install_id>.json` is read as a legacy observation of this
+//    machine and never lost; ② a repeated/regressing `report_seq` marks the id
+//    `identity-conflict`; ③ a conflicted id claims no lease and delivers
+//    nothing **retryably** — the item stays queued instead of being dropped or
+//    rejected. An extension that sends no `report_seq` stays accepted as
+//    "seq unknown" and can neither create nor clear a conflict.
+
+/// Read one status record the host persisted, from either storage shape.
+fn read_status_record(stage: &Path, machine: &str, install_id: &str) -> Value {
+    let keyed = stage
+        .join("ext-status")
+        .join(machine)
+        .join(format!("{install_id}.json"));
+    let raw =
+        fs::read(&keyed).unwrap_or_else(|e| panic!("read keyed status {}: {e}", keyed.display()));
+    serde_json::from_slice(&raw).expect("keyed status is valid JSON")
+}
+
+/// A `status` request shaped like `reportInstallStatus` serialises it.
+fn status_request(
+    request_id: &str,
+    install_id: &str,
+    reported_at: &str,
+    seq: Option<u64>,
+) -> Value {
+    let mut status = json!({
+        "install_id": install_id,
+        "browser": "Chrome",
+        "profile_label": "Personal",
+        "extension_version": "0.4.0",
+        "reported_at": reported_at,
+        "platforms": [{
+            "platform": "chatgpt",
+            "captured_by_this_browser": 3,
+            "pending": 1,
+            "paused_reason": null,
+        }],
+    });
+    if let Some(seq) = seq {
+        status["report_seq"] = json!(seq);
+    }
+    json!({"protocol": 1, "type": "status", "request_id": request_id, "status": status})
+}
+
+fn report_status(
+    fixture: &Fixture,
+    request_id: &str,
+    install_id: &str,
+    at: &str,
+    seq: Option<u64>,
+) -> Value {
+    let output = fixture.chrome(&frame(&status_request(request_id, install_id, at, seq)));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    response
+}
+
+/// Ask the host what it knows about one install, from the read-only query the
+/// popup uses. The status *record* is what the dashboard reads; this is what a
+/// popup can ask at any moment, including on an install whose backfill is off
+/// and which therefore never reports.
+fn identity_state(fixture: &Fixture, request_id: &str, install_id: &str) -> Value {
+    let response = one_frame(
+        &fixture
+            .chrome(&frame(&json!({
+                "protocol": 1, "type": "identity_state",
+                "request_id": request_id, "install_id": install_id,
+            })))
+            .stdout,
+    );
+    assert_matches_schema(&response);
+    response
+}
+
+/// ② A copy starts from the same `report_seq` and races the original, so the
+/// second writer's value comes back at or below the one already recorded. That
+/// is the only positive evidence of cloning the protocol has, and it must be
+/// enough to mark the id and to keep the *whole* id out of the archive.
+#[test]
+fn a_regressing_report_seq_marks_the_install_identity_conflicted() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "33333333-3333-4333-8333-333333333333";
+
+    let first = report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some(10),
+    );
+    assert_eq!(first["type"], "status");
+    assert_eq!(
+        identity_state(&fixture, "w248-a", install)["identity_conflict"],
+        false,
+        "one writer is not a conflict"
+    );
+    assert_eq!(
+        read_status_record(&fixture.stage, &machine, install)["report_seq"],
+        10
+    );
+
+    // The copy: same `storage.local`, so it starts from 10 and has only reached
+    // 7 of its own reports by the time the original is at 10.
+    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(7));
+    assert_eq!(
+        identity_state(&fixture, "w248-b", install)["identity_conflict"],
+        true,
+        "a regressing report_seq is proof that two writers share this install id"
+    );
+    let record = read_status_record(&fixture.stage, &machine, install);
+    assert_eq!(record["identity_conflict"], true);
+    assert_eq!(
+        record["report_seq"], 7,
+        "the staged record is a report and carries what that report said; the \
+         host's own high-water mark lives in its state, not in the report"
+    );
+    assert!(
+        record.get("identity_conflict_evidence").is_some(),
+        "the record says which observation set the flag: {record}"
+    );
+
+    // An equal value is the same evidence, not a no-op.
+    report_status(
+        &fixture,
+        "w248-3",
+        install,
+        "2026-09-29T10:10:00Z",
+        Some(10),
+    );
+    assert_eq!(
+        identity_state(&fixture, "w248-c", install)["identity_conflict"],
+        true
+    );
+}
+
+/// ③ While an id is conflicted, neither copy can archive: delivery is refused
+/// with an item-scope *retryable* `identity-conflict`, so the capture stays in
+/// the outbox rather than being dropped or marked rejected. The lease is
+/// refused too, because backfill is the only bulk-request path.
+#[test]
+fn a_conflicted_install_neither_seals_nor_claims_the_lease() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "44444444-4444-4444-8444-444444444444";
+
+    report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some(10),
+    );
+    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+
+    let payload = identity_bundle("sess-a", "hello a", install, "Chrome", "Personal");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "w248-deliver",
+        "deepseek-sess-a.json",
+        &payload,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack");
+    assert_eq!(
+        response["kind"], "identity-conflict",
+        "the refusal has to be nameable: {response}"
+    );
+    assert_eq!(
+        response["retryable"], true,
+        "a conflict needs a person, but the bytes must stay queued for when they act"
+    );
+    assert!(
+        !fixture.session_dir(&machine, "deepseek.sess-a").exists(),
+        "a conflicted install must seal nothing"
+    );
+
+    let claim = one_frame(
+        &fixture
+            .chrome(&frame(&json!({
+                "protocol": 1, "type": "coordination", "request_id": "w248-claim",
+                "mode": "claim", "platform": "chatgpt", "install_id": install,
+            })))
+            .stdout,
+    );
+    assert_matches_schema(&claim);
+    assert_eq!(claim["type"], "nack");
+    assert_eq!(claim["kind"], "identity-conflict");
+}
+
+/// ② The flag is sticky: once the id is known to be shared, a later
+/// well-ordered report from the *other* writer must not clear it. Otherwise the
+/// first copy to report a higher value would silently re-legitimise the id.
+#[test]
+fn a_higher_report_seq_does_not_forget_a_known_conflict() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "55555555-5555-4555-8555-555555555555";
+
+    report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some(10),
+    );
+    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+    report_status(
+        &fixture,
+        "w248-3",
+        install,
+        "2026-09-29T10:10:00Z",
+        Some(11),
+    );
+    assert_eq!(
+        identity_state(&fixture, "w248-a", install)["identity_conflict"],
+        true
+    );
+    assert_eq!(
+        read_status_record(&fixture.stage, &machine, install)["identity_conflict"],
+        true
+    );
+}
+
+/// ② An extension that predates `report_seq` stays accepted, as "seq unknown".
+/// Unknown is not a value: it can neither manufacture a conflict from a single
+/// writer nor erase one that a sequence already proved.
+#[test]
+fn an_extension_without_report_seq_is_accepted_as_seq_unknown() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "66666666-6666-4666-8666-666666666666";
+
+    let first = report_status(&fixture, "w248-1", install, "2026-09-29T10:00:00Z", None);
+    assert_eq!(first["type"], "status");
+    let record = read_status_record(&fixture.stage, &machine, install);
+    assert!(
+        record.get("report_seq").is_none(),
+        "an unrecorded sequence is absent, never zero: {record}"
+    );
+    assert_eq!(
+        identity_state(&fixture, "w248-a", install)["identity_conflict"],
+        false
+    );
+
+    // A second unknown-sequence report is not a repeat: nothing was counted.
+    report_status(&fixture, "w248-2", install, "2026-09-29T10:30:00Z", None);
+    assert_eq!(
+        identity_state(&fixture, "w248-b", install)["identity_conflict"],
+        false
+    );
+
+    // A sequence that diverges still marks it, and an old extension reporting
+    // afterwards must not clear the flag it cannot see.
+    report_status(
+        &fixture,
+        "w248-3",
+        install,
+        "2026-09-29T11:00:00Z",
+        Some(10),
+    );
+    report_status(&fixture, "w248-4", install, "2026-09-29T11:05:00Z", Some(2));
+    report_status(&fixture, "w248-5", install, "2026-09-29T11:10:00Z", None);
+    assert_eq!(
+        identity_state(&fixture, "w248-c", install)["identity_conflict"],
+        true
+    );
+}
+
+/// ① Status is stored under `(machine, install_id)`, and a legacy flat
+/// `ext-status/<install_id>.json` is read as this machine's earlier observation
+/// of the same install: its daily-report history carries into the keyed record,
+/// and the legacy file itself is left where it is. A migration that deleted it
+/// would destroy the only local copy of a report whose successor may never be
+/// written (the stage is not the archive, and nothing here is re-derivable).
+#[test]
+fn legacy_status_is_migrated_as_a_legacy_observation_and_never_deleted() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let install = "77777777-7777-4777-8777-777777777777";
+
+    let legacy_dir = fixture.stage.join("ext-status");
+    fs::create_dir_all(&legacy_dir).expect("legacy status dir");
+    let legacy_path = legacy_dir.join(format!("{install}.json"));
+    let legacy = json!({
+        "install_id": install,
+        "browser": "Chrome",
+        "profile_label": "Personal",
+        "extension_version": "0.4.0",
+        "reported_at": "2026-09-28T10:00:00Z",
+        "machine": machine,
+        "schema": "chat-stasher/ext-status@1",
+        "daily_report_streak": 4,
+        "reported_daily": true,
+        "platforms": [{"platform": "chatgpt", "captured_by_this_browser": 1, "pending": 2, "paused_reason": null}],
+    });
+    let legacy_bytes = serde_json::to_vec(&legacy).expect("legacy as bytes");
+    fs::write(&legacy_path, &legacy_bytes).expect("write legacy status");
+
+    // Twenty hours later — inside the 18–30h band, so the legacy streak is
+    // *advanced* rather than inherited unchanged. A record with no predecessor
+    // would read 1 here, which is what makes this number evidence.
+    report_status(&fixture, "w248-1", install, "2026-09-29T06:00:00Z", Some(1));
+
+    let record = read_status_record(&fixture.stage, &machine, install);
+    assert_eq!(
+        record["daily_report_streak"], 5,
+        "the legacy observation is the predecessor of this one, not a fresh install: {record}"
+    );
+    assert_eq!(record["reported_daily"], true);
+    assert_eq!(record["machine"], machine.as_str());
+    assert_eq!(record["legacy_migration"], true);
+    assert_eq!(
+        fs::read(&legacy_path).expect("legacy status still readable"),
+        legacy_bytes,
+        "the legacy record is not lost, rewritten, or deleted by the migration"
+    );
+}
+
+/// ① A report whose `install_id` does not match its own key is a broken record,
+/// and the reader must not be able to fold two machines' reports into one key.
+/// Here the host is asked to key by the machine it resolved, so a status whose
+/// caller-supplied `machine` disagrees is refused rather than stored.
+#[test]
+fn a_status_report_carrying_a_foreign_machine_is_refused() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let install = "88888888-8888-4888-8888-888888888888";
+
+    let mut request = status_request("w248-1", install, "2026-09-29T10:00:00Z", Some(1));
+    request["status"]["machine"] = json!("some-other-machine");
+    let output = fixture.chrome(&frame(&request));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(
+        response["type"], "nack",
+        "the host adds `machine` itself; a caller-supplied one is not a field this message defines: {response}"
+    );
+}
+
+/// ④ `identity_state` is the read-only answer the popup needs: it names the
+/// conflict without asking the host to write anything, so it works on an
+/// install whose backfill is off and which therefore never reports status.
+#[test]
+fn identity_state_names_a_conflict_no_status_report_has_declared() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let install = "99999999-9999-4999-8999-999999999999";
+
+    let quiet = identity_state(&fixture, "w248-quiet", install);
+    assert_eq!(quiet["type"], "identity_state");
+    assert_eq!(
+        quiet["identity_conflict"], false,
+        "an install the host has never heard of is not a conflict"
+    );
+
+    report_status(
+        &fixture,
+        "w248-1",
+        install,
+        "2026-09-29T10:00:00Z",
+        Some(10),
+    );
+    report_status(&fixture, "w248-2", install, "2026-09-29T10:05:00Z", Some(4));
+    assert_eq!(
+        identity_state(&fixture, "w248-answer", install)["identity_conflict"],
+        true
+    );
 }

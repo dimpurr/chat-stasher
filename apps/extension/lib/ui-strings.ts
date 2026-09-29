@@ -233,6 +233,34 @@ export function onlyInBrowserReason(neverConnected: boolean): string {
   return neverConnected ? t('extensionOnly.neverConnected') : t('extensionOnly.hostBroken');
 }
 
+/**
+ * 🔴 EXT-13 · The identity-conflict repair card.
+ *
+ * Four sentences rather than one because the user is being asked to make an
+ * irreversible choice about their own data, and every one of the four answers a
+ * question the choice raises: what happened, whether anything was lost,
+ * whether repairing rewrites history, and what to press.
+ */
+export function identityConflictTitle(): string {
+  return t('identityConflict.title');
+}
+
+export function identityConflictBody(): string {
+  return t('identityConflict.body');
+}
+
+export function identityConflictKept(): string {
+  return t('identityConflict.kept');
+}
+
+export function identityConflictHistory(): string {
+  return t('identityConflict.history');
+}
+
+export function identityRekeyLabel(): string {
+  return t('identityConflict.rekey');
+}
+
 /** The outbox usage-bar caption. The width is a render-side proportion, never a sentence here. */
 export function outboxBarLine(bytes: number, capacityBytes: number): string {
   return t('outboxBar.line', { bytes: formatBytes(bytes), capacity: formatBytes(capacityBytes) });

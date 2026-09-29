@@ -23,6 +23,8 @@
  * field is not the `ack` this contract describes.
  */
 
+import { withReportSeq } from './report-seq';
+
 /**
  * Pinned host name registered by `chat-stasher install-native-host`.
  * Outsource: `crates/chat-stasher/src/nativehost.rs` (HOST_NAME = "com.chat_stasher.host").
@@ -58,6 +60,13 @@ export const NACK_KINDS = [
   // so a newer host alone degrades to today's pending behaviour — the pair
   // settles once the extension updates.
   'install-conflict',
+  // EXT-13 · two live writers were observed sharing this install id. Also
+  // item-scope, but **retryable**, and the difference is the whole point: ADR-045
+  // §3 keeps the capture queued until one copy is given its own identity. An
+  // older extension does not know the kind, reads it as `malformed-response`
+  // (retryable), and therefore keeps the item pending too — the fail-closed
+  // direction, by accident of the same compatibility rule above.
+  'identity-conflict',
   'config',
   'stage-unavailable',
   'io',
@@ -831,7 +840,16 @@ export async function hello(options: { timeoutMs?: number } = {}): Promise<Hello
   return { ok: true, machine: res.machine, stage: res.stage, hostVersion: res.host_version };
 }
 
-/** Persist a content-free per-install backfill status snapshot in the local stage. */
+/**
+ * Persist a content-free per-install backfill status snapshot in the local stage.
+ *
+ * EXT-13 · `report_seq` is stamped here, under the shared sequence lock, for the
+ * reason `lib/report-seq.ts` gives: the host can only compare what it receives
+ * in the order it receives it, so this instance's values have to leave in order
+ * or a slow arrival would look like a copy. Absent (`undefined`) means the
+ * sequence could not be read, which the host accepts as "seq unknown" — it is
+ * never sent as a number.
+ */
 export async function reportInstallStatus(status: {
   install_id: string;
   browser: string;
@@ -842,9 +860,53 @@ export async function reportInstallStatus(status: {
 }): Promise<boolean> {
   const requestId = newRequestId();
   if (!requestId) return false;
-  const outcome = await sendOnce(getRuntime(), { protocol: PROTOCOL, type: 'status', request_id: requestId, status }, REQUEST_TIMEOUT_MS);
+  const outcome = await withReportSeq(async (seq) => sendOnce(
+    getRuntime(),
+    {
+      protocol: PROTOCOL,
+      type: 'status',
+      request_id: requestId,
+      status: seq === null ? status : { ...status, report_seq: seq },
+    },
+    REQUEST_TIMEOUT_MS,
+  ));
   return classify(outcome, (value) => value.protocol === PROTOCOL && value.type === 'status'
     && value.ok === true && value.request_id === requestId ? value : 'malformed status response', requestId).ok;
+}
+
+export type IdentityStateResult = { ok: true; conflict: boolean } | { ok: false };
+
+/**
+ * EXT-13 · asks the host whether this install id is known to be shared.
+ *
+ * Read-only and cheap, and that is why it exists as its own message rather than
+ * riding on a status report: an install whose backfill is switched off never
+ * sends one, so a flag that could only be learned from a report could never
+ * reach the popup of the very install that most needs to see it.
+ *
+ * A failure is a failure — the caller gets `ok:false`, never `conflict:false`.
+ * "The host did not answer" and "the host says this id is fine" are different
+ * answers, and the popup renders them differently.
+ */
+export async function identityState(installId: string): Promise<IdentityStateResult> {
+  if (!/^[A-Fa-f0-9-]{36}$/.test(installId)) return { ok: false };
+  const requestId = newRequestId();
+  if (!requestId) return { ok: false };
+  const outcome = await sendOnce(
+    getRuntime(),
+    { protocol: PROTOCOL, type: 'identity_state', request_id: requestId, install_id: installId },
+    REQUEST_TIMEOUT_MS,
+  );
+  const classified = classify(outcome, (value) => {
+    if (value.protocol !== PROTOCOL) return `protocol is not ${PROTOCOL}`;
+    if (value.type !== 'identity_state') return "type is not 'identity_state'";
+    if (value.ok !== true) return 'ok is not true';
+    if (value.request_id !== requestId) return 'request_id does not match the request';
+    if (typeof value.identity_conflict !== 'boolean') return 'identity_conflict is not a boolean';
+    return value;
+  }, requestId);
+  if (!classified.ok) return { ok: false };
+  return { ok: true, conflict: (classified.value as { identity_conflict: boolean }).identity_conflict };
 }
 
 export interface CoordinationResult {
@@ -1007,6 +1069,13 @@ export async function openDashboard(options: { timeoutMs?: number } = {}): Promi
  *
  * The only success is a matching `ack`. Everything else — including a response
  * that merely *looks* like an ack — comes back as `{delivered: false}`.
+ *
+ * 🔴 EXT-13 · The send is stamped with this instance's `report_seq` and goes out
+ *    under the shared sequence lock (`lib/report-seq.ts`), because a delivery is
+ *    wire traffic too: an install whose backfill is switched off never sends a
+ *    status report, so this is the only place its sequence reaches the host. The
+ *    field is omitted when the sequence cannot be read, which is the "seq
+ *    unknown" the host accepts — never a number this side invented.
  */
 export async function deliver(
   name: string,
@@ -1028,7 +1097,7 @@ export async function deliver(
     };
   }
 
-  const outcome = await sendOnce(
+  const outcome = await withReportSeq(async (seq) => sendOnce(
     getRuntime(),
     {
       protocol: PROTOCOL,
@@ -1039,9 +1108,10 @@ export async function deliver(
       sha256,
       ...(fingerprint === null ? {} : { fingerprint }),
       ...(accountId ? { account_id: accountId } : {}),
+      ...(seq === null ? {} : { report_seq: seq }),
     },
     REQUEST_TIMEOUT_MS,
-  );
+  ));
   const classified = classify(outcome, (value) => {
     if (value.type !== 'ack') return "type is neither 'ack' nor 'nack'";
     const ack = validateAck(value);

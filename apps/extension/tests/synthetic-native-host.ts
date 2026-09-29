@@ -46,6 +46,8 @@ export interface SyntheticHostOptions {
   summary?: unknown;
   /** Known archive-wide count returned by EXT-7's count-only query. */
   otherInstallCount?: unknown;
+  /** EXT-13 verdict for `identity_state`. Defaults to false — one writer. */
+  identityConflict?: boolean;
   /**
    * true ⇒ `summary`/`open_dashboard` **and** `has` get the nack for those
    * unsupported capabilities. Arbitration remains available so the `has`
@@ -230,6 +232,14 @@ export function createSyntheticHost(options: SyntheticHostOptions = {}): Synthet
         return {
           protocol: 1, type: 'open_dashboard', ok: true,
           url: options.dashboardUrl ?? SYNTHETIC_DASHBOARD_URL,
+        };
+      }
+
+      if (msg.type === 'identity_state') {
+        return {
+          protocol: 1, type: 'identity_state', ok: true,
+          request_id: String(msg.request_id),
+          identity_conflict: options.identityConflict ?? false,
         };
       }
 

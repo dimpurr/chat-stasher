@@ -63,6 +63,26 @@ channel:
 #    a JS constant (lib/ui-strings.ts's INSTALLER_COMMAND), never a catalog entry,
 #    because the catalog reserves ` | ` for plural forms — so a `curl … | sh` line
 #    placed here would be parsed as a plural rather than shown.
+# EXT-13 · The repair card for an install id the host has proved two live copies
+# share. Every sentence answers a question the choice raises; none of them
+# promises that the other copy will stop, because only the user can fix that one.
+identityConflict:
+  title: This profile shares its identity with another copy
+  body: >-
+    Another live copy of this browser profile is reporting under the same install
+    identity — most likely a copied or restored profile. Two copies cannot be
+    told apart, so the host stopped accepting this identity for backfill and
+    left deliveries queued rather than filing them under a profile it cannot name.
+  kept: >-
+    Nothing has been lost: a capture that was not delivered is still queued, and
+    its bytes are untouched. Captures queued before the repair carry the identity
+    this profile had when they were made, so they stay queued rather than being
+    rewritten — the captures this profile makes from now on are the ones that go
+    out under the new identity.
+  history: >-
+    Captures already archived keep the old identity; giving this profile a new
+    one adds an identity, it does not rewrite anything.
+  rekey: Give this profile a new identity
 extensionOnly:
   title: Only in this browser — not a backup yet
   # Said when no helper has EVER answered here: the first-run card is the remedy.

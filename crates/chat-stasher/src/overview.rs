@@ -672,15 +672,119 @@ pub fn extension_status_is_stale(reported_at: Option<&str>, now_unix: i64) -> bo
         .is_none_or(|value| now_unix.saturating_sub(value.timestamp()) > 48 * 60 * 60)
 }
 
+/// The private marker `main::read_extension_status` sets on a record read from
+/// the legacy flat `ext-status/<install_id>.json` layout. Kept in step with that
+/// constant by [`normalize_extension_installs`], which is the only reader.
+const LEGACY_STATUS_LAYOUT: &str = "\u{0}legacy-status-layout";
+
 /// Add archived per-install records without folding their counts together.
 pub fn with_extension_installs(
     mut document: serde_json::Value,
-    installs: Vec<serde_json::Value>,
+    mut installs: Vec<serde_json::Value>,
 ) -> serde_json::Value {
+    normalize_extension_installs(&mut installs);
     if let Some(object) = document.as_object_mut() {
         object.insert("installs".into(), serde_json::json!(installs));
     }
     document
+}
+
+/// EXT-13 · Two things an aggregated list of per-install records owes a reader,
+/// both of them about not mistaking one installation for two or two for one.
+///
+/// **A superseded pre-migration record is dropped.** A status record is stored
+/// under `ext-status/<machine>/<install_id>.json`, and an install that has been
+/// through the EXT-13 migration also still has its earlier flat
+/// `ext-status/<install_id>.json` — that file is deliberately not deleted, so its
+/// history stays inspectable. Both describe one installation, so publishing both
+/// would list a single browser profile twice. A keyed record always supersedes
+/// the flat one for the same `(machine, install_id)`: the keyed file exists only
+/// because a report arrived after the migration, so it is strictly later.
+///
+/// **A shared `install_id` is flagged, and neither copy overwrites the other.**
+/// The host can only prove an id is shared by watching two writers diverge on
+/// *one* machine; two machines cannot observe each other at all (ADR-045, D1:
+/// there is no server). Aggregation is the only place that can see both, so it
+/// is where the same id appearing under two machines is marked — on **every**
+/// record carrying it, because the host's rule that neither copy may be assumed
+/// to be the original applies here too. Nothing is merged or averaged: the rows
+/// stay separate and each keeps its own counts.
+pub fn normalize_extension_installs(installs: &mut Vec<serde_json::Value>) {
+    let keyed: std::collections::BTreeSet<(String, String)> = installs
+        .iter()
+        .filter(|install| install.get(LEGACY_STATUS_LAYOUT).is_none())
+        .filter_map(|install| {
+            Some((
+                install.get("machine")?.as_str()?.to_string(),
+                install.get("install_id")?.as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    installs.retain_mut(|install| {
+        let legacy = install
+            .as_object_mut()
+            .and_then(|object| object.remove(LEGACY_STATUS_LAYOUT))
+            .is_some();
+        if !legacy {
+            return true;
+        }
+        // A record whose key cannot be read is **kept**. There is no keyed
+        // successor it could be matched against, and dropping a record on the
+        // strength of a field that could not be read is the failure this whole
+        // codebase is arranged against.
+        match (
+            install.get("machine").and_then(|v| v.as_str()),
+            install.get("install_id").and_then(|v| v.as_str()),
+        ) {
+            (Some(machine), Some(id)) => !keyed.contains(&(machine.to_string(), id.to_string())),
+            _ => true,
+        }
+    });
+
+    // Which machines each install id was seen on. A machine with no readable id
+    // is not counted as a second machine: `None` is "we cannot tell", and this
+    // pass may not manufacture a collision out of an unreadable field.
+    let mut machines: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for install in installs.iter() {
+        let (Some(id), Some(machine)) = (
+            install.get("install_id").and_then(|v| v.as_str()),
+            install.get("machine").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        machines
+            .entry(id.to_string())
+            .or_default()
+            .insert(machine.to_string());
+    }
+    for install in installs.iter_mut() {
+        let Some(id) = install.get("install_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(seen) = machines.get(id) else {
+            continue;
+        };
+        if seen.len() < 2 {
+            continue;
+        }
+        let Some(object) = install.as_object_mut() else {
+            continue;
+        };
+        object.insert("identity_conflict".into(), serde_json::Value::Bool(true));
+        if object
+            .get("identity_conflict_evidence")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            object.insert(
+                "identity_conflict_evidence".into(),
+                serde_json::Value::String(format!(
+                    "this install id was reported by {} different machines: the copies cannot be told apart until one of them is given a new identity",
+                    seen.len()
+                )),
+            );
+        }
+    }
 }
 
 /// One record per source (harness), ordered by name: its session count and the
@@ -1676,6 +1780,156 @@ mod tests {
     fn legacy_overview_without_extension_reports_has_an_empty_install_list() {
         let document = with_extension_installs(serde_json::json!({"command":"overview"}), vec![]);
         assert_eq!(document["installs"], serde_json::json!([]));
+    }
+
+    /// An archived status record, as the reader hands it over.
+    fn install(id: &str, machine: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "install_id": id,
+            "machine": machine,
+            "browser": "Chrome",
+            "profile_label": "Personal",
+            "reported_at": "2026-09-29T10:00:00Z",
+            "platforms": [],
+        });
+        let object = value.as_object_mut().expect("object");
+        for (key, field) in extra.as_object().expect("object") {
+            object.insert(key.clone(), field.clone());
+        }
+        value
+    }
+
+    /// EXT-13 · The same `install_id` seen on two machines is a collision, and
+    /// neither report may be treated as the original. A host can only prove a
+    /// shared id from two writers diverging *on its own machine*: two machines
+    /// cannot see each other (ADR-045 D1 — there is no server). Aggregation is
+    /// therefore the only place this collision is visible at all.
+    #[test]
+    fn one_install_id_on_two_machines_is_flagged_on_both_rows() {
+        let mut installs = vec![
+            install("shared-id", "mba-m3", serde_json::json!({})),
+            install("shared-id", "mbp-m1max", serde_json::json!({})),
+        ];
+        normalize_extension_installs(&mut installs);
+        assert_eq!(installs.len(), 2, "neither row is merged away or hidden");
+        for row in &installs {
+            assert_eq!(row["identity_conflict"], true, "{row}");
+            assert!(
+                row["identity_conflict_evidence"]
+                    .as_str()
+                    .is_some_and(|text| text.contains('2')),
+                "the reason names how many machines reported the id: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_install_id_on_one_machine_is_not_flagged() {
+        let mut installs = vec![
+            install("own-id", "mba-m3", serde_json::json!({})),
+            install("other-id", "mba-m3", serde_json::json!({})),
+        ];
+        normalize_extension_installs(&mut installs);
+        for row in &installs {
+            assert!(row.get("identity_conflict").is_none(), "{row}");
+        }
+    }
+
+    /// A record that names no machine cannot be counted as a second machine:
+    /// `None` is "we cannot tell", and this pass may not manufacture a collision
+    /// out of a field it could not read.
+    #[test]
+    fn an_unreadable_machine_is_not_a_second_machine() {
+        let mut installs = vec![
+            install("own-id", "mba-m3", serde_json::json!({})),
+            install("own-id", "", serde_json::json!({"machine": null})),
+        ];
+        normalize_extension_installs(&mut installs);
+        assert_eq!(
+            installs[0].get("identity_conflict"),
+            None,
+            "{}",
+            installs[0]
+        );
+        assert_eq!(
+            installs[1].get("identity_conflict"),
+            None,
+            "{}",
+            installs[1]
+        );
+    }
+
+    /// EXT-13 · The migration leaves the pre-migration file in place, so an
+    /// upgraded install has two records for one `(machine, install_id)`. The
+    /// keyed one is strictly later — it exists only because a report arrived
+    /// after the migration — and listing both would present one browser profile
+    /// as two installations.
+    #[test]
+    fn a_keyed_record_supersedes_the_legacy_one_for_the_same_key() {
+        let mut installs = vec![
+            install(
+                "migrated-id",
+                "mba-m3",
+                serde_json::json!({ LEGACY_STATUS_LAYOUT: true, "daily_report_streak": 2 }),
+            ),
+            install(
+                "migrated-id",
+                "mba-m3",
+                serde_json::json!({ "daily_report_streak": 3 }),
+            ),
+        ];
+        normalize_extension_installs(&mut installs);
+        assert_eq!(installs.len(), 1, "one installation, one row");
+        assert_eq!(
+            installs[0]["daily_report_streak"], 3,
+            "the later record wins"
+        );
+        assert!(
+            installs[0].get(LEGACY_STATUS_LAYOUT).is_none(),
+            "the private marker is never published: {}",
+            installs[0]
+        );
+    }
+
+    /// A legacy record with no keyed successor is still the only record this
+    /// install has — an install that has not reported since the upgrade. It must
+    /// survive, and be published without the private marker.
+    #[test]
+    fn a_legacy_record_with_no_successor_is_kept() {
+        let mut installs = vec![install(
+            "not-yet-migrated",
+            "mba-m3",
+            serde_json::json!({ LEGACY_STATUS_LAYOUT: true }),
+        )];
+        normalize_extension_installs(&mut installs);
+        assert_eq!(installs.len(), 1);
+        assert!(
+            installs[0].get(LEGACY_STATUS_LAYOUT).is_none(),
+            "{}",
+            installs[0]
+        );
+        assert_eq!(installs[0]["install_id"], "not-yet-migrated");
+    }
+
+    /// The host's own verdict is sticky and must survive aggregation: a record
+    /// already marked `identity_conflict` on one machine keeps the flag, and its
+    /// evidence is not replaced by the cross-machine sentence.
+    #[test]
+    fn a_host_reported_conflict_keeps_its_own_evidence() {
+        let mut installs = vec![install(
+            "diverged-id",
+            "mba-m3",
+            serde_json::json!({
+                "identity_conflict": true,
+                "identity_conflict_evidence": "report_seq 4 is at or below the recorded high-water mark",
+            }),
+        )];
+        normalize_extension_installs(&mut installs);
+        assert_eq!(installs[0]["identity_conflict"], true);
+        assert_eq!(
+            installs[0]["identity_conflict_evidence"],
+            "report_seq 4 is at or below the recorded high-water mark"
+        );
     }
 
     fn row(
