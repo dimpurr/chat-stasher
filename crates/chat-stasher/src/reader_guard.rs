@@ -245,10 +245,14 @@ fn payload_note(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
+    // The one property these tests cannot pin from in here — that a guarded
+    // call leaves the process's panic hook exactly as it found it — is pinned in
+    // `tests/w244_panic_hook_test.rs`. It is a file of its own on purpose:
+    // cargo gives every file under `tests/` its own process, so a hook that test
+    // installs reaches no other test, and the hook can be handed back exactly
+    // rather than wrapped. A `#[cfg(test)]` test here shares this binary's
+    // process with every test in it.
     use super::*;
-    use std::panic;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn a_panic_in_the_reader_comes_back_as_a_note() {
@@ -292,51 +296,6 @@ mod tests {
             outcome.expect("a panic this read did not cause must not fail it"),
             7
         );
-    }
-
-    /// The guard must leave the process's panic hook exactly as it found it.
-    ///
-    /// The hook is process-wide state: installing one changes what every thread
-    /// in the process does when it panics, most of which this crate does not own.
-    /// This pins the guard's half of that bargain — a guarded call installs
-    /// nothing, so the hook that was in force is still the hook a later panic
-    /// reaches.
-    #[test]
-    fn the_guard_leaves_the_panic_hook_alone() {
-        const MARKER: &str = "a panic the counting hook must see";
-        static SEEN: AtomicUsize = AtomicUsize::new(0);
-        // A `Box<dyn Fn>` is not `Clone`, so the previous hook travels in an
-        // `Arc` — the only way to both call it and put it back.
-        let previous: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync> =
-            Arc::new(panic::take_hook());
-        {
-            let previous = Arc::clone(&previous);
-            panic::set_hook(Box::new(move |info| {
-                // Only this test's own panic is counted: the hook is global, and
-                // other tests in this binary panic deliberately.
-                if info.payload().downcast_ref::<&str>() == Some(&MARKER) {
-                    SEEN.fetch_add(1, Ordering::SeqCst);
-                }
-                previous(info);
-            }));
-        }
-
-        assert_eq!(catching_panic("read", || Ok(1)).expect("a healthy read"), 1);
-
-        // The literal matters: `panic!` with a format argument carries a `String`
-        // payload, and this hook identifies its own panic by the `&'static str`
-        // one a bare literal produces.
-        let panicker = std::thread::spawn(|| panic!("a panic the counting hook must see"));
-        assert!(panicker.join().is_err(), "the other thread was to panic");
-        assert!(
-            SEEN.load(Ordering::SeqCst) >= 1,
-            "the panic never reached the installed hook, so the guarded call replaced it"
-        );
-
-        // Hand the process its hook back. This is a wrapper that calls through
-        // rather than the original `Box`, which is as close as a test can get;
-        // the guard itself never takes the hook in the first place.
-        panic::set_hook(Box::new(move |info| previous(info)));
     }
 
     #[test]
