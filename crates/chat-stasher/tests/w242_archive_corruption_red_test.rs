@@ -28,9 +28,11 @@
 //! (`chat_stasher::reader_guard::require_sound_packs` asks the index whether
 //! any pack it references is shorter than it records — a *missing* pack is a
 //! different failure that `rustic`'s own check reports cleanly, and is
-//! deliberately left to it), and a panic that gets through anyway is reported
-//! as "did not finish reading" instead of crashing or wedging. `W244-OUT.md`
-//! has the full account.
+//! deliberately left to it), and a panic on the reader's own thread is reported
+//! as "did not finish reading" instead of crashing. `W244-OUT.md` has the full
+//! account, including the part this file cannot pin from outside the process: a
+//! panic on a rustic worker thread that no guard of ours can attribute, and the
+//! process-wide hook W244 tried first and removed rather than narrow.
 //!
 //! W242 also measured that the corruption is **invisible** while the metadata
 //! cache is warm: `read` hands the session back from a cached copy of the
@@ -205,26 +207,47 @@ impl Fixture {
     /// Run to completion, or kill and report `None` if it outlives the limit.
     /// A test that could hang the gate must not be able to.
     fn run_bounded(&self, args: &[&str]) -> Option<i32> {
+        self.run_bounded_capturing(args).0
+    }
+
+    /// [`Fixture::run_bounded`], keeping stdout. A test that asserts on what the
+    /// run *said* has to read it, and it must not become able to hang the gate
+    /// by doing so: the pipe is drained on its own thread, so a child that writes
+    /// more than a pipe buffer cannot block on the writer side either.
+    fn run_bounded_capturing(&self, args: &[&str]) -> (Option<i32>, String) {
         let mut child: Child = self
             .cli()
             .args(args)
             .args(self.repo_args())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            #[allow(
+                clippy::let_underscore_must_use,
+                reason = "A killed child closing the pipe mid-read is an expected end of this read; what it wrote before that is still the evidence."
+            )]
+            let _ = out.read_to_string(&mut buf);
+            buf
+        });
         let deadline = Instant::now() + READER_LIMIT;
-        loop {
+        let code = loop {
             if let Some(status) = child.try_wait().unwrap() {
-                return status.code();
+                break status.code();
             }
             if Instant::now() > deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                return None;
+                break None;
             }
             sleep(Duration::from_millis(25));
-        }
+        };
+        let stdout = reader.join().unwrap_or_default();
+        (code, stdout)
     }
 }
 
@@ -265,6 +288,89 @@ fn verify_over_a_truncated_pack_must_exit_3_not_stall() {
         Some(EXIT_DID_NOT_FINISH),
         "verify must report an unreadable archive with exit {EXIT_DID_NOT_FINISH}; \
          `None` means it did not finish within {READER_LIMIT:?}"
+    );
+}
+
+/// The control the three exit-3 tests above are read against: on a fixture
+/// nobody corrupted, `verify --level all` runs **every** level and exits 0.
+///
+/// W244 made a level that cannot finish reading stop the run and report the
+/// levels after it as not attempted (see the test below). The price of that is a
+/// run that could stop early for a reason of its own, so this pins the other
+/// side of it: a healthy archive still runs all three levels, and none of them
+/// is skipped.
+#[test]
+fn verify_of_a_healthy_repository_runs_every_level_and_exits_0() {
+    let fx = Fixture::new();
+    let stage = fx.stage.to_string_lossy().into_owned();
+    let machine = fx.machine.clone();
+    let (code, stdout) = fx.run_bounded_capturing(&[
+        "verify",
+        "--level",
+        "all",
+        "--stage",
+        &stage,
+        "--machine",
+        &machine,
+    ]);
+    assert_eq!(
+        code,
+        Some(0),
+        "a healthy archive must verify with exit 0; stdout was:\n{stdout}"
+    );
+    for level in ["L1 structure", "L2 content", "L3 reconcile"] {
+        assert!(
+            stdout.contains(level),
+            "`verify --level all` must run {level}; stdout was:\n{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("NOT ATTEMPTED"),
+        "a healthy archive must not skip a level; stdout was:\n{stdout}"
+    );
+}
+
+/// A level that cannot finish reading stops the run, and the levels after it are
+/// reported as **not attempted** — not run, and not passed.
+///
+/// `verify --level all` runs three levels through one store. When the first
+/// cannot read the archive at all, the other two are evidence of nothing, and a
+/// run that said nothing about them would read as a pass to anyone skimming the
+/// summary; this is the same "did not finish" contract as the exit code, said in
+/// the part of the output a person actually reads.
+#[test]
+fn verify_names_the_levels_it_did_not_run_instead_of_passing_them() {
+    let fx = Fixture::new();
+    fx.truncate_every_pack();
+    let stage = fx.stage.to_string_lossy().into_owned();
+    let machine = fx.machine.clone();
+    let (code, stdout) = fx.run_bounded_capturing(&[
+        "verify",
+        "--level",
+        "all",
+        "--stage",
+        &stage,
+        "--machine",
+        &machine,
+    ]);
+    assert_eq!(
+        code,
+        Some(EXIT_DID_NOT_FINISH),
+        "an unreadable archive must exit {EXIT_DID_NOT_FINISH}; stdout was:\n{stdout}"
+    );
+    for level in ["[verify] L2 content", "[verify] L3 reconcile"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.starts_with(level))
+            .unwrap_or_else(|| panic!("no `{level}` line in stdout:\n{stdout}"));
+        assert!(
+            line.contains("NOT ATTEMPTED"),
+            "`{line}` must be reported as not attempted, not left out and not passed"
+        );
+    }
+    assert!(
+        !stdout.contains("RESULT         : OK"),
+        "a run that could not read the archive must not summarise as OK; stdout was:\n{stdout}"
     );
 }
 

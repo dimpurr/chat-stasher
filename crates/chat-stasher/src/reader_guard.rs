@@ -24,20 +24,37 @@
 //! measurement — the first reads as a broken tool, the second as a stuck one,
 //! and neither tells the user their archive is unreadable.
 //!
-//! # The three parts
+//! # The fix, the fallback, and the refusal
 //!
-//! 1. [`BackupStore::require_sound_packs`] asks the question the reader never
-//!    asks itself: *is any pack the index references shorter than the index says
-//!    it must be?* The index answers it without reading a byte of any pack, so a
-//!    truncated archive is refused before the code that mishandles it runs. This
-//!    is the fix; the other two are for what it cannot foresee.
-//! 2. [`catching_panic`] converts a panic **on the calling thread** into the
-//!    `Err` channel its callers already map to exit 3, so a rustic panic is
-//!    reported rather than crashing.
-//! 3. The same call installs a panic hook for the deadlock, which no amount of
-//!    `catch_unwind` can help with: the panic is on another thread and our
-//!    thread is blocked, so the hook — the one code that does run — ends the
-//!    process with the reader's own exit code.
+//! 1. **The fix.** [`BackupStore::require_sound_packs`] asks the question the
+//!    reader never asks itself: *is any pack the index references shorter than
+//!    the index says it must be?* The index answers it without reading a byte of
+//!    any pack, so a truncated archive is refused before the code that
+//!    mishandles it runs.
+//! 2. **The fallback.** [`catching_panic`] runs the reader call on a thread this
+//!    module owns and joins, so a panic on the reader's own thread comes back as
+//!    the `Err` channel its callers already map to exit 3 instead of crashing.
+//! 3. **The refusal.** No panic hook is installed. See below.
+//!
+//! # Why no panic hook
+//!
+//! The deadlock above is the case a `catch_unwind` cannot reach: the panic is on
+//! a rustic worker and our thread is blocked, so the hook is the only code that
+//! runs. An earlier revision of this module installed one, and it ended the
+//! process with exit 3 for a panic on *any* thread other than the caller's — a
+//! hook cannot tell `TreeStreamerOnce`'s workers from any other thread, because
+//! `rustic_core` spawns them detached and unnamed. That made an unrelated panic
+//! — a parallel test, another library's background thread — refuse a **healthy**
+//! archive as unreadable, which is the one outcome this module exists to
+//! prevent: a wrong "did not finish" is not safer than no answer, it is the
+//! wrong answer wearing the right exit code.
+//!
+//! So the hook is gone rather than narrowed, and this module states the residual
+//! plainly instead of trading a healthy-archive misreport for it: if a panic
+//! `require_sound_packs` did not foresee lands on a rustic worker thread, the
+//! reader can still block on the dead worker's channel. Nothing reachable from
+//! the reader's own thread can break that block, and the only code that can
+//! (a process-wide hook) cannot tell whose panic it is looking at.
 //!
 //! # Why this is not a timeout
 //!
@@ -45,25 +62,16 @@
 //! wedged reader from a slow remote, and this project verifies archives over
 //! SFTP, where a slow read is normal — so the only limit that would never cut a
 //! legitimate run is one far above every legitimate run, which is not a bound.
-//! A panic, unlike a slow read, is never a legitimate part of one, so both parts
-//! 2 and 3 key on it and neither can cut a remote that is merely slow.
+//! A panic, unlike a slow read, is never a legitimate part of one, so the
+//! fallback keys on it and cannot cut a remote that is merely slow.
 
 use anyhow::Context;
 use std::collections::BTreeMap;
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
 
 use rustic_core::repofile::{IndexFile, IndexId};
 use rustic_core::{FileType, Open, ReadBackend, Repository};
 
 use crate::store::BackupStore;
-
-/// Exit code for "did not finish reading" (`CLAUDE.md` invariant 2).
-///
-/// Duplicated from `main.rs` rather than imported, because `main.rs` is a
-/// binary and this module is a library module that `main.rs` uses — the
-/// dependency runs that way round.
-const EXIT_DID_NOT_FINISH: i32 = 3;
 
 /// A pack whose file is present but shorter than the index records.
 ///
@@ -189,41 +197,29 @@ impl BackupStore {
     }
 }
 
-/// Run a reader call so that a panic comes back as an `Err` instead of a crash.
+/// Run a reader call on a thread this guard owns, so a panic comes back as an
+/// `Err` instead of a crash.
+///
+/// The call runs on a thread this function spawns and joins. That is the whole
+/// of the guard's reach: a panic inside foreign code is caught by that thread's
+/// join, so it never unwinds through the caller's own frames, and the caller
+/// keeps whatever stack it had. `std::thread::scope` joins before returning, so
+/// the borrows the call needs (`&BackupStore`, `&MasterKey`) stay valid without
+/// being `'static`, and no panic hook is installed or restored — the process's
+/// hook is exactly the one it had. See the module docs for why an earlier
+/// revision installed one and why that was wrong.
 ///
 /// The returned error lands on the channel every reader call already has, so
 /// each caller's existing "could not read it" arm — the one that exits 3 — keeps
 /// working with no new branch. `what` names the operation for the note.
 ///
-/// A panic on **another** thread cannot come back this way (see the module
-/// docs); the hook installed here ends the process with exit 3 instead.
-pub fn catching_panic<T>(what: &str, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
-    let own = std::thread::current().id();
-    // Held in an `Arc` so the original hook can be put back afterwards: a
-    // `Box<dyn Fn>` is not `Clone`, and the hook is taken by value.
-    let previous: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync> =
-        Arc::new(panic::take_hook());
-    {
-        let previous = Arc::clone(&previous);
-        let what = what.to_string();
-        panic::set_hook(Box::new(move |info| {
-            previous(info);
-            if std::thread::current().id() != own {
-                eprintln!(
-                    "{what}: this read cannot finish — a background thread panicked and the \
-                     reader waiting on it can no longer make progress. This does not say the \
-                     archive is empty; it says it was not read"
-                );
-                std::process::exit(EXIT_DID_NOT_FINISH);
-            }
-        }));
-    }
-
-    let outcome = panic::catch_unwind(AssertUnwindSafe(f));
-
-    // A wrapper around the original rather than the original itself; it calls
-    // through, and one layer per read is not worth reconstructing a `Box`.
-    panic::set_hook(Box::new(move |info| previous(info)));
+/// A panic on a thread `rustic_core` spawned for itself does not come back this
+/// way; the module docs say why nothing here can attribute one.
+pub fn catching_panic<T: Send>(
+    what: &str,
+    f: impl FnOnce() -> anyhow::Result<T> + Send,
+) -> anyhow::Result<T> {
+    let outcome = std::thread::scope(|scope| scope.spawn(f).join());
 
     match outcome {
         Ok(result) => result,
@@ -250,9 +246,12 @@ fn payload_note(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
-    fn a_panic_on_this_thread_comes_back_as_a_note() {
+    fn a_panic_in_the_reader_comes_back_as_a_note() {
         let outcome: anyhow::Result<()> = catching_panic("read", || panic!("boom: truncated pack"));
         let err = outcome.expect_err("a panicking reader must not return Ok");
         let text = err.to_string();
@@ -264,6 +263,80 @@ mod tests {
             text.contains("not read"),
             "the note must say the archive was not read, never that it was empty: {text}"
         );
+    }
+
+    /// A panic on another thread, while a read is in flight, must not be
+    /// attributed to that read.
+    ///
+    /// This is the property the guard's first revision got wrong: it installed a
+    /// process-wide hook that ended the process with exit 3 for a panic on any
+    /// thread other than the caller's, so a panic elsewhere in the process — a
+    /// parallel test, another library's background thread — refused a healthy
+    /// archive as unreadable. The read below is healthy and returns its own
+    /// result; the other thread's panic is neither attributed to it nor
+    /// suppressed, and the process is still running to say so.
+    #[test]
+    fn an_unrelated_panic_on_another_thread_is_not_attributed_to_the_read() {
+        let unrelated = std::thread::spawn(|| panic!("an unrelated thread's panic"));
+        let outcome = catching_panic("read", || {
+            // Joined inside the read's window on purpose: the other thread has
+            // finished unwinding before this call returns, so the panic cannot
+            // be waved off as one that happened after the read was over.
+            assert!(
+                unrelated.join().is_err(),
+                "the other thread was supposed to panic"
+            );
+            Ok(7)
+        });
+        assert_eq!(
+            outcome.expect("a panic this read did not cause must not fail it"),
+            7
+        );
+    }
+
+    /// The guard must leave the process's panic hook exactly as it found it.
+    ///
+    /// The hook is process-wide state: installing one changes what every thread
+    /// in the process does when it panics, most of which this crate does not own.
+    /// This pins the guard's half of that bargain — a guarded call installs
+    /// nothing, so the hook that was in force is still the hook a later panic
+    /// reaches.
+    #[test]
+    fn the_guard_leaves_the_panic_hook_alone() {
+        const MARKER: &str = "a panic the counting hook must see";
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        // A `Box<dyn Fn>` is not `Clone`, so the previous hook travels in an
+        // `Arc` — the only way to both call it and put it back.
+        let previous: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync> =
+            Arc::new(panic::take_hook());
+        {
+            let previous = Arc::clone(&previous);
+            panic::set_hook(Box::new(move |info| {
+                // Only this test's own panic is counted: the hook is global, and
+                // other tests in this binary panic deliberately.
+                if info.payload().downcast_ref::<&str>() == Some(&MARKER) {
+                    SEEN.fetch_add(1, Ordering::SeqCst);
+                }
+                previous(info);
+            }));
+        }
+
+        assert_eq!(catching_panic("read", || Ok(1)).expect("a healthy read"), 1);
+
+        // The literal matters: `panic!` with a format argument carries a `String`
+        // payload, and this hook identifies its own panic by the `&'static str`
+        // one a bare literal produces.
+        let panicker = std::thread::spawn(|| panic!("a panic the counting hook must see"));
+        assert!(panicker.join().is_err(), "the other thread was to panic");
+        assert!(
+            SEEN.load(Ordering::SeqCst) >= 1,
+            "the panic never reached the installed hook, so the guarded call replaced it"
+        );
+
+        // Hand the process its hook back. This is a wrapper that calls through
+        // rather than the original `Box`, which is as close as a test can get;
+        // the guard itself never takes the hook in the first place.
+        panic::set_hook(Box::new(move |info| previous(info)));
     }
 
     #[test]

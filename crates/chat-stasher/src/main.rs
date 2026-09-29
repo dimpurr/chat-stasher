@@ -7887,6 +7887,8 @@ fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) ->
 
 /// `verify` — prove the archive is intact, level by level. Each level prints
 /// its own verdict; exit 1 means a completed check failed, and 3 means reading failed.
+/// A level that could not finish reading stops the run there: the levels after it
+/// are reported as NOT ATTEMPTED, so a partial run cannot be read as a full pass.
 #[allow(clippy::too_many_arguments)]
 fn cmd_verify(
     level: VerifyLevel,
@@ -7952,52 +7954,42 @@ fn cmd_verify(
 
     let mut failed = 0usize;
     let mut unreadable = 0usize;
-    match level {
-        VerifyLevel::L1 => run_check(
-            &store,
-            &mk,
-            false,
-            "L1 structure",
-            &mut failed,
-            &mut unreadable,
-        ),
-        VerifyLevel::L2 => run_check(
-            &store,
-            &mk,
-            true,
-            "L2 content",
-            &mut failed,
-            &mut unreadable,
-        ),
-        VerifyLevel::L3 => {
-            println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, full_ids, &mut failed, &mut unreadable);
+    let mut not_attempted = 0usize;
+    // The level that first failed to finish reading, if any. It stops the
+    // sequence, for two reasons that point the same way: the levels after it
+    // read the same archive through the same store, and after a panic that store
+    // is one that has just unwound — a read that came back "did not finish" is
+    // not a sound base for the next one. The levels that were not run are
+    // reported as NOT ATTEMPTED, never dropped, so "we did not check this" stays
+    // a different answer from "this checked out".
+    let mut stopped_at: Option<&'static str> = None;
+    for (name, step) in verify_plan(level) {
+        if let Some(stopper) = stopped_at {
+            println!("[verify] {name:<16} : NOT ATTEMPTED ({stopper} did not finish reading)");
+            not_attempted += 1;
+            continue;
         }
-        VerifyLevel::All => {
-            run_check(
-                &store,
-                &mk,
-                false,
-                "L1 structure",
-                &mut failed,
-                &mut unreadable,
-            );
-            run_check(
-                &store,
-                &mk,
-                true,
-                "L2 content",
-                &mut failed,
-                &mut unreadable,
-            );
-            println!("[verify] stage          : {}", stage.display());
-            run_reconcile(&store, &mk, &stage, full_ids, &mut failed, &mut unreadable);
+        let outcome = match step {
+            VerifyStep::Check { data } => {
+                run_check(&store, &mk, data, name, &mut failed, &mut unreadable)
+            }
+            VerifyStep::Reconcile => {
+                println!("[verify] stage          : {}", stage.display());
+                run_reconcile(&store, &mk, &stage, full_ids, &mut failed, &mut unreadable)
+            }
+        };
+        if outcome == LevelOutcome::DidNotFinish {
+            stopped_at = Some(name);
         }
     }
 
     reap_remote(&cfg, keep_ssh_masters);
     if unreadable > 0 {
-        println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable)");
+        if not_attempted > 0 {
+            println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable, {not_attempted} not attempted)");
+        } else {
+            println!("[verify] RESULT         : INCOMPLETE ({unreadable} level(s) unreadable)");
+        }
         ExitCode::from(3)
     } else if failed == 0 {
         println!("[verify] RESULT         : OK");
@@ -8008,6 +8000,49 @@ fn cmd_verify(
     }
 }
 
+/// What one `verify` level does, independent of the invocation that asked for it.
+///
+/// `verify --level all` runs three levels in order, and this is that order. Naming
+/// the steps up front is what lets the loop report the levels it did *not* run:
+/// written the other way round, each level is a literal call at one place in the
+/// `match`, and a level skipped at runtime has nowhere to be printed from.
+#[derive(Clone, Copy)]
+enum VerifyStep {
+    /// Rustic's `check`; `data` is its `read_data` (`false` = L1, `true` = L2).
+    Check { data: bool },
+    /// L3: read the archive back and reconcile it against the staging tree.
+    Reconcile,
+}
+
+/// Whether a level finished reading the archive.
+///
+/// `DidNotFinish` is neither "the archive is empty" nor "the check found
+/// problems": it is the third state `CLAUDE.md` invariant 2 keeps separate, and
+/// nothing after it may be reported as passed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LevelOutcome {
+    Read,
+    DidNotFinish,
+}
+
+/// The levels one `verify` invocation runs, in order, as `(label, step)`.
+///
+/// One list per `--level` value rather than one code path per value: a level added
+/// here is run, labelled and reported by the same loop as the rest, and cannot
+/// quietly acquire its own exit-code handling.
+fn verify_plan(level: VerifyLevel) -> Vec<(&'static str, VerifyStep)> {
+    match level {
+        VerifyLevel::L1 => vec![("L1 structure", VerifyStep::Check { data: false })],
+        VerifyLevel::L2 => vec![("L2 content", VerifyStep::Check { data: true })],
+        VerifyLevel::L3 => vec![("L3 reconcile", VerifyStep::Reconcile)],
+        VerifyLevel::All => vec![
+            ("L1 structure", VerifyStep::Check { data: false }),
+            ("L2 content", VerifyStep::Check { data: true }),
+            ("L3 reconcile", VerifyStep::Reconcile),
+        ],
+    }
+}
+
 fn run_check(
     store: &BackupStore,
     mk: &MasterKey,
@@ -8015,13 +8050,14 @@ fn run_check(
     name: &str,
     failed: &mut usize,
     unreadable: &mut usize,
-) {
+) -> LevelOutcome {
     match chat_stasher::reader_guard::catching_panic("verify", || store.check_repo(mk, data)) {
         Ok(summary) => {
             print_check_summary(&summary, name);
             if !summary.ok() {
                 *failed += 1;
             }
+            LevelOutcome::Read
         }
         Err(e) => {
             chat_stasher::remote_err::eprint_remote_error(
@@ -8030,6 +8066,7 @@ fn run_check(
                 &store.cfg,
             );
             *unreadable += 1;
+            LevelOutcome::DidNotFinish
         }
     }
 }
@@ -8060,12 +8097,12 @@ fn run_reconcile(
     full_ids: bool,
     failed: &mut usize,
     unreadable: &mut usize,
-) {
-    // `catching_panic` is not a timeout: it converts a rustic panic into the
-    // same `Err` this match already treats as unreadable (exit 3), and turns a
-    // panic on a rustic worker thread into that exit code as well — which is the
-    // only thing that can, because such a panic leaves this thread blocked on a
-    // channel forever. See `reader_guard`'s module docs.
+) -> LevelOutcome {
+    // `catching_panic` is not a timeout: it runs the read on a thread of its own
+    // and returns a rustic panic as the same `Err` this match already treats as
+    // unreadable (exit 3), so a slow remote is never cut. See `reader_guard`'s
+    // module docs for the panic it cannot reach and why no hook is installed to
+    // try.
     match chat_stasher::reader_guard::catching_panic("verify", || {
         store.reconcile_manifest(mk, stage)
     }) {
@@ -8074,10 +8111,12 @@ fn run_reconcile(
             if !report.ok() {
                 *failed += 1;
             }
+            LevelOutcome::Read
         }
         Err(e) => {
             chat_stasher::remote_err::eprint_remote_error("verify: L3 reconcile", &e, &store.cfg);
             *unreadable += 1;
+            LevelOutcome::DidNotFinish
         }
     }
 }
