@@ -69,6 +69,7 @@ bash scripts/selftest-check-static-binary.sh
 bash scripts/selftest-crates-version-state.sh
 bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
+python3 scripts/dev/scoreboard.py --selftest
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh
 node --test npm/test/*.test.mjs
@@ -80,6 +81,16 @@ bash scripts/smoke/linux-smoke.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+
+`scripts/dev/scoreboard.py --selftest` is the scoreboard generator's own suite.
+It builds every input it judges — synthetic ext-status reports, overview
+snapshots, oracle results, editorial fields — under a temp directory, so it
+needs no archive, no private data and no network. It is the only check that
+holds the board's rule set: an unavailable source is never rendered as a zero,
+pending is never summed across installs, unknown stays distinct from "not
+there", and a freshness rule whose input is missing says so instead of passing
+silently. Nothing else in this list exercises those rules, which is exactly why
+the selftest must run.
 
 `self-test-install.sh` is the same shape for the installer: it serves a mock
 Release over `file://` and shadows `uname` on `PATH`, so the platform branches

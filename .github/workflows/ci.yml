@@ -430,6 +430,20 @@ jobs:
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
 
+      # The scoreboard generator (SB-2) is the reproducible answer to "is the
+      # platform board fresh, and was a number invented for a missing input".
+      # Its self-test is the only thing that exercises that rule set — an
+      # unavailable source is never zero, pending is never summed across
+      # installs, unknown stays distinct from "not there", and a freshness
+      # rule whose input is missing says "not judged" rather than passing — so
+      # without this step a stacked task could regress every one of them with
+      # no red anywhere. It builds all its own fixtures (synthetic status
+      # reports, overview snapshots, oracle results) under a temp directory: no
+      # archive, no private data, no network, no build — seconds in this job.
+      # CONTRIBUTING.md lists it as a local check, so CI has to run it too.
+      - name: Scoreboard generator self-test
+        run: python3 scripts/dev/scoreboard.py --selftest
+
       # CONTRIBUTING.md lists this as a local check, so CI has to run it too -
       # otherwise the two sets drift and a green local run stops meaning a green
       # pull request. It is in this job for the same reason the reload script's
