@@ -64,6 +64,26 @@ pub struct LocalSourceSaveOptions {
     #[cfg_attr(feature = "clap", clap(long))]
     #[cfg_attr(feature = "merge", merge(strategy = conflate::option::overwrite_none))]
     pub set_xattrs: Option<XattrOption>,
+
+    /// Set the times stored for directories [default: yes]
+    ///
+    /// A directory's times are the times of the writes *into* it, not of
+    /// anything it holds: creating, renaming or removing an entry updates
+    /// them, and on Windows the filesystem reports the new value lazily, so a
+    /// directory written to shortly before a walk can hand one value to that
+    /// walk and another to the next one. A node that stores such a value
+    /// therefore moves on its own, and a tree serializes its nodes, so the
+    /// tree (and every tree above it, whose child reference changed) is
+    /// written again with nothing changed. How a directory is compared for
+    /// *content* does not read this: a directory is compared through the id of
+    /// the tree it holds, so `no` drops nothing the comparison uses. Set this
+    /// to `no` when a source's directory times are not meaningful to the
+    /// backup and a tree must not move without one — file nodes are not
+    /// affected by this option, and a file's mtime remains what change
+    /// detection reads.
+    #[cfg_attr(feature = "clap", clap(long))]
+    #[cfg_attr(feature = "merge", merge(strategy = conflate::option::overwrite_none))]
+    pub set_dir_times: Option<TimeOption>,
 }
 
 impl LocalSourceSaveOptions {
@@ -112,12 +132,21 @@ impl LocalSourceSaveOptions {
         };
         let extended_attributes = self.set_xattrs.unwrap_or_default().map_or_else(xattr);
         let (mode, inode, links) = Self::nix_infos(&m);
+        // The directory half of the time policy, applied last: a directory
+        // node's times are the times of the writes into it, and dropping them
+        // takes nothing the content comparison reads (see `set_dir_times`).
+        let dir_times = self.set_dir_times.unwrap_or(TimeOption::Yes);
+        let time = |t: Option<Timestamp>| match (m.is_dir(), dir_times) {
+            (false, _) | (true, TimeOption::Yes) => t,
+            (true, TimeOption::Mtime) => mtime,
+            (true, TimeOption::No) => None,
+        };
 
         let meta = Metadata {
             mode,
-            mtime,
-            atime,
-            ctime,
+            mtime: time(mtime),
+            atime: time(atime),
+            ctime: time(ctime),
             uid,
             gid,
             user,

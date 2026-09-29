@@ -720,9 +720,11 @@ fn a_push_over_stranded_packs_reuses_them_instead_of_re_uploading_them() {
 /// `data_added` counts tree blobs as well. The Windows CI run is what showed the
 /// two apart: this test failed there with `data_blobs=0 data_added=1690` — not
 /// one byte of content was uploaded, and a tree (metadata) was re-serialized —
-/// so the assertion was reading tree bytes as content. Which tree that platform
-/// rewrote, and which stored field moved, is what W252 established: only `ctime`
-/// is stored, never compared, and unpinned, so `store.rs` no longer writes it
+/// so the assertion was reading tree bytes as content. W252 then established
+/// which stored field moves there: a *directory*'s time, which is the time of
+/// the writes into the directory rather than content, is reported lazily by the
+/// platform, and is stored on no counter's account — so `store.rs` no longer
+/// writes one, and no longer writes a `ctime` either
 /// (`docs-dev/node-metadata.md`). The counter is metadata either way, and this
 /// test is about content.
 #[test]
