@@ -74,3 +74,101 @@ cargo test --release --test w243_wallclock_test -- --ignored --nocapture
 
 It builds the synthetic archive, runs the cold/warm reads, and prints the per-run table
 and both medians annotated as above.
+
+## Criterion ① against a remote-like destination
+
+The local measurement above answers a narrower question than the criterion asks.
+ADR-034's ① is "the machine with a quota reads the same large session noticeably
+faster the second time (107 MB: 23 s → < 2 s)", and the 23 s in it is a
+**download** figure — W117 measured a real remote at ~4.7 MB/s. Locally there is
+nothing to download, which is exactly why the win there is 4%. This section is the
+same read against a destination that behaves like a remote, measured 2026-09-29 on
+one machine, release build.
+
+### Method
+
+- A synthetic archive of 102,400,000 B (102.4 MB) of plaintext in 50 sealed shards,
+  pushed through the project's own sealed-shard + `push` path — the same fixture
+  shape and size as the local section above.
+- The destination is `opendal:sftp`, the string production ships, with the options a
+  real one takes (`endpoint`, `user`, `key`, `known_hosts_strategy`) plus `root`. No
+  real host, credential or conversation is involved.
+- The remote is a local OpenSSH `sshd` on a loopback port, with a throwaway host key
+  and client key generated into a temp dir for the run.
+- The link is a TCP proxy in the test: the ssh client dials the proxy, the proxy
+  forwards to `sshd`, and every **download** byte is charged to a leaky bucket shared
+  by all connections at **4.73 MB/s** — `107e6 / 22.6`, W117's own pair of numbers.
+  The upload direction is unmetered, because the quantity being modelled is a
+  download rate.
+- The read therefore travels `chat-stasher → opendal:sftp → ssh → TCP proxy → sshd`.
+  No layer of the real path is skipped, and the thing throttled is the thing the
+  cache is supposed to save: bytes on a socket.
+- Cache: a `[cache]` section with quota `2 GiB` (10% = 215 MiB > the session, so it
+  may be stored). Cold = the cache cleared first; warm = served from a filled cache.
+  Five runs of each; the middle elapsed value is the median.
+
+### Result
+
+| kind | per-run elapsed (ms) | median (ms) | link bytes (median) | ssh connections | body hits | body misses |
+|---|---|---|---|---|---|---|
+| cold | 23489, 22649, 22649, 22566, 22543 | **22649** | 76.89 MB | 4 | 0/96 | 96/96 |
+| warm | 2939, 2862, 2849, 3253, 3077 | **2939** | 0.32 MB | 2 | 96/96 | 0/96 |
+
+**Warm is 13.0% of cold** — the same session, read twice, 22.6 s → 2.9 s.
+
+The link counters are what make the table readable, and they are the part that would
+catch a harness that had quietly stopped throttling:
+
+- A cold read moved 76.89 MB across the metered link. At 4.73 MB/s that is **16.3 s
+  of the 22.6 s** it took.
+- A warm read moved 0.32 MB — **0.07 s of the 2.9 s**.
+
+So the cache removed essentially all of the transfer — 76.89 MB becomes 0.32 MB. The
+cold figure should not be read as "the link" on its own, though: 16.3 s of its 22.6 s
+is metered transfer, and the remaining 6.4 s is local work — ssh session setup,
+decryption, and writing 76.89 MB into the cache — of which the warm read still pays
+2.9 s.
+
+### What this says about criterion ①
+
+The criterion's direction holds, and strongly: **the second read of an unchanged
+session is 7.7× faster, because it downloads nothing.**
+
+Its specific figure does not hold here. "23 s → < 2 s" is not reached: the warm read
+is 2.9 s, and 2.87 s of that is *not* the link. That residual is the `opendal:sftp`
+path's own per-read cost — every SFTP session starts its own ssh `ControlMaster`
+(`src/reap.rs:3`), and the proxy carried 4 connections for a cold read and 2 for a
+warm one, against 0 for a local archive. Cross-check: the local measurement above
+put a warm read of the same size at 763 ms, so roughly 2 s of the warm read here is
+sftp-path overhead that no hit rate can remove.
+
+That is a floor rather than a regression — the cache is doing its job (zero body
+misses, 0.32 MB on the wire), and the remaining time is paid before the first body is
+requested.
+
+### The fixture is not incompressible
+
+The local section above describes the fixture as 2,048,000 "incompressible" bytes per
+shard, "so ciphertext ≈ plaintext". Measured, that overstates it: the body generator
+draws uniformly from a 62-character alphabet, so a byte carries 5.954 bits and cannot
+be represented in fewer than 0.744 of its length. zstd reaches 0.746, and the cold
+read above pulled 76.89 MB for 102.4 MB of plaintext — 0.751 including pack and index
+overhead. The entropy floor is why that ratio is stable rather than noise.
+
+Nothing in either section's conclusion turns on this. The local cold/warm medians and
+the remote link-byte counters were both taken with this same fixture, and both say
+what they say. It changes only how a link-byte figure should be read: as ciphertext,
+not as "the session's size".
+
+### Reproducing it
+
+`#[ignore]`d like its local counterpart, and for a stronger reason: besides the
+~102 MB fixture it starts an ssh server and a throttling proxy, so it needs OpenSSH's
+`sshd` and keeps a listening socket for the length of the run.
+
+```sh
+cargo test --release --test w246_remote_cache_test -- --ignored --nocapture
+```
+
+It prints the per-run table, both medians, and the per-run link bytes and ssh
+connection counts.
