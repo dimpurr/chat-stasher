@@ -294,9 +294,22 @@ in the host's local coordination database and as sealed shard metadata, which
 is covered by archive encryption. 🔴 It is also the only account-scoped value in
 this design that is deliberately comparable across your own installs and your own
 machines — the install-local fingerprint above is not, by construction —
-so it is what lets one machine recognise the same account as another while
-holding no account id at all, and it cannot be compared by anyone without the
-masterkey. Without an unambiguous readable masterkey,
+so it is what lets one machine recognise the same account as another with no
+account id in the comparison. The records that do the recognising — rows of
+the machine-local `extension-coordination.sqlite3` that section 3b below names —
+hold a platform id, an install id, times and this key, and no raw account id in
+any form. What they compare is one stored key against another, a comparison the
+masterkey is not needed to make: the host itself makes it when counting how
+many installs recently showed one key, and any other process running as you on
+this machine can make it too. Crossing from a stored key to an account id is
+the step that needs the masterkey: without it, a stored key can be neither
+derived from an account id nor matched against one, so two matching stored
+keys say "the same account twice" and never which. None of this keeps the
+account id out of your archive: the sealed shard record of a capture still
+carries the account id verbatim, in its separate `identity` field, whenever the
+extension could find one — it reaches that record from the bundle itself, not
+from this key — and that field is never what these comparisons match on.
+Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:102-112`,
 `apps/extension/lib/native-host.ts:1083-1127`,
@@ -358,9 +371,10 @@ becomes visible only where both records are read together, in your archive
 
 **One more thing leaves this browser besides captures: a status report.** It is
 sent at the end of a backfill tick: the install id, the browser, the
-profile label, the extension version, and one row per platform saying how many
-captures this browser confirmed, how many are still pending, why a leg is paused,
-and — for a row that has one — that account's install-local fingerprint. Your
+profile label, the extension version, a report time, and one row per platform
+saying how many captures this browser confirmed, how many are still pending,
+why a leg is paused, and — for a row that has one — that account's
+install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
 (`apps/extension/entrypoints/background.ts:2925-2954`;

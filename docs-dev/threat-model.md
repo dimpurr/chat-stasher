@@ -622,9 +622,12 @@ They reach three different places, and the differences matter:
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
   `crates/chat-stasher/src/nativehost.rs:2534`, `:2559-2575`). It carries the
   install id, browser, profile label, extension version, a report time, and one
-  row per platform naming the platform, how many captures this browser confirmed,
-  how many are still pending and the pause reason when the leg is stopped —
-  counts and codes, no conversation text, no session id and no scope label
+  row per platform naming the platform, how many captures this browser
+  confirmed, how many are still pending, why a leg is paused, and — for a row
+  that has one — that account's install-local fingerprint, which stays
+  incomparable across installs by construction. It is metadata only — counts,
+  codes, a version string and timestamps — and it carries no conversation text,
+  no session id and no scope label
   (`apps/extension/entrypoints/background.ts:2925-2954`). This is what makes an
   install visible *as an install*: a capture puts the same names on a shard, but
   only this record says how much that profile holds and when it last reported,
