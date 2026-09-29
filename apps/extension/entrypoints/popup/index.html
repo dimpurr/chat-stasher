@@ -190,6 +190,19 @@
     <h1>Chat Stasher</h1>
     <div id="install-label"></div>
     <div id="other-installs" hidden></div>
+    <!-- 🔴 EXT-13 · Shown only when the host says this install id is shared by
+         more than one live copy. It is hidden until then, and it stays hidden
+         when the question could not be asked: the button rotates an identity
+         and cannot be undone from here, so it appears on evidence only. -->
+    <div id="identity-conflict" hidden>
+      <strong id="identity-conflict-title"></strong>
+      <p id="identity-conflict-body"></p>
+      <p id="identity-conflict-kept"></p>
+      <p id="identity-conflict-history"></p>
+      <div class="row">
+        <button type="button" id="rekey-identity"></button>
+      </div>
+    </div>
     <div id="install-name-row" class="row" hidden>
       <input id="install-profile-label" maxlength="80" />
       <button type="button" id="save-install-profile-label"></button>

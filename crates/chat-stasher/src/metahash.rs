@@ -54,7 +54,37 @@ fn stage_metadata_files(stage: &Path, machine: &str) -> anyhow::Result<Vec<(Stri
         };
         for entry in entries {
             let entry = entry?;
-            if !entry.file_type()?.is_file() {
+            let kind = entry.file_type()?;
+            // EXT-13 · Status records are keyed by `(machine, install_id)`, so
+            // the machine is a directory. Descending exactly one level here is
+            // what keeps "the status alone is content, and changing it triggers
+            // a push" true of the new layout — a walker that only looked at
+            // files would silently stop seeing every report and the stage would
+            // never push again. The digest keeps the relative key, so the two
+            // layouts hash differently and the first push after the migration
+            // says "changed", as it should.
+            if kind.is_dir() {
+                if namespace != "ext-status" {
+                    continue;
+                }
+                let sub = entry.file_name().to_string_lossy().into_owned();
+                if sub.starts_with('.') {
+                    continue;
+                }
+                for inner in fs::read_dir(entry.path())? {
+                    let inner = inner?;
+                    if !inner.file_type()?.is_file() {
+                        continue;
+                    }
+                    let name = inner.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') || !name.ends_with(".json") {
+                        continue;
+                    }
+                    files.push((format!("{namespace}/{sub}/{name}"), inner.path()));
+                }
+                continue;
+            }
+            if !kind.is_file() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -326,6 +356,84 @@ mod tests {
             evaluate_run_once_change(&stage, machine, &state_dir, 0, false)
                 .expect("changed status"),
             (true, true)
+        );
+    }
+
+    /// EXT-13 · The keyed layout puts the machine between the directory and the
+    /// file, so a walker that only looked at files would stop seeing every
+    /// status record — and `has_meta_files` would answer "nothing to push" while
+    /// reports piled up. The property above is asserted on the flat layout
+    /// alone, which is exactly why it could not catch that; this pins it on the
+    /// shape the host now writes.
+    #[test]
+    fn keyed_extension_status_is_content_and_changes_trigger_push() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stage = dir.path().join("stage");
+        let state_dir = dir.path().join("state");
+        let machine = "mac-test";
+        let status_dir = stage.join("ext-status").join(machine);
+        fs::create_dir_all(&status_dir).expect("create status dir");
+
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false).expect("empty"),
+            (false, false),
+            "an empty stage has nothing to push"
+        );
+        let status = status_dir.join("install-123.json");
+        fs::write(&status, r#"{"reported_at":"2026-09-27T00:00:00Z"}"#).expect("write");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false).expect("new status"),
+            (true, true),
+            "a keyed status record alone is content"
+        );
+
+        save_pushed_meta_hash(&stage, machine, &state_dir).expect("record successful push");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false)
+                .expect("unchanged status"),
+            (true, false)
+        );
+
+        fs::write(&status, r#"{"reported_at":"2026-09-27T01:00:00Z"}"#).expect("update");
+        assert_eq!(
+            evaluate_run_once_change(&stage, machine, &state_dir, 0, false)
+                .expect("changed status"),
+            (true, true)
+        );
+    }
+
+    /// The migration keeps the pre-migration file, so both layouts can hold a
+    /// record for one install at once. They are two files with two relative
+    /// keys, and the digest has to see both — a walker that picked one shape
+    /// would make the other's changes invisible to the push decision.
+    #[test]
+    fn both_status_layouts_are_counted_towards_one_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stage = dir.path().join("stage");
+        let flat = stage.join("ext-status").join("install-123.json");
+        fs::create_dir_all(flat.parent().expect("dir")).expect("create");
+        fs::write(&flat, r#"{"reported_at":"2026-09-27T00:00:00Z"}"#).expect("write flat");
+        let only_flat = compute_meta_hash(&stage, "mac-test")
+            .expect("hash")
+            .expect("some");
+
+        let keyed = stage
+            .join("ext-status")
+            .join("mac-test")
+            .join("install-123.json");
+        fs::create_dir_all(keyed.parent().expect("dir")).expect("create keyed dir");
+        fs::write(&keyed, r#"{"reported_at":"2026-09-27T00:00:00Z"}"#).expect("write keyed");
+        assert_eq!(
+            count_meta_files(&stage, "mac-test").expect("count"),
+            2,
+            "both layouts are seen"
+        );
+        let both = compute_meta_hash(&stage, "mac-test")
+            .expect("hash")
+            .expect("some");
+        assert_ne!(
+            only_flat, both,
+            "adding a keyed record changes the digest, so the next push is not skipped"
         );
     }
 }

@@ -32,14 +32,18 @@
 //! `crates/chat-stasher/src/nativehost.rs` together"), so the host lives here
 //! rather than in a module of its own.
 //!
-//! Beyond `hello` and `deliver`, the host answers three **read-only queries**
-//! (§6.4 `summary`, §6.5 `open_dashboard`, §6.8 `other_installs`). These
-//! queries do not mutate the stage or archive. `summary` reads stage directory entries and shard
+//! Beyond `hello` and `deliver`, the host answers four **read-only queries**
+//! (§6.4 `summary`, §6.5 `open_dashboard`, §6.8 `other_installs`, §6.9
+//! `identity_state`). These queries do not mutate the stage or archive.
+//! `summary` reads stage directory entries and shard
 //! mtimes; it never opens a shard, decrypts the repository or touches the
 //! network. `open_dashboard` starts this same binary as `ui` and hands the
 //! per-launch URL to the calling extension only. `other_installs` runs the
 //! existing archive overview, then returns one count without returning install
-//! ids or per-platform rows. Every failed read remains a failure, never a zero.
+//! ids or per-platform rows. `identity_state` answers from the host's own
+//! coordination state — whether two live writers have been observed sharing one
+//! install id — and writes nothing, which is why a popup may ask it on every
+//! open. Every failed read remains a failure, never a zero.
 //!
 //! The framing rules that decide the shape of everything below:
 //!
@@ -131,6 +135,7 @@
 //!   [`crate::doctor`]'s `NoDiscoveryPath` — never as `NotRegistered`.
 
 use anyhow::{bail, Context, Result};
+use rusqlite::OptionalExtension as _;
 use serde::Deserialize;
 use std::ffi::OsStr;
 use std::fs;
@@ -1127,6 +1132,16 @@ pub enum NackKind {
     /// host, so waiting for the host to change state can never deliver these
     /// bytes — the extension has to see the refusal and stop retrying.
     InstallConflict,
+    /// EXT-13 / ADR-045: two live writers were observed sharing this
+    /// `install_id` — one `report_seq` reached the host twice under different
+    /// nonces, which two copies advancing independent counters cannot avoid for
+    /// long and one writer cannot produce at all. Item-scope
+    /// and **retryable**, unlike [`NackKind::InstallConflict`]: the bytes are
+    /// not wrong, they are unattributable, and ADR-045 §3 says they stay queued
+    /// until a person gives one of the copies its own identity. Marking them
+    /// rejected would tell the user their capture was refused when nothing has
+    /// decided that.
+    IdentityConflict,
     Config,
     StageUnavailable,
     Io,
@@ -1142,6 +1157,7 @@ impl NackKind {
             NackKind::Integrity => "integrity",
             NackKind::InvalidBundle => "invalid-bundle",
             NackKind::InstallConflict => "install-conflict",
+            NackKind::IdentityConflict => "identity-conflict",
             NackKind::Config => "config",
             NackKind::StageUnavailable => "stage-unavailable",
             NackKind::Io => "io",
@@ -1153,7 +1169,10 @@ impl NackKind {
     /// sad the message sounds.
     pub fn retryable(self) -> bool {
         match self {
-            NackKind::Integrity | NackKind::StageUnavailable | NackKind::Io => true,
+            NackKind::Integrity
+            | NackKind::StageUnavailable
+            | NackKind::Io
+            | NackKind::IdentityConflict => true,
             NackKind::ProtocolVersion
             | NackKind::BadRequest
             | NackKind::TooLarge
@@ -1215,6 +1234,16 @@ struct DeliverRequest {
     fingerprint: Option<String>,
     /// W218 · transient account id used only by the host to derive the archive key.
     account_id: Option<String>,
+    /// EXT-13 · the sender's monotonic report sequence (ADR-045). Optional, and
+    /// absent is the ordinary case for an extension older than the field: the
+    /// capture is still archived, it simply carries no evidence about which of
+    /// two copies sent it. It is *not* persisted on the shard — the sequence is
+    /// a property of the writer, not of the conversation.
+    report_seq: Option<u64>,
+    /// EXT-13 · the token minted with that sequence. A sequence is evidence only
+    /// beside it (see [`record_report_seq`]); absent means the sender could not
+    /// mint one, which is recorded as *unknown* rather than compared.
+    report_nonce: Option<String>,
 }
 
 /// `has` request body (§6.6). `protocol` and `type` are checked before this is
@@ -1351,40 +1380,20 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
         HostTarget::Ready { machine, stage } => (machine, stage),
         HostTarget::Refused { kind, detail } => return nack(Some(request_id), kind, detail),
     };
-    let state_dir = crate::collect::default_state_dir();
-    if let Err(e) = fs::create_dir_all(&state_dir) {
-        return nack(
-            Some(request_id),
-            NackKind::Io,
-            format!("cannot prepare coordination state: {e}"),
-        );
-    }
-    let conn = match rusqlite::Connection::open(state_dir.join("extension-coordination.sqlite3")) {
+    // 🔴 EXT-13 · The identity gate is **not** asked here. It is asked inside
+    //    the transaction below, on the connection that holds it; the note on
+    //    `coordinate_in_transaction` says why that ordering is the whole
+    //    guarantee.
+    let conn = match open_state_db() {
         Ok(conn) => conn,
         Err(e) => {
             return nack(
                 Some(request_id),
                 NackKind::Io,
-                format!("cannot open coordination state: {e}"),
+                format!("cannot open coordination state: {e:#}"),
             )
         }
     };
-    let setup = conn.execute_batch(
-        "PRAGMA busy_timeout=5000;
-         CREATE TABLE IF NOT EXISTS ext_install(platform TEXT NOT NULL, install_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id));
-         CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));
-         CREATE TABLE IF NOT EXISTS ext_install_v2(platform TEXT NOT NULL, install_id TEXT NOT NULL, account_key TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id,account_key));
-         CREATE TABLE IF NOT EXISTS ext_platform_v2(machine TEXT NOT NULL, platform TEXT NOT NULL, account_key TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform,account_key));
-         INSERT OR IGNORE INTO ext_install_v2(platform,install_id,account_key,seen_at) SELECT platform,install_id,'',seen_at FROM ext_install;
-         INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key,owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count) SELECT machine,platform,'',owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform;"
-    );
-    if let Err(e) = setup {
-        return nack(
-            Some(request_id),
-            NackKind::Io,
-            format!("cannot initialize coordination state: {e}"),
-        );
-    }
     if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
         return nack(
             Some(request_id),
@@ -1400,96 +1409,9 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
         .and_then(|id| cross_install_account_key(&parsed.platform, id))
         // reason: missing account identity or masterkey keeps arbitration platform-wide.
         .unwrap_or_default(); // reason: missing account identity or masterkey keeps arbitration platform-wide.
-    let result = (|| -> anyhow::Result<serde_json::Value> {
-        conn.execute(
-            "DELETE FROM ext_install_v2 WHERE seen_at<=?1",
-            [now - 30 * 24 * 60 * 60 * 1000],
-        )?;
-        conn.execute("INSERT INTO ext_install_v2(platform,install_id,account_key,seen_at) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,install_id,account_key) DO UPDATE SET seen_at=excluded.seen_at", rusqlite::params![parsed.platform, parsed.install_id, account_key, now])?;
-        conn.execute(
-            "INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key) VALUES(?1,?2,?3)",
-            rusqlite::params![machine, parsed.platform, account_key],
-        )?;
-        let (owner, lease_until, cooldown_until, next_enum, next_detail, detail_day, detail_count): (Option<String>,i64,i64,i64,i64,String,i64) = conn.query_row("SELECT owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform_v2 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
-        conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND lease_until<=?4", rusqlite::params![machine,parsed.platform,account_key,now])?;
-        let active: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ext_install_v2 WHERE platform=?1 AND account_key=?2 AND seen_at>?3",
-            rusqlite::params![parsed.platform, account_key, now - 24 * 60 * 60 * 1000],
-            |r| r.get(0),
-        )?;
-        let mut granted = false;
-        let mut wait = 0i64;
-        let mut new_cooldown = cooldown_until;
-        match parsed.mode.as_str() {
-            "claim" => {
-                let owner_available =
-                    lease_until <= now || owner.as_deref() == Some(parsed.install_id.as_str());
-                wait = if cooldown_until > now {
-                    cooldown_until - now
-                } else if !owner_available {
-                    (lease_until - now).max(0)
-                } else {
-                    0
-                };
-                granted = owner_available && wait == 0;
-                if granted && wait == 0 {
-                    conn.execute("UPDATE ext_platform_v2 SET owner=?4,lease_until=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id,now+120_000])?;
-                }
-            }
-            "release" => {
-                conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND owner=?4", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id])?;
-                granted = true;
-            }
-            "rate_limit" => {
-                let header = parsed
-                    .retry_after_ms
-                    .unwrap_or(0) // reason: missing Retry-After still applies the 60s machine cooldown floor.
-                    .min(30 * 24 * 60 * 60 * 1000) as i64;
-                new_cooldown = now + header.max(60_000);
-                conn.execute("UPDATE ext_platform_v2 SET cooldown_until=MAX(cooldown_until,?4) WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,new_cooldown])?;
-                wait = header.max(60_000);
-            }
-            _ => {
-                let is_detail = parsed.segment.as_deref() == Some("detail");
-                let owner_ok =
-                    owner.as_deref() == Some(parsed.install_id.as_str()) && lease_until > now;
-                let cooldown_wait = (cooldown_until - now).max(0);
-                let next = if is_detail { next_detail } else { next_enum };
-                let daily_count = if detail_day == today { detail_count } else { 0 };
-                let daily_wait = if is_detail && daily_count >= 400 {
-                    60_000
-                } else {
-                    0
-                };
-                wait = cooldown_wait.max((next - now).max(0)).max(daily_wait);
-                granted = owner_ok && wait == 0;
-                if granted {
-                    let interval = if is_detail {
-                        if active > 1 {
-                            45_000
-                        } else {
-                            20_000
-                        }
-                    } else if active > 1 {
-                        4_000
-                    } else {
-                        2_000
-                    };
-                    let next_at = now + interval;
-                    if is_detail {
-                        conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_detail=?5,detail_day=?6,detail_count=CASE WHEN detail_day=?6 THEN detail_count+1 ELSE 1 END WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at,today])?;
-                    } else {
-                        conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_enum=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at])?;
-                    }
-                }
-            }
-        }
-        Ok(
-            serde_json::json!({"protocol":PROTOCOL,"type":"coordination","ok":true,"request_id":request_id,"granted":granted,"active_installs":active,"gentle":active>1,"cooldown_until":new_cooldown,"wait_ms":wait}),
-        )
-    })();
+    let result = coordinate_in_transaction(&conn, &machine, &parsed, now, &today, &account_key);
     match result {
-        Ok(value) => match conn.execute_batch("COMMIT") {
+        Ok(CoordinationOutcome::Answered(value)) => match conn.execute_batch("COMMIT") {
             Ok(()) => value,
             Err(e) => nack(
                 Some(request_id),
@@ -1497,6 +1419,20 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
                 format!("cannot save coordination state: {e}"),
             ),
         },
+        Ok(CoordinationOutcome::Refused(kind, detail)) => {
+            // The refusal is the answer, and the transaction is rolled back with
+            // it: a claim that is not granted leaves nothing behind, not even
+            // the bookkeeping the body had already done on the way there.
+            let rollback = conn.execute_batch("ROLLBACK");
+            if let Err(rollback_error) = rollback {
+                return nack(
+                    Some(request_id),
+                    NackKind::Io,
+                    format!("identity refusal could not be rolled back: {rollback_error}"),
+                );
+            }
+            nack(Some(request_id), kind, detail)
+        }
         Err(e) => {
             let rollback = conn.execute_batch("ROLLBACK");
             if let Err(rollback_error) = rollback {
@@ -1515,6 +1451,535 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
     }
 }
 
+/// What one coordination body decided, for the caller that owns its transaction.
+enum CoordinationOutcome {
+    /// The request was answered; the caller commits and returns this value.
+    Answered(serde_json::Value),
+    /// The identity gate refused it: the caller rolls back and answers this nack.
+    Refused(NackKind, String),
+}
+
+/// The coordination body, run inside the caller's `BEGIN IMMEDIATE`.
+///
+/// It is a function rather than a closure so a test can drive it against a
+/// transaction it controls — including one another connection has already taken
+/// the write lock on, which is the state a second host process is in whenever
+/// two requests arrive together.
+fn coordinate_in_transaction(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    parsed: &CoordinationRequest,
+    now: i64,
+    today: &str,
+    account_key: &str,
+) -> anyhow::Result<CoordinationOutcome> {
+    // 🔴 EXT-13 · An install id that two live writers have been observed sharing
+    //    claims no lease. Backfill is the one path that issues bulk requests
+    //    against a platform, so a set of writes that cannot be attributed to one
+    //    profile is exactly what must not run — and ADR-045 §3 puts the repair,
+    //    not this gate, in charge of lifting it.
+    //
+    //    The gate is asked **here**, on the connection that holds the write lock
+    //    and therefore inside the same transaction as the grant below. That is
+    //    the guarantee: native messaging starts a host process per request, so
+    //    another writer's conflict can be committed at any moment, and a gate
+    //    consulted before the lock would answer from a state that may already
+    //    have changed by the time this claim is written. `release` and
+    //    `rate_limit` are deliberately not gated: they are bookkeeping about
+    //    work already granted, and refusing them would leave a stale lease or an
+    //    unreported cooldown behind for the next claimant.
+    if matches!(parsed.mode.as_str(), "claim" | "token") {
+        if let Some((kind, detail)) = identity_refusal(conn, machine, &parsed.install_id)? {
+            return Ok(CoordinationOutcome::Refused(kind, detail));
+        }
+    }
+    conn.execute(
+        "DELETE FROM ext_install_v2 WHERE seen_at<=?1",
+        [now - 30 * 24 * 60 * 60 * 1000],
+    )?;
+    conn.execute("INSERT INTO ext_install_v2(platform,install_id,account_key,seen_at) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,install_id,account_key) DO UPDATE SET seen_at=excluded.seen_at", rusqlite::params![parsed.platform, parsed.install_id, account_key, now])?;
+    conn.execute(
+        "INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key) VALUES(?1,?2,?3)",
+        rusqlite::params![machine, parsed.platform, account_key],
+    )?;
+    let (owner, lease_until, cooldown_until, next_enum, next_detail, detail_day, detail_count): (Option<String>,i64,i64,i64,i64,String,i64) = conn.query_row("SELECT owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform_v2 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+    conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND lease_until<=?4", rusqlite::params![machine,parsed.platform,account_key,now])?;
+    let active: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ext_install_v2 WHERE platform=?1 AND account_key=?2 AND seen_at>?3",
+        rusqlite::params![parsed.platform, account_key, now - 24 * 60 * 60 * 1000],
+        |r| r.get(0),
+    )?;
+    let mut granted = false;
+    let mut wait = 0i64;
+    let mut new_cooldown = cooldown_until;
+    match parsed.mode.as_str() {
+        "claim" => {
+            let owner_available =
+                lease_until <= now || owner.as_deref() == Some(parsed.install_id.as_str());
+            wait = if cooldown_until > now {
+                cooldown_until - now
+            } else if !owner_available {
+                (lease_until - now).max(0)
+            } else {
+                0
+            };
+            granted = owner_available && wait == 0;
+            if granted && wait == 0 {
+                conn.execute("UPDATE ext_platform_v2 SET owner=?4,lease_until=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id,now+120_000])?;
+            }
+        }
+        "release" => {
+            conn.execute("UPDATE ext_platform_v2 SET owner=NULL,lease_until=0 WHERE machine=?1 AND platform=?2 AND account_key=?3 AND owner=?4", rusqlite::params![machine,parsed.platform,account_key,parsed.install_id])?;
+            granted = true;
+        }
+        "rate_limit" => {
+            let header = parsed
+                .retry_after_ms
+                .unwrap_or(0) // reason: missing Retry-After still applies the 60s machine cooldown floor.
+                .min(30 * 24 * 60 * 60 * 1000) as i64;
+            new_cooldown = now + header.max(60_000);
+            conn.execute("UPDATE ext_platform_v2 SET cooldown_until=MAX(cooldown_until,?4) WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,new_cooldown])?;
+            wait = header.max(60_000);
+        }
+        _ => {
+            let is_detail = parsed.segment.as_deref() == Some("detail");
+            let owner_ok =
+                owner.as_deref() == Some(parsed.install_id.as_str()) && lease_until > now;
+            let cooldown_wait = (cooldown_until - now).max(0);
+            let next = if is_detail { next_detail } else { next_enum };
+            let daily_count = if detail_day == today { detail_count } else { 0 };
+            let daily_wait = if is_detail && daily_count >= 400 {
+                60_000
+            } else {
+                0
+            };
+            wait = cooldown_wait.max((next - now).max(0)).max(daily_wait);
+            granted = owner_ok && wait == 0;
+            if granted {
+                let interval = if is_detail {
+                    if active > 1 {
+                        45_000
+                    } else {
+                        20_000
+                    }
+                } else if active > 1 {
+                    4_000
+                } else {
+                    2_000
+                };
+                let next_at = now + interval;
+                if is_detail {
+                    conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_detail=?5,detail_day=?6,detail_count=CASE WHEN detail_day=?6 THEN detail_count+1 ELSE 1 END WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at,today])?;
+                } else {
+                    conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,next_enum=?5 WHERE machine=?1 AND platform=?2 AND account_key=?3", rusqlite::params![machine,parsed.platform,account_key,now+120_000,next_at])?;
+                }
+            }
+        }
+    }
+    Ok(CoordinationOutcome::Answered(
+        serde_json::json!({"protocol":PROTOCOL,"type":"coordination","ok":true,"request_id":parsed.request_id,"granted":granted,"active_installs":active,"gentle":active>1,"cooldown_until":new_cooldown,"wait_ms":wait}),
+    ))
+}
+
+/// EXT-13 / ADR-045 · the host's own state database, shared by every handler
+/// that has to agree with another host process about one install id.
+///
+/// Native messaging starts a **fresh host process per request**, so a plain
+/// file cannot be the mutex: two requests that arrive together would each read
+/// the same base and each write their own answer, and the loser's observation
+/// would simply be gone. SQLite's `BEGIN IMMEDIATE` is the cross-process mutex
+/// this codebase already uses for coordination, and identity state needs
+/// exactly the same guarantee — a lost update there would *hide* a detected
+/// clone, which is the one direction the whole mechanism must not fail in.
+const STATE_SCHEMA: &str = "PRAGMA busy_timeout=5000;
+     CREATE TABLE IF NOT EXISTS ext_install(platform TEXT NOT NULL, install_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id));
+     CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));
+     CREATE TABLE IF NOT EXISTS ext_install_v2(platform TEXT NOT NULL, install_id TEXT NOT NULL, account_key TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id,account_key));
+     CREATE TABLE IF NOT EXISTS ext_platform_v2(machine TEXT NOT NULL, platform TEXT NOT NULL, account_key TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform,account_key));
+     INSERT OR IGNORE INTO ext_install_v2(platform,install_id,account_key,seen_at) SELECT platform,install_id,'',seen_at FROM ext_install;
+     INSERT OR IGNORE INTO ext_platform_v2(machine,platform,account_key,owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count) SELECT machine,platform,'',owner,lease_until,cooldown_until,next_enum,next_detail,detail_day,detail_count FROM ext_platform;
+     CREATE TABLE IF NOT EXISTS ext_identity(machine TEXT NOT NULL, install_id TEXT NOT NULL, last_report_seq INTEGER, identity_conflict INTEGER NOT NULL DEFAULT 0, conflict_at INTEGER, conflict_evidence TEXT, seen_at INTEGER NOT NULL, PRIMARY KEY(machine, install_id));
+     CREATE TABLE IF NOT EXISTS ext_identity_seq(machine TEXT NOT NULL, install_id TEXT NOT NULL, seq INTEGER NOT NULL, nonce TEXT, seen_at INTEGER NOT NULL, PRIMARY KEY(machine, install_id, seq));";
+
+/// The state database, with its schema applied. Never created implicitly by a
+/// read: a missing directory is an error the caller answers with, not a
+/// silently empty state that would read as "no conflict".
+fn open_state_db() -> anyhow::Result<rusqlite::Connection> {
+    open_state_db_at(&crate::collect::default_state_dir())
+}
+
+/// [`open_state_db`] against a named directory, so a test can open two
+/// connections to **one** database and watch what one transaction can see of the
+/// other's uncommitted work.
+fn open_state_db_at(state_dir: &Path) -> anyhow::Result<rusqlite::Connection> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("prepare coordination state in {}", state_dir.display()))?;
+    let conn = rusqlite::Connection::open(state_dir.join("extension-coordination.sqlite3"))
+        .context("open coordination state")?;
+    conn.execute_batch(STATE_SCHEMA)
+        .context("initialize coordination state")?;
+    Ok(conn)
+}
+
+/// How many `(seq, nonce)` observations one `(machine, install_id)` retains.
+///
+/// The window is what makes "one sequence under two different nonces" mean
+/// something: a sequence the host still remembers can be compared, and one it
+/// has forgotten cannot. It is bounded because the host is not an archive of
+/// every number a browser ever sent — 64 is far more than the reordering,
+/// retries and worker restarts that produce a legitimate repeat can span, and
+/// anything older is accepted without judgement rather than remembered forever.
+///
+/// Public because the protocol tests assert on both sides of the bound: that a
+/// sequence **at** it is judged and one below it is not. A test that restated
+/// the number would pass while the two drifted apart.
+pub const IDENTITY_SEQ_WINDOW: i64 = 64;
+
+/// What one `(report_seq, report_nonce)` observation did to the record for
+/// `(machine, install_id)`.
+///
+/// The outcomes are different facts and stay distinct: a first value
+/// establishes the key, a higher one advances it, an identical *pair* is the
+/// same allocation seen twice, a sequence older than everything retained is
+/// accepted without a judgement to make, and one sequence under a **different**
+/// nonce is the only positive evidence the protocol has that two live writers
+/// share the id. A report with no sequence is none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeqObservation {
+    /// The report carried no `report_seq` — an extension older than the field.
+    Unknown,
+    /// The same `(seq, nonce)` this record already holds: one allocation,
+    /// arriving twice. A retried or replayed frame is this, and it is not a copy.
+    Retry(u64),
+    /// A sequence that was not recorded and could be judged. `first` says it is
+    /// the earliest one retained.
+    Recorded { seq: u64, first: bool },
+    /// A sequence below everything retained: there is no recorded nonce to
+    /// compare it against, so it is accepted and **not** judged.
+    Unjudged(u64),
+    /// One sequence, two different nonces.
+    Conflict(u64),
+}
+
+/// What the host knows about one `(machine, install_id)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdentityRecord {
+    /// `None` means no report has ever carried a sequence. It is *unknown*, and
+    /// deliberately not `0`: zero is a value a writer can send, and a fabricated
+    /// one would be indistinguishable from a writer that has never reported.
+    last_report_seq: Option<u64>,
+    identity_conflict: bool,
+}
+
+/// Fold one `(report_seq, report_nonce)` observation into the record for
+/// `(machine, install_id)`, inside the caller's transaction.
+///
+/// **A sequence is evidence only together with the nonce minted for it.** Two
+/// copies start from the same stored value and advance independently, so they
+/// send the *same numbers*, and a number that repeats also arises from one
+/// writer whose frame is retried or replayed. Comparing sequences therefore
+/// says nothing on its own — and treating a regression as the signal meant a
+/// merely late arrival, a timeout, or a restarted worker accused an honest
+/// install of being a copy. What is compared here is the **pair**: a repeat of
+/// a pair already recorded is one allocation arriving twice, while one sequence
+/// under a different nonce is two allocations of the same number, which no
+/// single writer can produce.
+///
+/// The conflict flag is **sticky**. Two writers that have proved they share an
+/// id do not become one writer again because the next report happens to order
+/// correctly — that is exactly what the *other* copy's report looks like. The
+/// only way out is a new install id, which is a new key here and starts clean.
+fn record_report_seq(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    install_id: &str,
+    seq: Option<u64>,
+    nonce: Option<&str>,
+    now_ms: i64,
+) -> anyhow::Result<(IdentityRecord, SeqObservation)> {
+    let existing = conn
+        .query_row(
+            "SELECT last_report_seq, identity_conflict, conflict_at FROM ext_identity WHERE machine=?1 AND install_id=?2",
+            rusqlite::params![machine, install_id],
+            |row| {
+                Ok((
+                    // reason: an unrepresentable stored sequence is no recorded sequence.
+                    row.get::<_, Option<i64>>(0)?.and_then(|v| u64::try_from(v).ok()),
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (previous, was_conflicted, first_conflict_at) = existing.unwrap_or((None, false, None));
+    let observation = match seq {
+        None => SeqObservation::Unknown,
+        Some(value) => {
+            let stored = conn
+                .query_row(
+                    "SELECT nonce FROM ext_identity_seq WHERE machine=?1 AND install_id=?2 AND seq=?3",
+                    rusqlite::params![machine, install_id, value as i64],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            match stored {
+                // 🔴 Only two *known* and different nonces are evidence. A side
+                //    that is absent is not a second value — it is the host not
+                //    having been told — so it is never the difference that
+                //    accuses a writer of being a copy.
+                Some(recorded) => match (recorded.as_deref(), nonce) {
+                    (Some(recorded), Some(arriving)) if recorded != arriving => {
+                        SeqObservation::Conflict(value)
+                    }
+                    // The sequence is known but its nonce was never sent. The
+                    // first arrival that names one is not a second allocation,
+                    // so it is learned rather than judged.
+                    (None, Some(arriving)) => {
+                        conn.execute(
+                            "UPDATE ext_identity_seq SET nonce=?4, seen_at=?5 WHERE machine=?1 AND install_id=?2 AND seq=?3",
+                            rusqlite::params![
+                                machine,
+                                install_id,
+                                value as i64,
+                                arriving,
+                                now_ms
+                            ],
+                        )?;
+                        SeqObservation::Retry(value)
+                    }
+                    _ => SeqObservation::Retry(value),
+                },
+                None => {
+                    let floor: Option<i64> = conn
+                        .query_row(
+                            "SELECT MIN(seq) FROM ext_identity_seq WHERE machine=?1 AND install_id=?2",
+                            rusqlite::params![machine, install_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if floor.is_some_and(|floor| (value as i64) < floor) {
+                        // Below everything retained ⇒ there is no recorded nonce
+                        // to compare against and no judgement to make. It is not
+                        // recorded either: the window would prune it on the way
+                        // in, so storing it would only claim a memory this id
+                        // does not keep.
+                        SeqObservation::Unjudged(value)
+                    } else {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO ext_identity_seq(machine,install_id,seq,nonce,seen_at) VALUES(?1,?2,?3,?4,?5)",
+                            rusqlite::params![machine, install_id, value as i64, nonce, now_ms],
+                        )?;
+                        SeqObservation::Recorded {
+                            seq: value,
+                            first: previous.is_none(),
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let (next, conflicted, evidence) = match observation {
+        SeqObservation::Unknown | SeqObservation::Retry(_) | SeqObservation::Unjudged(_) => {
+            (previous, was_conflicted, None)
+        }
+        SeqObservation::Recorded { seq, .. } => (
+            Some(previous.map_or(seq, |previous| previous.max(seq))),
+            was_conflicted,
+            None,
+        ),
+        SeqObservation::Conflict(value) => (
+            previous,
+            true,
+            Some(format!(
+                "report_seq {value} arrived with a different report_nonce than the one recorded for it: two live writers allocated the same sequence independently"
+            )),
+        ),
+    };
+    let conflict_at = if conflicted {
+        first_conflict_at.or(Some(now_ms))
+    } else {
+        None
+    };
+    conn.execute(
+        "INSERT INTO ext_identity(machine,install_id,last_report_seq,identity_conflict,conflict_at,conflict_evidence,seen_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(machine,install_id) DO UPDATE SET
+           last_report_seq=COALESCE(excluded.last_report_seq, ext_identity.last_report_seq),
+           identity_conflict=excluded.identity_conflict,
+           conflict_at=excluded.conflict_at,
+           conflict_evidence=COALESCE(excluded.conflict_evidence, ext_identity.conflict_evidence),
+           seen_at=excluded.seen_at",
+        rusqlite::params![
+            machine,
+            install_id,
+            next.map(|value| value as i64),
+            conflicted,
+            conflict_at,
+            evidence,
+            now_ms
+        ],
+    )?;
+    // The window, and only the window, decides what a repeat can be judged
+    // against — so it is applied on every fold rather than when it happens to
+    // be convenient.
+    conn.execute(
+        "DELETE FROM ext_identity_seq WHERE machine=?1 AND install_id=?2 AND seq NOT IN (SELECT seq FROM ext_identity_seq WHERE machine=?1 AND install_id=?2 ORDER BY seq DESC LIMIT ?3)",
+        rusqlite::params![machine, install_id, IDENTITY_SEQ_WINDOW],
+    )?;
+    // A conflicted row is **never** pruned. Forgetting one would re-admit an id
+    // already known to be shared, and the next collision would have to be
+    // re-observed from two reports instead of one.
+    conn.execute(
+        "DELETE FROM ext_identity WHERE identity_conflict=0 AND seen_at<=?1",
+        [now_ms - 30 * 24 * 60 * 60 * 1000],
+    )?;
+    // An identity the table above has just forgotten cannot be compared against
+    // anything, so its window is not evidence and does not outlive it.
+    conn.execute(
+        "DELETE FROM ext_identity_seq WHERE NOT EXISTS (SELECT 1 FROM ext_identity i WHERE i.machine=ext_identity_seq.machine AND i.install_id=ext_identity_seq.install_id)",
+        [],
+    )?;
+    Ok((
+        IdentityRecord {
+            last_report_seq: next,
+            identity_conflict: conflicted,
+        },
+        observation,
+    ))
+}
+
+/// Read-only `(machine, install_id)` identity state, outside any transaction.
+fn read_identity_state(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    install_id: &str,
+) -> anyhow::Result<IdentityRecord> {
+    let found: Option<IdentityRecord> = conn
+        .query_row(
+            "SELECT last_report_seq, identity_conflict FROM ext_identity WHERE machine=?1 AND install_id=?2",
+            rusqlite::params![machine, install_id],
+            |row| {
+                Ok(IdentityRecord {
+                    // reason: an unrepresentable stored sequence is no recorded sequence.
+                    last_report_seq: row
+                        .get::<_, Option<i64>>(0)?
+                        .and_then(|v| u64::try_from(v).ok()),
+                    identity_conflict: row.get(1)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(found.unwrap_or(IdentityRecord {
+        last_report_seq: None,
+        identity_conflict: false,
+    }))
+}
+
+/// What a refusal tells the person reading it, in one place: the two callers
+/// that can answer it — a lease claim and a delivery — have to say the same
+/// thing, and a second copy of this sentence is a second thing to keep true.
+const IDENTITY_CONFLICT_DETAIL: &str = "this install_id is shared by more than one live copy: two writers sent the same report sequence, so neither copy can be told from the other. Nothing was archived and the capture stays queued. Give this profile a new identity in the extension popup; captures already archived keep the old identity";
+
+/// The host's answer to "may this install id act?", read **on the caller's own
+/// connection** and therefore inside the caller's transaction.
+///
+/// That is the whole point of the signature. A gate that opened its own
+/// connection would answer from a snapshot taken *before* the caller's
+/// transaction began, and a conflict another host process commits while this
+/// request waits for the lock would be invisible to it — so a lease would be
+/// granted, or a bundle sealed, on the strength of a state that had already
+/// changed. Reading through the connection that holds the write lock makes the
+/// question and the action it authorises one step.
+///
+/// ADR-045 §3 requires the copy to rekey before further status writes, lease
+/// claims, or delivery, and requires the refusal to be fail-closed — the
+/// capture stays queued, never dropped, and never archived under an identity
+/// that cannot be attributed to one profile.
+///
+/// `None` means the id is not known to be shared, which is not the same as
+/// "only one writer exists": until the first collision two copies are
+/// indistinguishable, and the ADR says so in as many words.
+fn identity_refusal(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    install_id: &str,
+) -> anyhow::Result<Option<(NackKind, String)>> {
+    if read_identity_state(conn, machine, install_id)?.identity_conflict {
+        Ok(Some((
+            NackKind::IdentityConflict,
+            IDENTITY_CONFLICT_DETAIL.to_string(),
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+/// `identity_state` — does the host know this install id to be shared?
+///
+/// Read-only and cheap, so the popup can ask once per open **without** writing
+/// anything. That matters for the state the ADR is most concerned about: an
+/// install whose backfill is switched off never sends a status report at all,
+/// so a flag that only ever rode on a report could not reach its popup.
+fn identity_state(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let Some(request_id) = request
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return nack(request_id, NackKind::BadRequest, "missing request_id");
+    };
+    if !valid_request_id(&request_id) {
+        return nack(
+            Some(request_id),
+            NackKind::BadRequest,
+            "malformed request_id",
+        );
+    }
+    let Some(install_id) = request.get("install_id").and_then(|v| v.as_str()) else {
+        return nack(Some(request_id), NackKind::BadRequest, "missing install_id");
+    };
+    if install_id.len() != 36
+        || !install_id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return nack(
+            Some(request_id),
+            NackKind::BadRequest,
+            "malformed install_id",
+        );
+    }
+    let machine = match resolve_target() {
+        HostTarget::Ready { machine, .. } => machine,
+        HostTarget::Refused { kind, detail } => return nack(Some(request_id), kind, detail),
+    };
+    let conn = match open_state_db() {
+        Ok(conn) => conn,
+        Err(e) => {
+            return nack(
+                Some(request_id),
+                NackKind::Io,
+                format!("cannot read identity state: {e:#}"),
+            )
+        }
+    };
+    match read_identity_state(&conn, &machine, install_id) {
+        Ok(state) => serde_json::json!({
+            "protocol": PROTOCOL,
+            "type": "identity_state",
+            "ok": true,
+            "request_id": request_id,
+            "identity_conflict": state.identity_conflict,
+        }),
+        Err(e) => nack(
+            Some(request_id),
+            NackKind::Io,
+            format!("cannot read identity state: {e:#}"),
+        ),
+    }
+}
+
 /// `[A-Za-z0-9_-]{1,128}` (§6.2).
 fn valid_request_id(id: &str) -> bool {
     !id.is_empty()
@@ -1522,6 +1987,17 @@ fn valid_request_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// EXT-13 · `report_nonce`, the token minted with a `report_seq`.
+///
+/// Deliberately the same grammar as a request id: an opaque, bounded token the
+/// host only ever compares for equality, never parses. What matters is that the
+/// host rejects an empty one, since an empty string is exactly what a writer
+/// would send if it had no random source to mint from — and "I have no nonce"
+/// is `report_nonce` being **absent**, which is a different message.
+fn valid_nonce(nonce: &str) -> bool {
+    valid_request_id(nonce)
 }
 
 /// `[0-9a-f]{64}` (§6.2).
@@ -1736,6 +2212,7 @@ pub fn respond(frame: &[u8]) -> serde_json::Value {
             Ok(()) => open_dashboard(echoed_id),
             Err(detail) => nack(echoed_id, NackKind::BadRequest, detail),
         },
+        Some("identity_state") => identity_state(request, echoed_id),
         Some("other_installs") => other_installs(request, echoed_id),
         Some(other) => nack(
             echoed_id,
@@ -1972,6 +2449,20 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             .get("platforms")
             .and_then(|v| v.as_array())
             .is_none_or(|v| v.len() > 100)
+        // EXT-13: optional, and absent is a real state — "this extension
+        // predates the field", which the host accepts and records as unknown.
+        // A present-but-not-a-sequence value is malformed, not unknown.
+        || status
+            .get("report_seq")
+            .is_some_and(|v| v.as_u64().is_none())
+        // EXT-13 · The nonce names the allocation a sequence was minted with, so
+        // it is meaningful only beside one. A nonce without a sequence is a
+        // message that believes it supplied evidence and did not — malformed,
+        // not a state the host could record.
+        || status
+            .get("report_nonce")
+            .is_some_and(|v| v.as_str().is_none_or(|s| !valid_nonce(s)))
+        || (status.get("report_nonce").is_some() && status.get("report_seq").is_none())
     {
         return nack(request_id, NackKind::BadRequest, "malformed status fields");
     }
@@ -1983,6 +2474,8 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 | "profile_label"
                 | "extension_version"
                 | "reported_at"
+                | "report_seq"
+                | "report_nonce"
                 | "platforms"
         )
     }) {
@@ -2040,12 +2533,37 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
     };
     let dir = stage.join("ext-status");
     let result = (|| -> anyhow::Result<()> {
-        fs::create_dir_all(&dir)?;
-        let target = dir.join(format!("{install_id}.json"));
-        let previous: serde_json::Value = fs::read(&target)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or(serde_json::Value::Null);
+        // ① EXT-13 · The sequence is recorded in the host's own state database
+        //    **before** the staged file is written. Two copies reporting at the
+        //    same moment would otherwise both read the same base and the later
+        //    write would erase the earlier one's observation — and the
+        //    observation erased would be the conflict, which is the one
+        //    direction this must never fail in. The staged record is what the
+        //    dashboard reads; this is what the gates read, and deriving one from
+        //    the other would make the gates depend on a file the stage may not
+        //    be able to accept. What this fold concluded stays in the database:
+        //    the report's own copy is written below, out of what the database
+        //    holds *then*, never out of the snapshot read here.
+        let conn = open_state_db()?;
+        with_immediate(&conn, || {
+            record_report_seq(
+                &conn,
+                &machine,
+                install_id,
+                status.get("report_seq").and_then(|v| v.as_u64()),
+                status.get("report_nonce").and_then(|v| v.as_str()),
+                chrono::Utc::now().timestamp_millis(),
+            )
+        })?;
+
+        // ① Status is keyed by `(machine, install_id)`: the machine is the
+        //    directory, so a record's own `machine` is not a claim the caller
+        //    can make and a copy cannot overwrite another machine's report.
+        let keyed_dir = dir.join(&machine);
+        fs::create_dir_all(&keyed_dir)?;
+        let target = keyed_dir.join(format!("{install_id}.json"));
+        let (previous, migrated_from_legacy) =
+            previous_status(&dir, &keyed_dir, &machine, install_id);
         let (daily_streak, reported_daily) = daily_report_history(
             &previous,
             status["reported_at"]
@@ -2053,16 +2571,19 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 .expect("validated reported_at"),
         )?;
         let mut value = parsed["status"].clone();
-        value["machine"] = serde_json::Value::String(machine);
+        value["machine"] = serde_json::Value::String(machine.clone());
         value["schema"] = serde_json::Value::String("chat-stasher/ext-status@1".into());
         value["daily_report_streak"] = serde_json::Value::from(daily_streak);
         value["reported_daily"] = serde_json::Value::Bool(reported_daily);
-        let bytes = serde_json::to_vec(&value)?;
-        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
-        use std::io::Write as _;
-        temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
-        temp.persist(&target).map_err(|e| e.error)?;
+        if migrated_from_legacy {
+            value["legacy_migration"] = serde_json::Value::Bool(true);
+        }
+        // 🔴 `report_seq` is the caller's own observation and is written back
+        //    **verbatim**, including its absence. Writing the host's
+        //    high-water mark here instead would make the file say the record's
+        //    sequence is something the record's writer never sent, and the
+        //    high-water mark is already the host's business in its own state.
+        publish_status_record(&conn, &machine, install_id, value, &keyed_dir, &target)?;
         Ok(())
     })();
     match result {
@@ -2074,6 +2595,122 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             NackKind::Io,
             format!("cannot persist extension status: {e}"),
         ),
+    }
+}
+
+/// Publish one staged status record — the copy the dashboard reads — carrying
+/// the conflict flag **as the state database holds it when the file is written**.
+///
+/// ④ The flag is read and the file renamed inside **one** transaction, and the
+/// flag is not the one the report read when it recorded its own sequence. The
+/// two are not the same fact, and the difference is a slow writer: a report can
+/// be delayed between its own record and this write for reasons that have
+/// nothing to do with a copy (a busy disk, a suspended process, a stage on a
+/// network mount), and two copies reporting at once can commit their
+/// observations in one order and write their copies in the other. Reading the
+/// flag from the report's own snapshot is what would let that slower writer
+/// erase the conflict a faster copy had already published — leaving a dashboard
+/// that shows a clean install whose captures the host is refusing.
+///
+/// The lock is what makes the read and the write one step: a conflict committed
+/// after this transaction began cannot be committed *during* it, so a copy can
+/// only publish "no conflict" while no conflict exists, never after one was
+/// published. And the flag is sticky in the database (see `record_report_seq`),
+/// so a report that carries no conflict of its own still publishes the one the
+/// database holds — which is the point, not an accident.
+///
+/// Called after the record commits, so a stage that cannot accept the file takes
+/// the report's copy down without touching what the host learned.
+fn publish_status_record(
+    conn: &rusqlite::Connection,
+    machine: &str,
+    install_id: &str,
+    mut value: serde_json::Value,
+    keyed_dir: &Path,
+    target: &Path,
+) -> anyhow::Result<()> {
+    with_immediate(conn, || {
+        let identity = read_identity_state(conn, machine, install_id)?;
+        value["identity_conflict"] = serde_json::Value::Bool(identity.identity_conflict);
+        if identity.identity_conflict {
+            value["identity_conflict_evidence"] = serde_json::Value::String(
+                "two live writers share this install id: one report sequence reached it twice with different nonces".into(),
+            );
+        }
+        let bytes = serde_json::to_vec(&value)?;
+        // 🔴 Written to a temporary file in the destination directory and renamed
+        //    over the record, so a reader never sees half a record. Ordering two
+        //    writers' renames is the lock's doing, above.
+        let mut temp = tempfile::NamedTempFile::new_in(keyed_dir)?;
+        use std::io::Write as _;
+        temp.write_all(&bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist(target).map_err(|e| e.error)?;
+        Ok(())
+    })
+}
+
+/// The previous observation of one install, and whether it came from the legacy
+/// flat layout.
+///
+/// EXT-13 · Before `(machine, install_id)` keying there was exactly one file per
+/// install, `ext-status/<install_id>.json`, written only by the machine whose
+/// stage this is. It is read here as a **legacy observation of this machine**,
+/// which is why the record has to name the machine that wrote it: one whose
+/// `machine` disagrees is not this machine's observation of this install, and
+/// adopting its history would attribute another machine's reporting cadence to
+/// this one. Its own file is left exactly where it is — the stage is not the
+/// archive, and a migration that deleted it would destroy the only local copy
+/// of a report whose successor may never be written.
+fn previous_status(
+    dir: &Path,
+    keyed_dir: &Path,
+    machine: &str,
+    install_id: &str,
+) -> (serde_json::Value, bool) {
+    if let Ok(bytes) = fs::read(keyed_dir.join(format!("{install_id}.json"))) {
+        // reason: an unparseable keyed record means no readable history for the streak.
+        return (
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            false,
+        );
+    }
+    match fs::read(dir.join(format!("{install_id}.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    {
+        Some(legacy) if legacy.get("machine").and_then(|v| v.as_str()) == Some(machine) => {
+            (legacy, true)
+        }
+        // reason: a legacy record written by another machine, or with no
+        // readable machine, has no readable history to inherit here.
+        _ => (serde_json::Value::Null, false),
+    }
+}
+
+/// Run `body` inside `BEGIN IMMEDIATE`, committing on success and rolling back
+/// on failure. The lock is the cross-process mutex (`coordination`'s argument,
+/// which applies to every table in this file).
+fn with_immediate<T>(
+    conn: &rusqlite::Connection,
+    body: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .context("lock identity state")?;
+    match body() {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .context("save identity state")?;
+            Ok(value)
+        }
+        Err(e) => {
+            if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+                return Err(e.context(format!(
+                    "identity state failed; rollback failed: {rollback}"
+                )));
+            }
+            Err(e)
+        }
     }
 }
 
@@ -2168,6 +2805,23 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
     {
         return nack(request_id, NackKind::BadRequest, "malformed `account_id`");
     }
+    // EXT-13 · The nonce names the allocation its sequence was minted with, so
+    // it is meaningful only beside one — the same rule §6.7 applies to a status
+    // report, for the same reason.
+    if parsed
+        .report_nonce
+        .as_deref()
+        .is_some_and(|nonce| !valid_nonce(nonce))
+    {
+        return nack(request_id, NackKind::BadRequest, "malformed `report_nonce`");
+    }
+    if parsed.report_nonce.is_some() && parsed.report_seq.is_none() {
+        return nack(
+            request_id,
+            NackKind::BadRequest,
+            "`report_nonce` without `report_seq`",
+        );
+    }
     let request_id = Some(parsed.request_id.clone());
 
     // Recomputed over the UTF-8 bytes of the *decoded* payload, which is what
@@ -2213,41 +2867,159 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         .as_deref()
         .and_then(|id| cross_install_account_key(platform, id));
 
-    match inbox::seal_payload(
-        &parsed.name,
-        parsed.payload.as_bytes(),
-        &stage,
-        &machine,
-        crate::store::DEFAULT_SHARD_BUCKET_CAP,
-        parsed.fingerprint.as_deref(),
-        account_key.as_deref(),
-    ) {
-        Ok(inbox::SealOutcome::Stored(consumed)) => serde_json::json!({
-            "protocol": PROTOCOL,
-            "type": "ack",
-            "request_id": parsed.request_id,
-            "status": "stored",
-            "sha256": parsed.sha256,
-            "shard": consumed.shard,
-        }),
-        Ok(inbox::SealOutcome::Duplicate(existing)) => serde_json::json!({
-            "protocol": PROTOCOL,
-            "type": "ack",
-            "request_id": parsed.request_id,
-            "status": "duplicate",
-            "sha256": parsed.sha256,
-            "shard": existing.matched_shard,
-        }),
-        Err(inbox::SealError::Lock(e)) => {
+    // ③ EXT-13 · **The sequence, the conflict gate and the seal are one
+    //    transaction.** A delivery is wire traffic too, and for an install whose
+    //    backfill is switched off it is the *only* wire traffic there is: that
+    //    install never runs a tick, so it never sends a status report, and this
+    //    is the only place its sequence reaches the host at all.
+    //
+    //    Recording the sequence and then sealing outside the lock would leave a
+    //    window in which another host process commits a conflict — and the
+    //    bundle would be archived on the strength of a state that had already
+    //    changed. Holding `BEGIN IMMEDIATE` across the seal closes it: a writer
+    //    that wants to record for this id waits for this seal to finish.
+    //
+    //    Lock order is state database, then stage (`seal_payload` takes the
+    //    stage lock), and nothing in this file takes them the other way round.
+    //    The cost is that a second process can wait here for the length of one
+    //    seal; SQLite's `busy_timeout` is the bound, and the alternative — an
+    //    archive that lands after the identity it carries was already known to
+    //    be ambiguous — is the failure this exists to prevent.
+    //
+    //    Every outcome commits the identity record, including a failed seal: the
+    //    observation is real whatever the stage did with the bytes, and a
+    //    conflict that was just detected must not be rolled back. Only a
+    //    database-level failure rolls back, and then nothing is sealed either.
+    let conn = match open_state_db() {
+        Ok(conn) => conn,
+        Err(e) => {
+            return nack(
+                request_id,
+                NackKind::Io,
+                format!("cannot open coordination state: {e:#}"),
+            )
+        }
+    };
+    if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
+        return nack(
+            request_id,
+            NackKind::Io,
+            format!("cannot lock coordination state: {e}"),
+        );
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = (|| -> anyhow::Result<DeliveryOutcome> {
+        if let Some(install_id) = inbox::bundle_install_id(parsed.payload.as_bytes()) {
+            let (state, _) = record_report_seq(
+                &conn,
+                &machine,
+                &install_id,
+                parsed.report_seq,
+                parsed.report_nonce.as_deref(),
+                now_ms,
+            )?;
+            if state.identity_conflict {
+                return Ok(DeliveryOutcome::Refused);
+            }
+        }
+        Ok(
+            match inbox::seal_payload(
+                &parsed.name,
+                parsed.payload.as_bytes(),
+                &stage,
+                &machine,
+                crate::store::DEFAULT_SHARD_BUCKET_CAP,
+                parsed.fingerprint.as_deref(),
+                account_key.as_deref(),
+            ) {
+                Ok(sealed) => DeliveryOutcome::Sealed(Box::new(sealed)),
+                Err(error) => DeliveryOutcome::SealFailed(error),
+            },
+        )
+    })();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+                return nack(
+                    request_id,
+                    NackKind::Io,
+                    format!("cannot record delivery identity: {e:#}; rollback failed: {rollback}"),
+                );
+            }
+            return nack(
+                request_id,
+                NackKind::Io,
+                format!("cannot record delivery identity: {e:#}"),
+            );
+        }
+    };
+    if let Err(e) = conn.execute_batch("COMMIT") {
+        if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+            return nack(
+                request_id,
+                NackKind::Io,
+                format!("cannot save delivery identity: {e}; rollback failed: {rollback}"),
+            );
+        }
+        return nack(
+            request_id,
+            NackKind::Io,
+            format!("cannot save delivery identity: {e}"),
+        );
+    }
+
+    match outcome {
+        // The refusal is *retryable* on purpose: the bytes are not wrong, they
+        // are unattributable, and ADR-045 §3 keeps them queued until a person
+        // gives one of the copies its own identity. Rejecting them would say a
+        // decision had been made about the capture when none has.
+        DeliveryOutcome::Refused => nack(
+            request_id,
+            NackKind::IdentityConflict,
+            IDENTITY_CONFLICT_DETAIL.to_string(),
+        ),
+        DeliveryOutcome::Sealed(sealed) => match *sealed {
+            inbox::SealOutcome::Stored(consumed) => serde_json::json!({
+                "protocol": PROTOCOL,
+                "type": "ack",
+                "request_id": parsed.request_id,
+                "status": "stored",
+                "sha256": parsed.sha256,
+                "shard": consumed.shard,
+            }),
+            inbox::SealOutcome::Duplicate(existing) => serde_json::json!({
+                "protocol": PROTOCOL,
+                "type": "ack",
+                "request_id": parsed.request_id,
+                "status": "duplicate",
+                "sha256": parsed.sha256,
+                "shard": existing.matched_shard,
+            }),
+        },
+        DeliveryOutcome::SealFailed(inbox::SealError::Lock(e)) => {
             nack(request_id, NackKind::StageUnavailable, format!("{e:#}"))
         }
-        Err(inbox::SealError::IdentityCollision) => nack(
+        DeliveryOutcome::SealFailed(inbox::SealError::IdentityCollision) => nack(
             request_id,
             NackKind::InstallConflict,
             "this install_id is already registered to a different browser/profile label; regenerate the install identity in the later browser profile",
         ),
-        Err(inbox::SealError::Other(e)) => nack(request_id, NackKind::Io, format!("{e:#}")),
+        DeliveryOutcome::SealFailed(inbox::SealError::Other(e)) => {
+            nack(request_id, NackKind::Io, format!("{e:#}"))
+        }
     }
+}
+
+/// What one `deliver` decided about the bundle, once its identity is recorded.
+enum DeliveryOutcome {
+    /// The install id is known to be shared: nothing was sealed.
+    Refused,
+    /// Boxed to keep this enum small: the sealed outcome carries a whole shard
+    /// record, and it would otherwise be three orders of magnitude larger than
+    /// the two refusals beside it.
+    Sealed(Box<inbox::SealOutcome>),
+    SealFailed(inbox::SealError),
 }
 
 /// `has` — §6.6, W50c · **does the stage already hold this exact content?**
@@ -3832,6 +4604,200 @@ mod tests {
             response.as_object().map(|object| object.len()),
             Some(4),
             "the extension treats an extra field as a malformed response: {response}"
+        );
+    }
+
+    // ------------------------------------------------------------ EXT-13
+
+    /// The conflict gate answers **inside the caller's transaction**.
+    ///
+    /// Native messaging starts a host process per request, so another writer's
+    /// conflict can be committed at any moment. A gate that opened its own
+    /// connection would answer from a snapshot taken before the caller's
+    /// transaction began; a conflict committed while this request waited for the
+    /// lock would then be invisible to it, and the claim would be granted on the
+    /// strength of a state that had already changed.
+    ///
+    /// The holder below is a second connection that already owns the write lock
+    /// — exactly the position another host process is in — and its conflict is
+    /// committed while the claim is waiting on that lock. Both connections are
+    /// opened *before* the lock is taken, because opening one applies the state
+    /// schema, which writes: an open on the far side of the lock would itself
+    /// wait, and the claim would then never be between its check and its commit.
+    #[test]
+    fn a_claim_waiting_for_the_lock_sees_a_conflict_committed_while_it_waits() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const MACHINE: &str = "w248-machine";
+        const INSTALL: &str = "11111111-1111-4111-8111-111111111111";
+
+        let dir = tempfile::tempdir().expect("temp state dir");
+        let holder = open_state_db_at(dir.path()).expect("open the holding connection");
+        let claimant = open_state_db_at(dir.path()).expect("open the claiming connection");
+
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the second writer takes the write lock");
+        record_report_seq(&holder, MACHINE, INSTALL, Some(5), Some("nonce-a"), 1)
+            .expect("the original allocates sequence 5");
+        record_report_seq(&holder, MACHINE, INSTALL, Some(5), Some("nonce-b"), 2)
+            .expect("the copy allocates sequence 5 as well");
+        // Uncommitted, and therefore visible to no other connection at all: the
+        // conflict exists only inside this transaction.
+
+        let claim = CoordinationRequest {
+            request_id: "w248-claim".into(),
+            mode: "claim".into(),
+            platform: "chatgpt".into(),
+            install_id: INSTALL.into(),
+            segment: None,
+            status: None,
+            retry_after_ms: None,
+            account_id: None,
+        };
+        let (attempting, waiting) = mpsc::channel();
+        let outcome: anyhow::Result<CoordinationOutcome> = std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let conn = claimant;
+                attempting.send(()).expect("announce the attempt");
+                // 🔴 This blocks until the holder commits: `BEGIN IMMEDIATE`
+                //    cannot start while another connection holds the write lock.
+                conn.execute_batch("BEGIN IMMEDIATE")
+                    .expect("the claim takes the lock");
+                let outcome =
+                    coordinate_in_transaction(&conn, MACHINE, &claim, 3, "2026-09-29", "");
+                if matches!(outcome, Ok(CoordinationOutcome::Refused(..))) {
+                    conn.execute_batch("ROLLBACK")
+                        .expect("a refused claim leaves nothing behind");
+                }
+                outcome
+            });
+            waiting.recv().expect("the claim announced itself");
+            // A scheduling margin, not a premise. The worker has already built
+            // the request it is about to send and needs microseconds to reach
+            // the lock; this thread only has to commit. Losing the race would
+            // not make the assertion wrong — the conflict is committed either
+            // way, and the fixed gate refuses either way — it would only make it
+            // say less.
+            std::thread::sleep(Duration::from_millis(250));
+            holder.execute_batch("COMMIT").expect("commit the conflict");
+            worker.join().expect("the claim thread joins")
+        });
+        assert!(
+            matches!(
+                outcome.expect("the claim body runs"),
+                CoordinationOutcome::Refused(NackKind::IdentityConflict, _)
+            ),
+            "a claim may not be granted on a conflict that was already committed when the lock came free"
+        );
+    }
+
+    /// ④ The staged record carries the conflict flag the database holds **when
+    /// the file is written**, not the flag the report read when it recorded its
+    /// own sequence. Those are two different facts, and the gap between them is
+    /// a slow writer: the review's interleaving is a report whose own
+    /// observation is clean, delayed past the collision another copy commits.
+    /// Publishing from the report's own snapshot is what lets that report erase
+    /// the conflict — and the direction it fails in is the bad one, because the
+    /// host is refusing this install's captures while the dashboard it writes
+    /// says the install is fine.
+    ///
+    /// The publisher here waits for the state lock, so nothing in this test
+    /// depends on a race: only a writer that reads the flag *outside* the lock
+    /// can see the state as it was before `copying` began.
+    #[test]
+    fn a_stale_report_cannot_publish_away_a_committed_conflict() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const MACHINE: &str = "w248-machine";
+        const INSTALL: &str = "11111111-1111-4111-8111-111111111111";
+
+        let state = tempfile::tempdir().expect("temp state dir");
+        let stage = tempfile::tempdir().expect("temp stage dir");
+        let keyed = stage.path().join(MACHINE);
+        fs::create_dir_all(&keyed).expect("the machine's record directory");
+        let target = keyed.join(format!("{INSTALL}.json"));
+
+        let reporting = open_state_db_at(state.path()).expect("open the reporting connection");
+        let copying = open_state_db_at(state.path()).expect("open the copying connection");
+
+        // One writer's own report: a sequence nobody else has used, recorded and
+        // committed with no conflict anywhere.
+        with_immediate(&reporting, || {
+            record_report_seq(&reporting, MACHINE, INSTALL, Some(11), Some("stale"), 1)
+        })
+        .expect("the report records its own sequence");
+
+        // The copy allocates the same number under a nonce of its own. Still
+        // uncommitted, so the connection above cannot see it — which is exactly
+        // the position a slower report is in while this commits.
+        copying
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the copy takes the write lock");
+        let (_, observation) =
+            record_report_seq(&copying, MACHINE, INSTALL, Some(11), Some("copy"), 2)
+                .expect("the copy allocates sequence 11 as well");
+        assert_eq!(
+            observation,
+            SeqObservation::Conflict(11),
+            "the fixture must really collide, or the assertion below proves nothing"
+        );
+
+        let value = serde_json::json!({
+            "install_id": INSTALL,
+            "schema": "chat-stasher/ext-status@1",
+        });
+        let (published_at, target_for_publish) = (keyed.clone(), target.clone());
+        let (attempting, waiting) = mpsc::channel();
+        let published: anyhow::Result<()> = std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                attempting.send(()).expect("announce the publish");
+                publish_status_record(
+                    &reporting,
+                    MACHINE,
+                    INSTALL,
+                    value,
+                    &published_at,
+                    &target_for_publish,
+                )
+            });
+            waiting.recv().expect("the publisher announced itself");
+            // A scheduling margin, not a premise. The publisher needs
+            // microseconds to reach the lock and this thread only has to commit;
+            // losing the race would not make the assertion wrong — the conflict
+            // is committed either way, and a publisher that reads it under the
+            // lock publishes it either way — it would only make the test say
+            // less.
+            std::thread::sleep(Duration::from_millis(250));
+            copying
+                .execute_batch("COMMIT")
+                .expect("commit the collision");
+            worker.join().expect("the publisher thread joins")
+        });
+        published.expect("the staged record is written");
+
+        assert!(
+            read_identity_state(&copying, MACHINE, INSTALL)
+                .expect("read the committed state")
+                .identity_conflict,
+            "the fixture must leave a committed conflict behind"
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&target).expect("the staged record exists"))
+                .expect("the staged record is JSON");
+        assert_eq!(
+            record["install_id"], INSTALL,
+            "the published record is the report's own copy: {record}"
+        );
+        assert_eq!(
+            record["identity_conflict"], true,
+            "a report delayed past the collision must not publish a copy that denies it: {record}"
+        );
+        assert!(
+            record.get("identity_conflict_evidence").is_some(),
+            "the record says which observation set the flag: {record}"
         );
     }
 }

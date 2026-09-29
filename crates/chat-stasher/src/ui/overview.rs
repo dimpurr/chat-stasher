@@ -166,6 +166,10 @@ fn plural(n: usize) -> &'static str {
 /// ones, because "we could not read it" is not "it is fine".
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Attention {
+    /// EXT-13 · Two live copies share this install id. It sorts first, above
+    /// `Stale`: a stale install will report again when it wakes, and this one
+    /// archives nothing at all until a person acts, on any machine.
+    IdentityConflict,
     Stale,
     Paused,
     Unknown,
@@ -177,6 +181,7 @@ impl Attention {
     /// it is now the row's status, which is the one place a reader looks.
     fn word(self) -> &'static str {
         match self {
+            Attention::IdentityConflict => "Identity conflict",
             Attention::Stale => "Stale",
             Attention::Paused => "Paused",
             Attention::Unknown => "Unknown",
@@ -188,6 +193,7 @@ impl Attention {
     /// reading of the status, never the only one.
     fn dot(self) -> &'static str {
         match self {
+            Attention::IdentityConflict => "paused",
             Attention::Stale => "stale",
             Attention::Paused => "paused",
             Attention::Unknown => "unknown",
@@ -221,6 +227,9 @@ struct InstallView<'a> {
     reported_unix: Option<i64>,
     platforms: BTreeMap<String, PlatformCell>,
     attention: Attention,
+    /// EXT-13 · Why the id is known to be shared, when the record says. `None`
+    /// means the record carries no reason — never that there is no conflict.
+    conflict_evidence: Option<&'a str>,
 }
 
 impl<'a> InstallView<'a> {
@@ -267,7 +276,16 @@ impl<'a> InstallView<'a> {
                 }
             }
         }
-        let attention = if platforms.values().any(|cell| cell.paused.is_some()) {
+        // EXT-13 · A proved conflict outranks everything: this install is not
+        // slow or paused, it is archiving nothing on any platform until someone
+        // gives one of the copies its own identity.
+        let conflicted = install
+            .get("identity_conflict")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let attention = if conflicted {
+            Attention::IdentityConflict
+        } else if platforms.values().any(|cell| cell.paused.is_some()) {
             Attention::Paused
         } else if platforms.values().any(|cell| cell.pause_unknown) {
             Attention::Unknown
@@ -279,6 +297,9 @@ impl<'a> InstallView<'a> {
             }
         };
         InstallView {
+            conflict_evidence: install
+                .get("identity_conflict_evidence")
+                .and_then(serde_json::Value::as_str),
             install_id: install
                 .get("install_id")
                 .and_then(serde_json::Value::as_str),
@@ -531,6 +552,7 @@ fn attention_counts(attentions: impl Iterator<Item = Attention>) -> String {
     }
     let mut out = String::new();
     for (attention, word) in [
+        (Attention::IdentityConflict, "in identity conflict"),
         (Attention::Stale, "stale"),
         (Attention::Paused, "paused"),
         (Attention::Unknown, "with an unreadable status"),
@@ -540,7 +562,7 @@ fn attention_counts(attentions: impl Iterator<Item = Attention>) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str(" · none stale, paused or unreadable");
+        out.push_str(" · none in identity conflict, stale, paused or unreadable");
     }
     out
 }
@@ -690,6 +712,22 @@ fn extension_details(rows: &[&InstallView], now_unix: i64) -> String {
         match view.extension_version {
             Some(version) => out.push_str(&format!(" · extension {}", esc(version))),
             None => out.push_str(" · extension version not recorded"),
+        }
+        // EXT-13 · Why the install is in conflict, and what clears it. The row's
+        // word says what is wrong; this is the only place the page says what to
+        // do about it, and it names the *extension popup* rather than a command,
+        // because the identity lives in one browser profile on one machine and
+        // nothing on the host can rotate it.
+        if view.attention == Attention::IdentityConflict {
+            out.push_str(" · identity conflict");
+            if let Some(evidence) = view.conflict_evidence {
+                out.push_str(&format!(" ({})", esc(evidence)));
+            }
+            out.push_str(
+                " · nothing is archived for this id until one copy is given a new identity from \
+                 its own extension popup, on the machine and profile the row names; captures \
+                 already archived keep the old identity",
+            );
         }
         for (platform, cell) in &view.platforms {
             if let Some(reason) = &cell.paused {

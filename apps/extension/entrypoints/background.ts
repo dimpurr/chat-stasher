@@ -24,7 +24,7 @@ import {
   planHoldsAccountLease,
   suspensionFor,
 } from '../lib/backfill/account-lease';
-import { attachInstallIdentityToConsole, getInstallIdentity, setProfileLabel } from '../lib/install-identity';
+import { attachInstallIdentityToConsole, getInstallIdentity, rekeyInstallIdentity, setProfileLabel } from '../lib/install-identity';
 import { refreshBadge } from '../lib/badge';
 import { browserLocalStore, type BackfillStore } from '../lib/backfill/store';
 import {
@@ -33,7 +33,7 @@ import {
   recordHookDecline,
   recordHookStatus,
 } from '../lib/hook-status';
-import { coordinate, deliver, has, isItemRejected, isValidDeliverName, otherInstalls, reportInstallStatus } from '../lib/native-host';
+import { coordinate, deliver, has, identityState, isItemRejected, isValidDeliverName, otherInstalls, reportInstallStatus } from '../lib/native-host';
 import { readCoverageInputs } from '../lib/coverage-read';
 import { buildCoverage } from '../lib/coverage';
 import { recordLiveCapture } from '../lib/live-capture';
@@ -126,6 +126,8 @@ import {
   POPUP_STATUS_MESSAGE,
   POPUP_INSTALL_LABEL_MESSAGE,
   POPUP_OTHER_INSTALLS_MESSAGE,
+  POPUP_REQUEST_IDENTITY_MESSAGE,
+  POPUP_REKEY_IDENTITY_MESSAGE,
   POPUP_SAVE_INSTALL_LABEL_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
@@ -3116,6 +3118,48 @@ export default defineBackground(() => {
           .then((install) => otherInstalls(install.install_id))
           .then((result) => sendResponse(result.ok ? { count: result.count } : { count: null }))
           .catch(() => sendResponse({ count: null }));
+        return true;
+      }
+      /**
+       * 🔴 EXT-13 · The popup asks the host whether this install id is shared.
+       *
+       * A question, not a report: it writes nothing on the host and changes
+       * nothing here. It exists as its own message because the answer has to be
+       * available to an install whose backfill is switched off — such an install
+       * runs no tick, so it never sends a status report, and a flag that could
+       * only ride on one would never reach the popup that has to show the repair.
+       *
+       * A failed question is answered `ok: false`, never `conflict: false`. The
+       * card it gates offers to rotate an identity, and that cannot be undone
+       * from the popup — so it may only be shown on evidence, not on silence.
+       */
+      if (message?.type === POPUP_REQUEST_IDENTITY_MESSAGE) {
+        getInstallIdentity()
+          .then((install) => identityState(install.install_id))
+          .then((result) => sendResponse(result.ok ? { ok: true, conflict: result.conflict } : { ok: false }))
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+      /**
+       * 🔴 EXT-13 · The repair, and the only caller of `rekeyInstallIdentity`.
+       *
+       * Nothing on an automatic path reaches this: the ADR rejects auto-rekey
+       * because a restored backup or a renamed profile would then have the tool
+       * silently sever the wrong lineage. Reaching here means a person read the
+       * card and pressed the button.
+       *
+       * The reply carries the new identity so the popup can repaint with it —
+       * and the popup must repaint from this reply, not from a storage read: the
+       * question it asks next is keyed by the install id, and answering it with
+       * the pre-rekey id would show the user the conflict they just cleared.
+       */
+      if (message?.type === POPUP_REKEY_IDENTITY_MESSAGE) {
+        rekeyInstallIdentity()
+          .then((install) => {
+            attachInstallIdentityToConsole(install);
+            sendResponse({ ok: true, install });
+          })
+          .catch(() => sendResponse({ ok: false }));
         return true;
       }
       if (message?.type === POPUP_SAVE_INSTALL_LABEL_MESSAGE && typeof message.profile_label === 'string') {

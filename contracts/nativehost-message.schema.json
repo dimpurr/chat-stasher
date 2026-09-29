@@ -38,6 +38,12 @@
       "$ref": "#/$defs/otherInstallsResponse"
     },
     {
+      "$ref": "#/$defs/identityStateRequest"
+    },
+    {
+      "$ref": "#/$defs/identityStateResponse"
+    },
+    {
       "$ref": "#/$defs/hasRequest"
     },
     {
@@ -61,6 +67,10 @@
       "const": 1
     },
     "requestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "reportNonce": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{1,128}$"
     },
@@ -199,6 +209,15 @@
           "minLength": 1,
           "maxLength": 4096,
           "description": "W218 optional transient platform account id. The host derives a masterkey-scoped HMAC and does not return or persist this raw value."
+        },
+        "report_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "EXT-13 optional. The sender's monotonic per-instance report sequence, incremented for every status report and every capture delivery (ADR-045). The host records it against (machine, install_id), together with `report_nonce`: one sequence under two different nonces is proof that two live writers share the id, and a repeat of the same pair is one allocation arriving twice. Absent — an older extension, or storage that could not be read — is recorded as unknown and is never sent as zero, because zero is a value a writer can send."
+        },
+        "report_nonce": {
+          "$ref": "#/$defs/reportNonce",
+          "description": "EXT-13 optional. The token minted with `report_seq` and persisted beside it, which is what makes a repeated sequence mean something: two copies of a profile allocate the same numbers, but each mints its own random nonce, so a sequence the host has already recorded under one nonce arriving under another is two allocations of one number. A repeat of the same pair is an idempotent retry. Meaningless without `report_seq`, and refused as malformed beside no sequence."
         }
       },
       "description": "Unknown request fields are ignored by the host (nativehost-protocol.md §6)."
@@ -387,6 +406,7 @@
             "integrity",
             "invalid-bundle",
             "install-conflict",
+            "identity-conflict",
             "config",
             "stage-unavailable",
             "io"
@@ -690,6 +710,37 @@
         "count": { "type": "integer", "minimum": 0 }
       },
       "description": "The archive's readable latest per-install status row count excluding one matching local install. No install ids or platform details are returned."
+    },
+    "identityStateRequest": {
+      "type": "object",
+      "required": ["protocol", "type", "request_id", "install_id"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "identity_state" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "install_id": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9-]{36}$",
+          "description": "The install identity being asked about. Read-only: the host answers from its own coordination state and writes nothing, so this works for an install whose backfill is off and which therefore never sends a status report."
+        }
+      }
+    },
+    "identityStateResponse": {
+      "type": "object",
+      "required": ["protocol", "type", "ok", "request_id", "identity_conflict"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "type": { "const": "identity_state" },
+        "ok": { "const": true },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "identity_conflict": {
+          "type": "boolean",
+          "description": "True when two live writers have been observed sharing this install id, which one `report_seq` arriving under two different `report_nonce` values proves. False means no collision has been observed yet — not proof that only one copy exists: two copies are indistinguishable until they allocate the same sequence (ADR-045)."
+        }
+      },
+      "description": "EXT-13. Whether this install id is known to be shared by more than one live copy. No other install's data is returned."
     },
     "statusRequest": {
       "type": "object",

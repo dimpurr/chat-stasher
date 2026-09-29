@@ -54,6 +54,8 @@ import {
   POPUP_STATUS_MESSAGE,
   POPUP_SAVE_INSTALL_LABEL_MESSAGE,
   POPUP_OTHER_INSTALLS_MESSAGE,
+  POPUP_REQUEST_IDENTITY_MESSAGE,
+  POPUP_REKEY_IDENTITY_MESSAGE,
   POPUP_SYNC_ALARM_MESSAGE,
   type BackfillRuntimeStatus,
   type PopupModel,
@@ -241,6 +243,9 @@ async function collect(): Promise<PopupModel> {
     //    button, both of them **facts**, not inferences.
     liveTarget: runtime.liveTarget ?? null,
     install: runtime.install,
+    // 🔴 EXT-13 · The host's verdict on this install id. Resolved here, not
+    //    in the painter, so `renderPopup` and the DOM draw the same model.
+    identityConflict: await readIdentityConflict(runtime.install?.install_id ?? ''),
     targetCount: targets.length,
     nativeHost,
     coordinationUnavailable: runtime.coordinationUnavailable,
@@ -557,6 +562,8 @@ function paintExtensionOnly(view: PopupView): void {
   }
   // Outbox usage bar.
   paintOutboxBar(view.outboxBar);
+  // Identity-conflict repair card.
+  paintIdentityRepair(view.identityRepair);
 }
 
 /** 🔴 EXT-12 · The usage bar and its state line. The fill width is the pct the render layer computed. */
@@ -594,6 +601,9 @@ function paintOutboxBar(bar: PopupView['outboxBar']): void {
 let lastModel: PopupModel | null = null;
 let otherInstallCountFor: string | null = null;
 let otherInstallCountTask: Promise<number | null> | null = null;
+/** EXT-13 · The same per-install cache for the host's identity verdict. */
+let identityConflictFor: string | null = null;
+let identityConflictTask: Promise<boolean> | null = null;
 
 async function refresh(): Promise<void> {
   // A repaint keeps the summary this popup already has: it is fetched once per
@@ -633,6 +643,74 @@ function paintInstallIdentity(install: BackfillRuntimeStatus['install']): void {
   save.textContent = t('popup.install.save');
   row.hidden = Boolean(profile);
   void paintOtherInstallCount(install.install_id);
+}
+
+/**
+ * 🔴 EXT-13 · Paint the identity-conflict repair card.
+ *
+ * The card is drawn from the *view*, exactly like the first-run card, so the
+ * sentences a user reads here are the same ones `popupText` reports and the
+ * tests assert on — one source, not two. `view.identityRepair` is null unless
+ * the host said this install id is shared: not asked, or asked and not
+ * answered, is *unknown*, and unknown draws no card, because the button below
+ * it mints a new install id and that cannot be undone from the popup.
+ */
+function paintIdentityRepair(view: PopupView['identityRepair']): void {
+  const card = document.getElementById('identity-conflict');
+  if (!card) return;
+  if (view) {
+    const set = (id: string, value: string) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    };
+    set('identity-conflict-title', view.title);
+    set('identity-conflict-body', view.body);
+    set('identity-conflict-kept', view.kept);
+    set('identity-conflict-history', view.history);
+    const button = document.getElementById('rekey-identity') as HTMLButtonElement | null;
+    if (button) {
+      button.textContent = view.action.label;
+      button.disabled = !view.action.visible;
+    }
+  }
+  card.hidden = view === null;
+}
+
+/**
+ * 🔴 EXT-13 · What the host says about this install id, asked at most once per
+ * identity and remembered by the id it was asked about.
+ *
+ * A question that could not be put answers `false` — no card. It is not a claim
+ * that the profile is fine (the popup has no way to say that either); it is the
+ * refusal to offer an irreversible rotation on anything but evidence.
+ */
+async function readIdentityConflict(installId: string): Promise<boolean> {
+  if (!installId) return false;
+  if (identityConflictFor !== installId) {
+    identityConflictFor = installId;
+    identityConflictTask = browser.runtime.sendMessage({ type: POPUP_REQUEST_IDENTITY_MESSAGE })
+      .then((response) => response?.ok === true && typeof response.conflict === 'boolean'
+        ? response.conflict : false)
+      .catch(() => false);
+  }
+  return identityConflictTask ?? false;
+}
+
+/**
+ * 🔴 EXT-13 · The repair, pressed. The reply carries the new identity, and the
+ * cache key is set to it before repainting — otherwise the next read would ask
+ * about the install id the user has just replaced and put the card straight back.
+ */
+async function rekeyIdentity(): Promise<void> {
+  const button = document.getElementById('rekey-identity') as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  const response = await browser.runtime.sendMessage({ type: POPUP_REKEY_IDENTITY_MESSAGE });
+  if (response?.ok && response.install?.install_id) {
+    identityConflictFor = response.install.install_id;
+    identityConflictTask = Promise.resolve(false);
+    otherInstallCountFor = null;
+  }
+  await refresh();
 }
 
 async function readOtherInstallCount(installId: string): Promise<number | null> {
@@ -926,6 +1004,14 @@ document.getElementById('copy-installer')?.addEventListener('click', async () =>
 document.getElementById('first-run-export')?.addEventListener('click', () => {
   void onExportUndelivered().catch((err) => {
     console.warn('[chat-stasher] popup export failed', (err as Error).message);
+    void refresh();
+  });
+});
+
+/** 🔴 EXT-13 · The repair, and the only control here that rotates an identity. */
+document.getElementById('rekey-identity')?.addEventListener('click', () => {
+  void rekeyIdentity().catch((err) => {
+    console.warn('[chat-stasher] popup identity rekey failed', (err as Error).message);
     void refresh();
   });
 });

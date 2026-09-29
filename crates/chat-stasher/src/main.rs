@@ -3167,8 +3167,7 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
             if node.node_type != NodeType::File {
                 continue;
             }
-            let status_filename = extension_status_filename(path);
-            if let Some(status_filename) = status_filename {
+            if let Some(located) = extension_status_location(path) {
                 let mut buf = Vec::new();
                 repo.dump(node, &mut buf)
                     .with_context(|| format!("host `{hostname}`: read extension status"))?;
@@ -3177,19 +3176,40 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
                         format!("host `{hostname}`: malformed extension status JSON")
                     })?;
                 let install_id = status.get("install_id").and_then(|v| v.as_str());
-                let filename_id = Path::new(status_filename)
+                let filename_id = Path::new(located.file)
                     .file_stem()
                     .and_then(std::ffi::OsStr::to_str);
+                // EXT-13 · The keyed layout puts the machine in the path, so the
+                // reader can check the key it read against the key it was filed
+                // under instead of trusting the record's own `machine` field
+                // alone. Two checks, not one: a record that disagrees with its
+                // own directory is exactly the shape a copy would produce, and
+                // it must be an error rather than a row.
+                let key_dir_agrees = located
+                    .machine_dir
+                    .is_none_or(|dir| dir == hostname.as_str());
                 if status.get("schema").and_then(|v| v.as_str())
                     != Some("chat-stasher/ext-status@1")
                     || install_id.is_none()
                     || install_id != filename_id
                     || status.get("machine").and_then(|v| v.as_str()) != Some(hostname.as_str())
+                    || !key_dir_agrees
                     || status.get("reported_at").and_then(|v| v.as_str()).is_none()
                 {
                     anyhow::bail!(
                         "host `{hostname}`: extension status identity or schema mismatch"
                     );
+                }
+                // EXT-13 · Marked so the aggregation can tell a superseded
+                // pre-migration record from its successor. The migration keeps
+                // the old file (nothing local is destroyed), so an upgraded
+                // install has *two* records for one `(machine, install_id)`
+                // until this pass drops the older one — showing both would
+                // report one installation as two, which is the counting mistake
+                // the topology rules exist to prevent. The mark is stripped
+                // before anything is published.
+                if located.machine_dir.is_none() {
+                    status[LEGACY_STATUS_LAYOUT] = serde_json::Value::Bool(true);
                 }
                 status["stale"] = serde_json::Value::Bool(overview::extension_status_is_stale(
                     status["reported_at"].as_str(),
@@ -3261,18 +3281,56 @@ fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<Ov
     Ok(out)
 }
 
-fn extension_status_filename(path: &Path) -> Option<&std::ffi::OsStr> {
-    // rustic's snapshot tree may retain the backed-up stage directory as a
-    // prefix, so locate the ext-status component instead of requiring it to
-    // be the first path component.
-    path.components()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|parts| {
-            (parts[0].as_os_str() == std::ffi::OsStr::new("ext-status")
-                && parts[1].as_os_str().to_string_lossy().ends_with(".json"))
-            .then_some(parts[1].as_os_str())
-        })
+/// The private marker the reader sets on a record it read from the legacy flat
+/// layout, so the aggregation can drop it in favour of its keyed successor.
+/// It is never published: `overview::normalize_extension_installs` removes it.
+const LEGACY_STATUS_LAYOUT: &str = "\u{0}legacy-status-layout";
+
+/// Where an archived extension status record sits, and under which key.
+struct StatusLocation<'a> {
+    /// The record's own file name.
+    file: &'a std::ffi::OsStr,
+    /// The machine directory, on the `(machine, install_id)` layout EXT-13
+    /// introduced. `None` for the legacy flat `ext-status/<install_id>.json`,
+    /// which names no machine in its path — its record's own `machine` field is
+    /// the only thing that says where it was written.
+    machine_dir: Option<&'a std::ffi::OsStr>,
+}
+
+/// Find the `ext-status` component of a snapshot path and say which of the two
+/// layouts it is.
+///
+/// rustic's snapshot tree may retain the backed-up stage directory as a prefix,
+/// so the component is located rather than required to be first.
+fn extension_status_location(path: &Path) -> Option<StatusLocation<'_>> {
+    let parts = path
+        .components()
+        .map(|component| component.as_os_str())
+        .collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
+        if *part != std::ffi::OsStr::new("ext-status") {
+            continue;
+        }
+        let next = parts.get(index + 1)?;
+        // The keyed layout: `ext-status/<machine>/<install_id>.json`.
+        if let Some(after) = parts.get(index + 2) {
+            if after.to_string_lossy().ends_with(".json") {
+                return Some(StatusLocation {
+                    file: after,
+                    machine_dir: Some(next),
+                });
+            }
+        }
+        // The legacy layout: `ext-status/<install_id>.json`.
+        if next.to_string_lossy().ends_with(".json") {
+            return Some(StatusLocation {
+                file: next,
+                machine_dir: None,
+            });
+        }
+        return None;
+    }
+    None
 }
 
 /// `overview` — draw the machine × harness activity overview of one destination
@@ -4680,6 +4738,11 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         .iter()
         .flat_map(|part| part.extension_installs.iter().cloned())
         .collect();
+    // EXT-13 · The merge is where facts no single destination can see become
+    // visible: one install id reported by two machines is only a collision once
+    // both are in one list, and a superseded pre-migration record has to give
+    // way to its keyed successor rather than being listed as a second install.
+    chat_stasher::overview::normalize_extension_installs(&mut data.extension_installs);
     data.extension_open_targets = chat_stasher::ui::extension_profile::discover(
         &data.extension_installs,
         data.local_machine_id.as_deref(),
@@ -8843,20 +8906,29 @@ mod decision_surface_tests {
 
     #[test]
     fn archived_extension_status_matches_after_stage_prefix() {
-        assert_eq!(
-            extension_status_filename(Path::new("stage-root/ext-status/install-123.json")),
-            Some(std::ffi::OsStr::new("install-123.json"))
-        );
-        assert_eq!(
-            extension_status_filename(Path::new(
-                "/archive/machine/stage/ext-status/install-123.json"
-            )),
-            Some(std::ffi::OsStr::new("install-123.json"))
-        );
-        assert_eq!(
-            extension_status_filename(Path::new("stage-root/meta/machine.json")),
-            None
-        );
+        // The legacy flat layout: `ext-status/<install_id>.json`, which names no
+        // machine in its path. Still read, because archives written before
+        // EXT-13 are append-only history that nothing may rewrite.
+        let legacy = extension_status_location(Path::new(
+            "/archive/machine/stage/ext-status/install-123.json",
+        ))
+        .expect("legacy layout is recognised after a stage prefix");
+        assert_eq!(legacy.file, std::ffi::OsStr::new("install-123.json"));
+        assert_eq!(legacy.machine_dir, None);
+
+        // The keyed layout `ext-status/<machine>/<install_id>.json`. The machine
+        // directory is returned so the reader can check the key it read against
+        // the key the record was filed under.
+        let keyed =
+            extension_status_location(Path::new("stage-root/ext-status/mba-m3/install-123.json"))
+                .expect("keyed layout is recognised");
+        assert_eq!(keyed.file, std::ffi::OsStr::new("install-123.json"));
+        assert_eq!(keyed.machine_dir, Some(std::ffi::OsStr::new("mba-m3")));
+
+        assert!(extension_status_location(Path::new("stage-root/meta/machine.json")).is_none());
+        // A directory inside the namespace that holds no status file is not a
+        // record, and must not be read as one with an empty name.
+        assert!(extension_status_location(Path::new("stage-root/ext-status/mba-m3")).is_none());
     }
 
     #[test]
