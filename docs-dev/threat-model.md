@@ -297,6 +297,24 @@ of service prohibit this, nor whether any platform rate-limits or flags such a
 pattern. Using this tool is your decision against your provider's terms; we make
 no claim that it is permitted.
 
+🔴 **Backfill is damped per machine, and two machines cannot be coordinated at
+all.** The dampening that keeps this leg short of a scraper is machine-local by
+construction: the host arbitrates a per-platform budget keyed by `(machine,
+platform, account key)` and grants one lease at a time, and it reports a run as
+gentle when more than one install *on that machine* is active
+(`crates/chat-stasher/src/nativehost.rs:1580`, `:1598`). There is no server, so
+nothing carries that state between machines: enable backfill for the same account
+on two machines and each machine's dampening applies only to its own requests,
+while the platform sees the sum of two independent patterns that neither machine
+would have produced alone. **We do not warn about that today**, and the one
+coordination sentence the extension shows is about *this* machine: when the local
+coordination channel is unavailable — an older host, or a host that cannot be
+reached — the leg does not run at all, live capture continues, and the popup says
+exactly that, "Update chat-stasher to enable backfill. Live capture remains
+active in this browser." (`apps/extension/entrypoints/background.ts:1925`;
+`apps/extension/locales/en.yml:485-486`). Refusing to backfill is the safe
+direction, but that sentence is not a statement about your other machines.
+
 **Which platforms backfill actually touches, and what you get back.** This
 matters to the threat model twice over — it bounds the observable traffic, and
 it bounds what you may safely assume is archived:
@@ -330,10 +348,48 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:1294-1309`, `:1396-1412`). That value is written
+(`apps/extension/lib/contract.ts:1343-1346`, `:1396-1412`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:224-226`). It never leaves your
 machine, but it means your archive contains your account identifier.
+
+🔴 **Four different account- or install-scoped values end up on this path, and
+they are not interchangeable.** Whether one of them can be compared across two
+of your own installs — or two of your own machines — is a property of how it is
+derived, not of what it is called, so "can this archive tell that these two
+captures are the same account?" has a different answer per row. Both directions
+of a wrong answer are mis-attributions this document would then inherit: a
+comparison across values that are not comparable reads an install boundary as an
+account switch, and one that refuses a comparison that *is* available throws
+away the only way to notice the same account twice.
+
+| Value | Where it is written | Comparable across two installs, or two machines? |
+|---|---|---|
+| **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:224-226`; `apps/extension/lib/contract.ts:1091-1096`; `crates/chat-stasher/src/inbox.rs:484-489`, `:550-555`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:484-489`) |
+| **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:490-508`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1200-1204`) |
+| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:512`, `:868`; `crates/chat-stasher/src/nativehost.rs:1597-1600`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
+| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1418-1426`) |
+
+🔴 **The masterkey-derived account key is the mechanism that makes "the same
+account on two machines" answerable, and it is derived rather than observed.**
+The host reads the same configured archive masterkey your `push` uses, derives a
+domain-separated subkey from it (`chat-stasher/cross-install-account/salt/v1`)
+and HMACs `platform` plus the account id under that subkey, so the result is
+equal for every install and every machine that shares the masterkey and
+different for a different key or a different platform
+(`crates/chat-stasher/src/nativehost.rs:1290-1306`). This is the deliberate
+opposite trade to the fingerprint above, and it is the approved one: it buys
+cross-machine comparison at the cost that anyone holding the masterkey *and*
+the archive can confirm that two conversations belong to one account — which is
+already the party who can read both conversations. The host never returns the
+masterkey or the derived value to the extension, the value is not in the bundle,
+the payload or the export file, and a test asserts the sealed payload never
+contains it (`crates/chat-stasher/src/inbox.rs:1979-2001`). No account id
+visible, no key file resolvable without ambiguity, or a key file that cannot be
+read each mean **no comparable key is derived** — coordination then falls back
+to a platform-wide bucket (`crates/chat-stasher/src/nativehost.rs:1310-1345`,
+`:1406-1411`). "We could not derive a comparable key" is not recorded as "same
+account", and it is not recorded as "different account" either.
 
 Since W128 step 1 the bundle also carries an **account fingerprint**: a keyed
 digest (HMAC-SHA256, over a domain- and platform-separated message) of the
@@ -353,7 +409,11 @@ fingerprints from two installs or two profiles are
 (`apps/extension/lib/contract.ts:1200-1204`). When no account id is visible the
 bundle carries an explicit `unknown` with a named reason instead of a value, so
 "we could not tell" is never recorded as a fingerprint
-(`apps/extension/lib/contract.ts:1172-1181`).
+(`apps/extension/lib/contract.ts:1172-1181`). It is therefore the archive's
+answer to "same account?" **inside one install**, and only there: across installs
+and across machines that answer comes from the masterkey-derived key above, and
+substituting one for the other would turn an install boundary into an account
+switch.
 
 🔴 W239 · **An organization is not an account, so a platform that files
 conversations under one records no fingerprint at all.** claude.ai addresses every
@@ -387,7 +447,10 @@ traffic rarely carries one the check cannot fire; and a scope that has never had
 a visible account is never accused, because an absence is not evidence of a
 switch. A suspension does not expire the way a backoff does — it is lifted by an
 observation that agrees with it, which in practice is that account being used
-again (`apps/extension/lib/backfill/types.ts:1850-1870`).
+again (`apps/extension/lib/backfill/types.ts:1850-1870`). This whole check is the
+extension's own and stays on the machine: it compares the install-local
+fingerprint, never the masterkey-derived key above, which the host never hands
+back to it.
 
 ### The browser extension ecosystem — other extensions installed alongside ours
 
@@ -524,6 +587,132 @@ them (`crates/chat-stasher/src/nativehost.rs:499-612`, `:488-491`;
 `crates/chat-stasher/src/main.rs:2076-2091`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
+
+### The browser profiles your archive came from (extension instances)
+
+One person is not one extension. The shape is several machines, each with several
+browsers, each with several profiles, and **one install per profile** — so "the
+extension" is never a single thing, and an archive written on one machine holds
+captures from all of them. Everything below exists so that a conversation can be
+attributed to the profile that produced it, and so that two profiles are never
+mistaken for one or one for two.
+
+**Three install-scoped values, and only two of them are the extension's.** The
+`install_id` is a random UUID minted the first time a profile captures, confirmed
+by a write-and-read-back, and refused rather than invented when storage or the
+random source is unusable; the `browser` name is read from this browser's own
+navigator, and the profile label is the name you typed, with the literal
+`Unnamed profile` standing in until you do
+(`apps/extension/lib/install-identity.ts:1-5`, `:13-23`, `:39-69`, `:114-124`;
+`apps/extension/lib/contract.ts:1231-1234`). The third is not the extension's:
+`machine` is assigned by the host as it seals a shard, so a bundle cannot claim
+to come from a machine it is not on (`crates/chat-stasher/src/inbox.rs:519`).
+
+They reach three different places, and the differences matter:
+
+- **The sealed shard record**, beside the conversation, in your archive: the
+  install id, browser and profile label verbatim, plus the host's machine
+  (`crates/chat-stasher/src/inbox.rs:514-519`). This is what lets the archive say
+  which profile a conversation came from.
+- **The export file name**, as a short install id plus a per-export nonce, so two
+  profiles exporting in the same second cannot overwrite each other's download
+  (exposure 4 above).
+- **A per-install status record**, written by the host into the stage as
+  `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
+  with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
+  `crates/chat-stasher/src/nativehost.rs:2534`, `:2559-2575`). It carries the
+  install id, browser, profile label, extension version, a report time, and one
+  row per platform naming the platform, how many captures this browser
+  confirmed, how many are still pending, why a leg is paused, and — for a row
+  that has one — that account's install-local fingerprint, which stays
+  incomparable across installs by construction. It is metadata only — counts,
+  codes, a version string and timestamps — and it carries no conversation text,
+  no session id and no scope label
+  (`apps/extension/entrypoints/background.ts:2925-2954`). This is what makes an
+  install visible *as an install*: a capture puts the same names on a shard, but
+  only this record says how much that profile holds and when it last reported,
+  which is what another machine reads when it lists your installs.
+
+**A copied, restored or synced browser profile carries that identity with it.**
+Copying a profile copies `storage.local`, so the copy reports under the same
+`install_id`, with the same fingerprint salt and the same label, and nothing in
+that storage can tell the two apart — the browser gives the host no profile
+coordinate to ask for. Two refusals exist, and they are deliberately different
+words with different consequences:
+
+- 🔴 **`install-conflict`** — the local stage already holds a shard with this
+  `install_id` under a *different browser*, or under two labels the user actually
+  named and which differ. The delivery is refused **non-retryably**, because the
+  fix lives in the browser profile and not in the host: retrying the same bytes
+  could never succeed. The capture stays in the outbox, listed rejected with that
+  instruction, and is never merged with the first install's record
+  (`crates/chat-stasher/src/inbox.rs:756-764`, `:828-838`, `:912-967`;
+  `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
+  deliberately *not* evidence of a conflict, and neither is the same browser under
+  the same label — that case is invisible here, by construction.
+- 🔴 **`identity-conflict`** (EXT-13) — one `report_seq` reached the host twice
+  under two different nonces. Unlike the refusal above, this one is **retryable**
+  and the bytes are not wrong, only unattributable, so the captures stay queued
+  rather than being recorded as rejected
+  (`crates/chat-stasher/src/nativehost.rs:1135-1144`, `:1160`, `:1170-1180`).
+
+**What makes the second refusal possible is an allocation, not a timestamp.**
+Each instance keeps a monotonic `report_seq` in `storage.local`, incremented for
+every status report and every capture delivery, and mints a fresh random
+`report_nonce` with each sequence, persisting the pair *before* the message that
+carries it is sent, through one serialised chain
+(`apps/extension/lib/report-seq.ts:1-36`, `:45`, `:167-210`;
+`apps/extension/lib/native-host.ts:1075-1114`). Two copies start from the same
+stored counter and advance independently, so they eventually **allocate the same
+number** — each doing so with its own random nonce. The host therefore compares
+the pair and not the number: a repeated pair is one allocation arriving twice, a
+sequence under a *different* nonce is two independent allocations of one number,
+and a report that merely arrived late, out of order or after a worker restart is
+neither (`crates/chat-stasher/src/nativehost.rs:1674-1691`, `:1795`). It keeps a
+bounded window of the newest 64 pairs per `(machine, install_id)` and accepts a
+sequence older than that window **without judging it**, rather than reporting a
+comparison it did not make (`crates/chat-stasher/src/nativehost.rs:1636`). The
+conflict flag is sticky: the only way out is a new install id, which is a new key
+and starts clean (`crates/chat-stasher/src/nativehost.rs:1805-1810`).
+
+**The repair is a user action in the popup, on each conflicting copy, and it
+rewrites nothing.** The popup asks the host whether this id is known to be shared
+— a read-only question that writes nothing, asked precisely because an install
+whose backfill is switched off never sends a status report at all
+(`crates/chat-stasher/src/nativehost.rs:1918-1924`, `:1970`) — and the card
+appears only when the host *says* the id is shared, never on a guess
+(`apps/extension/lib/popup-view.ts:529-545`, `:760-767`). Neither copy rotates
+automatically: that press is the only caller of the rekey, because an automatic
+repair would let a restored backup or a renamed profile sever the wrong lineage
+with nobody reviewing it. It mints a new install id and then resets the sequence,
+in that order, and touches no already-sealed record — captures already archived
+keep the identity they were sealed with
+(`apps/extension/lib/install-identity.ts:71-110`;
+`apps/extension/entrypoints/background.ts:3144-3157`). The card states all four
+things a person needs before an irreversible choice: what happened, that nothing
+was lost, that history is not rewritten, and what the button does
+(`apps/extension/locales/en.yml:69-85`).
+
+🔴 **The limit, stated rather than implied: until two copies have each reserved
+the same sequence, they are indistinguishable.** A copied profile whose two
+copies have never both reported looks exactly like one install, and the code says
+so instead of reporting a comparison it did not make
+(`crates/chat-stasher/src/nativehost.rs:1900-1902`). No further field can close
+that gap: a heartbeat, a timestamp or a token held in extension storage is copied
+along with everything else. What is **not** copied is the other copy's next
+random value — which is the allocation mechanism above, and is the whole of what
+this detection is.
+
+🔴 **One machine's host cannot see another machine, and the archive is the only
+place that can.** A host compares writers inside its own state database, so a
+shared `install_id` on two machines is invisible to both of them; it becomes
+visible only when the per-install records are aggregated over the archive, and
+that is where it is flagged — on **every** record carrying the id, with the rows
+kept separate and never merged or averaged, because neither copy may be assumed
+to be the original. A pre-migration flat status file is superseded by the keyed
+one for the same `(machine, install_id)`, so one profile is not listed twice, and
+a record that has not reported for more than 48 hours is marked stale — never as
+zero (`crates/chat-stasher/src/overview.rs:668-674`, `:688-745`).
 
 ### Anyone else on the network between you and your destination
 
@@ -672,10 +861,11 @@ a real limitation of the current code.
    archive can be incomplete in ways this document does not enumerate. See the
    limits section of `README.md`.
 
-7. **Browser-side history backfill runs on seven platforms, recovers text on
-   six of them, and one tier of it looks like coverage
-   without being coverage.** Backfill recovers past conversation *text* on
-   **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**, **Kimi** and **Claude**
+7. **Browser-side history backfill runs on all seven platforms the extension
+   serves, recovers past conversation text on each of them, and one tier of it
+   looks like coverage without being coverage.** Backfill recovers past
+   conversation *text* on **ChatGPT**, **DeepSeek**, **Gemini**, **Grok**,
+   **Kimi**, **Perplexity** and **Claude**
    (`apps/extension/lib/backfill/enumerate.ts:4878-4902`), but on none of them
    has a complete backfill been observed in a real browser, and on Gemini, Grok
    and Kimi we have **not verified** whether a long conversation comes back whole
