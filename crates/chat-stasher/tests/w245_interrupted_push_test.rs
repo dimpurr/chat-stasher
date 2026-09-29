@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -70,12 +71,33 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Which rustic backend a sandbox's repository lives on.
+///
+/// The adoption guard is a property of the *backend's* listing and read
+/// behaviour, so the two remote-path families this project ships have to be
+/// exercised, not just the local one. `LocalBackend` writes a pack to
+/// `data/<xx>/<id>-tmp-` and renames it into place
+/// (`rustic_backend-0.6.2` `src/local.rs:547,557`), so a listing can never show
+/// a half-written pack; the OpenDAL services write to the final path
+/// (`src/opendal.rs:198`, `path()`), which is the same code path the `sftp` and
+/// S3 destinations take, and there a listing *can* show one.
+#[derive(Clone, Copy)]
+enum Repo {
+    /// `--repo <path>`: `rustic_backend`'s own `LocalBackend`.
+    Local,
+    /// `--repo opendal:fs --option root=<path>`: OpenDAL's `fs` service, which
+    /// shares the write path — and therefore the partial-file window — with the
+    /// `opendal:sftp` and `opendal:s3` destinations this project actually ships.
+    OpenDalFs,
+}
+
 struct Sandbox {
     dir: tempfile::TempDir,
     registry: PathBuf,
     repo: PathBuf,
     key: PathBuf,
     stage: PathBuf,
+    backend: Repo,
     /// session id -> the exact shard bytes written for it.
     staged: BTreeMap<String, Vec<u8>>,
 }
@@ -83,6 +105,15 @@ struct Sandbox {
 impl Sandbox {
     /// `sessions` sessions of `bytes_each` bytes each, each shard's bytes known.
     fn new(sessions: usize, bytes_each: usize) -> Sandbox {
+        Sandbox::with_backend(sessions, bytes_each, Repo::Local)
+    }
+
+    /// The same fixture on the OpenDAL `fs` service.
+    fn opendal_fs(sessions: usize, bytes_each: usize) -> Sandbox {
+        Sandbox::with_backend(sessions, bytes_each, Repo::OpenDalFs)
+    }
+
+    fn with_backend(sessions: usize, bytes_each: usize, backend: Repo) -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         for sub in ["home", "config", "data", "state"] {
@@ -113,13 +144,34 @@ impl Sandbox {
             fs::write(dir.join("000001.jsonl"), &body).unwrap();
             staged.insert(session, body.into_bytes());
         }
+        let repo = root.join("repo");
+        if matches!(backend, Repo::OpenDalFs) {
+            // The `fs` service roots itself at an existing directory: `mkfs`
+            // would otherwise be the first thing the push had to do, and this
+            // fixture is not testing that.
+            fs::create_dir_all(&repo).unwrap();
+        }
         Sandbox {
             dir,
             registry,
-            repo: root.join("repo"),
+            repo,
             key: root.join("key.json"),
             stage,
+            backend,
             staged,
+        }
+    }
+
+    /// `--repo`/`--option` as this sandbox's backend needs them.
+    fn repo_args(&self) -> Vec<String> {
+        match self.backend {
+            Repo::Local => vec!["--repo".into(), self.repo.to_string_lossy().into_owned()],
+            Repo::OpenDalFs => vec![
+                "--repo".into(),
+                "opendal:fs".into(),
+                "--option".into(),
+                format!("root={}", self.repo.display()),
+            ],
         }
     }
 
@@ -136,18 +188,20 @@ impl Sandbox {
     }
 
     fn push_args(&self) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "push".into(),
             "--stage".into(),
             self.stage.to_string_lossy().into_owned(),
             "--machine".into(),
             "mbp-interrupted".into(),
-            "--repo".into(),
-            self.repo.to_string_lossy().into_owned(),
+        ];
+        args.extend(self.repo_args());
+        args.extend([
             "--key-file".into(),
             self.key.to_string_lossy().into_owned(),
             "--keep-ssh-masters".into(),
-        ]
+        ]);
+        args
     }
 
     fn spawn_push(&self) -> Child {
@@ -164,19 +218,18 @@ impl Sandbox {
     }
 
     fn read_archive(&self) -> Output {
-        self.command()
-            .args([
-                "read",
-                "--all-machines",
-                "--full-ids",
-                "--repo",
-                self.repo.to_str().unwrap(),
-                "--key-file",
-                self.key.to_str().unwrap(),
-                "--keep-ssh-masters",
-            ])
-            .output()
-            .unwrap()
+        let mut args = vec![
+            "read".to_string(),
+            "--all-machines".to_string(),
+            "--full-ids".to_string(),
+        ];
+        args.extend(self.repo_args());
+        args.extend([
+            "--key-file".to_string(),
+            self.key.to_string_lossy().into_owned(),
+            "--keep-ssh-masters".to_string(),
+        ]);
+        self.command().args(args).output().unwrap()
     }
 }
 
@@ -239,6 +292,24 @@ fn assert_no_mismatched_content(sb: &Sandbox, context: &str) -> usize {
     archived.len()
 }
 
+/// A path relative to `root`, spelled with `/` on every platform.
+///
+/// The repository's own layout is what the filters here are written against —
+/// `data/<xx>/<id>`, and a pack file name is the whole file name — but
+/// `Path::to_string_lossy` spells the separator the host uses. On Windows that
+/// is `\`, so `"data\ab\<id>".starts_with("data/")` is false and
+/// `rsplit('/')` never splits: every pack the first push wrote was invisible to
+/// `pack_paths`, and the three tests that strand packs died at
+/// `strand_packs`'s "the first push wrote no packs to strand" on CI while
+/// passing everywhere else. The repository's spelling is `/`; converting here,
+/// once, is what keeps the filters from being platform-dependent.
+fn unix_rel(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Repository-relative paths of every stored object, packs included: packs live
 /// two levels down (`data/<xx>/<id>`), so this has to recurse.
 fn repo_entries(repo: &Path) -> Vec<String> {
@@ -252,8 +323,8 @@ fn repo_entries(repo: &Path) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if let Ok(rel) = path.strip_prefix(repo) {
-                names.push(rel.to_string_lossy().into_owned());
+            } else if path.strip_prefix(repo).is_ok() {
+                names.push(unix_rel(&path, repo));
             }
         }
     }
@@ -261,11 +332,68 @@ fn repo_entries(repo: &Path) -> Vec<String> {
     names
 }
 
+/// The regression test for the separator bug above. What the filters are handed
+/// is a *string*, so a Windows-spelled relative path can be fed to them from any
+/// host — which is the only way this bug is visible on the machine it is written
+/// on: the Windows CI run is where it bit, and the host that writes the test
+/// spells every path with `/`.
+///
+/// Both halves are asserted, because the conversion is what is load-bearing:
+/// the spelling `Path::to_string_lossy` gives on Windows names no pack to either
+/// filter (`is_final_pack_name` splits on `/`, finds no separator, and measures
+/// the `data\ab\` prefix as part of the file name), and the same spelling after
+/// `unix_rel` names one.
+#[test]
+fn a_windows_spelled_relative_path_is_read_as_the_repositorys_own_layout() {
+    let windows = format!(r"data\ab\{}", "0123456789abcdef".repeat(4));
+    assert_eq!(
+        unix_rel(Path::new(&windows), Path::new("")),
+        format!("data/ab/{}", "0123456789abcdef".repeat(4)),
+        "a Windows-spelled relative path must be read as the repository spells it"
+    );
+    assert!(
+        unix_rel(Path::new(&windows), Path::new("")).starts_with("data/"),
+        "the converted spelling is what `pack_paths` filters on"
+    );
+    assert!(
+        !is_final_pack_name(&windows),
+        "the host's spelling does not name a pack on its own — this is the half that \
+         made every pack the first push wrote invisible to `strand_packs` on Windows"
+    );
+    assert!(
+        is_final_pack_name(&unix_rel(Path::new(&windows), Path::new(""))),
+        "the converted spelling names the pack"
+    );
+    assert!(
+        !is_final_pack_name(&format!("{windows}-tmp-")),
+        "a LocalBackend temporary pack is not a final pack, in either spelling"
+    );
+}
+
+/// Where a pack's blob region ends and its header begins.
+///
+/// A pack is `blob, blob, … , header, header-length`: rustic writes the
+/// encrypted header last and the length of that header — unencrypted, four bytes
+/// little-endian — after it (`rustic_core` `src/blob/packer.rs:632-646`,
+/// `repofile/packfile.rs:40-41`). So the last four bytes say how far back the header
+/// starts, which is exactly what a test needs to damage every blob in a pack
+/// while leaving the header, and the file's length, untouched.
+fn pack_blob_region(bytes: &[u8]) -> usize {
+    let end = bytes.len();
+    let header_len = u32::from_le_bytes([
+        bytes[end - 4],
+        bytes[end - 3],
+        bytes[end - 2],
+        bytes[end - 1],
+    ]) as usize;
+    end - 4 - header_len
+}
+
 /// A pack file name is the pack's own id: 32 bytes of hex, nothing else.
 ///
 /// The `-tmp-` suffix matters here. `LocalBackend` writes a pack to
 /// `data/<xx>/<id>-tmp-` and renames it into place
-/// (`rustic_backend-0.6.2` `src/local.rs:547,558`), so a file with that suffix is
+/// (`rustic_backend-0.6.2` `src/local.rs:547,557`), so a file with that suffix is
 /// a pack that is not finished and that no index will ever name. Treating it as
 /// a stranded pack would make the race in
 /// `an_interrupted_push_that_stranded_packs_is_reused_by_its_retry` fire on the
@@ -498,11 +626,7 @@ fn a_push_over_stranded_packs_reuses_them_instead_of_re_uploading_them() {
     // moves or rewrites a byte.
     let after = repo_entries(&sb.repo);
     for pack in &stranded {
-        let rel = pack
-            .strip_prefix(&sb.repo)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let rel = unix_rel(pack, &sb.repo);
         assert!(
             after.contains(&rel),
             "the adopted pack {rel} disappeared; adoption must not move packs"
@@ -607,6 +731,111 @@ fn an_unreadable_stranded_pack_is_reported_and_never_adopted() {
     // the reuse, never the archive.
     assert_eq!(
         assert_no_mismatched_content(&sb, "after a refused adoption"),
+        sb.staged.len()
+    );
+}
+
+/// The header is not the pack: a pack whose **blob bytes** were damaged, with its
+/// header and its length untouched, must not be adopted either.
+///
+/// `to_indexed_checked()` reads the header of a pack the index does not name and
+/// checks the header's own lengths against the file size. It never decrypts a
+/// blob. So a pack whose ciphertext was damaged in place — what a torn write or
+/// a bit-flipping store produces, and the one failure a length check cannot see —
+/// passes that check, and its blobs would enter the dedup index. A later backup
+/// then finds them "already present", uploads none of them, and writes a snapshot
+/// that points at bytes no reader can decrypt: the reuse would cost the archive.
+///
+/// The bytes below are damaged all through the blob region — the bit before the
+/// header — so no reader can decrypt any of them, while the header and the
+/// trailing length stay exactly as they were and the file keeps its length
+/// (`pack_blob_region` locates the header from that trailing length). Adoption
+/// verifies a pack against the id it is stored under — that id is the SHA-256 of
+/// the whole pack file (`rustic_core` `src/blob/packer.rs:762`), so any damage
+/// anywhere in it moves the hash, and the header bytes themselves are covered.
+#[test]
+fn a_pack_with_damaged_blob_bytes_is_not_adopted_and_its_content_is_re_uploaded() {
+    let sb = Sandbox::new(4, 400_000);
+    assert!(sb.push().status.success());
+    let stranded = strand_packs(&sb);
+    let before = repo_bytes(&sb.repo);
+
+    // Damage every byte of every stranded pack's blob region — its ciphertext —
+    // and nothing else: the header and the trailing length stay exactly as they
+    // were, and the file keeps its length. This is the shape a length check
+    // cannot see and a blob read cannot survive.
+    let mut damaged: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for pack in &stranded {
+        let mut bytes = fs::read(pack).unwrap();
+        let blobs = pack_blob_region(&bytes);
+        assert!(
+            blobs > 0,
+            "{} has a {} byte header and no blob region to damage",
+            pack.display(),
+            bytes.len() - blobs - 4
+        );
+        for byte in &mut bytes[..blobs] {
+            *byte ^= 0xff;
+        }
+        fs::write(pack, &bytes).unwrap();
+        damaged.push((pack.clone(), bytes));
+    }
+
+    let second = sb.push();
+    assert!(
+        second.status.success(),
+        "a damaged pack must not fail the push: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let said = stranded_lines(&stdout);
+    assert!(
+        said.iter().any(|line| line.contains("NOT adopted")),
+        "the push must report the refusal rather than quietly reusing damaged bytes: {stdout}"
+    );
+    assert!(
+        !said.iter().any(|line| line.contains("adopted -")),
+        "a pack whose blobs cannot be verified must never be reported as adopted: {stdout}"
+    );
+
+    // The damaged packs are left exactly as they were found.
+    for (path, bytes) in &damaged {
+        assert_eq!(
+            &fs::read(path).unwrap(),
+            bytes,
+            "{} must not be modified",
+            path.display()
+        );
+    }
+
+    // And their content was uploaded again. The measure is `data_added` — the
+    // plaintext bytes of the blobs this push added — rather than the repository's
+    // growth on disk, which depends on where the chunker's boundaries fall (two
+    // uploads of the same bytes can differ twofold in stored size). This is the
+    // assertion that says the refusal cost a re-upload rather than a silent skip:
+    // a dedup hit against the damaged packs would have left it at zero.
+    let grew = repo_bytes(&sb.repo) - before;
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    eprintln!(
+        "W245: damaged blob bytes: payload={payload} data_added={added} packed={} grew={grew} \
+         (repository was {before})",
+        summary_field(&stdout, "data_added_packed").unwrap_or_default()
+    );
+    assert!(
+        added as usize >= payload / 2,
+        "the retry added {added} bytes of data for a {payload}-byte payload: the damaged packs \
+         were treated as holding content that was already stored"
+    );
+
+    // And the archive still hands back exactly what was staged. This is the
+    // assertion that reads the safety claim directly: with the verification
+    // disabled, the retry adopts the damaged packs, uploads none of their
+    // content, writes a snapshot pointing into them — and this read comes back
+    // with zero of the four staged sessions, because nothing in the archive can
+    // be decrypted any more.
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after a refused adoption of damaged packs"),
         sb.staged.len()
     );
 }
@@ -741,6 +970,260 @@ fn an_interrupted_push_that_stranded_packs_is_reused_by_its_retry() {
     );
     assert_eq!(
         assert_no_mismatched_content(&sb, "after the retry"),
+        sb.staged.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The remote backend family. Everything above runs on `LocalBackend`, which
+// writes a pack to a temporary name and renames it into place, so no listing
+// can ever show a pack that is not finished. The OpenDAL services — `sftp`,
+// which this project ships, and S3 — write straight to the final path, so a
+// listing taken while another client is uploading *can* show one. The three
+// tests below put the guard in front of that listing instead.
+
+/// Files directly below `dir`, as `(name, bytes)`; empty when `dir` is absent.
+fn dir_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, Vec<u8>)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// A pack another client is still writing, seen from a backend whose listing
+/// shows it: the bytes uploaded so far, at the name the pack will keep.
+///
+/// This is the case the guard exists for on a remote destination, and it is the
+/// one `LocalBackend` cannot produce: its in-flight pack is named `<id>-tmp-`
+/// and renamed, so a listing is always of finished packs. OpenDAL writes to the
+/// final path, so the listing has to be assumed to contain a prefix of a pack.
+/// The push must fall back to the plain index and say so rather than index a
+/// pack whose bytes are half-written, and the file must be left exactly as it
+/// was found — whoever is writing it is still writing it.
+#[test]
+fn an_incomplete_pack_in_a_remote_backends_listing_is_not_adopted() {
+    let sb = Sandbox::opendal_fs(4, 400_000);
+    assert!(sb.push().status.success(), "the first push failed");
+    let stranded = strand_packs(&sb);
+
+    // Half a pack: what the file looks like while it is being streamed.
+    let victim = stranded.last().unwrap().clone();
+    let full = fs::read(&victim).unwrap();
+    fs::write(&victim, &full[..full.len() / 2]).unwrap();
+    let partial = fs::read(&victim).unwrap();
+    // After the truncation, not before: the store is smaller now, and the
+    // number below is printed next to the re-upload it is meant to show.
+    let before = repo_bytes(&sb.repo);
+
+    let second = sb.push();
+    assert!(
+        second.status.success(),
+        "an incomplete pack must not fail the push: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    let said = stranded_lines(&stdout);
+    assert!(
+        said.iter().any(|line| line.contains("NOT adopted")),
+        "the push must report the refusal rather than index a half-written pack: {stdout}"
+    );
+    assert!(
+        !said.iter().any(|line| line.contains("adopted -")),
+        "an incomplete pack must never be reported as adopted: {stdout}"
+    );
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        partial,
+        "the in-flight pack must not be touched"
+    );
+
+    // The content went up again, and the archive still reads back byte-perfect.
+    // The measure is `data_added` — the plaintext bytes of the blobs this push
+    // added — and not the repository's growth on disk: how a payload packs
+    // depends on where the chunker's boundaries fall, so two uploads of the same
+    // bytes can differ by a factor of two in stored size, while "did it upload
+    // the payload again" is exactly what `data_added` answers. The refusal is
+    // what is being read here: a dedup hit would have left it at zero.
+    let grew = repo_bytes(&sb.repo) - before;
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    let added = summary_field(&stdout, "data_added").unwrap_or_default();
+    eprintln!(
+        "W245: incomplete pack in the listing: payload={payload} data_added={added} \
+         packed={} grew={grew} (repository was {before})",
+        summary_field(&stdout, "data_added_packed").unwrap_or_default()
+    );
+    assert!(
+        added as usize >= payload / 2,
+        "the retry added {added} bytes of data for a {payload}-byte payload: something was \
+         treated as already stored, and the pack that refused is the only candidate"
+    );
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after an incomplete pack in the listing"),
+        sb.staged.len()
+    );
+}
+
+/// The other half of the same race: an index file that was not there when the
+/// packs were stranded, and is there when the next push opens the repository.
+///
+/// A second client finishing its push writes exactly this — its index file
+/// lands after its packs, and it need not be a client of ours or a push of this
+/// stage for our open to have to cope with it. What has to hold is that the
+/// packs such an index names are not adopted a second time and not uploaded a
+/// second time: they are already reachable, so the right answer is the plain
+/// index (nothing reported as stranded, nothing adopted), and the push must
+/// still upload no data.
+///
+/// The window this test cannot pin is the *arrival* of the file: whether the
+/// index lands before the survey or between the survey and the checked pass is
+/// not something an outside process can schedule, and both are the same state
+/// from inside the open — the survey and the checked pass each read the index
+/// files at their own time. `an_index_file_written_while_the_open_runs` below
+/// injects it during the open for the same reason.
+#[test]
+fn an_index_file_that_appears_after_the_packs_were_stranded_is_not_double_counted() {
+    let sb = Sandbox::opendal_fs(4, 500_000);
+    assert!(sb.push().status.success());
+    let index = dir_files(&sb.repo.join("index"));
+    assert!(!index.is_empty(), "the first push wrote no index file");
+    let stranded = strand_packs(&sb);
+    let before = repo_bytes(&sb.repo);
+
+    // The other client's index: put it back, and keep the packs it names.
+    fs::create_dir_all(sb.repo.join("index")).unwrap();
+    for (name, bytes) in &index {
+        fs::write(sb.repo.join("index").join(name), bytes).unwrap();
+    }
+
+    let second = sb.push();
+    assert!(
+        second.status.success(),
+        "a push over packs an index file names must succeed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert_eq!(
+        summary_field(&stdout, "data_added"),
+        Some(0),
+        "the index names every pack, so nothing may be uploaded again: {stdout}"
+    );
+    assert!(
+        stranded_lines(&stdout).is_empty(),
+        "nothing was stranded from this open's point of view — the index names every pack — \
+         so there is nothing to report: {stdout}"
+    );
+
+    // No second copy of the payload, and every pack the index names is untouched.
+    let grew = repo_bytes(&sb.repo) - before;
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    assert!(
+        grew < payload as u64 / 4,
+        "the retry added {grew} bytes for a {payload}-byte payload the index already names"
+    );
+    for pack in &stranded {
+        assert!(pack.exists(), "{} disappeared", pack.display());
+    }
+    assert_eq!(
+        dir_files(&sb.repo.join("index")),
+        index,
+        "an index file must not be rewritten by a push that only reads it"
+    );
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after an index file reappeared"),
+        sb.staged.len()
+    );
+}
+
+/// The same index file, arriving *while* the open is running: written from
+/// another process, against a repository whose packs are stranded, and read by
+/// whichever phase of the open lists the index directory next.
+///
+/// What is asserted is the end state, not which phase saw it, because the phase
+/// is not schedulable from outside the process: the survey and the checked pass
+/// both list the index files, so an index that lands between them is one the
+/// checked pass reads and the survey did not. Either way the packs must not be
+/// counted twice (no second copy of the payload on disk, no data added), the
+/// bytes must read back, and no pack or index file may be modified.
+#[test]
+fn an_index_file_written_while_the_open_runs_is_not_double_counted() {
+    let sb = Sandbox::opendal_fs(8, 1_000_000);
+    assert!(sb.push().status.success());
+    let index = dir_files(&sb.repo.join("index"));
+    assert!(!index.is_empty(), "the first push wrote no index file");
+    let stranded = strand_packs(&sb);
+    let before = repo_bytes(&sb.repo);
+
+    let index_dir = sb.repo.join("index");
+    let injected = index.clone();
+    let writer = thread::spawn(move || {
+        // Long enough that the open is under way — its verification reads every
+        // stranded pack, which is the part of the open this window sits in — and
+        // short enough that a loaded machine still has the push running.
+        sleep(Duration::from_millis(100));
+        fs::create_dir_all(&index_dir).unwrap();
+        for (name, bytes) in &injected {
+            fs::write(index_dir.join(name), bytes).unwrap();
+        }
+    });
+
+    let second = sb.push();
+    writer.join().unwrap();
+    assert!(
+        second.status.success(),
+        "a push racing an index file must succeed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    // Which phase saw the injected index, for the log: a push that reports no
+    // stranded packs is one whose *survey* read the file, and one that reports
+    // an adoption is one whose survey did not (whether the checked pass read it
+    // instead is not visible from here — either way the packs are not adopted a
+    // second time, which is what the assertions below are for).
+    eprintln!(
+        "W245: index injected 100 ms into the open; the survey {} it: {:?}",
+        if stranded_lines(&stdout).is_empty() {
+            "read"
+        } else {
+            "did not read"
+        },
+        stranded_lines(&stdout),
+    );
+
+    // Whichever phase read the index, the packs it names were not uploaded
+    // again and nothing was counted twice.
+    assert_eq!(
+        summary_field(&stdout, "data_added"),
+        Some(0),
+        "the payload is named by the index or adopted from its packs: neither may upload it \
+         again: {stdout}"
+    );
+    let grew = repo_bytes(&sb.repo) - before;
+    let payload: usize = sb.staged.values().map(Vec::len).sum();
+    assert!(
+        grew < payload as u64 / 4,
+        "the retry added {grew} bytes for a {payload}-byte payload that was already stored"
+    );
+    for pack in &stranded {
+        assert!(pack.exists(), "{} disappeared", pack.display());
+    }
+    assert_eq!(
+        dir_files(&sb.repo.join("index")),
+        index,
+        "the index file the other client wrote must be left as it was"
+    );
+    assert_eq!(
+        assert_no_mismatched_content(&sb, "after an index file arrived mid-open"),
         sb.staged.len()
     );
 }

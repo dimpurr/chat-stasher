@@ -49,14 +49,27 @@
 //! which is what rustic's own `repair index` does and why its `check` labels an
 //! unreferenced pack "can be a parallel backup job".
 //!
+//! A header is not a pack, and the checked pass reads no further than the header:
+//! it parses the encrypted header and compares the lengths in it with the file
+//! size, so a pack whose *blob bytes* were damaged in place — with the header and
+//! the length left intact — would be indexed, and a later backup would skip
+//! uploading blobs no reader can decrypt. `verify_unindexed` therefore reads
+//! every byte of every pack the index does not name, before the checked pass
+//! runs, and compares it with the id the pack is stored under: a pack's id is
+//! the SHA-256 of its own contents (rustic_core `src/blob/packer.rs:762`), so
+//! nothing enters the dedup index unless it reads back as the bytes it was
+//! written as. Any failure refuses the whole adoption and is reported, never
+//! absorbed — the direction that costs a re-upload and never the archive.
+//!
 //! `docs-dev/orphan-packs.md` carries the safety argument in full.
 
 use crate::store::StoreConfig;
 use anyhow::Context;
 use rustic_core::repofile::{IndexFile, MasterKey};
 use rustic_core::{
-    Credentials, FileType, IndexedFullStatus, Open, ReadBackend, Repository, RepositoryBackends,
+    Credentials, FileType, Id, IndexedFullStatus, Open, ReadBackend, Repository, RepositoryBackends,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 /// How the backend and the index files disagree.
@@ -98,11 +111,14 @@ pub enum IndexAdoption {
     /// index was built: those packs' blobs are visible to this open.
     Adopted,
     /// The adopting index was *not* built, so packs no index file names stay
-    /// unreachable. `why` says which fence stopped it: an unreadable pack, or an
-    /// index that names a pack the backend does not have.
+    /// unreachable. `why` says which of the three fences stopped it: a pack that
+    /// does not read back as the bytes it is stored under, an index that names a
+    /// pack the backend does not have, or the checked pass failing on a pack
+    /// whose header it could not use.
     Refused {
-        /// Human-readable reason, with rustic's own context chain when the
-        /// checked pass itself failed.
+        /// Human-readable reason, naming the pack when one pack refused the
+        /// open, and carrying rustic's own context chain when the checked pass
+        /// itself failed.
         why: String,
     },
 }
@@ -189,6 +205,76 @@ pub fn survey<S: Open>(
     Ok(OrphanReport { unindexed, missing })
 }
 
+/// How much of a pack is read at a time while verifying it: a pack is verified
+/// by reading all of it, and a bounded buffer means a large pack cannot turn the
+/// check that protects it into an allocation. (rustic's own `check --read-data`
+/// reads a whole pack into memory instead.)
+const VERIFY_CHUNK: u32 = 8 * 1024 * 1024;
+
+/// Read every pack the index does not name, all of it, and compare it with the
+/// id it is stored under.
+///
+/// A pack's id **is** the SHA-256 of the pack file's own contents — rustic names
+/// a pack after the bytes it just wrote (`rustic_core` `src/blob/packer.rs:762`)
+/// and its own `check --read-data` recomputes exactly that
+/// (`commands/check.rs:736`) — so comparing the two covers every byte of the
+/// pack: each blob's ciphertext, the encrypted header, and the trailing length
+/// field. One flipped bit anywhere moves it. That is strictly wider than
+/// decrypting each blob and re-deriving its id (which covers the blobs, and
+/// neither the header bytes nor the length): the question this answers is not
+/// "is this blob decryptable" but "is this pack the bytes its author wrote",
+/// which is the property a dedup entry has to rest on.
+///
+/// # Errors
+///
+/// A reason naming the pack (by the first 12 hex characters of its id) when it
+/// does not read back as the bytes it is named for: a pack still being written,
+/// a damaged one, or one the backend cannot read at all.
+fn verify_unindexed(
+    backends: &RepositoryBackends,
+    unindexed: &[(String, u64)],
+) -> Result<(), String> {
+    let be = backends.repository();
+    for (hex, listed) in unindexed {
+        let short = hex.get(..12).unwrap_or(hex);
+        let id: Id = hex
+            .parse()
+            .map_err(|err| format!("pack {short} is not a valid id: {err}"))?;
+        let size = u32::try_from(*listed).map_err(|_| {
+            format!("pack {short} is listed as {listed} bytes, which is larger than a pack can be")
+        })?;
+        let mut hasher = Sha256::new();
+        let mut offset: u32 = 0;
+        while offset < size {
+            let want = VERIFY_CHUNK.min(size - offset);
+            // `false`: read the stored bytes, never a cached copy of them.
+            let chunk = be
+                .read_partial(FileType::Pack, &id, false, offset, want)
+                .map_err(|err| format!("pack {short} could not be read: {err:#}"))?;
+            if chunk.len() < want as usize {
+                return Err(format!(
+                    "pack {short} ended after {} of {size} bytes",
+                    offset.saturating_add(chunk.len() as u32)
+                ));
+            }
+            hasher.update(&chunk);
+            offset += want;
+        }
+        let computed = hex_digest(&hasher.finalize());
+        if computed != *hex {
+            return Err(format!(
+                "pack {short} is not the bytes it is stored under: its contents hash to {}",
+                computed.get(..12).unwrap_or(&computed)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Open an existing repository and build its index, reaching the packs no index
 /// file names. One call for every read path.
 ///
@@ -252,6 +338,26 @@ pub fn index_adopting<S: Open>(
             "{} pack(s) this index names are absent from the backend",
             report.missing.len()
         );
+        let repo = repo.to_indexed().context("index repository")?;
+        return Ok((
+            repo,
+            OrphanOutcome {
+                report,
+                adoption: Some(IndexAdoption::Refused { why }),
+            },
+        ));
+    }
+
+    // Nothing enters the dedup index unverified. The checked pass validates each
+    // pack's *header* and the lengths declared in it against the file's size; it
+    // never reads a blob, so a pack damaged in place — header and length intact,
+    // ciphertext not — passes it, and a later backup would then skip uploading
+    // blobs no reader can decrypt. Reading every byte of every pack the index
+    // does not name first is what makes that impossible rather than unlikely.
+    // The refusal is the whole adoption, not the one pack: a partial adoption
+    // would leave which blobs are reachable decided by which packs happened to
+    // verify, which is a state nothing downstream could reason about.
+    if let Err(why) = verify_unindexed(backends, &report.unindexed) {
         let repo = repo.to_indexed().context("index repository")?;
         return Ok((
             repo,

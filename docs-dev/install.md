@@ -272,6 +272,8 @@ archive would quietly stop being copied anywhere
 
 (`crates/chat-stasher/src/main.rs:10163-10171,10181-10204`).
 
+(`crates/chat-stasher/src/main.rs:10184-10192,10202-10225`).
+
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
@@ -524,6 +526,9 @@ refusal's own wording is `crates/chat-stasher/src/main.rs:10956-10962`).
 
 remote step and the timer (`crates/chat-stasher/src/main.rs:11380-11387`; the
 refusal's own wording is `crates/chat-stasher/src/main.rs:10951-10957`).
+
+remote step and the timer (`crates/chat-stasher/src/main.rs:11401-11408`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:10972-10978`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -851,6 +856,8 @@ paths, sizes, mtimes, and flags go to standard output; conversation content
 does not (`crates/chat-stasher/src/main.rs:13966-13968`). This is the
 
 does not (`crates/chat-stasher/src/main.rs:13959-13961`). This is the
+
+does not (`crates/chat-stasher/src/main.rs:13980-13982`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
@@ -858,6 +865,8 @@ from the record left by the last `run-once`
 (`crates/chat-stasher/src/main.rs:13689-13717`). These are the conclusions defined
 
 (`crates/chat-stasher/src/main.rs:13682-13710`). These are the conclusions defined
+
+(`crates/chat-stasher/src/main.rs:13703-13731`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -877,6 +886,8 @@ few lines and does not flood the screen
 
 (`crates/chat-stasher/src/main.rs:13961-14094`):
 
+(`crates/chat-stasher/src/main.rs:13982-14115`):
+
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
 - When a source root directory does not exist, an extra line: `[scan] skipped N non-existent source root(s).`
@@ -891,6 +902,8 @@ the timer "unhealthy", **it exits with a non-zero code**
 (`crates/chat-stasher/src/main.rs:13947-13952`). So "the command errored"
 
 (`crates/chat-stasher/src/main.rs:13940-13945`). So "the command errored"
+
+(`crates/chat-stasher/src/main.rs:13961-13966`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -903,6 +916,8 @@ was scanned, so nothing is claimed
 (`crates/chat-stasher/src/main.rs:13645-13670`). **Note:** the human-readable report goes to
 
 (`crates/chat-stasher/src/main.rs:13638-13663`). **Note:** the human-readable report goes to
+
+(`crates/chat-stasher/src/main.rs:13659-13684`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,

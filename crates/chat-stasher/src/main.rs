@@ -5380,18 +5380,34 @@ fn cmd_dest_init(
                 } else {
                     match store.push(stage, &mk) {
                         Ok(summary) => {
-                            let (stranded, stranded_action) =
-                                stranded_push_facts(summary.orphans.as_ref());
-                            println!(
-                                "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={} stranded_packs={} stranded={}",
-                                summary.stage_shards,
-                                summary.files_new,
-                                summary.files_unmodified,
-                                summary.data_added,
-                                summary.snapshots_in_repo,
-                                stranded,
-                                stranded_action,
-                            );
+                            // The two branches below are one line in two widths:
+                            // the short one is exactly what this command
+                            // printed before stranded packs existed, and is kept
+                            // for the runs that have nothing to report (a
+                            // repository whose index names every pack, or one
+                            // this push just created). A run with something to
+                            // say appends the two fields. Keep the shared prefix
+                            // byte-identical between them.
+                            match stranded_push_facts(summary.orphans.as_ref()) {
+                                Some((stranded, stranded_action)) => println!(
+                                    "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={} stranded_packs={} stranded={}",
+                                    summary.stage_shards,
+                                    summary.files_new,
+                                    summary.files_unmodified,
+                                    summary.data_added,
+                                    summary.snapshots_in_repo,
+                                    stranded,
+                                    stranded_action,
+                                ),
+                                None => println!(
+                                    "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
+                                    summary.stage_shards,
+                                    summary.files_new,
+                                    summary.files_unmodified,
+                                    summary.data_added,
+                                    summary.snapshots_in_repo,
+                                ),
+                            }
                         }
                         Err(e) => {
                             chat_stasher::remote_err::eprint_remote_error(
@@ -6921,21 +6937,26 @@ fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
     }
 }
 
-/// `(packs no index file named, what this push did about them)` — the two facts
-/// every push summary carries, for the paths whose output is one line.
+/// `(packs no index file named, what this push did about them)`, or `None` when
+/// there is nothing to report.
 ///
-/// `None` means the push created the repository, which therefore held no packs
-/// at all: a measured zero, not a fallback. A refusal is reported as
-/// `not-adopted` even when the count is zero, because "the full index could not
-/// be built" is a different state from "every pack is named by an index file".
+/// `Some` only when there is a fact an operator needs: packs no index file names
+/// (whatever this push did about them), or a refusal — including a refusal whose
+/// count is zero, because "the full index could not be built" is a different
+/// state from "every pack is named by an index file". Everything else is `None`:
+/// a push that created the repository held no packs to survey, and a healthy
+/// repository's index names every pack in its backend. Both of those are
+/// measurements, and a caller that printed them would be changing the output of
+/// a healthy run — which is why the fields this returns are appended to
+/// `dest-init`'s one-line push summary only when it is `Some`.
 fn stranded_push_facts(
     orphans: Option<&chat_stasher::orphans::OrphanOutcome>,
-) -> (usize, &'static str) {
+) -> Option<(usize, &'static str)> {
     match orphans {
-        None => (0, "new-repository"),
-        Some(o) if o.refused().is_some() => (o.report.unindexed_packs(), "not-adopted"),
-        Some(o) if o.adopted() => (o.report.unindexed_packs(), "adopted"),
-        Some(_) => (0, "none"),
+        None => None,
+        Some(o) if o.refused().is_some() => Some((o.report.unindexed_packs(), "not-adopted")),
+        Some(o) if o.adopted() => Some((o.report.unindexed_packs(), "adopted")),
+        Some(_) => None,
     }
 }
 

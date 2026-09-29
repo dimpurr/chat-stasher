@@ -578,9 +578,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:6994-6998`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:7015-7019`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6970-6977`).
+  (`crates/chat-stasher/src/main.rs:6991-6998`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -647,6 +647,8 @@ a real limitation of the current code.
    (`crates/chat-stasher/src/main.rs:418-420,7175-7316`). `export --out <dir>`
 
    (`crates/chat-stasher/src/main.rs:418-420,7221-7360`). `export --out <dir>`
+
+   (`crates/chat-stasher/src/main.rs:418-420,7242-7381`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:641-721`) — see exposure 5
@@ -664,6 +666,8 @@ a real limitation of the current code.
    (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7482-7724`). One qualification, because the
 
    (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7526-7759`). One qualification, because the
+
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7547-7780`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

@@ -58,13 +58,29 @@ rewrite and minus the `append_only` refusal — and it needs no delete path at a
 A later `backup` then finds every one of those blobs already present and uploads
 none of them.
 
+**A header is not a pack, so a header read is not a verification.** The checked
+pass parses a pack's encrypted header and compares the lengths declared in it
+with the file size; it never decrypts a blob. A pack whose *ciphertext* was
+damaged in place — a torn write, a bit-flipping store — passes that check, and its
+blobs would enter the dedup index, where a later backup would skip uploading
+content no reader can decrypt. Before the checked pass runs, this project
+therefore reads every byte of every pack the index does not name and compares it
+with the id the pack is stored under (`crates/chat-stasher/src/orphans.rs:233`).
+A pack's id is the SHA-256 of its own contents — that is how rustic names a pack,
+by hashing the file it has just written, and it is what rustic's own `check
+--read-data` recomputes (the pinned source is cited in that function's comment) —
+so this covers every blob's ciphertext, the header bytes and the
+trailing length field, and one flipped bit anywhere in the pack moves it. A pack
+that does not read back as the bytes it is named for is not adopted, and the
+refusal is reported rather than absorbed.
+
 So the bytes stop being waste because they **become the content**. The measured
 effect at test scale (4 sessions × 500 000 bytes): the old retry added 1 047 572 B
 over a stranded 1 045 700 B repository — a second full copy — while the adopting
 retry adds only its snapshot, index and tree pack
-(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:450`).
+(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:578`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:223`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:309`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:366`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -84,19 +100,35 @@ ids at the same offsets, which is what rustic's own `repair index` does, and why
 its `check` labels an unreferenced pack "can be a parallel backup job".
 
 **A pack still being written is never adopted.** The guard is *completeness*, not
-age: a pack is adopted only if its header parses and its own length and blob sum
-agree with the file size — which a pack still being streamed to the backend
-fails. This is deliberately not an age gate. An age gate would have to outlast
-the slowest concurrent upload (minutes for a large pack) and would then refuse to
-reuse our own just-killed push's packs, which is the entire point of the change.
-Completeness is also the stronger guard: it is a property of the bytes, not a
-guess about who is writing them. `crates/chat-stasher/src/orphans.rs:265` is where
-a failure to validate sends the open back to the plain index.
+age: a pack is adopted only if its header parses, its own length and blob sum
+agree with the file size, and every byte of it reads back as the id it is stored
+under — which a pack still being streamed to the backend fails on the first
+count, and a damaged one on the last. This is deliberately not an age gate. An
+age gate would have to outlast the slowest concurrent upload (minutes for a large
+pack) and would then refuse to reuse our own just-killed push's packs, which is
+the entire point of the change. Completeness is also the stronger guard: it is a
+property of the bytes, not a guess about who is writing them.
+`crates/chat-stasher/src/orphans.rs:360` is where a failure to validate sends the
+open back to the plain index.
+
+**A refusal costs the reuse, not the archive — and the cost is the whole set.**
+One pack that cannot be verified refuses the adoption, so no pack on that open is
+adopted, including the ones that verified. That granularity is deliberate and is
+the behavior the tests already pinned (`an_unreadable_stranded_pack_…` asserts
+that no pack is reported as adopted when one is unreadable); excluding only the
+bad pack would mean handing the checked pass a filtered listing, and which blobs
+are reachable would then depend on which packs happened to verify. The cost is
+real and is worth naming: a damaged pack is permanent on this path, because
+nothing here deletes or rewrites it and `append_only:true` blocks the command
+that would — so the reuse those packs offered is gone until a deliberately
+planned repair (`repair index`, single-writer, with `append_only` off, ADR-016)
+re-indexes them. What is never at stake is the bytes: the content is uploaded
+again and the archive is complete either way.
 
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:160` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:176` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:250` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:336` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: the checked pass rebuilds the
 index from what the backend *lists*, so it would drop that entry — and an entry
 for a missing pack is one the local metadata cache can still serve, a documented
@@ -121,22 +153,57 @@ plain index (and re-uploads, which is what the tool did before this change).
 * Every open pays one survey: a pack listing plus one pass over the index files.
   With rustic's local metadata cache on (the default) that pass is served
   locally.
-* `push` reports what it found and did, and `dest-init`'s compact line carries
-  `stranded_packs=` and `stranded=`. Silence means the survey found nothing —
-  a measurement, not a gap. A refusal is reported as `NOT adopted` with its
-  reason, because "we could not reuse this" and "there was nothing to reuse" are
-  different states.
+* When the survey finds packs no index file names, that open also reads all of
+  them — every byte, once — before it may adopt anything. A healthy repository
+  pays nothing: a repository whose index names every pack in its backend skips
+  the verification entirely, because no pack is a candidate. An archive that
+  keeps stranded packs pays this on every open, on the read paths as well as on
+  `push`, which is the price of never reusing a pack whose bytes were not read.
+* `push` reports what it found and did, and a `dest-init` push appends
+  `stranded_packs=` and `stranded=` to its one-line summary only when there is
+  something to report; a healthy run prints the line it always printed. Silence
+  means the survey found nothing — a measurement, not a gap. A refusal is
+  reported as `NOT adopted` with its reason, because "we could not reuse this"
+  and "there was nothing to reuse" are different states.
 * Read paths print nothing about it. They do not need to: when a snapshot needs a
   pack it cannot reach, the existing machinery already answers PARTIAL / exit 3
   with "cannot ls tree" — the same answer it gave before this change, and one
-  that never presents an absence as proof.
+  that never presents an absence as proof. A refusal reached from a read path is
+  the same answer for the same reason, and it is the honest one: those packs did
+  not read back as the bytes they are named for, so nothing in them is presented
+  as content.
 
 ## What pins it
 
-`crates/chat-stasher/tests/w245_interrupted_push_test.rs` carries the tests. Four
-of them fail against the unfixed code (`a_push_over_stranded_packs_…`,
-`content_from_an_adopted_pack_…`, `an_unreadable_stranded_pack_…`, and the
-`#[ignore]`d real-window race); the other two are safety properties that hold both
-before and after (`an_interrupted_push_never_leaves_a_corrupt_archive` and the
-kill-before-any-pack case), and are kept so that a fix for the cost can never be
+`crates/chat-stasher/tests/w245_interrupted_push_test.rs` carries the tests. Five
+fail against the code before this feature: `a_push_over_stranded_packs_…`,
+`content_from_an_adopted_pack_…`, `an_unreadable_stranded_pack_…`,
+`an_incomplete_pack_in_a_remote_backends_listing_…`, and the `#[ignore]`d
+real-window race. One more — `a_pack_with_damaged_blob_bytes_…` — fails against
+that code *and* against this feature as it was first written, because a
+header-only check adopts a pack whose ciphertext was damaged in place; it is the
+test the byte-for-byte verification exists for. The rest are safety properties
+that hold both before and after (`an_interrupted_push_never_leaves_a_corrupt_archive`,
+the kill-before-any-pack case, the two index-appears cases, and the Windows
+separator regression), and are kept so that a fix for the cost can never be
 mistaken for a licence to weaken them.
+
+**The backend family a destination actually uses.** The tests above run on
+`rustic_backend`'s `LocalBackend`, which writes a pack to `data/<xx>/<id>-tmp-`
+and renames it into place, so its listings never show a pack that is not
+finished. The OpenDAL services — `sftp`, which this project ships, and S3 — write
+to the final path, so there a listing *can* show one. Three tests run the same
+scenarios on `opendal:fs`, which shares that write path: one strands a pack and
+truncates it (the push must fall back, report, and leave the in-flight file
+alone), and two put an index file beside stranded packs — one present for the
+whole open, one written from another process while the open runs — where nothing
+may be adopted a second time and no content may be uploaded again.
+
+What is *not* pinned: the arrival of an index file *between* the survey and the
+checked pass cannot be scheduled from outside the process, so the test that
+injects one asserts the properties that hold for any arrival point rather than
+that the write landed in that window. Real `sftp` and S3 remain untested here —
+they need a server and credentials the gate does not have — so what is verified
+for them is only that the code path is the same one `opendal:fs` takes; S3's
+multipart write and SFTP's own listing semantics are argued from the shared
+implementation, not measured.

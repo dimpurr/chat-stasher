@@ -61,6 +61,8 @@ that document is the honest one.
   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7482-7724`).
 
   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7526-7759`).
+
+  (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7547-7780`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
