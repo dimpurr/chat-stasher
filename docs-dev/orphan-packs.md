@@ -62,7 +62,7 @@ of them.
 **A header is not a pack, so a header read is not a verification.** This project
 reads the header of every pack the index does not name *and every blob that
 header declares* (`crates/chat-stasher/src/packcheck.rs:95`, called from
-`crates/chat-stasher/src/orphans.rs:251`): the header has to decrypt with the
+`crates/chat-stasher/src/orphans.rs:327`): the header has to decrypt with the
 repository key, every blob has to decrypt and decompress to the length its
 header gives, and every blob's plaintext has to hash to the id the header names.
 The pack's bytes must also hash to the id it is stored under. That catches damage
@@ -91,7 +91,7 @@ over a stranded 1 045 700 B repository — a second full copy — while the adop
 retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:613-616`).
 
-Implementation: `crates/chat-stasher/src/orphans.rs:363`. Every read path reaches
+Implementation: `crates/chat-stasher/src/orphans.rs:458`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:366`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
@@ -120,7 +120,7 @@ age gate would have to outlast the slowest concurrent upload (minutes for a larg
 pack) and would then refuse to reuse our own just-killed push's packs, which is
 the entire point of the change. Completeness is also the stronger guard: it is a
 property of the bytes, not a guess about who is writing them.
-`crates/chat-stasher/src/orphans.rs:405-407` is where every failure to validate sends
+`crates/chat-stasher/src/orphans.rs:500-502` is where every failure to validate sends
 the open back to the plain index — the same fallback whether the refuser was a
 pack this open could not verify or a pack set that changed under it.
 
@@ -137,9 +137,9 @@ re-indexes them. What is never at stake is the bytes: the content is uploaded
 again and the archive is complete either way.
 
 **Adoption is fenced by a survey, so a healthy repository is untouched.**
-`crates/chat-stasher/src/orphans.rs:201-232` diffs the backend's pack listing against
+`crates/chat-stasher/src/orphans.rs:271-309` diffs the backend's pack listing against
 the packs the index files name, and
-`crates/chat-stasher/src/orphans.rs:385-399` refuses to adopt when the index names a
+`crates/chat-stasher/src/orphans.rs:480-494` refuses to adopt when the index names a
 pack the backend no longer has. That case matters: adopting from existing index
 files plus only newly verified packs would otherwise drop that entry — and an
 entry for a missing pack is one the local metadata cache can still serve, a documented
@@ -150,9 +150,11 @@ repository whose index and backend agree gets exactly the index it got before th
 module existed.
 
 **Nothing is deleted, ever.** `append_only:true` is left on, `repair index` and
-`prune` are not called, and no code path here removes a pack. The two failure
-modes are the safe ones: an open either adopts (and reuses) or falls back to the
-plain index (and re-uploads, which is what the tool did before this change).
+`prune` are not called, and no code path here removes a pack. `prune-orphans`
+reports the same set the survey finds and refuses to delete any of it, naming the
+capabilities a safe delete would need. The two failure modes are the safe ones: an
+open either adopts (and reuses) or falls back to the plain index (and re-uploads,
+which is what the tool did before this change).
 
 ## What it costs, and what the operator sees
 
@@ -192,6 +194,57 @@ plain index (and re-uploads, which is what the tool did before this change).
   not read back as the bytes they are named for, so nothing in them is presented
   as content.
 
+## Seeing the stranded set: `prune-orphans`
+
+Adoption reclaims the bytes, but it does not make them *visible*: the packs stay
+unindexed on disk for good, so an operator asking "how much is stranded here, and
+could any of it be deleted" has no answer from `push` or `verify`. `prune-orphans`
+answers it and nothing else:
+
+```sh
+chat-stasher prune-orphans --destination <name> [--dry-run] [--json]
+```
+
+It opens the repository read-only — no index is built, and nothing is adopted —
+lists the backend once, reads the index files, and then verifies each unindexed
+pack's bytes with the same verifier the adopting open uses. Every count it reports
+comes from that one listing, so its totals and its unindexed set describe the same
+moment. It reports the repository's own config id as its fingerprint (never the
+path or host it was reached at), the backend family, pack and byte totals, the
+unindexed packs by id prefix and size, how many of those verified, how many are
+unknown with the verifier's reason, what the next push would do about them, and any
+pack an index names that the backend does not list. It writes nothing, and it
+appears in no schedule, no `push`, no `run-once` and no browser host.
+
+**Deletion is refused, and the refusal names what is missing.** `--apply` exits `3`
+and prints the three capabilities a safe delete would need:
+
+* a repository-wide reader/writer lock every client honors for its whole push or
+  read. There is none: `.ingest.lock` is a local *stage* lock, and a local `flock`
+  would not constrain another machine or another backend writer.
+* a conditional delete carrying an object version or ETag, so exactly the object
+  that was checked is the object removed. `rustic_core::ReadBackend` exposes
+  `list_with_size` — a listing and a size — and nothing to condition on.
+* a trustworthy backend modification time to age candidates by. The same interface
+  carries no modification time at all, and the packing machine's clock is not the
+  backend's clock.
+
+The age floor and the two-pass mark that a real sweep would use are also not
+sufficient on their own: they cannot see a *currently active* retry that is about
+to adopt a pack, which is why the lock is first on the list rather than a detail.
+The policy boundary is the fourth reason and the oldest — `append_only:true` is
+left on, and disabling it to call rustic's broad `prune` would let that command
+rewrite indexes and repack *indexed* data, which is not what this command is for.
+
+**An unreadable pack is unknown, and it makes the whole survey incomplete.** A pack
+whose bytes do not read back as the id it is stored under is reported `unknown`
+with the verifier's reason, never as empty and never as zero, and the command exits
+`3` — the same third state `CLAUDE.md` keeps for "did not finish reading". An index
+that names a pack the backend does not list is a contradiction rather than an
+unknown: the reading finished and the two sources disagree, so that is `1`. A run
+that read every pack and found no candidate exits `0`, and that zero is a
+measurement made after a complete survey.
+
 ## What pins it
 
 `crates/chat-stasher/tests/w245_interrupted_push_test.rs` carries the tests. Five
@@ -222,6 +275,16 @@ case, the two index-appears cases, and the Windows separator regression), and ar
 kept so that a fix for the cost can never be mistaken for a licence to weaken
 them.
 
+`crates/chat-stasher/tests/w250_prune_orphans_test.rs` carries the read-only
+report's tests: an empty repository, a healthy one, stranded packs reported
+verified and adoptable, a damaged orphan reported unknown with its reason and exit
+`3`, `--apply` refused and refused *before* the destination is dialled (proved by
+pointing it at a path that is not a repository), the `--json` document's full ids,
+and a destination named in the config reaching the same repository `--repo` does.
+Every mode also compares the repository tree — every file's contents hashed, not
+just its name — before and after, because "the survey writes nothing" is the claim
+the whole command rests on.
+
 **The backend family a destination actually uses.** The tests above run on
 `rustic_backend`'s `LocalBackend`, which writes a pack to `data/<xx>/<id>-tmp-`
 and renames it into place, so its listings never show a pack that is not
@@ -235,7 +298,7 @@ injected into that same window — where nothing may be adopted a second time an
 no content may be uploaded again.
 
 **The window is a fixture, not a race.** `CHAT_STASHER_TEST_HOLD_OPEN_AFTER_SURVEY`
-parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:263-292`),
+parks an open between those two listings (`crates/chat-stasher/src/orphans.rs:358-387`),
 which is how the injected-index and injected-pack tests put something there at
 all: without it, a test can only inject on a timer and assert the properties that
 hold whichever phase saw the file. The variable is read on every open and does
