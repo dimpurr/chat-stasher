@@ -804,9 +804,9 @@ pub fn export_sessions(
                     session_id: hit.session_id.clone(),
                     harness: hit.harness.clone(),
                     why: format!(
-                        "the newest snapshot of machine `{}` no longer holds this session, so its \
-                         bytes could not be read back — the session is absent from this export, \
-                         which is not the same as it being empty",
+                        "no snapshot of machine `{}` holds this session's shards, so its bytes \
+                         could not be read back — the session is absent from this export, which \
+                         is not the same as it being empty",
                         hit.machine
                     ),
                 });

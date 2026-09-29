@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7699-7761`).
+  (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7751-7813`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
@@ -374,7 +374,7 @@ and timestamp, not its content. We do not delete it; `ingest` retires it to
 The CLI makes one plaintext copy too, and it is not a capture but an archive
 session: `chat-stasher export --out <dir>` writes the sessions it selected back
 out **decrypted**, one file per session, into the directory you name
-(`crates/chat-stasher/src/main.rs:641-721`). Nothing moves those files on and
+(`crates/chat-stasher/src/main.rs:649-729`). Nothing moves those files on and
 we keep no record of where they went, so deleting the directory is yours to do.
 The CLI writes no archive content anywhere you did not name.
 
@@ -534,7 +534,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:101`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:281-355,1323-1408`).
+kept on your machine (`crates/chat-stasher/src/store.rs:281-355,1402-1487`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -739,7 +739,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3861-3895`, `:499-612`; `crates/chat-stasher/src/main.rs:2068-2083`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3861-3895`, `:499-612`; `crates/chat-stasher/src/main.rs:2076-2091`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-48`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:20-46`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:54`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
@@ -796,9 +796,9 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage (backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:641-721`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
+| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:649-729`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:164-1245`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:164-1253`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
@@ -812,7 +812,7 @@ be the worse failure.
 profile is retired.** `chat-stasher install-native-host --uninstall` removes the
 host manifest for every browser on the machine in one pass, so an install you
 left in place can no longer deliver and its captures wait in its outbox instead
-(`crates/chat-stasher/src/main.rs:2119-2157`, `:2226-2232`). Draining each
+(`crates/chat-stasher/src/main.rs:2127-2165`, `:2234-2240`). Draining each
 profile's outbox first is the subject of
 [install.md → Before you remove the host](../docs/install.md#before-you-remove-the-host),
 and it is worth doing because an outbox goes away with its profile.
@@ -846,10 +846,10 @@ dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1448-1455,1410-1414`). The key file
+archive (`crates/chat-stasher/src/store.rs:1527-1534,1489-1493`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1490-1575`).
+(`crates/chat-stasher/src/store.rs:1569-1654`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

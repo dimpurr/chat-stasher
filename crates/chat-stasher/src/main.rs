@@ -416,20 +416,28 @@ enum Command {
         keep_ssh_masters: bool,
     },
     /// Dump one session back from the repository (sequence-concatenated) and
-    /// print its sha256 for verification — or, with `--all-machines`, merge
-    /// the newest snapshot of every machine and report per-session digests.
+    /// print its sha256 for verification — or, with `--all-machines`, walk
+    /// **every snapshot of every machine** cumulatively and report per-session
+    /// digests.
     Read {
-        /// Stage directory used by push (mapping into the snapshot tree).
+        /// Local stage directory to compare the read against. Optional: the
+        /// session's bytes always come from the archive, addressed by
+        /// `--machine` and `--session`, and this only adds an
+        /// `expected src` sha256 computed from the shards on this machine's
+        /// disk. It does **not** have to be the archiving machine's stage root,
+        /// and a path that does not exist merely leaves that line uncomputed.
         /// Ignored by `--all-machines`.
         #[arg(long)]
         stage: Option<PathBuf>,
-        /// Native session id to dump, e.g. `019bf00d-...`. Ignored by
-        /// `--all-machines`.
+        /// Native session id to dump, e.g. `019bf00d-...`. Resolved against
+        /// every snapshot of `--machine`, newest first, so a session reclaimed
+        /// out of the stage is still readable. Ignored by `--all-machines`.
         #[arg(long)]
         session: Option<String>,
-        /// Cross-machine merge: every hostname's newest snapshot, all sessions
+        /// Cross-machine merge, cumulative: for every hostname, every snapshot
         /// (`sessions/<machine>/…`), each session's shards sequence-joined and
-        /// hashed. Prints ids / shard counts / byte lengths / sha256 only.
+        /// hashed. A session is reported against the newest snapshot that holds
+        /// it. Prints ids / shard counts / byte lengths / sha256 only.
         #[arg(long)]
         all_machines: bool,
         /// Print full session ids in per-session rows (default: privacy-safe short ids).
@@ -4015,9 +4023,31 @@ fn cmd_search_text(
 /// change exists to prevent.
 fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> ExitCode {
     println!("[search] destination  : {}", report.destination);
+    // Named "scanned", not just printed as a count: a search enumerates a
+    // destination's sessions by walking snapshot trees, so the difference
+    // between this number and `snapshots_in_repo` is the difference between
+    // "we looked everywhere" and "we looked at part of it" — which is the
+    // difference between a negative and an unknown. The shortfall is printed as
+    // its own number because it is the same number the exit code is decided
+    // from, and a reader who sees only "2 of 3" has to do the subtraction to
+    // learn that a snapshot was unreadable at all.
+    let unreadable_snapshots = report
+        .snapshots_in_repo
+        .saturating_sub(report.snapshots_scanned);
     println!(
-        "[search] snapshots    : {} scanned / {} in repo",
-        report.snapshots_scanned, report.snapshots_in_repo
+        "[search] snapshots scanned: {} of {} in repo{}{}",
+        report.snapshots_scanned,
+        report.snapshots_in_repo,
+        if unreadable_snapshots == 0 {
+            String::new()
+        } else {
+            format!(", {unreadable_snapshots} unreadable")
+        },
+        if report.scanned_all_snapshots() {
+            ""
+        } else {
+            "  <-- the rest were not looked at, so a miss proves nothing"
+        }
     );
     println!("[search] sessions seen: {}", report.sessions_seen);
     println!("[search] data blobs read: {}", report.data_blobs_read);
@@ -7067,9 +7097,18 @@ fn masterkey(config: &StoreConfig) -> anyhow::Result<(MasterKey, bool)> {
 /// Reap the ssh ControlPersist masters left behind for the backend `endpoint`
 /// host of this run. No-op when `--keep-ssh-masters` is set or no `endpoint`
 /// option was given (a local repo has no ssh masters to reap).
+///
+/// Every line goes to **stderr**, on success as well as on failure. This is
+/// housekeeping the run performed on its own behalf, not the command's answer:
+/// `overview --json`, `search --json` and `read` all promise exactly one JSON
+/// object (or nothing) on stdout, and a consumer piping that into a parser must
+/// not have to know which backend options were configured. It reproduces on
+/// failed runs too, so an exit code does not save a script from it — and it
+/// only fires for destinations with an `endpoint` option, i.e. exactly the real
+/// deployments. See `docs/cli.md` §"Where output goes".
 fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
     if keep_ssh_masters {
-        say!("[reap] skipped (--keep-ssh-masters)");
+        eprintln!("[reap] skipped (--keep-ssh-masters)");
         return;
     }
     let Some(endpoint) = cfg.options.get("endpoint") else {
@@ -7080,9 +7119,9 @@ fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
         return;
     };
     match reap::reap_masters_for_host(&host) {
-        Ok(n) => say!("[reap] host {host} · ssh masters shut down: {n}"),
+        Ok(n) => eprintln!("[reap] host {host} · ssh masters shut down: {n}"),
         Err(e) => {
-            say!("[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})")
+            eprintln!("[reap] host {host} · ssh masters shut down: unknown (could not read the process list: {e})")
         }
     }
 }
@@ -7467,17 +7506,6 @@ fn cmd_read(
             reap_remote(&cfg, keep_ssh_masters);
             return ExitCode::from(3);
         };
-        let stage = match stage {
-            Some(s) => s,
-            None => {
-                eprintln!("read: `--stage` is required unless `--all-machines` is set");
-                reap_remote(&cfg, keep_ssh_masters);
-                // Deliberately 2, not 1 or 3. The command is missing required
-                // syntax, so this is a usage error before any archive read;
-                // repository semantics reserve 2 for usage errors.
-                return ExitCode::from(2);
-            }
-        };
         let session = match session {
             Some(s) => s,
             None => {
@@ -7499,8 +7527,22 @@ fn cmd_read(
                 "ON"
             }
         );
+        // The session is addressed by `(machine, session id)` — the partition
+        // the archived path already carries — and the copy is taken from the
+        // newest snapshot that holds it (ADR-021), so a session whose body has
+        // been reclaimed out of the stage is still readable.
+        //
+        // `--stage` is **not** required for this, and is not the addressing
+        // scheme. It used to be both: `read` built
+        // `<canonicalize(--stage)>/sessions/<machine>/<id>` and looked that up
+        // in the newest snapshot, which required the *source* machine's
+        // absolute stage root — a path no command prints, and one whose every
+        // wrong guess surfaced as a rustic internal-error banner naming neither
+        // the prefix it wanted nor the prefix the archive holds (W253 C3). The
+        // stage root is only useful locally, as the thing to compare the read
+        // against, so that is the one job it keeps below.
         let (bytez, hashes) = match chat_stasher::reader_guard::catching_panic("read", || {
-            store.read_session_readback(stage, session, &mk)
+            store.read_session_concat(machine, session, &mk)
         }) {
             Ok(v) => v,
             Err(e) => {
@@ -7525,11 +7567,21 @@ fn cmd_read(
             bytez.len(),
             sha256_hex(&bytez)
         );
-        println!(
-            "[read] expected src    : sha256={}",
-            store::expected_concat_sha(stage, &machine, session)
-                .unwrap_or_else(|e| format!("<ein> {e}"))
-        );
+        // Only when the operator named a local stage, and never fatal: this
+        // line is a comparison aid, not part of the read. `expected_concat_sha`
+        // needs the shards on this machine's disk, which the archive read above
+        // deliberately does not.
+        match stage.as_deref() {
+            Some(stage) => println!(
+                "[read] expected src    : sha256={}",
+                store::expected_concat_sha(stage, &machine, session)
+                    .unwrap_or_else(|e| format!("<ein> {e}"))
+            ),
+            None => println!(
+                "[read] expected src    : not compared (no --stage given; the archive's own \
+                 sha256 above is the answer)"
+            ),
+        }
         ExitCode::SUCCESS
     };
     reap_remote(&cfg, keep_ssh_masters);
@@ -8037,12 +8089,17 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
     ))
 }
 
-/// `read --all-machines` — group every snapshot by hostname, take each
-/// hostname's newest snapshot, walk its `sessions/<machine>/` subtree, and
-/// report per-session shard count / byte length / sha256. Privacy line: only
-/// ids, counts, lengths and digests are printed — never session content.
+/// `read --all-machines` — group every snapshot by hostname, walk **all** of
+/// each hostname's snapshots newest-first, and report per-session shard count /
+/// byte length / sha256, a session resolved against the newest snapshot that
+/// holds it (ADR-021). Privacy line: only ids, counts, lengths and digests are
+/// printed — never session content.
+///
+/// This reads the whole destination: unlike `search` it downloads and hashes
+/// every shard it lists. It is therefore expensive by design, and the header
+/// says so rather than describing itself as a listing.
 fn cmd_read_all_machines(store: &BackupStore, mk: &MasterKey, full_ids: bool) -> ExitCode {
-    println!("[read] mode           : all-machines (newest snapshot per hostname)");
+    println!("[read] mode           : all-machines (every snapshot, cumulatively)");
     println!("[read] repo           : {}", store.cfg.repo_root);
     let report =
         match chat_stasher::reader_guard::catching_panic("read", || store.read_all_machines(mk)) {

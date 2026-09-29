@@ -24,6 +24,18 @@
 //! `SnapshotFilter::post_process`. That reduction is the ~ten lines this
 //! module implements ([`newest_snapshot_per_host`]).
 //!
+//! "Newest per hostname" is *not* the whole archive, though, and ADR-021 made
+//! the readers that ask "what do I have archived" cumulative: `reclaim-stage`
+//! deletes a session's bodies from the stage once every destination has proved
+//! it holds them, so a busy machine's newest snapshot holds only the last
+//! push's batch. Those readers walk every snapshot of a hostname newest-first
+//! and let a session's **first** appearance win
+//! ([`snapshots_by_host_newest_first`]) — one function, so `read
+//! --all-machines`, `verify` L3, `search`, `read --session` and `export` cannot
+//! disagree about where a session lives. `newest_snapshot_per_host` remains for
+//! the questions that really are about the latest backup run, such as the
+//! reclaim proof, whose candidates are all still on the stage.
+//!
 //! Tree layout reality (measured): a rustic dir-backup's tree mirrors the full
 //! source path (`snapshot.paths` minus the leading `/`), so `sessions/` sits
 //! at `stage-relative` depth and *not* at the tree root, and `repo.ls` on the
@@ -128,6 +140,36 @@ pub fn newest_snapshot_per_host(snaps: Vec<SnapshotFile>) -> Vec<SnapshotFile> {
             out.push(newest);
         }
     }
+    out
+}
+
+/// Snapshots grouped by `hostname`, each group ordered **newest first**, and
+/// the groups themselves ordered by hostname.
+///
+/// This is the traversal order ADR-021's cumulative readers use, and the order
+/// is the whole rule: a cumulative reader walks one hostname's snapshots from
+/// newest to oldest and keeps the **first** appearance of each session, so the
+/// snapshot a session is reported against is the newest one that holds it.
+///
+/// One function rather than one per reader, because "which snapshot holds this
+/// session" must have exactly one answer. `read --all-machines` / `verify` L3
+/// ([`BackupStore::read_cumulative_sessions`]), `search` and `read --session`
+/// all resolve it through here.
+pub fn snapshots_by_host_newest_first(
+    snaps: Vec<SnapshotFile>,
+) -> Vec<(String, Vec<SnapshotFile>)> {
+    let grouped = Grouped::from_items(snaps, SnapshotGroupCriterion::new().hostname(true));
+    let mut out = Vec::with_capacity(grouped.groups.len());
+    for mut group in grouped.groups {
+        // `SnapshotFile`'s `Ord` compares `time` only, so this is "newest
+        // first" by construction and cannot drift from `max()`.
+        group.items.sort_by(|a, b| b.time.cmp(&a.time));
+        let Some(newest) = group.items.first() else {
+            continue;
+        };
+        out.push((newest.hostname.clone(), group.items));
+    }
+    out.sort_by(|(a, _), (b, _)| a.cmp(b));
     out
 }
 
@@ -312,19 +354,12 @@ impl BackupStore {
 
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         let snapshots_in_repo = snaps.len();
-        let grouped = Grouped::from_items(snaps, SnapshotGroupCriterion::new().hostname(true));
 
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
 
         let mut merges = Vec::new();
-        for group in grouped.groups {
-            let mut snaps = group.items;
-            if snaps.is_empty() {
-                continue;
-            }
-            snaps.sort_by(|a, b| b.time.cmp(&a.time));
-
+        for (_host, snaps) in snapshots_by_host_newest_first(snaps) {
             let newest_snap = &snaps[0];
             let hostname = newest_snap.hostname.clone();
             let snapshot_id = newest_snap.id.to_hex().as_str().to_string();
