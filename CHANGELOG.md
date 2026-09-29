@@ -4,11 +4,12 @@ Version numbers here are the CLI's, and they match the `vX.Y.Z` git tags. The
 browser extension has its own version and ships on its own schedule; see
 [`RELEASING.md`](RELEASING.md) for what a release contains.
 
-## Unreleased
+## 0.5.0 — YYYY-MM-DD
 
-Everything below has merged since `v0.5.0-rc.2` and is in no released artifact
-yet. The CLI, the browser extension and a new macOS menu bar app all move; the
-version numbers each carries are decided when a release is cut.
+Everything below has merged since `v0.5.0-rc.2`. The CLI moves to `0.5.0`. The
+browser extension and the macOS menu bar app are separate artifacts with their
+own version numbers, so what each of them gained or changed in this cycle is
+under its own heading below.
 
 ### CLI
 
@@ -144,6 +145,22 @@ version numbers each carries are decided when a release is cut.
   shell, the situation a scheduled run and the menu bar app are in, and fail
   closed naming the missing credential rather than silently omitting the
   option; `env:NAME` keeps its documented lenient behaviour.
+- **A read-only command that reports the packs no index file names.**
+  `prune-orphans --destination <name>` surveys one destination without building
+  an index and says how many packs it holds, which of them no index file names,
+  how many bytes those are, and what the next push would do about them. Each
+  unindexed pack is checked the way an adopting open checks one — its header
+  decrypts, every blob it declares decrypts and hashes to the id the header
+  gives, and the pack's bytes hash to the name it is stored under. The report
+  carries the repository's own config id, the backend family and those counts,
+  and no path, host, machine, account or conversation text, so it is safe to
+  paste into a ticket; `--json` adds each candidate's full id. `--apply` is
+  refused with exit 3, naming the three capabilities a safe delete would need,
+  because "unindexed" means no index file names the pack, not that nothing uses
+  it. A pack that could not be read is reported unknown and makes the whole
+  survey incomplete, so "no candidates" is never claimed on a partial read.
+  Nothing calls this command for you: it adds no schedule, no call from `push`
+  or `run-once`, and no write path, and `append_only` is untouched.
 
 #### Changed
 
@@ -156,7 +173,12 @@ version numbers each carries are decided when a release is cut.
   written by two different accounts, but only where the fingerprints one
   install itself recorded can be compared, because per-install salting makes
   another install's fingerprints incomparable, and it publishes the size of
-  that blind spot rather than folding it into the collision count.
+  that blind spot rather than folding it into the collision count. The
+  dashboard's collision banner counts conversations rather than rows for the
+  same reason: every row of a colliding conversation carries the flag, so the
+  canonical shape — one archive id on two machines — printed "2 conversation(s)"
+  and listed the same short id twice, which is the per-machine double count the
+  change exists to remove, restated in the sentence that names it.
 
 #### Fixed
 
@@ -166,6 +188,83 @@ version numbers each carries are decided when a release is cut.
   present and reporting a local setup that looks broken. Fail-closed is
   unchanged on any platform: the reference is refused, never silently
   emptied, and `file:`, `env-file:` and `env:` keep working.
+- **A push that was killed no longer uploads the whole payload again.** A push
+  writes its packs before its index, so one interrupted in between leaves
+  complete packs that no index file names. Because each stored object's id
+  covers a fresh random nonce, the same conversation never re-derives the same
+  name, so a retry re-sent everything and the stranded bytes stayed behind for
+  good — measured on a 560 MB payload at three kill points, and at test scale a
+  retry added 1,047,572 B over a 1,045,700 B repository. Opening a repository
+  now reads the header of every pack no index file names, so the dedup test
+  finds those blobs already there and uploads none of them, and `push` reports
+  what it found and what it did. A pack is adopted only after its own bytes
+  check out: the header decrypts and parses, the lengths it declares match the
+  file, every blob it declares decrypts and hashes to the id the header gives,
+  and the pack hashes to the name it is stored under. A pack failing any of
+  those is refused whole and named by id — the alternative was losing content,
+  because a damaged pack either re-sent silently or entered the index so a
+  later backup skipped bytes no reader can decrypt. Nothing is deleted, moved
+  or rewritten.
+- **A push of an unchanged stage adds no bytes.** A second push of a stage
+  nothing had changed in could still upload tree bytes, so on Windows every
+  scheduled no-op push grew the archive a little while reporting every staged
+  file unmodified and no content blob written. The bytes came from stored
+  fields no change in the files had touched: a file's `ctime` — on Windows,
+  the creation time the platform reports — and a directory's own times, which
+  the platform can report differently to two consecutive walks of one
+  unchanged directory. A push stores neither any more; a value that never
+  measured anything does not belong in the stored tree. A file's mtime is
+  kept, because that is what change detection reads, so a changed stage still
+  re-uploads and an unchanged one still reports every file unmodified.
+- **A truncated pack is refused instead of crashing or hanging.** A metadata
+  pack shorter than the index records made `read` panic (exit 101) and
+  `verify` never return, on a repository with the default metadata cache; both
+  are neither a diagnosis nor a measurement, so neither can stand in for "did
+  not finish reading". A read now checks, before fetching a pack byte, whether
+  any pack the index names is shorter than it records, and refuses with exit 3
+  and the pack's id. A *missing* pack is deliberately not that finding: its read
+  returns an error rather than a short buffer, which is what `verify` exists to
+  report. Neither part is a timeout, because a wall-clock limit cannot tell a
+  wedged reader from a slow remote and this project verifies archives over SFTP,
+  where slow is normal. `verify --level all` also stops at the first level that
+  could not finish reading and prints the remaining levels as NOT ATTEMPTED,
+  counted in the summary, so "we did not check this" cannot read as "this
+  checked out".
+- **A stored organization is no longer read as an account.** An older build
+  wrote an organization where an account belongs; two accounts can be members
+  of one organization, so every value derived from that scope was equal for
+  both, and a conversation captured under one was recorded as having come from
+  the other. That is a positive false statement in an archive that cannot take
+  it back. The activity index now requires the contract's person-bearing source
+  and records no account key for anything else, and an install's coverage
+  report answers from the plan rather than from the record, so a lease an older
+  build wrote cannot be handed on as this scope's account. An envelope with no
+  source, or one the contract's list does not name, is a bundle this reader
+  cannot read rather than one it may assume holds an account.
+- **A `setup` run that exits 2 writes what it says it writes.** A non-TTY run
+  checked required parameters after the local first save, so a run that then
+  refused had already created a repository and a masterkey — a side effect the
+  missing-parameters contract forbids. The check now runs first, and an absent
+  or incomplete named destination refuses before the archive pass. The
+  exception that made the old behaviour look deliberate is kept and is the only
+  one: when the masterkey declaration is the *only* parameter owed, the run
+  creates the repository and its key and reports the key's path, because the
+  declaration is an attestation about a file that has to exist before it can be
+  made — and still exits 2, without running the archive pass, the remote step
+  or the scheduler.
+- **The installer's PATH advice names the directory the binary went to.**
+  `install.sh` printed the same advice for every reader — add `~/.local/bin`
+  to your `PATH` — even when `CHAT_STASHER_INSTALL_DIR` had put the binary
+  somewhere else, and its closing line then said to run a bare
+  `chat-stasher doctor`, the one command a reader who followed that advice
+  could not run. The advice now names the directory the binary is in — the
+  default is still spelled `$HOME/.local/bin`, so the line a reader pastes
+  into their shell profile also survives a moved home directory — the closing
+  line gives the binary's full path whenever that directory is not on `PATH`,
+  and an install directory given with a trailing slash no longer reads as
+  off-`PATH` or prints a doubled slash. The README's Quick start carries the
+  same export line, so its instructions no longer stop at a command that
+  would not be found.
 
 #### Security
 
@@ -215,6 +314,17 @@ version numbers each carries are decided when a release is cut.
   still answer `has` for those conversations, and the same bytes delivered
   later are recognized rather than archived a second time. Exports written
   before this change import unchanged.
+- **ChatGPT backfill walks the workspace the browser is signed into.**
+  Backfill reads the workspace id out of the page's own outgoing requests,
+  because that is the only place this build can observe which workspace the
+  browser is actually using, and enumerates that workspace rather than
+  whatever the account's conversation list happens to return. When the
+  observation names two different workspaces it halts as ambiguous, and when
+  it names none it halts as unresolved; neither is walked, and the coverage
+  row names which of the two it was instead of showing progress against a
+  workspace nobody identified. Reading back a workspace the account is not
+  signed into is how a backfill files one person's conversations under
+  another's, so failing closed here is the point.
 
 #### Changed
 
@@ -263,8 +373,75 @@ version numbers each carries are decided when a release is cut.
   with what this install still owed says whose records were compared: this
   browser's. The two counts are never mixed and never added together.
 
+#### Fixed
+
+- **A hook failure a page stopped reporting is retracted.** A top document that
+  half-installed, wrote that its hook had been replaced and then closed left the
+  popup asserting a page-state that had stopped being asserted, and nothing
+  could withdraw it: the remedy the popup offered reloads the embedder, not a
+  top document on that origin. A page still in the state it reported re-reports
+  it on a fixed interval, so a record whose observation has not been re-reported
+  for five minutes is pruned before the popup builds its model. The window is
+  absolute rather than a multiple of the reporting cadence, because the browser
+  throttles background-tab timers to about once a minute and a genuinely broken
+  but merely backgrounded page must never age out. The prune is scoped to the
+  release channel: a dev and a stable build share one extension id and one
+  storage area, so a stable popup can no longer delete the record a dev build
+  is the only witness of.
+- **A conversation list that never changes no longer ends an enumeration
+  silently.** The guard that asks whether the parameter the engine advances
+  actually moved ran for token paging and for one offset plan, but ChatGPT is
+  offset-paged and the engine advances that offset itself. A server that ignores
+  the parameter therefore returned the same page for ever — one page per tick,
+  the same page back, nothing added, and every stored field still reading as
+  healthy. Every offset-paged plan now asks, and an enumeration that stops
+  making progress halts rather than reporting health.
+- **An organization is no longer recorded as an account**, the extension half of
+  the CLI fix above. claude.ai addresses every conversation by organization and
+  two accounts can share one, so the value a capture recorded as its account was
+  equal for both — a positive, false statement about who a conversation came
+  from. Such a capture now records `organization-is-not-an-account` and creates
+  no salt, the run lease answers `scope-names-an-organization` rather than the
+  false "this plan declares no account axis", and the coverage page tells the
+  three facts apart from the plan rather than from the record, so a lease an
+  older build wrote cannot be read back as "the account this scope belongs to".
+  The organization is not lost: it is in the bundle's own URL and it is still
+  what the host coordinates by. It is the recording of it as an account that
+  stops.
+- **The account-switch sentence no longer prints a dangling quote.** The one
+  sentence this feature ships — the popup's headline for a leg that stopped
+  because a different account had been signed in — ended in a stray `"` inside
+  a folded scalar in both language catalogues, so what the reader saw was the
+  headline about a stopped capture with a quote mark hanging off the end. No
+  gate reads locale prose, which is why this had to be caught by reading it.
+
 #### Security
 
+- **A copied profile is detected from its own future.** A profile copied, or
+  restored from a backup, carries the install identity along with the rest of
+  the browser's storage, so the copy and the original report under one id, and
+  nothing in that storage can tell them apart. Each install keeps a counter that
+  rises with every report and every delivery, and two live writers on one id
+  eventually send a value the host has already recorded. That observation is
+  sound only if one writer's values arrive in order, so a number alone is not
+  the evidence: each allocation mints a random nonce beside its number and the
+  two are sent together. One number under two different nonces is two writers
+  reserving it independently, and marks the id until a new one is minted; the
+  same pair twice is one allocation arriving twice and is answered as the
+  duplicate it is. Order is evidence of nothing — a late value, a higher one and
+  a retry are all accepted — because native messaging hands each message its own
+  host process and a send that times out is retried. On detection, deliveries
+  are answered with a retryable item-scope refusal so captures stay queued rather
+  than being filed under an identity that cannot be attributed to one profile,
+  and backfill claims stop. A number older than the host's recorded window is
+  accepted without judgement, and the contract says so rather than reporting a
+  comparison it did not make. Nothing rotates an identity on its own, because a
+  restored backup or a renamed profile would then have the tool sever the wrong
+  lineage. The staged status record's conflict flag is read and published inside
+  one transaction, so a report delayed between its own observation and its file
+  cannot erase a conflict a faster copy already published — a dashboard showing
+  a clean install whose captures the host is refusing is the one direction this
+  must not fail in.
 - **Copied profiles are refused, and told how to fix themselves.** Every
   sealed record on the machine now carries the producing install's browser
   and profile label. A profile copy that delivers the same install id under a
@@ -297,7 +474,10 @@ on `PATH`, and macOS 13 or newer.
   it stopped comes from its own observed cadence. Open dashboard starts
   `chat-stasher ui`. A failed refresh keeps the last good result visible with
   an Offline label, and an unknown count stays unknown on screen, never a
-  zero.
+  zero. A machine with no activity index is its own condition on both
+  surfaces: the popover says how many machines are missing one and that the
+  coverage is incomplete, and the bar's health line counts those machines as
+  needing attention rather than as silent.
 - **Destination choice in Settings.** With several destinations configured,
   the app checks each one and shows the worst state by default; Settings can
   pin it to one named destination instead, a launch-time environment
@@ -326,10 +506,33 @@ Nothing here is in the shipped binary.
 
 - The README was rewritten for the person installing the tool, and the first
   reader-facing pages were added under docs/ covering the first archive, each
-  platform, destinations, and privacy and security. The engineering documents
-  moved under docs-dev/, and a check now resolves every link between the
-  project's own Markdown files, including the fragment on each link, so a
-  moved file or a renamed heading fails a gate instead of rendering silently.
+  platform, destinations, and privacy and security. Seven more followed —
+  setup, schedule, cli, config, troubleshooting, how-it-works and support — so a
+  reader can look up a first run, a flag, an exit code, a config key or a
+  failure without reading the source, and the dashboard, the extension and the
+  timer are described in one place rather than only in the README. Every
+  command, flag, JSON field, exit code, path and status word in them was
+  checked against a build of this tree. The engineering documents moved under
+  docs-dev/, and a check now resolves every link between the project's own
+  Markdown files, including the fragment on each link, so a moved file or a
+  renamed heading fails a gate instead of rendering silently.
+- A check that resolves the project's own Markdown was joined by one that reads
+  tracked files for paths into a private working directory, because the policy
+  forbidding them was adopted after some of them were written and nothing
+  enforced it — nineteen files named one, and the worst published an absolute
+  path into a scratch tree. The references are kept and so is their meaning;
+  only the directory is dropped, so a report is named by its own filename and a
+  competitor's source by the file being quoted rather than the directory this
+  project cloned it into.
+- The browser support matrix is generated from the same registry the native
+  host installer reads, and one cell had published a link to a mirror of
+  proprietary source. No vendor document for that row existed to link to
+  instead, so the cell records its provenance in words: no vendor doc, the key
+  carried from a third-party implementation, the source in the installer, the
+  date it was read, and that it is not linked. The tier it sits in is unchanged
+  on purpose. A cell with nothing recorded holds one plain hyphen rather than
+  the typographic dash the tables carried, so the value survives any font or
+  pipeline a copied table lands in and can be searched as text.
 - Two registry steps the `0.5.0-rc.2` run tripped over are fixed. The crates
   registry's documented data-access refusal (HTTP 403) is no longer read as
   "that version is not published", which was the misread that could publish
