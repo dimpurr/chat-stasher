@@ -1,6 +1,6 @@
 # Command reference
 
-<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, and the setup wizard's destination and scheduler steps. -->
+<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, `prune-orphans`, and the setup wizard's destination and scheduler steps. -->
 
 Every `chat-stasher` command, its purpose, its main flags and its exit codes. This page is a map. The authority for your installed version is always:
 
@@ -29,6 +29,7 @@ chat-stasher <command> --help
 | [`index`](#index) | Builds, checks or deletes the local full-text index | Local index |
 | [`cache`](#cache) | Shows or clears the local body cache | Local cache (`clear`) |
 | [`reclaim-stage`](#reclaim-stage) | Removes staged copies every destination proves it holds | Stage (with `--apply`) |
+| [`prune-orphans`](#prune-orphans) | Reports the archive packs no index file names | No |
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
 
@@ -65,7 +66,7 @@ Exceptions are listed per command. `ui` never exits `1`.
 
 ### JSON output
 
-`doctor`, `status`, `setup`, `overview` and `search` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
+`doctor`, `status`, `setup`, `overview`, `search` and `prune-orphans` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
 
 ### Where output goes
 
@@ -193,6 +194,54 @@ Removes staged copies, but only for sessions that **every** declared destination
 | `--apply` | Actually remove. Without it, a dry run that removes nothing. |
 
 Exit codes: `0` reclaimable or reclaimed · `1` blocked, nothing removed · `2` usage error.
+
+### `prune-orphans`
+
+Reports the packs a destination's backend holds that **no index file names** —
+what a push killed between writing its packs and its index leaves behind — and
+says what the next push would do about each one. It **deletes nothing**: dry run
+is the only mode in this build.
+
+`--apply` is refused with exit `3`, naming what a safe delete would need and this
+build does not have: a repository-wide lock every client honors for its whole push
+or read, a conditional delete carrying an object version, and a trustworthy
+backend modification time to age candidates by. The refusal is not a formality.
+"Unindexed" means no index file names the pack, not that nothing uses it — a
+retry is allowed to reuse one and write a snapshot that depends on it while it
+stays unindexed on disk, so a pack can be the only copy of archived content.
+[docs-dev/orphan-packs.md](../docs-dev/orphan-packs.md) has the full argument.
+
+Every pack it reports is verified the way the adopting open verifies one before
+reusing it: the header must decrypt, every blob it declares must decrypt and hash
+to the id the header gives, and the pack's bytes must hash to the id it is stored
+under.
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>` | Required (or `--repo`). One destination per run, always named. |
+| `--dry-run` | The default, and the only mode. |
+| `--apply` | Refused, exit `3`, naming the missing capabilities. |
+| `--json` | One object, carrying each candidate pack's full id for audit. |
+
+The report carries the repository's **own id** from its config — the same on every
+machine that reads it — and never the path, host or account it was reached at. Along
+with it: the backend family, pack and byte totals, the unindexed packs by id prefix
+and size, how many of those verified, how many are unknown with the verifier's own
+reason, and any pack an index names that the backend no longer lists. No
+conversation text appears in it.
+
+Exit codes: `0` the survey read every pack · `1` it read everything and found an
+index naming a pack the backend does not list · `3` it did not finish reading — a
+pack or an index file could not be read, the backend was unreachable, or `--apply`
+was asked for — so no absence in the output proves anything · `2` usage error.
+
+An empty answer and an unknown one never look alike: a pack that could not be read
+is reported `unknown` with its size and the verifier's reason, never as nothing
+there, and it makes the whole survey incomplete. A clean report of zero candidates
+is produced only after a complete survey.
+
+Nothing calls this command for you: no schedule, no `push`, no `run-once`, no
+browser host.
 
 ## Getting your conversations back
 

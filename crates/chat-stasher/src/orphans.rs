@@ -73,9 +73,10 @@ use crate::store::StoreConfig;
 use anyhow::Context;
 use rustic_core::repofile::{IndexFile, IndexPack, MasterKey};
 use rustic_core::{
-    Credentials, FileType, IndexedFullStatus, Open, ReadBackend, Repository, RepositoryBackends,
+    Credentials, FileType, IndexedFullStatus, Open, OpenStatus, ReadBackend, Repository,
+    RepositoryBackends,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -97,9 +98,42 @@ pub struct OrphanReport {
 /// The exact repository inventory captured by one survey.
 struct Survey {
     report: OrphanReport,
-    listed: BTreeSet<String>,
+    /// Every pack the backend listed: hex id -> backend bytes. Sizes are kept,
+    /// not just ids, so a caller that reports totals reports them from the same
+    /// listing its unindexed set came from.
+    listed: BTreeMap<String, u64>,
     indexed: BTreeSet<String>,
     indexed_packs: Vec<IndexPack>,
+}
+
+/// The backend's whole pack listing and the packs the index files disagree
+/// about, from **one** listing.
+///
+/// [`OrphanReport`] is the diff alone, which is all the adopting open needs.
+/// A report that prints "42 packs, 2 unindexed" needs both halves to describe
+/// the same moment, or a push landing between two listings could make the
+/// unindexed count exceed the total — so this carries the listing too.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackInventory {
+    /// Every pack the backend listed: hex id -> backend bytes. Id-sorted.
+    pub listed: BTreeMap<String, u64>,
+    /// The diff the adopting open acts on: what no index names, and what an
+    /// index names and the backend lacks.
+    pub report: OrphanReport,
+}
+
+impl PackInventory {
+    /// Packs the backend lists.
+    #[must_use]
+    pub fn total_packs(&self) -> usize {
+        self.listed.len()
+    }
+
+    /// Backend bytes those packs occupy.
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.listed.values().copied().sum()
+    }
 }
 
 impl OrphanReport {
@@ -194,6 +228,42 @@ pub fn survey<S: Open>(
     Ok(survey_inventory(repo, backends)?.report)
 }
 
+/// [`survey`], keeping the pack listing the diff was taken from.
+///
+/// # Errors
+///
+/// If the backend cannot list packs, or an index file cannot be decrypted.
+pub fn survey_packs<S: Open>(
+    repo: &Repository<S>,
+    backends: &RepositoryBackends,
+) -> anyhow::Result<PackInventory> {
+    let survey = survey_inventory(repo, backends)?;
+    Ok(PackInventory {
+        listed: survey.listed,
+        report: survey.report,
+    })
+}
+
+/// Open an existing repository **without** building an index.
+///
+/// [`open_adopting`] is what a read path calls, and it verifies and adopts the
+/// packs no index file names. This is for a caller that only wants to *look* at
+/// them — `prune-orphans` — and must not change what any index can reach.
+///
+/// # Errors
+///
+/// If the repository cannot be opened with this key.
+pub fn open_for_survey(
+    cfg: &StoreConfig,
+    backends: &RepositoryBackends,
+    mk: &MasterKey,
+) -> anyhow::Result<Repository<OpenStatus>> {
+    Repository::new(&cfg.repository_options(), backends)
+        .context("build repository")?
+        .open(&Credentials::Masterkey(mk.clone()))
+        .context("open existing repository")
+}
+
 fn survey_inventory<S: Open>(
     repo: &Repository<S>,
     backends: &RepositoryBackends,
@@ -214,20 +284,26 @@ fn survey_inventory<S: Open>(
             indexed.insert(pack.id.to_hex().to_string());
         }
     }
-    let listed_ids: BTreeSet<String> = listed
+    let listed: BTreeMap<String, u64> = listed
         .iter()
-        .map(|(id, _)| id.to_hex().to_string())
+        .map(|(id, size)| (id.to_hex().to_string(), u64::from(*size)))
         .collect();
     let mut unindexed: Vec<(String, u64)> = listed
         .iter()
-        .filter(|(id, _)| !indexed.contains(&id.to_hex().to_string()))
-        .map(|(id, size)| (id.to_hex().to_string(), u64::from(*size)))
+        .filter(|(hex, _)| !indexed.contains(*hex))
+        .map(|(hex, size)| (hex.clone(), *size))
         .collect();
     unindexed.sort();
-    let missing: Vec<String> = indexed.difference(&listed_ids).cloned().collect();
+    // Both sets are ordered by the same string keys, so this keeps the id order
+    // the callers reported before sizes were carried alongside them.
+    let missing: Vec<String> = indexed
+        .iter()
+        .filter(|hex| !listed.contains_key(*hex))
+        .cloned()
+        .collect();
     Ok(Survey {
         report: OrphanReport { unindexed, missing },
-        listed: listed_ids,
+        listed,
         indexed,
         indexed_packs,
     })
@@ -253,6 +329,25 @@ fn verify_unindexed(
     unindexed: &[(String, u64)],
     mk: &MasterKey,
 ) -> Result<Vec<IndexPack>, String> {
+    verify_candidates(backends, unindexed, mk)
+        .into_iter()
+        .collect()
+}
+
+/// Verify each pack the index does not name, keeping the verdict on **every**
+/// one of them instead of stopping at the first failure.
+///
+/// [`verify_unindexed`] is the adopting open's all-or-nothing form: one failure
+/// refuses the whole adoption, so it stops there. A read-only report needs the
+/// other granularity — which packs verified, which did not, and the reason for
+/// each — so `prune-orphans` calls this. The checks are the same either way;
+/// `crate::packcheck::verify_pack` holds them.
+#[must_use]
+pub fn verify_candidates(
+    backends: &RepositoryBackends,
+    unindexed: &[(String, u64)],
+    mk: &MasterKey,
+) -> Vec<Result<IndexPack, String>> {
     let be = backends.repository();
     unindexed
         .iter()

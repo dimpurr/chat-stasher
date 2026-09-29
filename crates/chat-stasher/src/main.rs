@@ -887,6 +887,72 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Report the packs one destination's backend holds that **no index file
+    /// names** — what a push killed between its packs and its index strands —
+    /// and say what the next push would do about each. Deletes nothing; there
+    /// is no mode in this build that deletes.
+    ///
+    /// Dry run is the only mode. `--apply` is refused with exit `3`, naming
+    /// what a safe delete would need and this build does not have: a
+    /// repository-wide lock every client honors, a conditional delete carrying
+    /// an object version, and a trustworthy backend modification time to age
+    /// candidates by. "Unindexed" means no index file names the pack, not that
+    /// the pack is unused — a retry can reuse one and write a snapshot that
+    /// depends on it while it stays unindexed on disk — so the gap is real, not
+    /// a formality.
+    ///
+    /// Every pack it reports is verified the way the adopting open verifies one
+    /// before reusing it: the header must decrypt, every blob it declares must
+    /// decrypt and hash to the id the header gives, and the pack's bytes must
+    /// hash to the id it is stored under. A pack that fails any of those is
+    /// reported **unknown** with the verifier's reason, never as empty and
+    /// never as zero, and its presence makes the whole survey incomplete.
+    ///
+    /// Reads only: nothing is written to the repository, to an index file or to
+    /// a pack. The report carries the repository fingerprint, the backend
+    /// family, pack and byte totals, the unindexed packs by id prefix and size,
+    /// what the next push would adopt, and any pack an index names that the
+    /// backend does not list. It never carries a path, a host, a machine or an
+    /// account name, or any conversation text.
+    ///
+    /// Exit codes: 0 = the survey finished and read every pack; 1 = the survey
+    /// finished and found a contradiction (an index naming a pack the backend
+    /// does not have); 3 = it did not finish reading — a pack or an index file
+    /// could not be read, the backend was unreachable, or `--apply` was asked
+    /// for — so no absence in the output proves anything; 2 = usage error.
+    PruneOrphans {
+        /// Named destination from the config. Required unless `--repo` is given.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Check the destination and stop: no repository is opened and nothing
+        /// is deleted. This is what happens without the flag too.
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Refused. Present so that asking to delete gets an answer that names
+        /// what a safe delete would need, rather than an unknown-flag error.
+        #[arg(long)]
+        apply: bool,
+        /// Print exactly one JSON object on stdout and nothing else there.
+        /// Candidate packs carry their full id, for audit; the human report
+        /// prints a 12-character prefix.
+        #[arg(long)]
+        json: bool,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
     /// Register this executable as the browsers' Native Messaging host
     /// (ADR-014 step 2) — or, with `--uninstall`, remove that registration.
     ///
@@ -1751,6 +1817,27 @@ fn run() -> ExitCode {
         } => cmd_reclaim_stage(
             &stage,
             apply,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
+        Command::PruneOrphans {
+            destination,
+            dry_run,
+            apply,
+            json,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_prune_orphans(
+            destination,
+            dry_run,
+            apply,
+            json,
             repo,
             key_file,
             connections,
@@ -8412,6 +8499,305 @@ fn cmd_reclaim_stage(
     );
     println!("[reclaim-stage] RESULT       : OK");
     ExitCode::SUCCESS
+}
+
+/// The capability gaps that make `prune-orphans --apply` a refusal rather than a
+/// deletion, in the operator's own terms.
+///
+/// Named as constants because the human line, the JSON document and the module
+/// doc all state the same three; three copies of a list of *requirements* is how
+/// a requirement quietly stops being mentioned.
+const PRUNE_MISSING_CAPABILITIES: [&str; 3] = [
+    "repository-wide lock every client honors for its whole push or read",
+    "conditional delete carrying an object version or ETag",
+    "trustworthy backend modification time to age candidates by",
+];
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One parameter per flag, forwarded verbatim from the `match` arm. A struct for them would exist only to be destructured once, and the sibling commands (`cmd_verify`, `cmd_reclaim_stage`) spell their flags the same way."
+)]
+fn cmd_prune_orphans(
+    destination: Option<String>,
+    dry_run: bool,
+    apply: bool,
+    json: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let config = match config_or_refuse("prune-orphans") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+
+    // `--apply` is refused before anything is opened. A refusal that had first
+    // dialed the destination, listed its backend or decrypted its index files
+    // would have gone looking for a reason to write to a repository this
+    // command must not touch at all — and none of that work would make the
+    // refusal different.
+    if apply {
+        eprintln!("prune-orphans: --apply is refused, and nothing was read or written.");
+        eprintln!("prune-orphans: deleting an unindexed pack is not a maintenance detail here:");
+        eprintln!(
+            "prune-orphans: \"unindexed\" means no index file names it, not that nothing uses it — a retry can reuse one and write a snapshot that depends on it while it stays unindexed on disk, so a pack can be the only copy of archived content."
+        );
+        eprintln!(
+            "prune-orphans: a safe delete needs all three of these, and this build has none:"
+        );
+        for (n, capability) in PRUNE_MISSING_CAPABILITIES.iter().enumerate() {
+            eprintln!("prune-orphans:   {}. {capability}", n + 1);
+        }
+        eprintln!(
+            "prune-orphans: exit_code=3 — the requested apply could not be proven safe, so nothing was deleted and no absence in any output proves otherwise. Run without `--apply` for the read-only inventory."
+        );
+        return ExitCode::from(3);
+    }
+
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(mk) => mk,
+        Err(e) => {
+            eprintln!(
+                "prune-orphans: {}",
+                chat_stasher::prune_orphans::error_line(&e)
+            );
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    let backends = match store.backends() {
+        Ok(backends) => backends,
+        Err(e) => {
+            eprintln!(
+                "prune-orphans: {}",
+                chat_stasher::prune_orphans::error_line(&e)
+            );
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    let inventory = match chat_stasher::prune_orphans::survey(&cfg, &backends, &mk) {
+        Ok(inventory) => inventory,
+        Err(e) => {
+            // ADR-023 classifies host-trust and transport failures for the
+            // commands that connect; this one reports only the redacted reason,
+            // because its output is meant to be pasted into a ticket. `verify`
+            // is where the full host diagnostic lives.
+            eprintln!(
+                "prune-orphans: {}",
+                chat_stasher::prune_orphans::error_line(&e)
+            );
+            eprintln!(
+                "prune-orphans: exit_code=3 — the repository was not read, so this says nothing about the archive. `verify --destination <name>` reports a remote host's trust state in full."
+            );
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+
+    if json {
+        println!("{}", json_string(&prune_orphans_json(&inventory)));
+    } else {
+        print_prune_orphans(&inventory, dry_run);
+    }
+
+    reap_remote(&cfg, keep_ssh_masters);
+
+    // Three states, kept apart the way `CLAUDE.md` requires. A pack that could
+    // not be read makes the survey incomplete, and that outranks the
+    // contradiction: with a pack unread, even a clean index/backend diff is not
+    // a complete statement about this repository.
+    if inventory.unknown_packs() > 0 {
+        ExitCode::from(3)
+    } else if !inventory.missing.is_empty() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The `--json` document for one survey. Every fact the human report carries,
+/// plus each candidate's full id, for audit.
+fn prune_orphans_json(inventory: &chat_stasher::prune_orphans::Inventory) -> serde_json::Value {
+    use chat_stasher::prune_orphans::{NextPush, Verdict};
+
+    let candidates: Vec<serde_json::Value> = inventory
+        .candidates
+        .iter()
+        .map(|pack| match &pack.verdict {
+            Verdict::Verified => serde_json::json!({
+                "id": pack.id,
+                "id_prefix": pack.id_prefix(),
+                "bytes": pack.bytes,
+                "status": "verified",
+            }),
+            Verdict::Unverified { reason } => serde_json::json!({
+                "id": pack.id,
+                "id_prefix": pack.id_prefix(),
+                "bytes": pack.bytes,
+                "status": "unknown",
+                "reason": reason,
+            }),
+        })
+        .collect();
+
+    let next_push = match &inventory.next_push {
+        NextPush::NothingStranded => serde_json::json!({"kind": "nothing_stranded"}),
+        NextPush::WouldAdopt => serde_json::json!({"kind": "would_adopt"}),
+        NextPush::Refused { why } => serde_json::json!({"kind": "refused", "why": why}),
+    };
+
+    serde_json::json!({
+        "command": "prune-orphans",
+        "mode": "dry_run",
+        "repository_fingerprint": inventory.fingerprint,
+        "backend": inventory.backend,
+        "backend_time_source": {
+            "kind": "not_applicable",
+            "why": "the backend interface exposes each object's id and size; it carries no modification time",
+        },
+        "repository_lock": {
+            "kind": "not_applicable",
+            "why": "this build holds no repository-wide lock, so none can be required of another client",
+        },
+        "client_compatibility": {
+            "kind": "unknown",
+            "why": "no client exchanges a capability or version marker, so which client versions write this repository is not established",
+        },
+        "apply": {
+            "supported": false,
+            "missing_capabilities": PRUNE_MISSING_CAPABILITIES,
+            "why": "deleting an unindexed pack cannot be proven safe without all three; `--apply` exits 3",
+        },
+        "packs": {
+            "total": inventory.total_packs,
+            "bytes": inventory.total_bytes,
+            "unindexed": inventory.candidate_packs(),
+            "unindexed_bytes": inventory.candidate_bytes(),
+            "verified": inventory.verified_packs(),
+            "verified_bytes": inventory.verified_bytes(),
+            "unknown": inventory.unknown_packs(),
+            "unknown_bytes": inventory.unknown_bytes(),
+        },
+        "missing_packs": {
+            "count": inventory.missing.len(),
+            "ids": inventory.missing,
+        },
+        "next_push": next_push,
+        "candidates": candidates,
+        "exit_semantics": "0 = the survey read every pack · 1 = it finished and found an index naming a pack the backend does not list · 3 = it did not finish reading, or `--apply` was asked for · 2 = usage error",
+    })
+}
+
+/// The human report. Paths, hosts, machines and account names do not appear in
+/// it: the repository is identified by its own id, and the backend by its family.
+fn print_prune_orphans(inventory: &chat_stasher::prune_orphans::Inventory, dry_run: bool) {
+    use chat_stasher::prune_orphans::NextPush;
+
+    println!(
+        "[prune] repo        : fingerprint {}",
+        inventory.fingerprint
+    );
+    println!("[prune] backend     : {}", inventory.backend);
+    println!(
+        "[prune] mode        : {}",
+        if dry_run {
+            "dry-run (requested; the only mode)"
+        } else {
+            "dry-run (the only mode; `--apply` is refused)"
+        }
+    );
+    println!(
+        "[prune] time source : not applicable — the backend interface exposes each object's id and size, and no modification time"
+    );
+    println!(
+        "[prune] lock        : not applicable — this build holds no repository-wide lock, so none can be required of another client"
+    );
+    println!(
+        "[prune] clients     : unknown — no client exchanges a capability or version marker, so which versions write here is not established"
+    );
+    println!(
+        "[prune] packs       : {} ({})",
+        inventory.total_packs,
+        fmt_bytes(inventory.total_bytes)
+    );
+    println!(
+        "[prune] unindexed   : {} ({}) — {} verified ({}), {} unknown ({})",
+        inventory.candidate_packs(),
+        fmt_bytes(inventory.candidate_bytes()),
+        inventory.verified_packs(),
+        fmt_bytes(inventory.verified_bytes()),
+        inventory.unknown_packs(),
+        fmt_bytes(inventory.unknown_bytes()),
+    );
+    println!(
+        "[prune] missing     : {} pack(s) an index names that the backend does not list",
+        inventory.missing.len()
+    );
+    for id in &inventory.missing {
+        println!(
+            "[prune]   index names {} — absent from the backend",
+            chat_stasher::prune_orphans::id_prefix(id)
+        );
+    }
+    match &inventory.next_push {
+        NextPush::NothingStranded => println!(
+            "[prune] next push   : nothing to adopt — the index names every pack the backend lists"
+        ),
+        NextPush::WouldAdopt => println!(
+            "[prune] next push   : would adopt all {} unindexed pack(s); a later push uploads none of their blobs again",
+            inventory.candidate_packs()
+        ),
+        NextPush::Refused { why } => println!(
+            "[prune] next push   : NOT adopted — {why}; a push re-uploads what these packs hold"
+        ),
+    }
+    for pack in &inventory.candidates {
+        match &pack.verdict {
+            chat_stasher::prune_orphans::Verdict::Verified => println!(
+                "[prune] pack {}  {}  verified",
+                pack.id_prefix(),
+                fmt_bytes(pack.bytes)
+            ),
+            chat_stasher::prune_orphans::Verdict::Unverified { reason } => println!(
+                "[prune] pack {}  {}  unknown ({reason})",
+                pack.id_prefix(),
+                fmt_bytes(pack.bytes)
+            ),
+        }
+    }
+    if inventory.unknown_packs() > 0 {
+        println!(
+            "[prune] RESULT      : INCOMPLETE ({} pack(s) could not be read, so their status is unknown, not empty{}); nothing was written",
+            inventory.unknown_packs(),
+            if inventory.missing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} pack(s) an index names are also absent from the backend",
+                    inventory.missing.len()
+                )
+            }
+        );
+    } else if !inventory.missing.is_empty() {
+        println!(
+            "[prune] RESULT      : CONTRADICTION ({} pack(s) an index names are absent from the backend); nothing was written",
+            inventory.missing.len()
+        );
+    } else {
+        println!("[prune] RESULT      : COMPLETE (every pack was read); nothing was written");
+    }
 }
 
 /// Human-readable byte size, same shape as `doctor`'s (1 KiB = 1024 B).

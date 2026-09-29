@@ -521,7 +521,7 @@ registered browser can reach the host, deliver into the stage, and ask the three
 read-only questions above, and the manifest's allowlist, which is what stops a
 different extension, is pinned to our extension id and is identical in all of
 them (`crates/chat-stasher/src/nativehost.rs:494-607`, `:483-486`;
-`crates/chat-stasher/src/main.rs:1981-1996`). The host's `summary` answer is
+`crates/chat-stasher/src/main.rs:2068-2083`). The host's `summary` answer is
 therefore a count over the stage the whole machine shares, not over the asking
 install's own captures.
 
@@ -574,9 +574,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:7015-7019`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:7102-7106`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:6991-6998`).
+  (`crates/chat-stasher/src/main.rs:7078-7085`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -587,7 +587,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:5195-5203`).
+  as many words (`crates/chat-stasher/src/main.rs:5282-5290`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -628,13 +628,14 @@ a real limitation of the current code.
    `setup`, `run-once`, `schedule`, `push`, `status`, `read`, `doctor`, `verify`,
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
-   `activity-index`, `machine-declare`, `machine-label`, `overview`, `index`
-   (`crates/chat-stasher/src/main.rs:164-1179`); **a command that puts sessions
+   `activity-index`, `machine-declare`, `machine-label`, `prune-orphans`,
+   `overview`, `index`
+   (`crates/chat-stasher/src/main.rs:164-1245`); **a command that puts sessions
    back into a harness's own directories does not exist**. There are two
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:418-420,7242-7383`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:418-420,7329-7470`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:641-721`) — see exposure 5
@@ -649,7 +650,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7549-7611`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687,823-828`; `crates/chat-stasher/src/main.rs:7636-7698`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
