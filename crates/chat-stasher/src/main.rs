@@ -18,7 +18,7 @@ use chat_stasher::store::{self, BackupStore, StoreConfig};
 use chat_stasher::verify::{CheckSummary, ExpectationBasis, ReconcileReport, SessionOutcome};
 use clap::{Parser, Subcommand};
 use rustic_core::repofile::{MasterKey, NodeType};
-use rustic_core::{Credentials, Grouped, LsOptions, Repository, SnapshotGroupCriterion};
+use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -2623,9 +2623,7 @@ where
         let backends = BackupStore::for_metadata_query(cfg.clone())
             .backends()
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
-        let repo = Repository::new(&cfg.repository_options(), &backends)
-            .and_then(|repo| repo.open(&Credentials::Masterkey(mk.clone())))
-            .and_then(|repo| repo.to_indexed())
+        let (repo, _adoption) = chat_stasher::orphans::open_adopting(cfg, &backends, mk)
             .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
         let mut snapshots = repo
             .get_all_snapshots()
@@ -2775,10 +2773,8 @@ fn list_destination_machine_snapshot_ids(
     let backends = BackupStore::for_metadata_query(cfg.clone())
         .backends()
         .map_err(|e| ActivityIndexError::Read(format!("open destination: {e:#}")))?;
-    let repo = Repository::new(&cfg.repository_options(), &backends)
-        .and_then(|repo| repo.open(&Credentials::Masterkey(mk.clone())))
-        .and_then(|repo| repo.to_indexed())
-        .map_err(|e| {
+    let (repo, _adoption) =
+        chat_stasher::orphans::open_adopting(cfg, &backends, mk).map_err(|e| {
             ActivityIndexError::Read(format!("open destination for snapshot recheck: {e:#}"))
         })?;
     let snapshots = repo
@@ -3047,11 +3043,8 @@ fn read_archive_writer_statuses(
 fn read_overview_indexes(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<OverviewRead> {
     let store = BackupStore::for_metadata_query(cfg.clone());
     let backends = store.backends()?;
-    let repo = Repository::new(&cfg.repository_options(), &backends)?
-        .open(&Credentials::Masterkey(mk.clone()))
-        .context("open repository for overview")?
-        .to_indexed()
-        .context("index repository for overview")?;
+    let (repo, _adoption) = chat_stasher::orphans::open_adopting(&cfg, &backends, mk)
+        .context("open repository for overview")?;
     let snaps = repo
         .get_all_snapshots()
         .context("list snapshots for overview")?;
@@ -5386,16 +5379,42 @@ fn cmd_dest_init(
                     push_failed = true;
                 } else {
                     match store.push(stage, &mk) {
-                        Ok(summary) => println!(
-                            "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
-                            summary.stage_shards,
-                            summary.files_new,
-                            summary.files_unmodified,
-                            summary.data_added,
-                            summary.snapshots_in_repo,
-                        ),
+                        Ok(summary) => {
+                            // The two branches below are one line in two widths:
+                            // the short one is exactly what this command
+                            // printed before stranded packs existed, and is kept
+                            // for the runs that have nothing to report (a
+                            // repository whose index names every pack, or one
+                            // this push just created). A run with something to
+                            // say appends the two fields. Keep the shared prefix
+                            // byte-identical between them.
+                            match stranded_push_facts(summary.orphans.as_ref()) {
+                                Some((stranded, stranded_action)) => println!(
+                                    "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={} stranded_packs={} stranded={}",
+                                    summary.stage_shards,
+                                    summary.files_new,
+                                    summary.files_unmodified,
+                                    summary.data_added,
+                                    summary.snapshots_in_repo,
+                                    stranded,
+                                    stranded_action,
+                                ),
+                                None => println!(
+                                    "[dest-init] push          : stage_shards={} files_new={} files_unmodified={} data_added={} snapshots={}",
+                                    summary.stage_shards,
+                                    summary.files_new,
+                                    summary.files_unmodified,
+                                    summary.data_added,
+                                    summary.snapshots_in_repo,
+                                ),
+                            }
+                        }
                         Err(e) => {
-                            chat_stasher::remote_err::eprint_remote_error("dest-init: push", &e, &target);
+                            chat_stasher::remote_err::eprint_remote_error(
+                                "dest-init: push",
+                                &e,
+                                &target,
+                            );
                             push_failed = true;
                         }
                     }
@@ -6918,6 +6937,29 @@ fn reap_remote(cfg: &StoreConfig, keep_ssh_masters: bool) {
     }
 }
 
+/// `(packs no index file named, what this push did about them)`, or `None` when
+/// there is nothing to report.
+///
+/// `Some` only when there is a fact an operator needs: packs no index file names
+/// (whatever this push did about them), or a refusal — including a refusal whose
+/// count is zero, because "the full index could not be built" is a different
+/// state from "every pack is named by an index file". Everything else is `None`:
+/// a push that created the repository held no packs to survey, and a healthy
+/// repository's index names every pack in its backend. Both of those are
+/// measurements, and a caller that printed them would be changing the output of
+/// a healthy run — which is why the fields this returns are appended to
+/// `dest-init`'s one-line push summary only when it is `Some`.
+fn stranded_push_facts(
+    orphans: Option<&chat_stasher::orphans::OrphanOutcome>,
+) -> Option<(usize, &'static str)> {
+    match orphans {
+        None => None,
+        Some(o) if o.refused().is_some() => Some((o.report.unindexed_packs(), "not-adopted")),
+        Some(o) if o.adopted() => Some((o.report.unindexed_packs(), "adopted")),
+        Some(_) => None,
+    }
+}
+
 fn cmd_push(
     stage: &PathBuf,
     inbox: Option<PathBuf>,
@@ -7164,6 +7206,31 @@ fn cmd_push(
         "[push] snapshot host  : sha256={} (must equal machine)",
         store::machine_fingerprint(&summary.snapshot_host)
     );
+    // A killed push leaves packs no index file names. They are reported, never
+    // silently absorbed: either this push reached them and deduplicated against
+    // them, or it did not and re-uploaded their content. Silence here means the
+    // index named every pack in the backend, which is a measurement, not a gap.
+    if let Some(orphans) = &summary.orphans {
+        let stranded = orphans.report.unindexed_packs();
+        if stranded > 0 {
+            println!(
+                "[push] stranded packs : {stranded} pack(s) / {} bytes in this repository are named by no index file",
+                orphans.report.unindexed_bytes(),
+            );
+        }
+        match (stranded, orphans.refused()) {
+            (0, None) => {}
+            (_, None) => println!(
+                "[push] stranded packs : adopted - this backup deduplicated against them and re-uploaded none of their content"
+            ),
+            (0, Some(why)) => println!(
+                "[push] stranded packs : none unreachable, but the full index could not be built ({why})"
+            ),
+            (_, Some(why)) => println!(
+                "[push] stranded packs : NOT adopted ({why}) - their content was uploaded again"
+            ),
+        }
+    }
     println!("[push] snapshots      : {}", summary.snapshots_in_repo);
     if let Err(e) = chat_stasher::metahash::record_pushed_meta_hash(
         &state_dir,
@@ -7560,11 +7627,9 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 }
             };
             let repo_result = (|| -> anyhow::Result<_> {
-                Repository::new(&cfg.repository_options(), &backends)?
-                    .open(&Credentials::Masterkey(mk))
-                    .context("open destination for FTS build")?
-                    .to_indexed()
-                    .context("index destination for FTS build")
+                chat_stasher::orphans::open_adopting(&cfg, &backends, &mk)
+                    .context("open destination for FTS build")
+                    .map(|(repo, _adoption)| repo)
             })();
             let repo = match repo_result {
                 Ok(repo) => repo,
@@ -11443,9 +11508,7 @@ fn setup_snapshot_count(config: &Config) -> Result<usize, String> {
     let backends = BackupStore::for_metadata_query(cfg.clone())
         .backends()
         .map_err(|error| format!("{error:#}"))?;
-    let repo = Repository::new(&cfg.repository_options(), &backends)
-        .and_then(|repo| repo.open(&Credentials::Masterkey(mk)))
-        .and_then(|repo| repo.to_indexed())
+    let (repo, _adoption) = chat_stasher::orphans::open_adopting(&cfg, &backends, &mk)
         .map_err(|error| format!("{error:#}"))?;
     repo.get_all_snapshots()
         .map(|snapshots| snapshots.len())

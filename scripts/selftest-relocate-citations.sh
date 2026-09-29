@@ -181,6 +181,13 @@ MD
 
 Run the checks.
 MD
+  cat > "$1/docs-dev/orphan-packs.md" <<'MD'
+# Orphan packs
+
+Present because it is in the drift checker's scan set: a document the scan set
+names but the fixture lacks makes every run below refuse on the fixture itself.
+It carries no citation, so no probe's count of relocated ranges changes.
+MD
   cat > "$1/docs-dev/threat-model.md" <<'MD'
 # Threat model
 
