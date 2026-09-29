@@ -172,6 +172,7 @@ impl BackupStore {
             .context("open repository for writer versions")?
             .to_indexed()
             .context("index repository for writer versions")?;
+        self.require_sound_packs(&repo)?;
         let mut out = ArchivedWriters::default();
         for snapshot in newest_snapshot_per_host(repo.get_all_snapshots()?) {
             out.machines.insert(snapshot.hostname.clone());
@@ -210,6 +211,7 @@ impl BackupStore {
             .context("open repository for read-all")?
             .to_indexed()
             .context("index repository for read-all")?;
+        self.require_sound_packs(&repo)?;
 
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         // `get_all_snapshots` reads every snapshot file under `snapshots/` —
@@ -315,6 +317,7 @@ impl BackupStore {
             .context("open repository for read-all")?
             .to_indexed()
             .context("index repository for read-all")?;
+        self.require_sound_packs(&repo)?;
 
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         let snapshots_in_repo = snaps.len();
@@ -488,6 +491,7 @@ impl BackupStore {
             .context("open repository for shard restore")?
             .to_indexed()
             .context("index repository for shard restore")?;
+        self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         for snap in newest_snapshot_per_host(snaps) {
             if snap.hostname != machine {

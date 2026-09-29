@@ -426,6 +426,10 @@ fn packs_stranded_without_an_index_are_never_reclaimed() {
     // packs, exactly the state a kill in the window leaves.
     // Repository-relative paths of every stored object, packs included: packs
     // live two levels down (`data/<xx>/<id>`), so this has to recurse.
+    //
+    // Components are joined with `/` because the filter below selects packs by
+    // the `data/` prefix; `to_string_lossy` alone gives `data\` on Windows,
+    // which matches nothing and would leave `stranded` empty.
     let pack_names = |repo: &Path| -> Vec<String> {
         let mut names = Vec::new();
         let mut stack = vec![repo.to_path_buf()];
@@ -438,7 +442,12 @@ fn packs_stranded_without_an_index_are_never_reclaimed() {
                 if path.is_dir() {
                     stack.push(path);
                 } else if let Ok(rel) = path.strip_prefix(repo) {
-                    names.push(rel.to_string_lossy().into_owned());
+                    names.push(
+                        rel.components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                    );
                 }
             }
         }

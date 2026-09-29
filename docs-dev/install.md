@@ -268,7 +268,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:10119-10127,10137-10160`).
+(`crates/chat-stasher/src/main.rs:10168-10176,10186-10209`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -501,9 +501,9 @@ read the repository and key file you select in config or arguments
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1271-1273`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1275-1277`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1371-1379`).
+(`crates/chat-stasher/src/store.rs:1375-1383`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -513,8 +513,8 @@ copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
 `--masterkey-saved-elsewhere` creates the local repository and the key, reports
 the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:11336-11343`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:10907-10913`).
+remote step and the timer (`crates/chat-stasher/src/main.rs:11385-11392`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:10956-10962`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -524,7 +524,7 @@ the first write.
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:306-310`, `:1549-1554`; the config
+(`crates/chat-stasher/src/store.rs:153-156`, `:306-310`, `:1553-1558`; the config
 field itself is `crates/chat-stasher/src/config.rs:268-269`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -614,7 +614,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:153-156`, `:1549-1554`; the field itself is
+(`crates/chat-stasher/src/store.rs:153-156`, `:1553-1558`; the field itself is
 `crates/chat-stasher/src/config.rs:268-269`), so the option names below belong
 to the backend, not to this tool.
 
@@ -835,12 +835,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:13917-13919`). This is the
+does not (`crates/chat-stasher/src/main.rs:13966-13968`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:13640-13668`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:13689-13717`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -856,7 +856,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:13919-14052`):
+(`crates/chat-stasher/src/main.rs:13968-14101`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -869,7 +869,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:13898-13903`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:13947-13952`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -879,7 +879,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:13596-13621`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:13645-13670`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -961,7 +961,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1271-1278`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1275-1282`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

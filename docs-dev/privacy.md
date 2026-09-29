@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7480-7722`).
+  (`crates/chat-stasher/src/fts.rs:1-6,557-670,673-687`; `crates/chat-stasher/src/main.rs:7482-7724`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
@@ -534,7 +534,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:101`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:271-345,1146-1231`).
+kept on your machine (`crates/chat-stasher/src/store.rs:271-345,1150-1235`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -846,10 +846,10 @@ dominant risk.
 **3. The master key is the only key, and losing it is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1271-1278,1233-1237`). The key file
+archive (`crates/chat-stasher/src/store.rs:1275-1282,1237-1241`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1313-1398`).
+(`crates/chat-stasher/src/store.rs:1317-1402`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

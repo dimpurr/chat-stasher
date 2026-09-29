@@ -463,6 +463,7 @@ impl BackupStore {
             .context("open repository for consumed audit")?
             .to_indexed()
             .context("index repository for consumed audit")?;
+        self.require_sound_packs(&repo)?;
         let snapshots = repo
             .get_all_snapshots()
             .context("list snapshots for consumed audit")?;
@@ -517,6 +518,7 @@ impl BackupStore {
         let repo = Repository::new(&self.cfg.repository_options(), &backends)?
             .open(&Credentials::Masterkey(mk.clone()))?
             .to_indexed()?;
+        self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots()?;
         let newest_for_host = snaps
             .iter()
@@ -630,6 +632,7 @@ impl BackupStore {
             .context("open repository for session content")?
             .to_indexed()
             .context("index repository for session content")?;
+        self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         let Some(snap) = crate::readback::newest_snapshot_per_host(snaps)
             .into_iter()
@@ -690,6 +693,7 @@ impl BackupStore {
             .context("open repository for export")?
             .to_indexed()
             .context("index repository for export")?;
+        self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
 
         for snap in crate::readback::newest_snapshot_per_host(snaps) {

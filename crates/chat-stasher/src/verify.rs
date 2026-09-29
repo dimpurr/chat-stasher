@@ -237,6 +237,7 @@ impl BackupStore {
             .context("build repository")?
             .open(&Credentials::Masterkey(mk.clone()))
             .context("open repository for verify")?;
+        self.require_sound_packs(&repo)?;
         let opts = CheckOptions::default().read_data(read_data).clone();
         let results = repo.check(opts).context("run rustic check")?;
 

@@ -621,27 +621,27 @@ crates/chat-stasher/src/main.rs:6949-6956  6708be64c9ca  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:579  :: let stage_check =
 crates/chat-stasher/src/main.rs:6973-6977  c1c01a085bde  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:577  :: // This guard used to refuse any shard-less stage: while re…
-crates/chat-stasher/src/main.rs:7175-7314  98292402966b  lines=140
+crates/chat-stasher/src/main.rs:7175-7316  f1c329d6b097  lines=142
   <- docs-dev/threat-model.md:637  :: reap_remote(&cfg, keep_ssh_masters);
-crates/chat-stasher/src/main.rs:7480-7722  25f55cf734e5  lines=243
+crates/chat-stasher/src/main.rs:7482-7724  25f55cf734e5  lines=243
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:652  :: fn cmd_index(action: IndexAction) -> ExitCode {
-crates/chat-stasher/src/main.rs:10119-10127  78f23654916e  lines=9
+crates/chat-stasher/src/main.rs:10168-10176  78f23654916e  lines=9
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:10137-10160  3f797bdc8c26  lines=24
+crates/chat-stasher/src/main.rs:10186-10209  3f797bdc8c26  lines=24
   <- docs-dev/install.md:271  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:10907-10913  6577755c346f  lines=7
+crates/chat-stasher/src/main.rs:10956-10962  6577755c346f  lines=7
   <- docs-dev/install.md:517  :: fn setup_refused_awaiting_declaration_why() -> String {
-crates/chat-stasher/src/main.rs:11336-11343  e5a9c1eb5374  lines=8
+crates/chat-stasher/src/main.rs:11385-11392  e5a9c1eb5374  lines=8
   <- docs-dev/install.md:516  :: fn setup_create_repo_and_key(config: &Config) -> Result<std…
-crates/chat-stasher/src/main.rs:13596-13621  495447a9695e  lines=26
+crates/chat-stasher/src/main.rs:13645-13670  495447a9695e  lines=26
   <- docs-dev/install.md:882  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:13640-13668  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:13689-13717  563498443d71  lines=29
   <- docs-dev/install.md:843  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:13898-13903  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:13947-13952  00bb766bbeb7  lines=6
   <- docs-dev/install.md:872  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:13917-13919  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:13966-13968  28b586b3526e  lines=3
   <- docs-dev/install.md:838  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:13919-14052  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:13968-14101  9b25725da3b1  lines=134
   <- docs-dev/install.md:859  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/nativehost.rs:150-163  b160255bd493  lines=14
   <- docs-dev/privacy.md:742, docs-dev/threat-model.md:441  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
@@ -721,21 +721,21 @@ crates/chat-stasher/src/store.rs:271-345  a6debb9ea9c7  lines=75
   <- docs-dev/privacy.md:152, docs-dev/privacy.md:537, docs-dev/privacy.md:552, docs-dev/privacy.md:781, docs-dev/threat-model.md:80, docs-dev/threat-model.md:218, docs-dev/threat-model.md:534  :: }
 crates/chat-stasher/src/store.rs:306-310  bd0dae8980fe  lines=5
   <- docs-dev/install.md:527  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
-crates/chat-stasher/src/store.rs:1146-1231  d1b806878c20  lines=86
+crates/chat-stasher/src/store.rs:1150-1235  d1b806878c20  lines=86
   <- docs-dev/privacy.md:537, docs-dev/threat-model.md:80  :: // error, so reaching here means the entry list is provably…
-crates/chat-stasher/src/store.rs:1233-1237  6b4ff2db82f4  lines=5
+crates/chat-stasher/src/store.rs:1237-1241  6b4ff2db82f4  lines=5
   <- docs-dev/privacy.md:849  :: machine: &str,
-crates/chat-stasher/src/store.rs:1271-1273  d158bc9afb0e  lines=3
+crates/chat-stasher/src/store.rs:1275-1277  d158bc9afb0e  lines=3
   <- docs-dev/install.md:504, docs-dev/threat-model.md:619  :: machine: &str,
-crates/chat-stasher/src/store.rs:1271-1278  38aff1df8680  lines=8
+crates/chat-stasher/src/store.rs:1275-1282  38aff1df8680  lines=8
   <- docs-dev/install.md:964, docs-dev/privacy.md:849  :: machine: &str,
-crates/chat-stasher/src/store.rs:1313-1398  9ee679c8a89b  lines=86
+crates/chat-stasher/src/store.rs:1317-1402  9ee679c8a89b  lines=86
   <- docs-dev/privacy.md:852, docs-dev/threat-model.md:124, docs-dev/threat-model.md:613  :: let file_type = entry.file_type()?;
-crates/chat-stasher/src/store.rs:1371-1379  2fd9234448bb  lines=9
+crates/chat-stasher/src/store.rs:1375-1383  2fd9234448bb  lines=9
   <- docs-dev/install.md:506  :: }
-crates/chat-stasher/src/store.rs:1400-1404  e915d9a10309  lines=5
+crates/chat-stasher/src/store.rs:1404-1408  e915d9a10309  lines=5
   <- docs-dev/threat-model.md:621  :: }
-crates/chat-stasher/src/store.rs:1549-1554  4a031ff70c84  lines=6
+crates/chat-stasher/src/store.rs:1553-1558  4a031ff70c84  lines=6
   <- docs-dev/install.md:527, docs-dev/install.md:617  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
 crates/chat-stasher/src/ui/extension_profile.rs:146-177  fb34362ebddf  lines=32
   <- docs-dev/privacy.md:657  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…
