@@ -149,6 +149,11 @@ impl Fixture {
     }
 
     /// Every repository-relative object path, excluding `config`.
+    ///
+    /// Components are joined with `/`, which is what the callers filter these
+    /// strings by (`data/…`). `Path::to_string_lossy` would hand them `data\…`
+    /// on Windows, matching nothing — and an empty *match* there is not an empty
+    /// repository, so the assertion would quietly stop testing the archive.
     fn objects(&self) -> Vec<String> {
         let repo = self.repo();
         let mut names = Vec::new();
@@ -165,8 +170,10 @@ impl Fixture {
                     names.push(
                         path.strip_prefix(&repo)
                             .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
+                            .components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join("/"),
                     );
                 }
             }
