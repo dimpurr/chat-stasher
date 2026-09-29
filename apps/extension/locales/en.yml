@@ -1008,6 +1008,16 @@ coverage:
       what this platform's responses let the extension see.
     sourceOrg: the page's own request
     sourceBody: the response body
+    # 🔴 W239 · The third fact, and it may not borrow `none`'s sentence: `none` says this
+    #    build has never had an account to show, while here the limit is known in advance
+    #    and by name. Keeping them apart is the difference between "we did not look" and
+    #    "there is nothing here that could be looked at" — and the second one is a fact
+    #    about the platform, not about our records.
+    orgScope: >-
+      This platform files conversations under an organization, and an organization is not
+      a person: two accounts that share one cannot be told apart here, so a switch between
+      them would not be detected. This is not a stop — nothing was skipped and nothing was
+      written off — it is the limit of what this platform's own requests can show.
   counts:
     fromHeader: >-
       The debt list this browser holds could not be read, so the captured and

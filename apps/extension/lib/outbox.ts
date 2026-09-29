@@ -106,7 +106,7 @@ export interface OutboxEntry {
   name: string;
   /** §6.2 `payload` — the bundle serialised with JSON.stringify. */
   payload: string;
-  /** W218 · Local-only id passed to the native host; never part of payload/export. */
+  /** W218 · Local-only id passed to the native host; never part of payload/export. 🔴 W239 · It is the namespace the capture's requests address, which is an account id only on the platforms that have one: see `coordinationIdFromCapture`. */
   accountId?: string;
   bytes: number;
   enqueuedAt: number;

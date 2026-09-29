@@ -58,6 +58,13 @@
  *  · **It never issues a request, reads a page or writes storage.** Every function
  *    here is pure but for the salt read, and the salt read goes through step 1's own
  *    `loadOrCreateAccountSalt`.
+ *  · **It takes no lease over an organization.** W128's step 3, and the honest half of
+ *    it: for a plan whose scope is an organization, a lease would be derived from the very
+ *    value every response carries, so it would agree with every account inside that
+ *    organization and suspend nothing (the reasoning and its evidence are at
+ *    `ORGANIZATION_SCOPED_PLATFORMS`, ./enumerate.ts). Such a scope is `unleased` with its
+ *    own reason, which is a *statement about what this build can tell*, not a check it
+ *    pretends to make.
  */
 
 import {
@@ -66,7 +73,7 @@ import {
   loadOrCreateAccountSalt,
 } from '../account-fingerprint';
 import type { AccountFingerprint, AccountIdSource } from '../contract';
-import { backfillPlanFor, planHoldsAccountLease } from './enumerate';
+import { backfillPlanFor, planHoldsAccountLease, planScopeIsOrganization } from './enumerate';
 import type { BackfillStore } from './store';
 import type { AccountIdentity, AccountLease, AccountSuspension } from './types';
 
@@ -80,6 +87,11 @@ import type { AccountIdentity, AccountLease, AccountSuspension } from './types';
  *  · `scope-names-no-account` — the plan does declare one, and this scope is the
  *    `'default'` sentinel (ADR-002's "the scan found nothing"): a scope whose own
  *    name is "we could not tell".
+ *  · `scope-names-an-organization` — 🔴 W239 · the scope names an **organization**, which
+ *    is a namespace rather than a person: two accounts can be members of one, so a lease
+ *    taken from it would be equal for both and would agree with every response they send.
+ *    Distinct from `platform-not-scoped` on purpose — that one says the plan declares no
+ *    account axis, and this plan does declare one; what it declares is not an account.
  *  · `salt-unavailable`     — no store, or a store that could not be written to, so
  *    no salt exists and no value could be reproduced after a reload.
  *  · `crypto-unavailable`   — no usable WebCrypto HMAC in this context.
@@ -87,6 +99,7 @@ import type { AccountIdentity, AccountLease, AccountSuspension } from './types';
 export type AccountLeaseUnknown =
   | 'platform-not-scoped'
   | 'scope-names-no-account'
+  | 'scope-names-an-organization'
   | 'salt-unavailable'
   | 'crypto-unavailable';
 
@@ -107,6 +120,13 @@ const UNRESOLVED_ACCOUNT = 'default';
  * have to be added in one place.
  */
 export function leaseSourceFor(platform: string): AccountIdSource {
+  // 🔴 W239 · The path-carried branch is kept and is **unreachable from a lease today**: an
+  //    organization-scoped plan is answered by `accountLeaseForScope` before this is
+  //    consulted, and the one organisation-shaped source `AccountIdSource` declares is
+  //    exactly the claim W239 removed. It stays because the mapping is still the true one
+  //    for the case it describes — a plan whose scope really is a person's id in a path —
+  //    and because deleting it would leave the day such a plan arrives with nothing to
+  //    read. `ACCOUNT_ID_SOURCES` is what makes a *stored* source readable either way.
   return backfillPlanFor(platform)?.scopeInPath ? 'request-url-organization' : 'response-body-platform-uid';
 }
 
@@ -144,6 +164,15 @@ export async function accountLeaseForScope(
   store: BackfillStore | null,
   now: number,
 ): Promise<AccountLeaseReading> {
+  // 🔴 W239 · Checked before `planHoldsAccountLease`, because these two declarations answer
+  //    different questions and neither may borrow the other's reason: "this plan declares no
+  //    account axis" is false about an organization-scoped plan, whose scope does name
+  //    something. And a lease is exactly what must not exist here — it would be derived from
+  //    the organization every response already carries, so it could only agree with itself
+  //    and would suspend nothing. See `ORGANIZATION_SCOPED_PLATFORMS`.
+  if (planScopeIsOrganization(platform)) {
+    return { kind: 'unleased', reason: 'scope-names-an-organization' };
+  }
   if (!planHoldsAccountLease(platform)) return { kind: 'unleased', reason: 'platform-not-scoped' };
   if (scope.length === 0 || scope === UNRESOLVED_ACCOUNT) {
     return { kind: 'unleased', reason: 'scope-names-no-account' };

@@ -139,6 +139,7 @@
               "enum": [
                 "platform-not-recognized",
                 "organization-not-in-request-url",
+                "organization-is-not-an-account",
                 "no-account-id-in-capture",
                 "email-is-not-an-account-id",
                 "handle-is-not-an-account-id",
@@ -146,7 +147,7 @@
                 "salt-unreadable",
                 "crypto-unavailable"
               ],
-              "description": "Every value is a distinct fact. 'salt-unreadable' means a salt record exists and does not parse, and is deliberately not replaced by a fresh one: that would re-key every later fingerprint and read as an account switch."
+              "description": "Every value is a distinct fact. 'organization-is-not-an-account' (W239) means this platform files conversations under an organization, which two accounts can share: a value derived from it would be equal for both, so no value is recorded and the reason says why. 'salt-unreadable' means a salt record exists and does not parse, and is deliberately not replaced by a fresh one: that would re-key every later fingerprint and read as an account switch."
             }
           }
         }

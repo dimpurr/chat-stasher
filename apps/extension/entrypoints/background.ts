@@ -11,7 +11,7 @@ import {
   type CapturedFetch,
   type InboxBundle,
 } from '../lib/contract';
-import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
+import { accountFingerprintFor, coordinationIdFromCapture } from '../lib/account-fingerprint';
 import {
   acquireSharedLease,
   backfillLeaseKey,
@@ -482,8 +482,13 @@ async function preparePayload(
   }
 
   const bundle = await buildBundle(captured, store);
-  const accountReading = accountIdFromCapture(captured, bundle.sessionId);
-  const accountId = accountReading.kind === 'id' ? accountReading.id : undefined;
+  // 🔴 W239 · This is the id the host coordinates under — a **namespace** — and it is not
+  //    the same question as the bundle's `account` field, which is an attribution claim.
+  //    For an organization-scoped plan the two answers differ on purpose: the host needs
+  //    the organization (it is what every request addresses, and D1's budget is per
+  //    namespace), while the bundle must not call it an account. See
+  //    `coordinationIdFromCapture` for why the split is the change rather than a detail.
+  const accountId = coordinationIdFromCapture(captured, bundle.sessionId) ?? undefined;
   // 🔴 C21 · Naming is an **identity mapping**, not "replace unsafe characters":
   //    sanitizePathSegment is many-to-one ('a b' and 'a/b' collide), and the old
   //    download path overwrote ⇒ two different conversations could erase each
@@ -2923,6 +2928,15 @@ async function recordAlarmTick(
     const report = buildCoverage({ ...input, install: { ...identity, profile_label: identity.profile_label ?? 'Unnamed profile' } });
     const grouped = new Map<string, { platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>();
     for (const row of report.rows) {
+      /**
+       * 🔴 W239 · **A row's lease is an account lease, or it is nothing.** The row is
+       *    built by `buildCoverage`, which refuses to fill this field for a plan whose
+       *    scope names an organization — a value this report would otherwise carry off
+       *    the machine as `account_fingerprint`, where it is read as an account id, and
+       *    two accounts in one organization would arrive at the host as one. That refusal
+       *    is the plan's answer, not this loop's: an older build's lease on the stored
+       *    header must not be able to decide what this build reports.
+       */
       const fingerprint = row.accountLease?.value;
       const key = `${row.platform}\u0000${fingerprint ?? ''}`;
       const existing = grouped.get(key) ?? { platform: row.platform, captured_by_this_browser: 0, pending: 0, paused_reason: null, ...(fingerprint ? { account_fingerprint: fingerprint } : {}) };

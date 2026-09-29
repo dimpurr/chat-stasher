@@ -2035,6 +2035,14 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
     }
 }
 
+/// The one `AccountIdSource` whose value hashes a **person's** id, and so the
+/// only stored source `account_keys` turns into an account key.
+///
+/// The contract's enum carries a second label, and the two are not
+/// interchangeable: see `account_keys` for what that one names and why it may
+/// not become a key.
+const PERSON_ACCOUNT_SOURCE: &str = "response-body-platform-uid";
+
 /// W219 · Every comparable account key this session's records carry.
 ///
 /// Read from the `account` envelope the extension wrote on each bundle
@@ -2044,6 +2052,20 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
 /// fingerprint, which is the failure invariant 1 forbids. A malformed envelope
 /// yields nothing for the same reason a malformed line is skipped everywhere
 /// else in this module: it is not evidence about an account.
+///
+/// 🔴 W239 · **Which fingerprint** is a second question, and the envelope answers
+/// it with `source`. Only a source that names a person's id yields a key: a
+/// fingerprint whose source is `request-url-organization` hashes an
+/// **organization**, which two accounts can share, so a key made from it states
+/// that two people are one — a positive false claim rather than an unknown one.
+/// The extension no longer writes that label (`ACCOUNT_ID_SOURCES` in
+/// `apps/extension/lib/contract.ts` pins today's set, and the plan table beside
+/// it is why), so the bundles carrying it are ones an **older build** wrote —
+/// which is precisely why this reader cannot skip the question: the archive
+/// holds them, and the extension's own fix cannot reach data already written.
+/// This reader is where that claim stops. An envelope whose `source` is absent,
+/// or is a label the closed enum does not name, is a bundle this reader cannot
+/// read rather than one it may assume holds an account.
 ///
 /// Deduped and sorted so the row is a set, not a log: the same account captured
 /// twice is one key, and the row's bytes do not depend on line order — which is
@@ -2058,6 +2080,9 @@ fn account_keys(lines: &[&str]) -> Vec<AccountKey> {
             continue;
         };
         if account.get("kind").and_then(|k| k.as_str()) != Some("fingerprint") {
+            continue;
+        }
+        if account.get("source").and_then(|v| v.as_str()) != Some(PERSON_ACCOUNT_SOURCE) {
             continue;
         }
         let Some(value) = account.get("value").and_then(|v| v.as_str()) else {
@@ -2248,6 +2273,10 @@ mod tests {
             "no-account-id-in-capture",
             "email-is-not-an-account-id",
             "salt-unreadable",
+            // W239 · the organization-scoped refusal. It is a reason and not a value for
+            // the same reason as the others: what it states is that no account can be
+            // named here, so a key made from it would be a key made from nothing.
+            "organization-is-not-an-account",
         ] {
             let line = with_account(&format!(r#"{{"kind":"unknown","reason":"{reason}"}}"#));
             let row = build_row("deepseek.s", "mbp", "deepseek", &[line.as_str()]);
@@ -2256,6 +2285,76 @@ mod tests {
                 "`{reason}` is not a key: {:?}",
                 row.account_keys
             );
+        }
+    }
+
+    /// A bundle an older build wrote for an organization-scoped plan: kind
+    /// `fingerprint`, and a `source` that says the value hashes an
+    /// **organization**. W239 keeps this label readable precisely so these
+    /// bundles still parse.
+    fn organization_fingerprint(salt: &str, value: &str) -> String {
+        format!(
+            r#"{{"kind":"fingerprint","value":"{value}","source":"request-url-organization","saltId":"{salt}"}}"#
+        )
+    }
+
+    /// 🔴 W239 · A stored fingerprint whose `source` names an organization is not
+    /// an account key, and this is the half of W239 that no live code path can
+    /// reach: the extension stopped writing this label, so the only bundles that
+    /// carry it are ones an older build wrote and an archive still holds. Two
+    /// accounts in one organization hash to the same value, so accepting the key
+    /// would keep a positive, false statement that two people are one — the
+    /// mis-attribution W239 exists to remove, surviving in the data that was
+    /// already written.
+    #[test]
+    fn an_organization_derived_fingerprint_records_no_key() {
+        let legacy = with_account(&organization_fingerprint("salt-1", "aa"));
+        let row = build_row("claude.s", "mbp", "claude", &[legacy.as_str()]);
+        assert!(
+            row.account_keys.is_empty(),
+            "an organization is not an account: {:?}",
+            row.account_keys
+        );
+    }
+
+    /// The same session carrying an organization value **and** a real account
+    /// value keeps the real one. The rule drops a claim, not the row: a reader
+    /// that lost the account the build could actually name would be trading one
+    /// wrong answer for another.
+    #[test]
+    fn an_organization_derived_fingerprint_does_not_hide_a_real_one() {
+        let legacy = with_account(&organization_fingerprint("salt-1", "aa"));
+        let real = with_account(&fingerprint("salt-1", "bb"));
+        let row = build_row(
+            "claude.s",
+            "mbp",
+            "claude",
+            &[legacy.as_str(), real.as_str()],
+        );
+        assert_eq!(
+            row.account_keys,
+            vec![AccountKey {
+                salt_id: "salt-1".into(),
+                value: "bb".into()
+            }]
+        );
+    }
+
+    /// A `source` the contract does not name as a person's id is not evidence
+    /// about an account, so it is not a key — the same rule the other malformed
+    /// envelopes above follow. `contracts/inbox.schema.json` closes this enum,
+    /// so a label outside it is a bundle this reader cannot read rather than one
+    /// it may guess about; `ACCOUNT_ID_SOURCES` is where the extension pins the
+    /// same set.
+    #[test]
+    fn a_fingerprint_with_an_unknown_source_records_no_key() {
+        let absent = with_account(r#"{"kind":"fingerprint","value":"aa","saltId":"salt-1"}"#);
+        let invented = with_account(
+            r#"{"kind":"fingerprint","value":"aa","source":"response-body-uid","saltId":"salt-1"}"#,
+        );
+        for line in [absent, invented] {
+            let row = build_row("deepseek.s", "mbp", "deepseek", &[line.as_str()]);
+            assert!(row.account_keys.is_empty(), "{:?}", row.account_keys);
         }
     }
 
