@@ -154,6 +154,8 @@ chat-stasher index build --destination <name>
 
 It only covers what the archive held when you last built it. Run it again to include newer sessions. `chat-stasher index check --destination <name>` reports what the index holds without contacting the archive.
 
+Using a text search to decide which conversations to export is [a task of its own](use-cases/skill-from-history.md), with the reading of the coverage counts written out.
+
 A session the index has not read cannot be searched, and the page says so instead of reporting "no match".
 
 ### A one- or two-character search finds nothing
@@ -173,6 +175,8 @@ The archive it opens cannot be read again. There is no recovery, reset or backdo
 ### I want to read my archive on another machine
 
 Copy the destination's key file to the same path on the other machine (or set `key_file` in that machine's config), declare the same destination, and use `ui`, `search` or `export` as usual.
+
+If the machine the conversations came from is gone for good, that is a whole task rather than a one-liner, and it has its own page: [Recover a lost machine's conversations](use-cases/lost-machine.md). It covers finding the machine's partition, what an exit `3` from a search means, and how to read one conversation back with a checksum.
 
 ## Still stuck?
 

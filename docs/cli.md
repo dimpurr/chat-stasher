@@ -286,6 +286,8 @@ Without `--text`, search reads metadata only and never downloads a conversation.
 
 A session whose dates are unknown is listed separately, never dropped. While any remain and a date filter is active, "0 matched" exits `3`, not `1`.
 
+`--session` matches from the **start** of the stored session id, which begins with the tool (`claude-code.<machine>.<native id>`). A native id on its own therefore matches nothing, and the run says "not in this destination" without that being a fact about the archive. [Recover a lost machine's conversations](use-cases/lost-machine.md#5-read-one-back) has the two forms side by side.
+
 ### `export`
 
 Writes exactly the sessions `search` selects for the same flags, as `<out>/<machine>/<tool>/<session-id>.jsonl` in each tool's own format, plus a checksummed `<out>/manifest.json`.
@@ -298,7 +300,9 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 | `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
 
-Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error.
+Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error. `--dry-run` reports the same exit code the real run would, so it is worth running first.
+
+There are no text filters here: the flags are `search`'s, minus `--text`. Use a text search to decide whether the material is worth exporting, then select with machine, tool and dates. [Turn old conversations into a skill](use-cases/skill-from-history.md) is that workflow end to end.
 
 ### `read`
 
@@ -307,6 +311,8 @@ Prints one session (`--session <id>`) and its SHA-256, without content: the shar
 `--all-machines` instead reports, across **every snapshot of every machine** cumulatively, each session's id, shard count, length and digest — a session is listed against the newest snapshot that holds it. It reads a lot: unlike `search` it downloads and hashes every shard it lists, so it is a full read of the destination, not a listing.
 
 Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read) · `2` usage error.
+
+`--session` here is the **whole** stored id, `<tool>.<machine>.<native id>`, and unlike `search --session` it accepts no prefix: anything shorter exits `3` with "holds no shards in any of the snapshots of machine …", which means it could not be resolved rather than that it is absent. The full ids are in an `export`'s `manifest.json`, and `read --all-machines --full-ids` prints them all at the cost of reading and hashing every shard. [Recover a lost machine's conversations](use-cases/lost-machine.md#5-read-one-back) is the worked version.
 
 ### `overview`
 

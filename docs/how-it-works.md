@@ -47,7 +47,7 @@ The archive is an encrypted, content-addressed repository built on the open-sour
 
 Each machine gets a random 128-bit **identity** on its first run, and writes only to its own **partition** of the archive: `sessions/<machine>/…`. Two machines never write over each other, even with the same host name.
 
-That is why several machines can push to one destination, and why the dashboard can show them side by side. `machine-declare` gives a machine a readable name, and `machine-label` names one that can no longer name itself, such as a sold laptop.
+That is why several machines can push to one destination, and why the dashboard can show them side by side. `machine-declare` gives a machine a readable name, and `machine-label` names one that can no longer name itself, such as a sold laptop. That last case is a whole task rather than a command: [Recover a lost machine's conversations](use-cases/lost-machine.md) is it end to end.
 
 ### Destinations are full copies
 

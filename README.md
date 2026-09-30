@@ -4,12 +4,14 @@
 
 **Local-first: there is no server of ours in the path.** Conversations are encrypted on your machine before they are stored. The archive is only ever added to. Anything the tool cannot see is reported as *unknown*, never quietly counted as zero.
 
+**A machine you lose is not a history you lose.** What it archived stays readable from any other computer, with the destination and its key file alone. [Use cases](docs/use-cases/) spells that out step by step, including what it cannot prove.
+
 <!-- screenshot: `chat-stasher ui` dashboard, totals, machine × source matrix, weekly heatmap (no session titles, paths or ids visible) -->
 
 [![Release](https://img.shields.io/github/v/release/dimpurr/chat-stasher)](https://github.com/dimpurr/chat-stasher/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[Quick start](#quick-start) · [Install](#install) · [Support at a glance](#support-at-a-glance) · [Where the archive lives](#where-the-archive-lives) · [Security](#security-and-privacy) · [Docs](#documentation)
+[Quick start](#quick-start) · [Install](#install) · [Support at a glance](#support-at-a-glance) · [Where the archive lives](#where-the-archive-lives) · [Use cases](docs/use-cases/) · [Security](#security-and-privacy) · [Docs](#documentation)
 
 ## Works with the tools you already use
 
@@ -232,12 +234,16 @@ The dashboard shows every machine side by side, and `status --destination <name>
 
 Several browser profiles on one computer are the same idea one level down, with one difference: they share that machine's identity, so their captures land in the same part of the archive. Install the extension in each profile you chat in, as above. A conversation that two profiles both captured is stored once only when the two deliveries are byte-identical; otherwise both are kept, because the archive records what was captured rather than deciding which profile was right.
 
+Having several machines is also what makes one of them recoverable. Losing a laptop is not losing what it archived: any other machine that can reach the destination, with its key file, can read the conversations back, so [Recover a lost machine's conversations](docs/use-cases/lost-machine.md) is the page to read before you need it.
+
 ## Getting your conversations back
 
 - **Browse.** `chat-stasher ui` opens a dashboard on `127.0.0.1`, and needs no flag when the config leaves the choice unambiguous (one declared destination, or a default recorded). It shows totals, a machine × source matrix and a weekly heatmap, and you can drill into any cell. The list is sorted and paged on the server, and a conversation opens in a reader that fetches and decrypts that one session, printing the byte cost first.
 - **Search inside conversations.** The dashboard's `/search` runs a query against a **local full-text index**, which `chat-stasher index build` creates from the archive into the operating-system cache directory. It matches literal substrings (including scripts without spaces) from three characters up, and every answer states how much of the destination that index covers — a session the index has not read, or could not re-read when it changed, cannot be searched, and the page says so rather than reporting no match. `chat-stasher index clear` deletes the index.
 - **Find.** `chat-stasher search` finds sessions by machine, tool and **conversation date**: `--day 2026-01-15`, or `--since` / `--until`.
 - **Take out.** `chat-stasher export --out <dir>` writes exactly the sessions `search` found as files in their native format, plus a checksummed `manifest.json`. `--dry-run` shows the cost and writes nothing. `chat-stasher read` prints a single session.
+- **Recover a machine you no longer have.** Everything above reads one destination and works without the computer that wrote it, so a sold or wiped laptop is a situation with a procedure rather than a loss: [Recover a lost machine's conversations](docs/use-cases/lost-machine.md).
+- **Turn old conversations into a skill.** Search inside them, export the ones that matter, and hand the files to an agent to distil a procedure or checklist out of: [Turn old conversations into a skill](docs/use-cases/skill-from-history.md).
 
 There is no command yet that puts sessions back into a tool's own folder.
 
@@ -305,6 +311,7 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 | Look up a command's flags and exit codes | [docs/cli.md](docs/cli.md) · `chat-stasher <command> --help` |
 | Look up a setting in `config.toml` | [docs/config.md](docs/config.md) |
 | Fix something that looks wrong | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Do a whole task, start to finish | [docs/use-cases/](docs/use-cases/) |
 | See what is supported, and how sure we are | [docs/support.md](docs/support.md) |
 | Understand the pipeline and the archive | [docs/how-it-works.md](docs/how-it-works.md) |
 | Decide whether to trust it | [docs/privacy-security.md](docs/privacy-security.md) |
