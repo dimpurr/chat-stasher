@@ -28,6 +28,12 @@
 //! rustic repository. The counter-case at the bottom is the one that makes the
 //! fix non-trivial: *real* content may repeat, and repeated content must still
 //! be sealed.
+//!
+//! The defect also ran on real machines, so the last section starts from the
+//! stage it left behind — a body sealed two or three times — and pins that a
+//! pass over *that* seals nothing either. The machine's own `run-once` is one
+//! of those passes, and a fix that only held on a clean stage would have left
+//! the damage growing every hour.
 
 use chat_stasher::collect;
 use chat_stasher::collect::DestinationView;
@@ -452,5 +458,377 @@ fn a_fresh_destination_does_not_reseal_a_sqlite_session() {
         store::concat_shards(&stage, MACHINE, &id).unwrap(),
         body,
         "the exported body must not be stored twice"
+    );
+}
+
+// ------------------------------- the stage the defect already left behind
+//
+// The defect ran on real machines before this branch existed, so the fix meets
+// a stage that is *already* wrong: the real archive holds 1212 sessions whose
+// body is sealed twice. A pass over that stage must seal nothing — and it must
+// keep sealing nothing however many times it runs, because the pass the machine
+// runs every hour is exactly this one.
+//
+// So these tests plant the second copy by hand (a fixed pass can no longer
+// produce one) and drive the ordinary pass over it. The shapes are the ones the
+// defect leaves, plus the one the *cap* leaves: a body large enough to be
+// sealed as several shards re-sealed as the same several shards (`A, B, A, B`),
+// which is a re-seal the single-shard test cannot see.
+
+impl Fixture {
+    /// Seal `lines` as the next shard, on top of whatever the stage holds: the
+    /// shard a pass that re-read a source it had already sealed used to leave.
+    fn plant(&self, lines: &[&str]) {
+        store::write_sealed_shard(
+            store::StageWriter::Collect,
+            &self.stage,
+            MACHINE,
+            &self.id,
+            &lines.iter().map(|l| (*l).to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    }
+}
+
+/// **The answer to "is the hourly timer making the real archive worse?"**
+///
+/// The machine's timer runs `run-once` every hour for a destination whose
+/// cursor is stored. That destination never asks the stage for a position — it
+/// has one of its own — so the pass seals only real deltas and the doubling
+/// stays where the defect left it. Pinned here so a fix that started re-reading
+/// the source hourly would be caught.
+#[test]
+fn a_stored_cursor_pass_over_a_doubled_stage_seals_nothing() {
+    let fx = Fixture::new(b"one\ntwo\nthree\n");
+    fx.collect("first");
+    fx.plant(&["one", "two", "three"]);
+    assert_eq!(fx.shard_count(), 2, "the fixture must start doubled");
+
+    // Two more passes for the same destination: the hourly timer's shape.
+    fx.collect("first");
+    fx.collect("first");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "an ordinary pass has a cursor of its own and must seal nothing"
+    );
+    assert_eq!(fx.concat(), b"one\ntwo\nthree\none\ntwo\nthree\n");
+}
+
+/// A destination with no cursor of its own, over the stage the defect left: the
+/// body it is owed is already there, twice. It must seal nothing. This is the
+/// path `dest-init` step 1 and `setup` step 4 take, and the path a lost state
+/// file puts the hourly pass on as well.
+#[test]
+fn a_fresh_destination_over_a_doubled_stage_seals_nothing() {
+    let fx = Fixture::new(b"one\ntwo\nthree\n");
+    fx.collect("first");
+    fx.plant(&["one", "two", "three"]);
+    assert_eq!(fx.shard_count(), 2);
+
+    let second = collect::collect_scan_report(
+        &fx.scan(),
+        &fx.stage,
+        MACHINE,
+        &fx.state,
+        20,
+        &dest("second"),
+    )
+    .unwrap();
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "a doubled stage must not become a tripled one"
+    );
+    assert_eq!(
+        fx.concat(),
+        b"one\ntwo\nthree\none\ntwo\nthree\n",
+        "the stage's body must be left exactly as it was found"
+    );
+    assert_eq!(
+        second.lines_written, 0,
+        "nothing new was read, so nothing may be written"
+    );
+}
+
+/// Twice is not a special case. A stage that has already been tripled must not
+/// be quadrupled, or the fix would only slow the growth down.
+#[test]
+fn a_fresh_destination_over_a_tripled_stage_seals_nothing() {
+    let fx = Fixture::new(b"one\ntwo\nthree\n");
+    fx.collect("first");
+    fx.plant(&["one", "two", "three"]);
+    fx.plant(&["one", "two", "three"]);
+    assert_eq!(fx.shard_count(), 3);
+
+    fx.collect("second");
+    assert_eq!(fx.shard_count(), 3);
+    assert_eq!(
+        fx.concat(),
+        b"one\ntwo\nthree\none\ntwo\nthree\none\ntwo\nthree\n"
+    );
+}
+
+/// A body sealed over two passes (`A`, then `B`) and then re-sealed by the
+/// defect as *one* shard holding both — the shape a multi-shard body leaves
+/// when a destination with no cursor re-reads the whole source. The stage's
+/// body is the source twice, but the copy's shard boundaries do not line up
+/// with the first copy's, so neither "the stage's length" nor "the last
+/// shard's length" is the position: where the two bodies agree is.
+#[test]
+fn a_fresh_destination_over_a_multi_shard_reseal_seals_nothing() {
+    let fx = Fixture::new(b"one\ntwo\n");
+    fx.collect("first");
+    fx.append(b"three\nfour\n");
+    fx.collect("first");
+    assert_eq!(fx.shard_count(), 2, "A, then B: the source in two shards");
+    fx.plant(&["one", "two", "three", "four"]);
+    assert_eq!(fx.shard_count(), 3, "the defect's third shard holds both");
+
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        3,
+        "a re-seal of a multi-shard body must not be sealed a third time"
+    );
+    assert_eq!(
+        fx.concat(),
+        b"one\ntwo\nthree\nfour\none\ntwo\nthree\nfour\n"
+    );
+}
+
+/// The source grew after the doubling — the state the real archive reaches
+/// within the hour. The pass must seal the new turn and *only* the new turn:
+/// the bytes already held twice are not sealed a third time, and the doubled
+/// copy is not mistaken for a reason to re-read the whole file.
+#[test]
+fn a_fresh_destination_over_a_doubled_stage_seals_only_the_growth() {
+    let fx = Fixture::new(b"one\n");
+    fx.collect("first");
+    fx.plant(&["one"]);
+    fx.append(b"two\n");
+    assert_eq!(fx.concat(), b"one\none\n");
+
+    fx.collect("second");
+    assert_eq!(
+        fx.concat(),
+        b"one\none\ntwo\n",
+        "the growth is what is owed; the rest is already there"
+    );
+    assert_eq!(fx.shard_count(), 3);
+}
+
+/// A stage whose *total* length is no longer than the source, because the
+/// source has grown past the doubled body: the stage is not a prefix of the
+/// file, so neither "the stage's length" nor "the source's length" is the
+/// position wanted. The position is where the two agree.
+#[test]
+fn a_grown_source_out_past_a_doubled_stage_seals_only_the_growth() {
+    let fx = Fixture::new(b"one\n");
+    fx.collect("first");
+    fx.plant(&["one"]);
+    fx.append(b"two\nthree\nfour\n");
+    assert_eq!(fx.concat(), b"one\none\n");
+
+    fx.collect("second");
+    assert_eq!(
+        fx.concat(),
+        b"one\none\ntwo\nthree\nfour\n",
+        "the doubled body is already there; only the new lines are owed"
+    );
+}
+
+/// The whole-file shape (`format: json`), which has no incremental model: the
+/// reuse is claimed only when the stage holds that file entire — and a stage
+/// holding it twice still holds it entire.
+#[test]
+fn a_fresh_destination_over_a_doubled_whole_file_source_seals_nothing() {
+    let fx = Fixture::named("session.json", "json", Some("session.json"), br#"{"a":1}"#);
+    fx.collect("first");
+    fx.plant(&[r#"{"a":1}"#]);
+    assert_eq!(fx.shard_count(), 2);
+
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "a whole-file source sealed twice must not be sealed a third time"
+    );
+    assert_eq!(fx.concat(), b"{\"a\":1}\n{\"a\":1}\n");
+}
+
+/// The compressed shape (`jsonl.zst`): the cursor is over the *compressed*
+/// bytes while the stage holds the decoded lines, so the reuse is claimed only
+/// for the whole decoded export — twice over as well as once.
+#[test]
+fn a_fresh_destination_over_a_doubled_compressed_source_seals_nothing() {
+    let lines = b"{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n";
+    let compressed = zstd::stream::encode_all(&lines[..], 3).unwrap();
+    let fx = Fixture::named("session.jsonl.zst", "jsonl / jsonl.zst", None, &compressed);
+    fx.collect("first");
+    fx.plant(&[r#"{"uuid":"u1"}"#, r#"{"uuid":"u2"}"#]);
+    assert_eq!(fx.shard_count(), 2);
+    assert_eq!(
+        fx.concat(),
+        b"{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n"
+    );
+
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "a compressed source sealed twice must not be sealed a third time"
+    );
+}
+
+/// The same, for a SQLite session. Its reuse is judged after the export rather
+/// than from a stage-derived offset, but the question is identical: does the
+/// stage already hold this export? A stage holding it twice does.
+#[test]
+fn a_fresh_destination_does_not_reseal_a_doubled_sqlite_session() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = dir.path().join("opencode.db");
+    create_store(&db);
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+    let scan = sqlite_scan(&db);
+    let id = scan.records[0].id.clone();
+
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("first")).unwrap();
+    let body = store::concat_shards(&stage, MACHINE, &id).unwrap();
+    store::write_sealed_shard_raw_with_cap(
+        store::StageWriter::Collect,
+        &stage,
+        MACHINE,
+        &id,
+        &body,
+        20,
+    )
+    .unwrap();
+    assert_eq!(shard_count(&stage, &id), 2);
+
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("second")).unwrap();
+    assert_eq!(
+        shard_count(&stage, &id),
+        2,
+        "an export the stage already holds twice must not be sealed a third time"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, MACHINE, &id).unwrap(),
+        [body.clone(), body].concat()
+    );
+}
+
+/// A word-whole source that has been exported more than once: the stage holds an
+/// older version *and* this one. This version is the stage's tail, so nothing is
+/// owed — a whole-body comparison sees the older version too and seals this one
+/// again, which is the whole-file half of the same defect.
+#[test]
+fn a_fresh_destination_over_a_whole_file_source_with_an_older_version_seals_nothing() {
+    let fx = Fixture::named("session.json", "json", Some("session.json"), br#"{"a":1}"#);
+    fx.collect("first");
+    fs::write(&fx.source, br#"{"a":1,"b":2}"#).unwrap();
+    fx.collect("first");
+    assert_eq!(fx.shard_count(), 2, "one shard per exported version");
+    assert_eq!(fx.concat(), b"{\"a\":1}\n{\"a\":1,\"b\":2}\n");
+
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "the current version is already the stage's tail"
+    );
+    assert_eq!(fx.concat(), b"{\"a\":1}\n{\"a\":1,\"b\":2}\n");
+}
+
+/// The same shape for a compressed source: the stage holds the older export and
+/// the current one.
+#[test]
+fn a_fresh_destination_over_a_compressed_source_with_an_older_version_seals_nothing() {
+    let first = b"{\"uuid\":\"u1\"}\n";
+    let fx = Fixture::named(
+        "session.jsonl.zst",
+        "jsonl / jsonl.zst",
+        None,
+        &zstd::stream::encode_all(&first[..], 3).unwrap(),
+    );
+    fx.collect("first");
+    let second = b"{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n";
+    fs::write(
+        &fx.source,
+        zstd::stream::encode_all(&second[..], 3).unwrap(),
+    )
+    .unwrap();
+    fx.collect("first");
+    assert_eq!(fx.shard_count(), 2, "one shard per exported version");
+    assert_eq!(
+        fx.concat(),
+        b"{\"uuid\":\"u1\"}\n{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n"
+    );
+
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "the current export is already the stage's tail"
+    );
+}
+
+/// Append one message to the fixture session, so its next export differs.
+fn add_message(db: &Path, id: &str, at: i64) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?3, ?4)",
+        rusqlite::params![id, "session-a", at, r#"{"role":"user","text":"second"}"#],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO part (id, session_id, message_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+        rusqlite::params![
+            format!("{id}-part"),
+            "session-a",
+            id,
+            at,
+            r#"{"text":"second"}"#
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE session SET time_updated = ?1 WHERE id = ?2",
+        rusqlite::params![at, "session-a"],
+    )
+    .unwrap();
+}
+
+/// A SQLite session that has been exported more than once: each export is a
+/// whole-session snapshot, so the stage holds every version it has seen and the
+/// current one is the tail. A fresh destination is owed nothing.
+#[test]
+fn a_fresh_destination_does_not_reseal_a_sqlite_session_with_an_older_version() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = dir.path().join("opencode.db");
+    create_store(&db);
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+    let scan = sqlite_scan(&db);
+    let id = scan.records[0].id.clone();
+
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("first")).unwrap();
+    assert_eq!(shard_count(&stage, &id), 1);
+    add_message(&db, "session-a-msg-2", 2_000);
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("first")).unwrap();
+    assert_eq!(
+        shard_count(&stage, &id),
+        2,
+        "the session changed, so it is exported and sealed again"
+    );
+
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("second")).unwrap();
+    assert_eq!(
+        shard_count(&stage, &id),
+        2,
+        "the current export is already the stage's tail"
     );
 }

@@ -9255,17 +9255,29 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     // doubled archive came back `L3 verdict: OK`. So it is named, per session,
     // and counted into the verdict line.
     for dup in &r.possible_duplicate_seals {
+        let shape = match dup.repeated_body_shards {
+            // The shape 1211 of the real archive's 1212 cases have: the whole
+            // body sealed before this shard, as one shard.
+            Some(1) => {
+                " and is exactly the whole preceding body (the shape a re-seal leaves)".to_string()
+            }
+            // The same event on a body that took several shards to seal, where
+            // the repeat is the run and not any single shard in it.
+            Some(run) => format!(
+                " and is the first of {run} shards that repeat the body sealed before them \
+                 (the shape a re-seal of a {run}-shard body leaves)"
+            ),
+            // A block that recurs without beginning the sequence: reported,
+            // named for what it is, and the weakest of the three.
+            None => " (a repeated block, not the whole preceding body)".to_string(),
+        };
         println!(
             "  !? {:<12} {:<20} POSSIBLE DUPLICATE SEAL: shard {} repeats shard {} byte-for-byte{}",
             dup.machine,
             display_session_id(&dup.session_id, full_ids),
             dup.second + 1,
             dup.first + 1,
-            if dup.repeats_whole_prefix {
-                " and is exactly the whole preceding body (the shape a re-seal leaves)"
-            } else {
-                ""
-            }
+            shape
         );
     }
     if !r.possible_duplicate_seals.is_empty() {

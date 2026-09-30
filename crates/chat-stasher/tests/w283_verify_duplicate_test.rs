@@ -170,3 +170,59 @@ fn l3_does_not_cry_duplicate_over_a_normal_sequence() {
     );
     assert!(ok, "L3 should exit 0:\n{out}");
 }
+
+/// A body that took two shards to seal, then sealed again: `A, B, A, B`. The
+/// repeat spans shards, so naming a single shard against the bytes before it
+/// would call this a repeated block — and the whole body is what repeated.
+#[test]
+fn l3_names_a_multi_shard_reseal() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    write_shard(&stage, 1, "{\"uuid\":\"u1\"}\n");
+    write_shard(&stage, 2, "{\"uuid\":\"u2\"}\n");
+    write_shard(&stage, 3, "{\"uuid\":\"u1\"}\n");
+    write_shard(&stage, 4, "{\"uuid\":\"u2\"}\n");
+
+    let (ok, out) = push_then_verify_l3(sandbox, &stage);
+    assert!(
+        out.contains("POSSIBLE DUPLICATE SEAL"),
+        "L3 must name the repeated body:\n{out}"
+    );
+    assert!(
+        out.contains("shard 3 repeats shard 1"),
+        "the report must name where the repeat begins:\n{out}"
+    );
+    assert!(
+        out.contains("2 shards that repeat the body sealed before them"),
+        "a repeat that spans shards must be named as the body, not as one shard:\n{out}"
+    );
+    assert!(
+        ok,
+        "a repeated body is a possibility, not corruption — L3 must not fail on it:\n{out}"
+    );
+}
+
+/// The other side of that line: shard 3 repeating shard 2 while shard 1 differs
+/// is a repeated *block*, which is the shape real repetition leaves as much as a
+/// re-seal — so it is named as a block and not as a repeated body.
+#[test]
+fn l3_calls_a_repeated_block_a_repeated_block() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    write_shard(&stage, 1, "{\"uuid\":\"u1\"}\n");
+    write_shard(&stage, 2, "{\"uuid\":\"u2\"}\n");
+    write_shard(&stage, 3, "{\"uuid\":\"u2\"}\n");
+
+    let (ok, out) = push_then_verify_l3(sandbox, &stage);
+    assert!(
+        out.contains("shard 3 repeats shard 2"),
+        "the repeated pair must be named:\n{out}"
+    );
+    assert!(
+        out.contains("a repeated block, not the whole preceding body"),
+        "a repeated block must not be presented as a repeated body:\n{out}"
+    );
+    assert!(ok, "L3 must not fail on a possibility:\n{out}");
+}

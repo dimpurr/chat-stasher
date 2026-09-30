@@ -158,22 +158,27 @@ pub struct ReconcileRow {
     pub basis: ExpectationBasis,
 }
 
-/// A session whose archived shard sequence repeats a shard byte-for-byte.
+/// A session whose archived shard sequence repeats shards byte-for-byte.
 ///
 /// W283. The three-field triple L3 reconciles on is *self-consistent* on a
 /// doubled body — a re-seal of the whole source produces a longer
 /// concatenation with a matching digest, so nothing above this type can see it.
 /// A repeated shard can: the same bytes appear twice in one sequence.
 ///
-/// It is reported as a **possibility**, never as a verdict, and the difference
-/// is not timidity. Real content repeats — a harness may append bytes identical
-/// to bytes it already wrote, and a source staged as `a\n` that grows to
-/// `a\na\n` produces exactly the shard sequence a re-seal produces. Nothing in
-/// the archive records *why* a shard was written: the sealer stores payload
-/// bytes and nothing else, and the per-session summary
+/// It is reported as a **possible duplicate seal**, never as a verdict, and the
+/// difference is not timidity. Real content repeats — a harness may append
+/// bytes identical to bytes it already wrote, and a source staged as `a\n` that
+/// grows to `a\na\n` produces exactly the shard sequence a re-seal produces.
+/// Nothing in the archive records *why* a shard was written: the sealer stores
+/// payload bytes and nothing else, and the per-session summary
 /// (`manifest-v1.jsonl`) is derived from the same sealed tree, so it inherits
 /// the same ambiguity. Since a false "your archive is corrupt" is as much a
 /// lie as a false "OK", this is surfaced loudly and does not fail the run.
+///
+/// What the type carries is therefore the *shape* and not a cause:
+/// [`DuplicateSeal::repeated_body_shards`] says how much of the sequence is
+/// repeated from its start, which is what separates the shape a re-seal leaves
+/// from a block that merely recurs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateSeal {
     pub machine: String,
@@ -182,37 +187,55 @@ pub struct DuplicateSeal {
     /// bytes are identical.
     pub first: usize,
     pub second: usize,
-    /// The later shard is byte-identical to the *whole* run of shards before
-    /// it — the shape a re-seal of the entire source leaves, where a middle
-    /// block that happens to repeat does not.
-    pub repeats_whole_prefix: bool,
+    /// How many shards, counted from the start of the sequence, the shards from
+    /// `second` onward repeat byte for byte.
+    ///
+    /// `Some(1)` is one shard repeated (`A, A`) — what a re-seal of a body
+    /// small enough to be sealed in one shard leaves, and 1211 of the 1212 real
+    /// cases. `Some(n)` is the same event on a body that took n shards to seal
+    /// (`A, B, A, B`), which a test that compares one shard against the bytes
+    /// before it cannot see. `None` is a repeat that does *not* begin the
+    /// sequence — the weakest evidence of the three, and the one least
+    /// distinguishable from content that genuinely repeats.
+    pub repeated_body_shards: Option<usize>,
 }
 
-/// Find the first byte-identical shard pair in one archived session, if any.
+/// Find a repeated shard sequence in one archived session, if any.
 ///
-/// Shard *sizes* are compared before digests so the common case costs one
-/// integer comparison per pair; the digest decides.
+/// The shape a re-seal leaves is looked for first: a run of shards at the start
+/// of the sequence that recurs immediately after itself. That is one shard in
+/// the common case and several when the body was sealed in several shards, and
+/// it is checked with sizes before digests so the common case is a handful of
+/// integer comparisons; the digest decides.
+///
+/// Failing that, the first byte-identical shard pair is reported, wherever in
+/// the sequence it falls — a block that recurs without beginning the sequence,
+/// which is all that can be said for it.
 pub fn duplicate_seal(session: &SessionBackedUp) -> Option<DuplicateSeal> {
     let digests = &session.shard_sha256;
     let sizes = &session.shard_bytes;
     if digests.len() != sizes.len() || digests.len() < 2 {
         return None;
     }
+    let seal = |first: usize, second: usize, repeated_body_shards: Option<usize>| {
+        Some(DuplicateSeal {
+            machine: session.machine.clone(),
+            session_id: session.session_id.clone(),
+            first,
+            second,
+            repeated_body_shards,
+        })
+    };
+    for run in 1..=digests.len() / 2 {
+        if (0..run).all(|i| sizes[i] == sizes[run + i] && digests[i] == digests[run + i]) {
+            return seal(0, run, Some(run));
+        }
+    }
     for j in 1..digests.len() {
         for i in 0..j {
-            if sizes[i] != sizes[j] || digests[i] != digests[j] {
-                continue;
+            if sizes[i] == sizes[j] && digests[i] == digests[j] {
+                return seal(i, j, None);
             }
-            let prefix: u64 = sizes[..j].iter().sum();
-            let repeats_whole_prefix =
-                prefix == sizes[j] && (0..j).all(|k| digests[k] == digests[j]);
-            return Some(DuplicateSeal {
-                machine: session.machine.clone(),
-                session_id: session.session_id.clone(),
-                first: i,
-                second: j,
-                repeats_whole_prefix,
-            });
         }
     }
     None
@@ -742,19 +765,42 @@ mod tests {
         let resealed = session(&["aa", "aa"], &[442, 442]);
         let seal = duplicate_seal(&resealed).expect("a re-sealed shard must be reported");
         assert_eq!((seal.first, seal.second), (0, 1));
-        assert!(seal.repeats_whole_prefix);
+        assert_eq!(seal.repeated_body_shards, Some(1));
 
-        // Three destinations: still one report, still the whole-prefix shape.
+        // Three destinations: still one report, still the whole-body shape.
         let thrice = session(&["aa", "aa", "aa"], &[442, 442, 442]);
-        assert!(duplicate_seal(&thrice).unwrap().repeats_whole_prefix);
+        assert_eq!(
+            duplicate_seal(&thrice).unwrap().repeated_body_shards,
+            Some(1)
+        );
 
-        // A genuinely appended delta that happens to repeat the first shard is
-        // reported too, and *not* as a whole-prefix repeat: nothing in the
+        // A body sealed as two shards and then sealed again: `A, B, A, B`. The
+        // repeat is the whole body, so it must be named as one — a test that
+        // only compares a single shard against the bytes before it calls this
+        // a repeated block, which is the shape real repetition leaves.
+        let two_shard_body = session(&["aa", "bb", "aa", "bb"], &[442, 442, 442, 442]);
+        let seal = duplicate_seal(&two_shard_body).expect("a re-sealed body is a repeat");
+        assert_eq!(
+            (seal.first, seal.second, seal.repeated_body_shards),
+            (0, 2, Some(2)),
+            "A, B, A, B is a whole-body re-seal, not a repeated block"
+        );
+
+        // A body sealed twice and then grown: only the opening run repeats, and
+        // that run is the whole body the re-seal duplicated.
+        let grown = session(&["aa", "bb", "aa", "bb", "cc"], &[442, 442, 442, 442, 99]);
+        assert_eq!(
+            duplicate_seal(&grown).unwrap().repeated_body_shards,
+            Some(2)
+        );
+
+        // A genuinely appended delta that happens to repeat an earlier block is
+        // reported too, and *not* as a whole-body repeat: nothing in the
         // archive can tell the two apart, which is why this is a possibility.
         let real_repeat = session(&["aa", "bb", "bb"], &[10, 10, 10]);
         let seal = duplicate_seal(&real_repeat).expect("a repeated block is still a repeat");
         assert_eq!((seal.first, seal.second), (1, 2));
-        assert!(!seal.repeats_whole_prefix);
+        assert_eq!(seal.repeated_body_shards, None);
 
         // Same length, different bytes: silence.
         assert!(duplicate_seal(&session(&["aa", "bb"], &[442, 442])).is_none());

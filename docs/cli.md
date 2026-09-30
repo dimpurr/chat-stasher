@@ -186,13 +186,19 @@ A source destination that cannot be read makes the result incomplete, reported a
 | `l3` | Every staged session against the archive: shard count, bytes, SHA-256 | Needs `--stage` |
 | `all` (default) | All three | |
 
-L3 also names any session whose archived shard sequence repeats a shard byte for
+L3 also names any session whose archived shard sequence repeats shards byte for
 byte. The three checks above cannot see that — a body stored twice is
 self-consistent — and it is what leaves `read` and `export` returning a
 conversation twice. It is reported as a **possible** duplicate seal and does not
 fail the run: a harness may legitimately append bytes identical to bytes already
 sealed, and the archive records no provenance that could tell the two apart. The
 count is carried in the `L3 verdict` line so a green run cannot hide it.
+
+Each report also names the shape, because the shapes are not equally suspicious.
+The repeat is either the whole body sealed before it — the shape a re-seal
+leaves, whether that body took one shard or several — or a block that recurs
+without beginning the sequence, which is the weakest of the three and the one
+least distinguishable from content that genuinely repeats.
 
 ### `reclaim-stage`
 

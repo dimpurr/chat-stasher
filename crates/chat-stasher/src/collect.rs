@@ -369,12 +369,46 @@ fn stage_holds_this_export(
     json_line: &[u8],
 ) -> anyhow::Result<bool> {
     let sealed = stage_sealed_content(stage, machine, session_id)?;
-    if sealed.is_empty() {
-        return Ok(false);
-    }
     let mut framed = json_line.to_vec();
     framed.push(b'\n');
-    Ok(framed == sealed)
+    Ok(stage_tail_is(&sealed, &framed))
+}
+
+/// Is `frame` the body the stage sealed last?
+///
+/// The snapshot shapes — a whole file, a compressed export, a SQLite session —
+/// have no incremental cursor. Each pass seals the whole current body as one
+/// shard, so the stage accumulates the versions it has seen and the newest one
+/// is its tail. The question for a destination with no cursor of its own is
+/// therefore whether the body this pass is about to seal is already there, and
+/// the answer must not depend on how much *else* is: a stage holding that body
+/// twice (the defect's own work) and one holding it behind older versions of
+/// itself are both stages that already have it.
+///
+/// Comparing the whole body for equality — which is what this used to do — says
+/// "no" to all of them, and each "no" seals the body again.
+fn stage_tail_is(body: &[u8], frame: &[u8]) -> bool {
+    !frame.is_empty() && body.ends_with(frame)
+}
+
+/// The longest line boundary at which `body` and `source` agree.
+///
+/// `body` is the stage's concatenation and `source` is the file being read, so
+/// the answer is how much of this source the stage already holds — which is the
+/// position the pass should resume from. It is always a line boundary: an
+/// offset that split a line would leave the next pass sealing the rest of that
+/// line as a line of its own.
+fn shared_prefix_boundary(body: &[u8], source: &[u8]) -> u64 {
+    let shared = body
+        .iter()
+        .zip(source)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let boundary = body[..shared]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    boundary as u64
 }
 
 /// The stage's own sealed shards, expressed as a cursor, when they provably
@@ -415,6 +449,21 @@ fn stage_holds_this_export(
 /// where partial coverage is exactly the information wanted.) A SQLite
 /// session's reuse is judged at its own call site instead, against the export
 /// it has just produced.
+///
+/// # A stage that holds the body more than once
+///
+/// The defect above ran on real machines, so this function has to read a stage
+/// it has already damaged: an affected session's body is there twice (or behind
+/// older versions of itself), which is not "no evidence" — it is *more* of the
+/// same evidence. Reading the stage's length as the position would put the pass
+/// past the end of an unchanged source (no cursor, so the whole file is read
+/// and sealed again: a third copy, and a fourth the next time), so the position
+/// is instead where the stage and the source **agree**, which is what
+/// [`shared_prefix_boundary`] answers for the one shape whose cursor is a prefix
+/// of a file. The whole-file and compressed shapes have no such cursor: what
+/// they can ask is what the stage sealed *last*, and that is
+/// [`stage_tail_is`]. A SQLite session asks the same question at its own call
+/// site, against the export the pass has just produced.
 fn stage_prefix_entry(
     record: &SessionRecord,
     stage: &Path,
@@ -445,7 +494,7 @@ fn stage_prefix_entry(
         })?;
         let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
         let (lines, _) = complete_lines(&decoded);
-        if lines.is_empty() || seal_framed(&lines) != sealed {
+        if lines.is_empty() || !stage_tail_is(&sealed, &seal_framed(&lines)) {
             return Ok(None);
         }
         let len = compressed.len() as u64;
@@ -463,17 +512,36 @@ fn stage_prefix_entry(
         // The stage's concatenation is a committed prefix of the file. Hand it
         // back as an offset cursor; the read path re-reads `[0, offset)`,
         // compares it against `prefix_sha256`, and only then reads the delta.
+        //
+        // It is a *prefix*, not the stage's length: a stage the defect already
+        // touched holds the body twice, which is longer than the unchanged
+        // source, and handing that length back would put the pass past the end
+        // of the file — where it used to give up, read the whole source and
+        // seal it again. So the position is the longest line boundary at which
+        // the two agree. That is the one place this function reads the source,
+        // and the cost is unavoidable: whether the stage is ahead of the source
+        // by a repetition cannot be told from the stage alone. The read path
+        // re-proves the answer by hashing `[0, offset)` against
+        // `prefix_sha256`, so an over-claim cannot survive it; an underestimate
+        // would cost a re-seal, never a lost turn.
         let len = fs::metadata(&record.absolute_path)
             .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
             .len();
-        let covered = sealed.len() as u64;
-        if covered > len {
+        let head = read_range(&record.absolute_path, 0, len.min(sealed.len() as u64))
+            .with_context(|| {
+                format!(
+                    "read source prefix ({})",
+                    path_digest(&record.absolute_path)
+                )
+            })?;
+        let offset = shared_prefix_boundary(&sealed, &head);
+        if offset == 0 {
             return Ok(None);
         }
         return Ok(Some(OffsetEntry {
-            offset: covered,
-            prefix_len: covered,
-            prefix_sha256: sha256_hex(&sealed),
+            offset,
+            prefix_len: offset,
+            prefix_sha256: sha256_hex(&sealed[..offset as usize]),
             compressed: false,
             opencode: None,
             store_fingerprint: None,
@@ -481,11 +549,12 @@ fn stage_prefix_entry(
     }
 
     // Whole-file sources have no incremental model: `process_whole_file` seals
-    // the file in one shard or not at all. Reuse therefore means the stage
-    // already holds this file entire.
+    // the file in one shard or not at all, so the reuse means the stage's tail
+    // is already this file — which it is when the file has not changed since it
+    // was sealed last, and also when the defect sealed it twice.
     let bytes = fs::read(&record.absolute_path)
         .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
-    if bytes.is_empty() || seal_framed(std::slice::from_ref(&bytes)) != sealed {
+    if bytes.is_empty() || !stage_tail_is(&sealed, &seal_framed(std::slice::from_ref(&bytes))) {
         return Ok(None);
     }
     // The sealer appends a newline after the single "line" it is given, so the
