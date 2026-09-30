@@ -1007,6 +1007,7 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
                 title: None,
                 provenance: None,
                 account_keys: Vec::new(),
+                measured_body: None,
             };
             body.push_str(&serde_json::to_string(&row).expect("row json"));
             body.push('\n');
