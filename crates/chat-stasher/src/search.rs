@@ -76,6 +76,7 @@ use crate::activity::{
 use crate::readback::{bucket_shard_path, snapshots_by_host_newest_first};
 use crate::selector::{Selector, SessionMeta, TimeBounds, TimeWindow, UnplacedBy, Verdict};
 use crate::sidecar::{activity_index_machine, infer_harness};
+use crate::snapshot_cache::{CachedIndexFile, CachedSession, SnapshotEntry};
 use crate::store::BackupStore;
 
 /// One matched session. Every field comes from snapshot/tree metadata or the
@@ -953,6 +954,25 @@ pub fn search_sessions(
         .context("list snapshots for search")?;
     let snapshots_in_repo = snaps.len();
 
+    // SRCH-1b · the per-destination snapshot session cache, when the caller
+    // installed one. `None` is the uncached search this module has always done,
+    // and every path below reads identically with it.
+    //
+    // The listing above is the cache's authority: an entry is only ever read
+    // for a snapshot in it, and every entry for a snapshot *not* in it is
+    // dropped here. Snapshots are immutable, so an entry cannot go stale while
+    // its snapshot is listed; what this closes is the other direction — an
+    // entry outliving the listing that justified it, which would let a pruned
+    // snapshot answer for a repository that no longer holds it.
+    let cache = store.snapshot_cache();
+    if let Some(cache) = cache {
+        let listed: BTreeSet<String> = snaps
+            .iter()
+            .map(|snap| snap.id.to_hex().as_str().to_string())
+            .collect();
+        let _pruned = cache.retain(&listed);
+    }
+
     let mut report = SearchReport {
         destination: store.cfg.repo_root.clone(),
         snapshots_in_repo,
@@ -1033,6 +1053,61 @@ pub fn search_sessions(
             let snap_id = snap.id.to_hex().as_str().to_string();
             let snap_time_unix = snap.time.timestamp().as_second();
 
+            // ---- the cache hit (SRCH-1b) ----------------------------------
+            //
+            // A snapshot's id is the hash of its own contents, so what a walk
+            // of it found can never change: an entry is valid for exactly as
+            // long as the repository lists the snapshot, and `retain` drops it
+            // the moment the listing stops naming it. A hit therefore stands in
+            // for the walk below and reproduces its buckets — including the
+            // counting, because a cached snapshot is one that *was* accounted
+            // for, and `snapshots_scanned` must mean the same thing either way.
+            //
+            // The one thing a hit does not stand in for is the activity index.
+            // The entry carries the index's archived path, and the file itself
+            // is fetched, dumped and parsed below exactly as it is after a
+            // walk, so "no index", "index unreadable" and "index malformed"
+            // keep being answered by the snapshot rather than by a note about
+            // it. A node that cannot be fetched now leaves the hit unused and
+            // the walk runs — which then reports whatever is really wrong with
+            // this snapshot, in its own words.
+            if let Some(cache) = cache {
+                if let Some(cached) = cache.load(&snap_id) {
+                    let mut index_nodes_from_cache: BTreeMap<String, rustic_core::repofile::Node> =
+                        BTreeMap::new();
+                    let mut usable = true;
+                    if depth == 0 {
+                        for file in &cached.index_files {
+                            match repo.node_from_snapshot_and_path(snap, &file.path) {
+                                Ok(node) => {
+                                    index_nodes_from_cache.insert(file.machine.clone(), node);
+                                }
+                                Err(_) => {
+                                    usable = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if usable {
+                        report.snapshots_scanned += 1;
+                        index_nodes.extend(index_nodes_from_cache);
+                        for row in cached.sessions {
+                            sessions
+                                .entry((row.machine, row.session))
+                                .or_insert(SessionSlot {
+                                    shard_count: row.shard_count,
+                                    bytes: row.bytes,
+                                    data_blobs: row.data_blobs,
+                                    snapshot_id: snap_id.clone(),
+                                    archive_time_unix: snap_time_unix,
+                                });
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let root = match repo.node_from_snapshot_and_path(snap, "") {
                 Ok(node) => node,
                 Err(e) => {
@@ -1063,11 +1138,25 @@ pub fn search_sessions(
             // snapshot only — the index files that say when they were active.
             let mut snap_sessions: BTreeMap<(String, String), (usize, u64, usize)> =
                 BTreeMap::new();
+            // Every activity index this snapshot holds, at every depth, because
+            // a cache entry is keyed by snapshot id alone: a snapshot that is
+            // oldest today can be newest once the ones after it are pruned, and
+            // an entry written here must answer the same at either depth.
+            let mut index_files: Vec<CachedIndexFile> = Vec::new();
             for (path, node) in &entries {
                 if node.node_type != NodeType::File {
                     continue;
                 }
-                // The activity index is read from the newest snapshot alone.
+                // An activity index is never a session, and that is decided the
+                // same way at every depth — it was previously decided only for
+                // the newest snapshot, so an older snapshot's index could fall
+                // through to `bucket_shard_path` and be bucketed as a session if
+                // the machine's stage path happened to contain a `sessions`
+                // component. Nothing but an index file is affected, and making
+                // the two depths agree is what lets one entry describe a
+                // snapshot regardless of where in the order it was walked.
+                //
+                // The index is still *read* from the newest snapshot alone.
                 // `activity-index` rebuilds it cumulatively on every run — a
                 // reclaimed session keeps its row, with `line_count: 0` — so
                 // the newest index already names every session the machine ever
@@ -1075,11 +1164,15 @@ pub fn search_sessions(
                 // once per snapshot and add no session the first one missed.
                 // The older snapshots are walked for *bodies*, which is exactly
                 // what the index cannot tell us about.
-                if depth == 0 {
-                    if let Some(machine) = activity_index_machine(path) {
+                if let Some(machine) = activity_index_machine(path) {
+                    index_files.push(CachedIndexFile {
+                        machine: machine.clone(),
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                    if depth == 0 {
                         index_nodes.insert(machine, node.clone());
-                        continue;
                     }
+                    continue;
                 }
                 let Some((machine, session, _shard)) = bucket_shard_path(path) else {
                     continue;
@@ -1088,6 +1181,32 @@ pub fn search_sessions(
                 entry.0 += 1;
                 entry.1 += node.meta.size;
                 entry.2 += node.content.as_ref().map_or(0, Vec::len);
+            }
+
+            // Record what this snapshot held, so the next run does not walk it
+            // again. Written only after the walk has succeeded — a snapshot
+            // whose tree could not be read must be retried on every run, never
+            // remembered as unreadable — and the result is deliberately dropped:
+            // this is a cache, a machine whose cache directory is unwritable is
+            // entitled to a slower search, and no answer depends on the write.
+            if let Some(cache) = cache {
+                let stored = SnapshotEntry::new(
+                    &snap_id,
+                    snap_sessions
+                        .iter()
+                        .map(|((machine, session), (shard_count, bytes, data_blobs))| {
+                            CachedSession {
+                                machine: machine.clone(),
+                                session: session.clone(),
+                                shard_count: *shard_count,
+                                bytes: *bytes,
+                                data_blobs: *data_blobs,
+                            }
+                        })
+                        .collect(),
+                    index_files,
+                );
+                let _stored = cache.store(&stored);
             }
 
             for (key, (shard_count, bytes, data_blobs)) in snap_sessions {

@@ -4252,7 +4252,20 @@ fn cmd_search(
     // The machine filter is a *query* over `sessions/<machine>/`, not this
     // machine's identity: searching an archive for another machine's sessions
     // is the normal case, so this must not default to the local machine id.
-    let store = BackupStore::for_metadata_query(cfg.clone());
+    //
+    // SRCH-1b: `search` is the command a human runs over and over against the
+    // same archive, so it reads through the snapshot session cache — the same
+    // identity the full-text index is keyed by, so one destination has one
+    // cache. The cache changes no answer: it stands in for a tree walk whose
+    // result a snapshot's own id proves cannot have changed, and a miss (cold,
+    // damaged, or a snapshot whose tree cannot be read) walks as before.
+    let store = BackupStore::for_metadata_query(cfg.clone()).with_snapshot_cache(
+        chat_stasher::snapshot_cache::SnapshotCache::for_identity(&index_identity(
+            destination.as_deref(),
+            repo.as_deref(),
+            &cfg.repo_root,
+        )),
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -5147,13 +5160,21 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             });
         // ADR-034: the dashboard is the other single-session body reader. Every
         // route except `load` is metadata-tier, and only `load` reaches this cache.
-        let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
-            chat_stasher::body_cache::for_operation(
-                &config,
-                chat_stasher::body_cache::Policy::ReadThrough,
+        //
+        // SRCH-1b: the page loads a `search_sessions` report per destination on
+        // every refresh, which is precisely the repeat over the same snapshots
+        // the snapshot cache exists for. Same identity as the text index above.
+        let store = BackupStore::for_metadata_query(cfg.clone())
+            .with_body_cache(
+                chat_stasher::body_cache::for_operation(
+                    &config,
+                    chat_stasher::body_cache::Policy::ReadThrough,
+                )
+                .handle(),
             )
-            .handle(),
-        );
+            .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+                &index_identity(name.as_deref(), repo_override.as_deref(), &cfg.repo_root),
+            ));
         let mk = match store::load_key_file(&cfg) {
             Ok(mk) => mk,
             Err(e) => {

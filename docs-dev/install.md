@@ -268,7 +268,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:11691-11699,11709-11732`).
+(`crates/chat-stasher/src/main.rs:11040-11048,11058-11081`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -430,13 +430,13 @@ sentence the surrounding documents have to get right:
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:2099-2114`;
+  (`crates/chat-stasher/src/main.rs:2076-2091`;
   `crates/chat-stasher/src/nativehost.rs:2048-2123`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
-  (`crates/chat-stasher/src/main.rs:2041-2051`;
+  (`crates/chat-stasher/src/main.rs:2018-2028`;
   `crates/chat-stasher/src/nativehost.rs:770-772`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
@@ -444,7 +444,7 @@ sentence the surrounding documents have to get right:
   chrome` limits it to the ones named, and `--stage` cannot be combined with it
   at all, exit 2), and it leaves the config, the stage, the sealed captures and
   every other vendor's manifest untouched
-  (`crates/chat-stasher/src/main.rs:1985-1991`, `:2150-2188`, `:2257-2263`).
+  (`crates/chat-stasher/src/main.rs:1962-1968`, `:2127-2165`, `:2234-2240`).
   "It is per-user" does **not** mean "it is per profile": removing the extension
   from one profile is done on that profile's own extension page, and doing it
   with `--uninstall` takes the channel away from the profiles you kept, whose
@@ -561,9 +561,9 @@ read the repository and key file you select in config or arguments
 🔴 **The master key file is the only key. Lose it and the archive can never be
 read again; there is no way to recover it.** The source's own words are "The
 masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1527-1529`). The key file is written
+forever" (`crates/chat-stasher/src/store.rs:1559-1561`). The key file is written
 with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1627-1635`).
+(`crates/chat-stasher/src/store.rs:1659-1667`).
 
 **Make a copy of it somewhere else right now.** No one can do this for you.
 
@@ -573,8 +573,8 @@ copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
 `--masterkey-saved-elsewhere` creates the local repository and the key, reports
 the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:12908-12915`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:12479-12485`).
+remote step and the timer (`crates/chat-stasher/src/main.rs:12257-12264`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:11828-11834`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -584,7 +584,7 @@ the first write.
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:159-162`, `:316-320`, `:1805-1810`; the config
+(`crates/chat-stasher/src/store.rs:159-162`, `:348-352`, `:1837-1842`; the config
 field itself is `crates/chat-stasher/src/config.rs:268-269`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -596,11 +596,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:5807-5822`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:5335-5350`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:5812-5837`). An
+it does anything else (`crates/chat-stasher/src/main.rs:5340-5365`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -632,10 +632,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5821-5833`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5349-5361`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:5812-5820`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:5340-5348`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -674,7 +674,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:159-162`, `:1805-1810`; the field itself is
+(`crates/chat-stasher/src/store.rs:159-162`, `:1837-1842`; the field itself is
 `crates/chat-stasher/src/config.rs:268-269`), so the option names below belong
 to the backend, not to this tool.
 
@@ -895,12 +895,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:15487-15489`). This is the
+does not (`crates/chat-stasher/src/main.rs:14836-14838`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:15210-15238`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:14559-14587`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -916,7 +916,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:15489-15622`):
+(`crates/chat-stasher/src/main.rs:14838-14971`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -929,7 +929,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:15468-15473`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:14817-14822`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -939,7 +939,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:15166-15191`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:14515-14540`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -1011,7 +1011,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` command — nothing puts a session back into a
   harness's own directory, and that is not in phase one.** The subcommand table
-  has no `restore` entry (`crates/chat-stasher/src/main.rs:164-1276`). Getting
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:164-1253`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
   (`crates/chat-stasher/src/main.rs:649-729`), and `read` dumps **one**
@@ -1021,7 +1021,7 @@ confirmed in the code, not a temporary disclaimer.
 
 - **🔴 Lose the master key and there is no way to recover it.** There is no
   recovery process, no recovery code, no customer service. The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1527-1534`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1559-1566`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

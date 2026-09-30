@@ -241,6 +241,10 @@ pub struct BackupStore {
     /// whole-cache-off case, and every bulk operation alike — see
     /// [`BackupStore::with_body_cache`].
     body_cache: Option<std::sync::Arc<crate::body_cache::BodyCache>>,
+    /// The per-destination snapshot session cache this store's searches read
+    /// from (SRCH-1b). `None` is the default and the whole-cache-off case — see
+    /// [`BackupStore::with_snapshot_cache`].
+    snapshot_cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
 }
 
 impl BackupStore {
@@ -264,6 +268,7 @@ impl BackupStore {
             cfg,
             machine,
             body_cache: None,
+            snapshot_cache: None,
         }
     }
 
@@ -277,6 +282,7 @@ impl BackupStore {
             cfg,
             machine: String::new(),
             body_cache: None,
+            snapshot_cache: None,
         }
     }
 
@@ -303,6 +309,32 @@ impl BackupStore {
     /// The cache this store would serve body reads from, if any.
     pub fn body_cache(&self) -> Option<&std::sync::Arc<crate::body_cache::BodyCache>> {
         self.body_cache.as_ref()
+    }
+
+    /// Serve this store's searches from `cache` (SRCH-1b).
+    ///
+    /// Like [`BackupStore::with_body_cache`], a per-store decision rather than
+    /// a global one: whether a run may use the cache is a property of the
+    /// operation. Unlike the body cache it is not a correctness question — a
+    /// snapshot cache entry can only ever reproduce the tree walk that wrote it
+    /// — but the same discipline is kept, so a caller has to say when it wants
+    /// one instead of a test or a bulk job silently inheriting a directory on
+    /// the developer's own machine.
+    ///
+    /// The default (no call) is `None`: an uncached search, which is the run
+    /// this tool had before SRCH-1b and the one every existing test still
+    /// exercises. Callers pass [`crate::snapshot_cache::SnapshotCache::for_identity`].
+    pub fn with_snapshot_cache(
+        mut self,
+        cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
+    ) -> Self {
+        self.snapshot_cache = cache;
+        self
+    }
+
+    /// The snapshot cache this store's searches would read from, if any.
+    pub fn snapshot_cache(&self) -> Option<&std::sync::Arc<crate::snapshot_cache::SnapshotCache>> {
+        self.snapshot_cache.as_ref()
     }
 
     /// Build the backend handles.
