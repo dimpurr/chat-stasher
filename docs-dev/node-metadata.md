@@ -92,7 +92,7 @@ by hand.
 ## The policy
 
 All of it is stated in one place,
-`crates/chat-stasher/src/store.rs:466-477`:
+`crates/chat-stasher/src/store.rs:498-509`:
 
 - **Comparison**: `ignore_ctime(true)` and `ignore_inode(true)`, so a file
   counts as changed on type, size and mtime alone.

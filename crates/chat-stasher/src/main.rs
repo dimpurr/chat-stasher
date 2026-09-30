@@ -4252,7 +4252,20 @@ fn cmd_search(
     // The machine filter is a *query* over `sessions/<machine>/`, not this
     // machine's identity: searching an archive for another machine's sessions
     // is the normal case, so this must not default to the local machine id.
-    let store = BackupStore::for_metadata_query(cfg.clone());
+    //
+    // SRCH-1b: `search` is the command a human runs over and over against the
+    // same archive, so it reads through the snapshot session cache — the same
+    // identity the full-text index is keyed by, so one destination has one
+    // cache. The cache changes no answer: it stands in for a tree walk whose
+    // result a snapshot's own id proves cannot have changed, and a miss (cold,
+    // damaged, or a snapshot whose tree cannot be read) walks as before.
+    let store = BackupStore::for_metadata_query(cfg.clone()).with_snapshot_cache(
+        chat_stasher::snapshot_cache::SnapshotCache::for_identity(&index_identity(
+            destination.as_deref(),
+            repo.as_deref(),
+            &cfg.repo_root,
+        )),
+    );
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -4592,6 +4605,15 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
         } else {
             "  <-- the rest were not looked at, so a miss proves nothing"
         }
+    );
+    // SRCH-1B: of the snapshots accounted for above, how many were answered
+    // from the local session cache. It is a count of *this run* — the same
+    // destination reports a different number on a cold cache, a warm one and
+    // with no cache at all — which is exactly why it is printed rather than
+    // folded into the count above it.
+    println!(
+        "[search] snapshots from cache: {}",
+        report.snapshots_from_cache
     );
     println!("[search] sessions seen: {}", report.sessions_seen);
     println!("[search] data blobs read: {}", report.data_blobs_read);
@@ -5147,13 +5169,21 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             });
         // ADR-034: the dashboard is the other single-session body reader. Every
         // route except `load` is metadata-tier, and only `load` reaches this cache.
-        let store = BackupStore::for_metadata_query(cfg.clone()).with_body_cache(
-            chat_stasher::body_cache::for_operation(
-                &config,
-                chat_stasher::body_cache::Policy::ReadThrough,
+        //
+        // SRCH-1b: the page loads a `search_sessions` report per destination on
+        // every refresh, which is precisely the repeat over the same snapshots
+        // the snapshot cache exists for. Same identity as the text index above.
+        let store = BackupStore::for_metadata_query(cfg.clone())
+            .with_body_cache(
+                chat_stasher::body_cache::for_operation(
+                    &config,
+                    chat_stasher::body_cache::Policy::ReadThrough,
+                )
+                .handle(),
             )
-            .handle(),
-        );
+            .with_snapshot_cache(chat_stasher::snapshot_cache::SnapshotCache::for_identity(
+                &index_identity(name.as_deref(), repo_override.as_deref(), &cfg.repo_root),
+            ));
         let mk = match store::load_key_file(&cfg) {
             Ok(mk) => mk,
             Err(e) => {
