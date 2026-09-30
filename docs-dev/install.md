@@ -268,7 +268,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:11784-11792,11802-11825`).
+(`crates/chat-stasher/src/main.rs:11801-11809,11819-11842`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -573,8 +573,8 @@ copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
 `--masterkey-saved-elsewhere` creates the local repository and the key, reports
 the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:13015-13022`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:12586-12592`).
+remote step and the timer (`crates/chat-stasher/src/main.rs:13033-13040`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:12604-12610`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -876,7 +876,7 @@ loads a launchd agent on macOS or writes and enables a systemd user timer on
 Linux; `schedule uninstall` stops and removes the matching job. Both operations
 are idempotent. Installation targets every configured destination by default;
 repeating `--destination` selects a subset. The embedded binary must be an
-installed path outside `target/` (`crates/chat-stasher/src/schedule.rs:508-782`).
+installed path outside `target/` (`crates/chat-stasher/src/schedule.rs:508-929`).
 The generated template wraps a `run-once` command
 (`crates/chat-stasher/src/schedule.rs:197-301`).
 
@@ -885,15 +885,20 @@ only order a manager can accept), so a manager that refuses — WSL with
 `systemd=false` measured `daemon-reload` exiting 1 after both files were on
 disk, and `status` then reported an installed timer that was armed nowhere —
 must be the install's problem, not the user's. A failed install rolls itself
-back: it stops the timers it had got enabled, removes the unit files it created
-and restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:508-782`),
-and on the systemd side `status` asks the manager rather than trusting the
-disk — `installed` needs every unit file *and* `systemctl --user is-active`
-confirming each timer, and units the manager did not confirm are reported
-`unconfirmed` (`crates/chat-stasher/src/schedule.rs:835-972`). On Windows every
-`schedule` action refuses with exit 2 before writing anything, with the manual
-Task Scheduler steps in the refusal itself
-(`crates/chat-stasher/src/main.rs:6866-6918`).
+back: it stops the timers it had got enabled, removes the files it created and
+restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:508-929`),
+and `status` asks the manager rather than trusting the disk — `installed` needs
+every timer file *and* the manager confirming the job is loaded, `systemctl
+--user is-active` per timer on systemd and `launchctl print` per agent on macOS,
+and units the manager did not confirm are reported `unconfirmed`
+(`crates/chat-stasher/src/schedule.rs:982-1152`). Both formats were measured
+wrong in the same way: W282 on systemd and Windows, W287 on launchd, where a
+failed `bootstrap` left the plist behind and `status` called it installed. On
+Windows every `schedule` action refuses with exit 2 before writing anything,
+and the refusal points at the manual Task Scheduler steps in
+`docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
+the logon caveat that keeps a per-user task from looking scheduled while it
+sleeps (`crates/chat-stasher/src/main.rs:6866-6921`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:216-253`).
@@ -910,12 +915,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:15612-15614`). This is the
+does not (`crates/chat-stasher/src/main.rs:15634-15636`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:15330-15358`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:15348-15376`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -931,7 +936,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:15614-15747`):
+(`crates/chat-stasher/src/main.rs:15636-15769`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -944,7 +949,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:15593-15598`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:15615-15620`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -954,7 +959,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:15286-15311`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:15304-15329`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -1145,7 +1150,7 @@ confirmed in the code, not a temporary disclaimer.
 - **`schedule` render-only mode does not install the timer**; use the explicit
   `schedule install` action to load a launchd agent on macOS or enable the
   systemd user timer on Linux. `schedule uninstall` stops and removes the
-  matching job (`crates/chat-stasher/src/schedule.rs:508-782`).
+  matching job (`crates/chat-stasher/src/schedule.rs:508-929`).
 
 ---
 

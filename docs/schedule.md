@@ -41,7 +41,7 @@ It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`
 Running it again is safe. A timer that is already installed with the same content is left alone and counted as `unchanged`. One whose content changed, for example because you moved the binary, is rewritten and reloaded.
 
 > [!NOTE]
-> **A failed install leaves nothing behind.** The scheduler is talked to *after* the unit files are written — that is the only order `systemctl` can accept them in — so on a machine with no user systemd session (WSL without systemd, for instance) the manager refuses and the install fails. The failed install then rolls itself back: it stops the timers it had got enabled, removes the unit files it created and puts back the ones it replaced. `status` reports `not_installed`, never an installed timer that is armed nowhere.
+> **A failed install puts the machine back the way it was.** The scheduler is talked to *after* the timer files are written — that is the only order a manager can accept them in — so a manager that refuses fails the install on a machine whose disk already holds part of a schedule nothing will run. Both formats then roll themselves back: the files this run created are removed, the ones it replaced get their previous content back, the timers it had got armed are stopped, and on macOS the agents that were loaded before it are loaded again. On a machine that had no timer, `status` reports `not_installed` — never an installed timer that is armed nowhere.
 
 > [!NOTE]
 > On Linux, pass `--format systemd` every time, including for `schedule uninstall`. Without it the command renders a launchd timer.
@@ -125,7 +125,7 @@ The first line is the verdict. It is read from the record the last pass left beh
 
 "Stopped" means no pass for more than four intervals (at least one hour). `status` exits `0` only when the verdict is healthy, and `1` otherwise, so it works as a check in a script. Its report is on stderr: run it bare, not through a pipe, if you want the exit code.
 
-`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. On Linux, `installed` needs two things: every unit file present, *and* systemd confirming each timer active. Files the manager did not confirm are reported as `unconfirmed` — the reason sits beside it in `next_run_why` ("systemd did not report a next run", or the manager could not be asked at all). The last pass is reported separately, in `run_state`: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field.
+`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. `installed` needs two things on both platforms: every timer file present, *and* the scheduler confirming the job is loaded — systemd confirming each timer active on Linux, launchd finding each agent on macOS. Files the scheduler did not confirm are reported as `unconfirmed` — the reason sits beside them in `next_run_why` ("launchd has not loaded …", "systemd did not report a next run", or that the manager could not be asked at all). Those two are different answers and are worded as different answers: a plist written by hand with `--output` and never bootstrapped is the first, and a machine with no user session to reach is the second. The last pass is reported separately, in `run_state`: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field.
 
 ### When it runs
 
@@ -189,10 +189,52 @@ chat-stasher schedule --stage ~/stash/chat-stasher/stage \
 
 With `--output`, it writes the file and prints the exact command that loads it. Nothing is loaded until you run that command. With more than one destination, `--output` must be a folder.
 
-**Windows** has no built-in timer support: every `chat-stasher schedule` action there refuses with exit 2 and writes nothing — this build has no scheduler integration for Windows, and writing systemd unit files a platform without systemd cannot load was a defect, not a feature. Create the pass yourself instead, as a per-user task in Task Scheduler that runs `chat-stasher run-once --stage <stage> --destination <name>` every hour.
+### Windows: a task in Task Scheduler
+
+Windows has no scheduler this build integrates with: every `chat-stasher schedule` action there refuses with exit 2 and writes nothing. Create the pass yourself instead, as a per-user task in Task Scheduler.
+
+`schtasks.exe` does the whole job. Run this in `cmd.exe` or PowerShell, with the two paths replaced by yours — the binary's **full path** is required, because Task Scheduler does not search `PATH`:
+
+```bat
+schtasks /Create /TN "chat-stasher run-once" /SC HOURLY /TR "\"%USERPROFILE%\bin\chat-stasher.exe\" run-once --stage \"%USERPROFILE%\stash\chat-stasher\stage\" --destination r2"
+```
+
+The parts that are easy to get wrong:
+
+- `/TN` is the task's name. `/Query`, `/Run` and `/Delete` address the task by it.
+- `/TR` is the whole command, as one string. The inner quotes are backslash-escaped: `cmd.exe` passes `\"` through untouched and `schtasks` reads it as a real quote, which is what keeps a program path containing spaces from being split in two.
+- `run-once` needs its own `--stage`, and `--destination <name>` as soon as your config declares a destination ([destinations.md](destinations.md)). A pass that names none is refused, and the task then looks scheduled while failing every hour. Drop `--destination` only while no destination is declared.
+- The binary has to be a permanent copy, the same rule as [above](#which-binary-the-timer-runs): one inside a build folder stops working after the next `cargo clean`.
+- Without `/RU` and `/RP`, the task runs **only while you are logged on**. This is the reason this page gives no wrapper around it: a task that looks scheduled and silently stops at every log-off is worse than one you know you set up by hand. If the pass must run while you are logged off, add `/RU <account> /RP` and expect Windows to ask for that account's password.
+
+Check what Windows did with it:
+
+```bat
+schtasks /Query /TN "chat-stasher run-once" /V /FO LIST
+```
+
+Read `Next Run Time`, `Last Run Time` and `Last Result`. `Last Result` is the pass's own exit code, so `0` is a successful pass and anything else is the exit code [cli.md](cli.md#exit-codes) explains. To run it once now, rather than waiting for the hour:
+
+```bat
+schtasks /Run /TN "chat-stasher run-once"
+```
+
+Neither of those says the archive is current — a task Windows ran and a pass that succeeded are two different facts. That one is `status`:
+
+```bat
+chat-stasher status
+```
+
+It reads the record the pass writes, so it says whether the last pass ran and what it did, whether or not a task was involved.
+
+Remove it:
+
+```bat
+schtasks /Delete /TN "chat-stasher run-once" /F
+```
 
 > [!NOTE]
-> A build before this refusal could write `chat-stasher-run-once-*.service` and `.timer` unit files into your home folder's `.config\systemd\user` directory. They schedule nothing on Windows: delete them.
+> A build before this refusal could write `chat-stasher-run-once.service`, `chat-stasher-run-once.timer` and any `chat-stasher-run-once-<destination>.service` / `.timer` into your home folder's `.config\systemd\user` directory. They schedule nothing on Windows: delete those files, and leave whatever else you find in that directory alone — another tool may keep its own units there.
 
 ## See also
 

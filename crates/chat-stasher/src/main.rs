@@ -6897,10 +6897,13 @@ fn schedule_platform_refusal(os: &str) -> Option<&'static str> {
              for a service manager the platform does not have and then fail; this refusal \
              replaces that. To schedule the pass, create a per-user task in Task Scheduler \
              that runs `chat-stasher run-once --stage <stage>` every hour — add \
-             `--destination <name>` once the config declares destinations — following the \
-             \"Doing it by hand\" section of docs/schedule.md. Unit files an earlier build \
-             left in your home folder's .config\\systemd\\user directory schedule nothing on \
-             Windows: delete them",
+             `--destination <name>` once the config declares destinations. A complete \
+             copy-pasteable `schtasks.exe` command, what to check afterwards and the \
+             logon caveat are in docs/schedule.md#windows-a-task-in-task-scheduler. Unit \
+             files an earlier build left in your home folder's .config\\systemd\\user \
+             directory schedule nothing on Windows: delete \
+             chat-stasher-run-once.service, chat-stasher-run-once.timer and any \
+             chat-stasher-run-once-<destination>.service / .timer there",
         )
     } else {
         None
@@ -7220,6 +7223,20 @@ fn scheduler_tool_path(format: schedule::Format) -> PathBuf {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default))
+}
+
+/// The launchd domain the read-only probes ask about — [`launchd_domain`], with
+/// an unresolvable one left empty rather than fatal.
+///
+/// An install or an uninstall cannot proceed without a domain and gets
+/// `launchd_domain`'s error; a *report* must still be produced, because "we
+/// could not ask" is an answer a reader can act on and a missing report is not.
+fn launchd_probe_domain() -> String {
+    // reason: an empty domain builds a target (`/label`) that `launchctl print`
+    // will not confirm, so both probes report unconfirmed and an unknown next
+    // run — the honest answer for "nobody could be asked", and never a claim
+    // that an agent is loaded.
+    launchd_domain().unwrap_or_default()
 }
 
 fn launchd_domain() -> anyhow::Result<String> {
@@ -12400,6 +12417,7 @@ fn cmd_setup(
                     &schedule_targets,
                     &config::home_dir(),
                     &scheduler_tool_path(setup_schedule_format()),
+                    &launchd_probe_domain(),
                     chrono::Local::now(),
                 );
             }
@@ -15429,12 +15447,15 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
     let mut declared: Vec<String> = config.destinations.keys().cloned().collect();
     declared.sort_unstable();
     let targets = schedule::install_targets(&declared, &[]);
+    let tool = scheduler_tool_path(format);
+    let domain = launchd_probe_domain();
     let install = schedule::schedule_install_state(
         schedule::Unit::RunOnce,
         format,
         &targets,
         &config::home_dir(),
-        &scheduler_tool_path(format),
+        &tool,
+        &domain,
     );
     let (schedule_kind, installed) = match install {
         schedule::ScheduleInstall::Installed => ("installed", true),
@@ -15450,7 +15471,8 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
         format,
         &targets,
         &config::home_dir(),
-        &scheduler_tool_path(format),
+        &tool,
+        &domain,
         chrono::Local::now(),
     );
     let units: Vec<String> = targets
@@ -16091,9 +16113,9 @@ mod schedule_platform_tests {
             "nothing was written or installed",
             "Task Scheduler",
             "run-once --stage <stage>",
-            "docs/schedule.md",
+            "docs/schedule.md#windows-a-task-in-task-scheduler",
             "systemd",
-            "delete them",
+            "delete chat-stasher-run-once.service, chat-stasher-run-once.timer",
         ] {
             assert!(
                 refusal.contains(word),

@@ -859,6 +859,83 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
     );
 }
 
+/// W287 §3, on the platform it is about.
+///
+/// Windows has no scheduler this build integrates with, so the wizard's
+/// scheduler step is decided *before* it is attempted: the run must report the
+/// step `not_attempted` rather than `failed`, name `schedule` as an unfinished
+/// step and exit non-zero. The archive is left without a timer, which is a fact
+/// and not a failure of the archive itself — and the distinction is the whole
+/// point, because "the platform refused" and "the install ran and broke" are
+/// different things to tell a reader.
+///
+/// `#[cfg(windows)]` is deliberate and two-sided: the property exists only on
+/// Windows (the arm exists because `schedule` refuses there), the other arm —
+/// the step runs and reports `installed_and_checked` — is asserted by
+/// `setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run`
+/// above, and the decision reads `std::env::consts::OS`, which no test can set.
+/// That leaves this test as the only place the arm can execute at all; the
+/// `windows-latest` cell in `.github/workflows/ci.yml` runs `cargo test`, so it
+/// does. The interactive half of the step — the suppressed question and the
+/// summary line that replaces it — needs a pty and is not reachable here.
+#[cfg(windows)]
+#[test]
+fn a_windows_wizard_scheduler_step_is_not_attempted_and_the_run_is_incomplete() {
+    let sandbox = Sandbox::new(true);
+    let output = sandbox.setup(&[
+        "--masterkey-saved-elsewhere",
+        "--install-schedule",
+        "--json",
+    ]);
+    let value = json_of(&output);
+    assert_eq!(
+        value["steps"]["schedule"], "not_attempted",
+        "a platform that refused before anything ran did not fail: {value}"
+    );
+    assert_eq!(value["schedule"]["status"], "not_attempted");
+    assert_eq!(value["schedule"]["requested"], serde_json::json!(true));
+    assert_eq!(
+        value["schedule"]["next_run"],
+        serde_json::Value::Null,
+        "nothing was installed, so there is no next run: {value}"
+    );
+    assert!(
+        value["schedule"]["next_run_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("no next run")),
+        "an empty next run arrives with the sentence saying why: {value}"
+    );
+    assert!(
+        value["incomplete"]
+            .as_array()
+            .is_some_and(|steps| steps.iter().any(|step| step == "schedule")),
+        "the run must name the step it did not finish: {value}"
+    );
+    assert_eq!(
+        exit_code(&output),
+        1,
+        "an unfinished step is 1, never a success: {value}"
+    );
+
+    // A refusal writes nothing: no unit files for a manager this platform does
+    // not have, and no plists for the one it does not have either.
+    assert!(
+        !sandbox.home().join(".config").join("systemd").exists(),
+        "the Windows refusal must not leave systemd unit files behind (the defect it \
+         replaced wrote them, could not load them, and let status call them installed)"
+    );
+    assert!(
+        !sandbox.home().join("Library").exists(),
+        "nor is anything launchd's to install on Windows"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("docs/schedule.md#windows-a-task-in-task-scheduler"),
+        "the refusal has to point at the manual steps that replace it: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {

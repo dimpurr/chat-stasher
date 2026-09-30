@@ -132,9 +132,9 @@ Renders the hourly timer, or installs and removes it. See [schedule.md](schedule
 |---|---|
 | `schedule --stage <dir>` | Prints the timer. Changes nothing. |
 | `schedule --stage <dir> --output <path>` | Writes the timer file and prints the command that loads it. Loads nothing. |
-| `schedule install --stage <dir>` | Writes and loads the timer. One per declared destination, unless `--destination` narrows it. A failed install stops the timers it had enabled and removes or restores the unit files it wrote, leaving `status` reporting `not_installed`, never an installed timer that is armed nowhere. |
+| `schedule install --stage <dir>` | Writes and loads the timer. One per declared destination, unless `--destination` narrows it. A failed install puts the machine back: it stops the timers it had armed, removes or restores the files it wrote, and loads again the agents it had unloaded. On a machine that had no timer, `status` then reports `not_installed`, never an installed timer that is armed nowhere. |
 | `schedule uninstall` | Stops and removes the timers for the declared (or named) destinations. |
-| `schedule …` on Windows | Refuses with exit `2` and changes nothing: this build has no scheduler integration there. See the "Doing it by hand" section of [schedule.md](schedule.md). |
+| `schedule …` on Windows | Refuses with exit `2` and changes nothing: this build has no scheduler integration there. The manual Task Scheduler steps, with a copy-pasteable `schtasks` command, are in [schedule.md](schedule.md#windows-a-task-in-task-scheduler). |
 
 | Flag | Meaning |
 |---|---|

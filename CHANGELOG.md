@@ -280,8 +280,18 @@ under its own heading below.
   active, and files without that confirmation are a new `unconfirmed`
   kind — with the reason beside them in `next_run_why` ("the manager did
   not report one", or it could not be asked at all), never a zero or an
-  install claim. macOS launchd keeps its existing file-presence report;
-  the defect was measured on systemd and Windows.
+  install claim. **macOS gets the same treatment.** The same false positive
+  was measured on launchd: a failed `bootstrap` left the plist on disk, no
+  agent was loaded, and `status` called it installed. So a failed launchd
+  install rolls itself back too — the plists it created are removed, the
+  ones it replaced get their previous content back, and the agents it had
+  unloaded are loaded again — and the launchd half of `status` asks
+  `launchctl` whether each agent is loaded before it claims an install.
+  "launchd answered that it is not loaded" (a plist written by
+  `schedule --output` and never bootstrapped is the ordinary case) and
+  "`launchctl` could not be asked" stay two different sentences in the
+  same `next_run_why`, and a plist launchd will not reach is no longer
+  reported as a next run.
 - **`schedule` on Windows refuses instead of writing foreign unit
   files.** There, `schedule install` wrote **systemd** unit files into the
   user profile — for a service manager Windows does not have — failed to
@@ -291,7 +301,13 @@ under its own heading below.
   message naming the manual Task Scheduler steps, exit 2, and nothing
   written; the message also names the leftover
   `chat-stasher-run-once-*.service`/`.timer` unit files an earlier build
-  may have written and says they can be deleted. Task Scheduler
+  may have written and says they can be deleted. The manual steps are
+  spelled out rather than gestured at: `docs/schedule.md` carries a
+  copy-pasteable `schtasks /Create` command for an hourly per-user task,
+  the `/Query` and `/Delete` that address it by name, what to read in the
+  query output, and the caveat that a task created without `/RU`/`/RP`
+  runs only while its user is logged on — which is also why this project
+  does not ship such a wrapper itself. Task Scheduler
   integration through `schtasks.exe` was considered and rejected for this
   change, and the reasons are properties of that tool: a per-user task it
   can create without a password runs only while its user is logged on, so

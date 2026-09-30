@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8388-8699`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8405-8716`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a

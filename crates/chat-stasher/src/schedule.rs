@@ -505,6 +505,38 @@ pub enum InstallResult {
     Unchanged,
 }
 
+/// One agent file [`install_launchd_agents`] changed, and everything needed to
+/// put it back: the bytes it had before the call (`None` = the file did not
+/// exist, so the roll-back deletes it), and whether launchd had that agent
+/// loaded at that moment.
+///
+/// `was_loaded` is captured before the first change, which is the only moment
+/// the answer describes the pre-call machine: once `bootout` has run, "is it
+/// loaded?" answers about the failed install rather than about what it found.
+struct LaunchdChange {
+    path: PathBuf,
+    label: String,
+    previous: Option<Vec<u8>>,
+    was_loaded: bool,
+}
+
+/// Install (or re-install) a rendered set of launchd user agents.
+///
+/// The ordering rule is the same one [`install_systemd_units`] follows, and it
+/// exists for the same reason: `launchctl bootstrap` cannot load a plist that
+/// is not on disk yet, so the step that can refuse runs *after* the file is
+/// written. A refusal therefore happens on a machine whose disk already holds
+/// part of a schedule launchd will not load — the state W282 §2 caught `status`
+/// reporting as `installed: true`. So this call rolls itself back instead: on
+/// any failure after the first write it unloads the agents it got loaded,
+/// removes the plists it created and restores the ones it replaced, then loads
+/// again the agents that were loaded before it ran.
+///
+/// Within one file the new bytes are written *before* the running agent is
+/// booted out, so a write that fails leaves the loaded job and the file it
+/// reads describing the same schedule, and the roll-back has no agent to
+/// re-load. A failed *re*install is the case this ordering protects: the
+/// working agent stays up until its replacement is on disk.
 pub fn install_launchd_agents(
     home: &Path,
     files: &[TemplateFile],
@@ -518,34 +550,149 @@ pub fn install_launchd_agents(
         .with_context(|| format!("create launchd log directory under {}", home.display()))?;
 
     let mut results = Vec::with_capacity(files.len());
+    let mut changed: Vec<LaunchdChange> = Vec::new();
     for file in files {
         let path = agents.join(&file.name);
-        let label = file.name.strip_suffix(".plist").unwrap_or(&file.name);
+        let label = file
+            .name
+            .strip_suffix(".plist")
+            .unwrap_or(&file.name)
+            .to_string();
         let target = format!("{domain}/{label}");
-        // A read error means the installed plist is absent or unreadable, which
-        // is not the same bytes as what we would write. The safe direction is
-        // to rewrite and reload, never to leave a stale unit in place.
-        let same = fs::read(&path)
-            .map(|bytes| bytes == file.content.as_bytes())
-            .unwrap_or(false); // reason: an absent or unreadable installed plist is treated as changed, so install rewrites and reloads it
-        let loaded = launchctl_status(launchctl, &target)?;
+        let previous = match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                // Refuse to overwrite a plist this call could not read back,
+                // for the reason the systemd arm gives: the roll-back restores
+                // what it saved, and a file that cannot be read cannot be
+                // saved. Without this refusal a later failure in the same call
+                // would delete an agent it never understood.
+                bail!(
+                    "launchd agent {} exists but cannot be read ({error}), so a failed \
+                     install could not put it back the way it was; make the file readable \
+                     and run the install again",
+                    path.display()
+                );
+            }
+        };
+        let same = previous.as_deref() == Some(file.content.as_bytes()); // reason: an absent agent file is treated as changed, so install rewrites and reloads it
+        let loaded = match launchctl_status(launchctl, &target) {
+            Ok(loaded) => loaded,
+            // Nothing has been touched yet for this file, but earlier files in
+            // this call may have been, so the roll-back still has work to do.
+            Err(error) => return Err(rollback_launchd_install(error, &changed, launchctl, domain)),
+        };
         if same && loaded {
             results.push(InstallResult::Unchanged);
             continue;
         }
-        if loaded {
-            launchctl_run(launchctl, &["bootout", domain, label])
-                .with_context(|| format!("unload launchd agent {label}"))?;
-        }
+        // Past this point the call is committed to changing this agent, so
+        // record what it looked like first.
+        changed.push(LaunchdChange {
+            path: path.clone(),
+            label: label.clone(),
+            previous,
+            was_loaded: loaded,
+        });
         if !same {
-            write_atomic(&path, file.content.as_bytes())
-                .with_context(|| format!("write launchd agent {}", path.display()))?;
+            if let Err(error) = write_atomic(&path, file.content.as_bytes()) {
+                let error = anyhow::Error::from(error)
+                    .context(format!("write launchd agent {}", path.display()));
+                return Err(rollback_launchd_install(error, &changed, launchctl, domain));
+            }
         }
-        launchctl_run(launchctl, &["bootstrap", domain, &path.to_string_lossy()])
-            .with_context(|| format!("load launchd agent {label}"))?;
+        if loaded {
+            if let Err(error) = launchctl_run(launchctl, &["bootout", domain, &label]) {
+                let error = error.context(format!("unload launchd agent {label}"));
+                return Err(rollback_launchd_install(error, &changed, launchctl, domain));
+            }
+        }
+        if let Err(error) =
+            launchctl_run(launchctl, &["bootstrap", domain, &path.to_string_lossy()])
+        {
+            let error = error.context(format!("load launchd agent {label}"));
+            return Err(rollback_launchd_install(error, &changed, launchctl, domain));
+        }
         results.push(InstallResult::Installed);
     }
     Ok(results)
+}
+
+/// Undo what a failed [`install_launchd_agents`] did to the machine, and attach
+/// a sentence about the outcome to the error that stopped the install.
+///
+/// The systemd roll-back's contract, in launchd's verbs. Every step is
+/// best-effort by construction: the caller's error happened first and must stay
+/// the primary error, so a roll-back step that fails is reported in the context
+/// rather than replacing what it failed to undo.
+///
+/// Each agent is unloaded before its file is restored, so launchd is never left
+/// holding a loaded job whose definition is about to change underneath it; and
+/// an agent that was loaded before this call is loaded again afterwards,
+/// because unloading it is part of what the failed install did.
+fn rollback_launchd_install(
+    error: anyhow::Error,
+    changed: &[LaunchdChange],
+    launchctl: &Path,
+    domain: &str,
+) -> anyhow::Error {
+    let mut unrestored: Vec<String> = Vec::new();
+    for entry in changed {
+        match launchctl_status(launchctl, &format!("{domain}/{}", entry.label)) {
+            Ok(true) => {
+                if let Err(stop_error) =
+                    launchctl_run(launchctl, &["bootout", domain, &entry.label])
+                {
+                    unrestored.push(format!(
+                        "the agent {} stayed loaded ({stop_error}) — a schedule this failed \
+                         install had already loaded is still loaded",
+                        entry.label
+                    ));
+                }
+            }
+            Ok(false) => {}
+            Err(ask_error) => unrestored.push(format!(
+                "launchctl could not be asked whether {} was loaded ({ask_error}), so it may \
+                 still be loaded",
+                entry.label
+            )),
+        }
+        let undone = match &entry.previous {
+            Some(bytes) => fs::write(&entry.path, bytes)
+                .with_context(|| format!("restore {}", entry.path.display())),
+            None => fs::remove_file(&entry.path)
+                .with_context(|| format!("remove {}", entry.path.display())),
+        };
+        if let Err(undo_error) = undone {
+            unrestored.push(format!("{undo_error:#}"));
+        }
+        if entry.was_loaded {
+            let restored = entry.path.to_string_lossy().into_owned();
+            if let Err(load_error) = launchctl_run(launchctl, &["bootstrap", domain, &restored]) {
+                unrestored.push(format!(
+                    "the agent {} was loaded before this install and could not be loaded \
+                     again ({load_error})",
+                    entry.label
+                ));
+            }
+        }
+    }
+    if unrestored.is_empty() {
+        error.context(
+            "the failed install was rolled back: every agent it created was removed, every \
+             one it replaced got its previous content back and every agent that was loaded \
+             before it is loaded again, so the machine is as it was before `schedule \
+             install` ran",
+        )
+    } else {
+        error.context(format!(
+            "the failed install was rolled back incompletely — part of it is still on the \
+             machine: {}. Run `schedule uninstall` again once launchctl is usable, and \
+             check `launchctl list` before trusting any schedule it reports",
+            unrestored.join("; ")
+        ))
+    }
 }
 
 pub fn uninstall_launchd_agents(
@@ -849,32 +996,38 @@ pub fn install_targets(declared: &[String], requested: &[String]) -> Vec<Option<
 ///   reason [`next_run`] carries (the manager answered "not armed", or could
 ///   not be asked at all), so "could not ask" never collapses into "not
 ///   armed".
-/// * **launchd** (macOS) reads file presence only. W282 validated the defect
-///   on systemd and Windows and did not flag macOS, so its probe stays what
-///   it was; a macOS claim is carried by the run-state verdict beside it
-///   rather than by this enum.
+/// * **launchd** (macOS) asks too. W287 measured the same defect here, on the
+///   project's own primary platform: a `bootstrap` that failed left the plist
+///   on disk, and `status` called it installed. So for launchd every expected
+///   plist being present is only half the answer as well;
+///   [`ScheduleInstall::Installed`] additionally requires `launchctl print` to
+///   find each agent loaded, and a plist launchd did not confirm is
+///   [`ScheduleInstall::Unconfirmed`]. The documented hand-install path is why
+///   this matters on a machine nobody broke: `schedule --output` writes a plist
+///   and loads nothing until the printed `bootstrap` command is run.
 ///
-/// File presence stays half of the systemd answer because it is what
-/// [`install_systemd_units`] creates and what [`uninstall_systemd_units`]
-/// removes; it is reported, never silently substituted for the manager's
-/// answer.
+/// File presence stays half of the answer both formats because it is what the
+/// installers create and the uninstallers remove; it is reported, never
+/// silently substituted for the manager's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleInstall {
-    /// Every expected unit file exists, and the scheduler confirmed the timer
-    /// is active where the format gets an answer (systemd; see the enum doc
-    /// for why launchd needs none).
+    /// Every expected unit file exists, and the scheduler confirmed the job is
+    /// loaded where the format gets an answer (systemd: every timer active
+    /// under `systemctl --user is-active`; launchd: every agent present under
+    /// `launchctl print`).
     Installed,
     /// No expected unit file exists.
     NotInstalled,
     /// Some expected unit files exist and some do not: an interrupted install
     /// or a hand-removed unit, which is neither of the two clean states.
     Partial { present: usize, expected: usize },
-    /// Every expected unit file exists and the manager did not confirm the
-    /// timer active — it answered "inactive", or it could not be asked. The
-    /// file is not the schedule: a unit systemd has not loaded protects
-    /// nothing while looking exactly like one that does. `present` and
-    /// `expected` stay in the answer so `Partial` and `Unconfirmed` can be
-    /// told apart with the same fields; here they are equal by construction.
+    /// Every expected unit file exists and the manager did not confirm the job
+    /// loaded — it answered that it was not, or it could not be asked. The
+    /// file is not the schedule: a unit systemd has not loaded, or a plist
+    /// launchd has not bootstrapped, protects nothing while looking exactly
+    /// like one that does. `present` and `expected` stay in the answer so
+    /// `Partial` and `Unconfirmed` can be told apart with the same fields;
+    /// here they are equal by construction.
     Unconfirmed { present: usize, expected: usize },
 }
 
@@ -906,14 +1059,18 @@ pub fn unit_file_name(unit: Unit, format: Format, destination: Option<&str>) -> 
 /// [`ScheduleInstall::NotInstalled`]: there is no unit to be present, and
 /// calling that "installed" would invert the answer.
 ///
-/// `systemctl` is only run by the systemd arm, mirroring [`next_run`]; the
-/// launchd arm reads file presence, as the enum doc records.
+/// `tool` and `domain` are each run by one arm: `tool` is the format's own
+/// manager (`systemctl` for systemd, `launchctl` for launchd) and `domain` is
+/// the launchd domain the agents are registered in (see [`launchd_domain`]'s
+/// caller). Both are parameters rather than lookups so a test can point the
+/// probe at a throwaway fake instead of the machine's real session.
 pub fn schedule_install_state(
     unit: Unit,
     format: Format,
     targets: &[Option<String>],
     home: &Path,
-    systemctl: &Path,
+    tool: &Path,
+    domain: &str,
 ) -> ScheduleInstall {
     if targets.is_empty() {
         return ScheduleInstall::NotInstalled;
@@ -929,24 +1086,30 @@ pub fn schedule_install_state(
     if present < expected {
         return ScheduleInstall::Partial { present, expected };
     }
-    // Every timer file is present — half of the answer. The other half is the
+    // Every unit file is present — half of the answer. The other half is the
     // manager's: the report's §2 had files on disk and no timer armed, and an
     // install state that stopped at the files is the false positive it filed.
-    match format {
-        Format::Launchd => ScheduleInstall::Installed,
-        Format::Systemd => {
-            let confirmed = targets.iter().all(|destination| {
-                systemd_timer_active(
-                    systemctl,
-                    &systemd_timer_name_for_destination(unit, destination.as_deref()),
-                )
-            });
-            if confirmed {
-                ScheduleInstall::Installed
-            } else {
-                ScheduleInstall::Unconfirmed { present, expected }
-            }
-        }
+    // Both formats get that answer now; W287 measured the same false positive
+    // on launchd, where a failed `bootstrap` left the plist behind.
+    let confirmed = match format {
+        Format::Launchd => targets.iter().all(|destination| {
+            launchd_agent_loaded(
+                tool,
+                domain,
+                &launchd_label_for_destination(unit, destination.as_deref()),
+            )
+        }),
+        Format::Systemd => targets.iter().all(|destination| {
+            systemd_timer_active(
+                tool,
+                &systemd_timer_name_for_destination(unit, destination.as_deref()),
+            )
+        }),
+    };
+    if confirmed {
+        ScheduleInstall::Installed
+    } else {
+        ScheduleInstall::Unconfirmed { present, expected }
     }
 }
 
@@ -972,6 +1135,44 @@ fn systemd_timer_active(systemctl: &Path, timer: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether launchd has one agent loaded — the same question
+/// [`install_launchd_agents`] asks before it reloads one and
+/// [`rollback_launchd_install`] asks before it unloads one, so the state probe
+/// and the installer cannot disagree about what "loaded" means.
+///
+/// A launchctl that cannot be run (not installed, no GUI session to reach)
+/// confirms nothing: that is not "not loaded", it is no answer, and the note
+/// [`next_run`] carries says which of the two it was.
+fn launchd_agent_loaded(launchctl: &Path, domain: &str, label: &str) -> bool {
+    launchctl_status(launchctl, &format!("{domain}/{label}"))
+        // reason: a spawn failure is the absence of an answer, and the caller
+        // reports "not confirmed" rather than "not loaded" — the note beside
+        // the state carries which one it was.
+        .unwrap_or(false)
+}
+
+/// Why this agent cannot be said to be loaded, or `None` when it is.
+///
+/// The two failures [`NextRun`] must keep apart get a sentence each: launchd
+/// answering "not loaded" is a fact about the schedule, and a `launchctl` that
+/// could not be run at all is the absence of an answer. A caller that collapsed
+/// them into a boolean would have to invent one of the two.
+fn launchd_unloaded_note(launchctl: &Path, domain: &str, label: &str) -> Option<String> {
+    let target = format!("{domain}/{label}");
+    match launchctl_status(launchctl, &target) {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "launchd has not loaded {label}, so it will not fire; `launchctl print {target}` \
+             shows the agent's state, and `schedule install` loads it"
+        )),
+        Err(error) => Some(format!(
+            "{} could not be run to ask whether {label} is loaded ({error}), so the next fire \
+             time is unknown",
+            launchctl.display()
+        )),
+    }
+}
+
 /// Ask the scheduler for the next run of the units that were just installed.
 ///
 /// Nothing here is estimated. systemd is asked through `systemctl --user
@@ -990,14 +1191,23 @@ fn systemd_timer_active(systemctl: &Path, timer: &str) -> bool {
 /// is the source: the slot is computed on the local calendar, which is the
 /// clock launchd itself reads.
 ///
-/// `systemctl` is only run by the systemd probe; the launchd probe reads the
-/// installed plist instead.
+/// The launchd probe asks launchd first, for the same reason the systemd one
+/// does: a plist's calendar slot is a fire time only for an agent that is
+/// loaded. A plist written by `schedule --output` and not yet bootstrapped —
+/// a documented way to install by hand — declares a slot launchd will never
+/// reach, so reporting it as the next run would be the §2 false positive in
+/// the field beside the install state rather than in it.
+///
+/// `tool` and `domain` name the format's own manager (`systemctl`, or
+/// `launchctl` with the domain its agents live in), both as parameters so a
+/// test can address a throwaway fake rather than the real session.
 pub fn next_run(
     unit: Unit,
     format: Format,
     targets: &[Option<String>],
     home: &Path,
-    systemctl: &Path,
+    tool: &Path,
+    domain: &str,
     now: DateTime<Local>,
 ) -> NextRun {
     match targets {
@@ -1005,8 +1215,19 @@ pub fn next_run(
             "no scheduler unit was installed, so there is no next run to report".to_string(),
         ),
         [destination] => match format {
-            Format::Launchd => launchd_next_run(unit, destination.as_deref(), home, now),
-            Format::Systemd => systemd_next_run(unit, destination.as_deref(), systemctl),
+            // The plist is the source of the *slot*; launchd is the source of
+            // whether the slot will ever be reached. Neither answer is the
+            // other: an unloaded agent has a slot and no next run, and a
+            // manager that cannot be asked leaves the next run unknown rather
+            // than absent.
+            Format::Launchd => {
+                let label = launchd_label_for_destination(unit, destination.as_deref());
+                match launchd_unloaded_note(tool, domain, &label) {
+                    Some(note) => NextRun::Unknown(note),
+                    None => launchd_next_run(unit, destination.as_deref(), home, now),
+                }
+            }
+            Format::Systemd => systemd_next_run(unit, destination.as_deref(), tool),
         },
         // Each destination has its own timer, and this report carries one next
         // run. Naming one of them would be a claim about the others, and
@@ -1608,6 +1829,13 @@ fn systemd_quote_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The launchd domain the tests address their fake `launchctl` in. The
+    /// systemd arms ignore it; the launchd ones need it to be what the fake
+    /// answers for, and it is deliberately not a real target so a test that
+    /// ever reached the machine's own launchd would find nothing rather than
+    /// unload something.
+    const TEST_DOMAIN: &str = "gui/test";
 
     #[test]
     fn default_interval_is_hourly() {
@@ -2237,7 +2465,8 @@ mod tests {
                 Format::Systemd,
                 &[None],
                 temp.path(),
-                &script
+                &script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::NotInstalled,
             "a failed install is no install; status must report the machine as the failed \
@@ -2278,7 +2507,8 @@ mod tests {
                 Format::Systemd,
                 &[None],
                 temp.path(),
-                &script
+                &script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::NotInstalled
         );
@@ -2399,6 +2629,207 @@ mod tests {
         );
     }
 
+    /// A fake `launchctl` for the read-only probes: `print` always answers
+    /// `loaded`, and every other verb exits 2 — a probe that loaded or unloaded
+    /// something would be a defect, and the log makes that visible.
+    ///
+    /// Its `print` ignores the target, which is the point: these tests are
+    /// about the *answer*, not about which domain the probe built.
+    #[cfg(unix)]
+    fn launchd_answers(dir: &Path, loaded: bool) -> PathBuf {
+        let script = dir.join("launchctl");
+        let log = dir.join("probe-calls");
+        let answer = if loaded { "exit 0" } else { "exit 1" };
+        crate::test_support::plant_executable(
+            &script,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\ncase \"$1\" in\n  print) {answer} ;;\n  *) \
+                 exit 2 ;;\nesac\n",
+                log.display()
+            ),
+        );
+        script
+    }
+
+    /// A plist file left behind by a failed install is exactly what W287 §2
+    /// reported on macOS: a failed `bootstrap` after the plist was written, a
+    /// `status` that called the leftover plist an install, and an archive
+    /// nobody was archiving. The install must leave the machine as it found it.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_launchd_load_leaves_no_plist_behind() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("launchctl");
+        let loaded = temp.path().join("loaded");
+        let script_body = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  print) test -f \"{}\" ;;\n  bootstrap) exit 1 ;;\n  \
+             bootout) rm -f \"{}\" ;;\n  *) exit 2 ;;\nesac\n",
+            loaded.display(),
+            loaded.display()
+        );
+        crate::test_support::plant_executable(&script, &script_body);
+
+        let file = TemplateFile {
+            name: "com.chat-stasher.run-once.plist".to_string(),
+            content: "plist-v1".to_string(),
+        };
+        let install = install_launchd_agents(temp.path(), &[file], &script, TEST_DOMAIN);
+        assert!(
+            install.is_err(),
+            "a launchd that refuses the load is an install failure: {install:?}"
+        );
+        assert!(
+            !temp
+                .path()
+                .join("Library/LaunchAgents/com.chat-stasher.run-once.plist")
+                .is_file(),
+            "the failed install must not leave the plist behind (W287: the leftover plist made \
+             status report an agent that launchd had never loaded)"
+        );
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &[None],
+                temp.path(),
+                &script,
+                TEST_DOMAIN,
+            ),
+            ScheduleInstall::NotInstalled,
+            "a failed install is no install; status must report the machine as the failed \
+             install left it"
+        );
+    }
+
+    /// The re-install shape, which is the one that can cost a user a working
+    /// schedule: the agent was loaded and serving, the new plist is written,
+    /// and the load of the replacement fails. The roll-back must restore the
+    /// previous bytes *and* load them again — a machine left with the old agent
+    /// unloaded is not the machine this call found.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_launchd_reinstall_restores_the_plist_and_loads_it_again() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let agents = temp.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        fs::write(agents.join("com.chat-stasher.run-once.plist"), "plist-v0")
+            .expect("write the pre-existing plist");
+        let script = temp.path().join("launchctl");
+        let loaded = temp.path().join("loaded");
+        // The first load refuses — the reported repro — and every later one
+        // succeeds, so the roll-back's own re-load is the load that is observed.
+        let once = temp.path().join("refused-once");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\necho \"$@\" >> \"{log}\"\ncase \"$1\" in\n  print) test -f \"{loaded}\" \
+             ;;\n  bootstrap) if [ -f \"{once}\" ]; then touch \"{loaded}\"; else touch \
+             \"{once}\"; exit 1; fi ;;\n  bootout) rm -f \"{loaded}\" ;;\n  *) exit 2 ;;\nesac\n",
+            log = log.display(),
+            loaded = loaded.display(),
+            once = once.display()
+        );
+        crate::test_support::plant_executable(&script, &script_body);
+        fs::write(&loaded, b"").expect("mark the pre-existing agent as loaded");
+
+        let upgraded = TemplateFile {
+            name: "com.chat-stasher.run-once.plist".to_string(),
+            content: "plist-v1-new-binary".to_string(),
+        };
+        let install = install_launchd_agents(temp.path(), &[upgraded], &script, TEST_DOMAIN);
+        assert!(install.is_err(), "the first load refuses: {install:?}");
+        assert_eq!(
+            fs::read_to_string(agents.join("com.chat-stasher.run-once.plist"))
+                .expect("the pre-existing plist must still be there, restored"),
+            "plist-v0",
+            "the failed upgrade must put the working plist back, not delete it"
+        );
+        assert!(
+            loaded.is_file(),
+            "the agent that was loaded before this install must be loaded again by the roll-back"
+        );
+        let calls = fs::read_to_string(log).expect("read fake launchctl log");
+        assert_eq!(
+            calls.matches("bootstrap").count(),
+            2,
+            "one refused load, then the roll-back's own: {calls}"
+        );
+        assert_eq!(
+            calls.matches(&format!("bootstrap {TEST_DOMAIN}")).count(),
+            2,
+            "both loads name the domain the install was given: {calls}"
+        );
+    }
+
+    /// The multi-destination shape: the first agent loads, the second does not.
+    /// A roll-back that leaves the first one loaded leaves a half install, and
+    /// the loaded half is the dangerous one — launchd keeps running a schedule
+    /// the command that created it reported as failed.
+    ///
+    /// The fake keeps one marker per label rather than one for the whole
+    /// manager, because "is this agent loaded?" is the question under test: a
+    /// single marker would say alpha is loaded when alpha is the only agent
+    /// that failed to load.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_multi_destination_launchd_install_unloads_what_it_loaded() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("launchctl");
+        let state = temp.path().join("state");
+        fs::create_dir_all(&state).expect("create the fake manager's state directory");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\necho \"$@\" >> \"{log}\"\ncase \"$1\" in\n  \
+             print) test -f \"{state}/$(basename \"$2\")\" ;;\n  \
+             bootstrap) label=$(basename \"$3\" .plist); case \"$label\" in *beta*) exit 1;; \
+             esac; touch \"{state}/$label\" ;;\n  \
+             bootout) rm -f \"{state}/$(basename \"$3\")\" ;;\n  *) exit 2 ;;\nesac\n",
+            log = log.display(),
+            state = state.display()
+        );
+        crate::test_support::plant_executable(&script, &script_body);
+
+        let files = vec![
+            TemplateFile {
+                name: "com.chat-stasher.run-once.alpha.plist".to_string(),
+                content: "alpha-v1".to_string(),
+            },
+            TemplateFile {
+                name: "com.chat-stasher.run-once.beta.plist".to_string(),
+                content: "beta-v1".to_string(),
+            },
+        ];
+        let install = install_launchd_agents(temp.path(), &files, &script, TEST_DOMAIN);
+        assert!(install.is_err(), "beta refuses to load: {install:?}");
+        let agents = temp.path().join("Library/LaunchAgents");
+        for name in [
+            "com.chat-stasher.run-once.alpha.plist",
+            "com.chat-stasher.run-once.beta.plist",
+        ] {
+            assert!(
+                !agents.join(name).is_file(),
+                "the failed install must not leave {name} behind"
+            );
+        }
+        assert!(
+            fs::read_dir(&state)
+                .expect("read the fake manager's state")
+                .next()
+                .is_none(),
+            "no agent may still be loaded after the roll-back"
+        );
+        let calls = fs::read_to_string(log).expect("read fake launchctl log");
+        assert_eq!(
+            calls
+                .matches(&format!(
+                    "bootout {TEST_DOMAIN} com.chat-stasher.run-once.alpha"
+                ))
+                .count(),
+            1,
+            "the agent this failed install had already loaded must be unloaded by the \
+             roll-back: {calls}"
+        );
+    }
+
     /// The plists `render` produced, saved where the installer saves them, so a
     /// probe reads the same bytes launchd would.
     fn write_plists(home: &Path, files: &[TemplateFile]) {
@@ -2436,6 +2867,16 @@ mod tests {
 
     /// A calendar plist is its own source: the fire time is computed from the
     /// `StartCalendarInterval` keys the plist carries, on the local calendar.
+    ///
+    /// The four plist tests below call [`launchd_next_run`] rather than going
+    /// through [`next_run`]: since W287 the dispatcher asks launchd whether the
+    /// agent is loaded before it reads the plist, and asking means executing a
+    /// manager, which a test can only fake with an executable script — unix
+    /// only, and launchd is macOS-only in any case (`setup_schedule_format`
+    /// never selects it elsewhere). Reading the plist is platform-neutral
+    /// arithmetic and stays covered on every platform here; the dispatcher's
+    /// half has its own tests, and the wizard suite drives it end to end
+    /// against a real binary.
     #[test]
     fn launchd_calendar_plist_yields_the_exact_next_local_occurrence() {
         use chrono::Timelike;
@@ -2454,14 +2895,7 @@ mod tests {
         write_plists(home.path(), &files);
 
         let now = local_noon();
-        let next = next_run(
-            Unit::ReclaimStage,
-            Format::Launchd,
-            &[None],
-            home.path(),
-            Path::new("launchctl"),
-            now,
-        );
+        let next = launchd_next_run(Unit::ReclaimStage, None, home.path(), now);
         let value = next.value().expect("the plist names a calendar slot");
         assert_eq!(next.note(), None, "a known time carries no excuse");
 
@@ -2499,14 +2933,7 @@ mod tests {
             .with_ymd_and_hms(2026, 9, 27, 4, 0, 0)
             .earliest()
             .expect("2026-09-27 04:00 exists in local time");
-        let next = next_run(
-            Unit::ReclaimStage,
-            Format::Launchd,
-            &[None],
-            home.path(),
-            Path::new("launchctl"),
-            now,
-        );
+        let next = launchd_next_run(Unit::ReclaimStage, None, home.path(), now);
         let when = DateTime::parse_from_str(
             next.value().expect("a calendar slot is known"),
             "%a %Y-%m-%d %H:%M:%S %z",
@@ -2535,14 +2962,7 @@ mod tests {
         );
         write_plists(home.path(), &files);
 
-        let next = next_run(
-            Unit::RunOnce,
-            Format::Launchd,
-            &[None],
-            home.path(),
-            Path::new("launchctl"),
-            local_noon(),
-        );
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
         assert_eq!(next.value(), None);
         assert_eq!(
             next.note(),
@@ -2558,14 +2978,7 @@ mod tests {
     #[test]
     fn an_unreadable_launchd_plist_is_reported_as_unread_not_as_absent() {
         let home = tempfile::tempdir().unwrap();
-        let next = next_run(
-            Unit::RunOnce,
-            Format::Launchd,
-            &[None],
-            home.path(),
-            Path::new("launchctl"),
-            local_noon(),
-        );
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
         assert_eq!(next.value(), None);
         let note = next.note().expect("an empty answer carries its reason");
         assert!(note.contains("could not be read"), "note={note}");
@@ -2618,6 +3031,7 @@ mod tests {
             &[Some("a".to_string()), Some("b".to_string())],
             home.path(),
             Path::new("systemctl"),
+            TEST_DOMAIN,
             local_noon(),
         );
         assert_eq!(several.value(), None);
@@ -2633,6 +3047,7 @@ mod tests {
             &[],
             home.path(),
             Path::new("systemctl"),
+            TEST_DOMAIN,
             local_noon(),
         );
         assert_eq!(none.value(), None);
@@ -2678,6 +3093,7 @@ mod tests {
             &[None],
             temp.path(),
             &script,
+            TEST_DOMAIN,
             now,
         );
         // The reason travels with the message: a bare `None` here cannot say
@@ -2701,6 +3117,7 @@ mod tests {
             &[None],
             temp.path(),
             &script,
+            TEST_DOMAIN,
             now,
         );
         assert_eq!(unarmed.value(), None);
@@ -2719,6 +3136,7 @@ mod tests {
             &[None],
             temp.path(),
             &temp.path().join("no-such-systemctl"),
+            TEST_DOMAIN,
             now,
         );
         assert_eq!(missing.value(), None);
@@ -2749,10 +3167,12 @@ mod tests {
         assert_eq!(install_targets(&[], &[]), vec![None]);
     }
 
-    /// The three clean states of an install, read from the on-disk unit files
-    /// the installer writes — no `launchctl`/`systemctl` call.
+    /// The states an install is in before the manager is asked at all — no
+    /// files, some files, no expected files. None of them reaches a probe, so
+    /// this stays a pure file read on every platform; the states that do ask
+    /// launchd are the tests below.
     #[test]
-    fn schedule_install_state_reads_the_unit_files() {
+    fn schedule_install_state_counts_the_unit_files() {
         let home = tempfile::TempDir::new().unwrap();
         let targets = vec![Some("a".to_string()), Some("b".to_string())];
         let dir = home.path().join("Library/LaunchAgents");
@@ -2765,6 +3185,7 @@ mod tests {
                 &targets,
                 home.path(),
                 Path::new("launchctl"),
+                TEST_DOMAIN,
             ),
             ScheduleInstall::NotInstalled
         );
@@ -2780,26 +3201,12 @@ mod tests {
                 &targets,
                 home.path(),
                 Path::new("launchctl"),
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Partial {
                 present: 1,
                 expected: 2
             }
-        );
-        let b = dir.join(format!(
-            "{}.plist",
-            launchd_label_for_destination(Unit::RunOnce, Some("b"))
-        ));
-        fs::write(&b, b"<plist/>").unwrap();
-        assert_eq!(
-            schedule_install_state(
-                Unit::RunOnce,
-                Format::Launchd,
-                &targets,
-                home.path(),
-                Path::new("launchctl"),
-            ),
-            ScheduleInstall::Installed
         );
 
         // No expected unit is no install, never "trivially installed".
@@ -2809,7 +3216,8 @@ mod tests {
                 Format::Launchd,
                 &[],
                 home.path(),
-                Path::new("launchctl")
+                Path::new("launchctl"),
+                TEST_DOMAIN,
             ),
             ScheduleInstall::NotInstalled
         );
@@ -2833,6 +3241,7 @@ mod tests {
                 &targets,
                 home.path(),
                 &fake.script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::NotInstalled
         );
@@ -2844,6 +3253,7 @@ mod tests {
                 &targets,
                 home.path(),
                 &fake.script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Installed
         );
@@ -2898,7 +3308,8 @@ mod tests {
                 Format::Systemd,
                 &[None],
                 home.path(),
-                &fake.script
+                &fake.script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Unconfirmed {
                 present: 1,
@@ -2927,7 +3338,8 @@ mod tests {
                 Format::Systemd,
                 &[None],
                 home.path(),
-                &fake.script
+                &fake.script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Installed
         );
@@ -2956,6 +3368,7 @@ mod tests {
                 &[None],
                 home.path(),
                 &home.path().join("no-such-systemctl"),
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Unconfirmed {
                 present: 1,
@@ -2987,12 +3400,218 @@ mod tests {
                 Format::Systemd,
                 &targets,
                 home.path(),
-                &fake.script
+                &fake.script,
+                TEST_DOMAIN,
             ),
             ScheduleInstall::Unconfirmed {
                 present: 2,
                 expected: 2
             }
+        );
+    }
+
+    /// Write the plist `render` produces for one unit, where the installer
+    /// writes it, so a probe reads the bytes launchd would.
+    fn write_one_plist(home: &Path, unit: Unit) -> PathBuf {
+        let files = render(
+            unit,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            0,
+            &RunOnceArgs::default(),
+            &ReclaimStageArgs::default(),
+            home,
+        );
+        write_plists(home, &files);
+        home.join("Library/LaunchAgents")
+            .join(unit_file_name(unit, Format::Launchd, None))
+    }
+
+    /// W287, §2 on macOS: the plist is on disk and launchd has not loaded it —
+    /// the exact state a failed `bootstrap` leaves, and the state
+    /// `schedule --output` leaves until the printed command is run. Calling
+    /// that `installed` is the false positive the report filed.
+    #[cfg(unix)]
+    #[test]
+    fn a_plist_launchd_did_not_load_is_unconfirmed() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_one_plist(home.path(), Unit::RunOnce);
+        let fake = launchd_answers(home.path(), false);
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &[None],
+                home.path(),
+                &fake,
+                TEST_DOMAIN,
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 1,
+                expected: 1
+            }
+        );
+    }
+
+    /// The same plist with launchd confirming the agent loaded — the pair of
+    /// facts an "installed" claim needs. An install state that reported less
+    /// than both would be the opposite defect: a working agent talked down.
+    #[cfg(unix)]
+    #[test]
+    fn a_plist_launchd_confirms_is_installed() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_one_plist(home.path(), Unit::RunOnce);
+        let fake = launchd_answers(home.path(), true);
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &[None],
+                home.path(),
+                &fake,
+                TEST_DOMAIN,
+            ),
+            ScheduleInstall::Installed
+        );
+    }
+
+    /// A `launchctl` that cannot be run at all confirms nothing either, and is
+    /// a third state rather than "launchd said no": the note [`next_run`]
+    /// carries says which of the two it was.
+    #[cfg(unix)]
+    #[test]
+    fn an_unaskable_launchctl_still_gets_no_installed_claim() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_one_plist(home.path(), Unit::RunOnce);
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &[None],
+                home.path(),
+                &home.path().join("no-such-launchctl"),
+                TEST_DOMAIN,
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 1,
+                expected: 1
+            }
+        );
+    }
+
+    /// Multi-destination on launchd: both plists present, neither agent loaded.
+    /// One unloaded agent is enough to unconfirm the install, for the same
+    /// reason one unarmed timer is on systemd.
+    #[cfg(unix)]
+    #[test]
+    fn one_unloaded_launchd_agent_unconfirms_the_whole_install() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        for destination in ["alpha", "beta"] {
+            fs::write(
+                agents.join(format!(
+                    "{}.plist",
+                    launchd_label_for_destination(Unit::RunOnce, Some(destination))
+                )),
+                b"<plist/>",
+            )
+            .unwrap();
+        }
+        let fake = launchd_answers(home.path(), false);
+        let targets = vec![Some("alpha".to_string()), Some("beta".to_string())];
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &targets,
+                home.path(),
+                &fake,
+                TEST_DOMAIN,
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 2,
+                expected: 2
+            }
+        );
+    }
+
+    /// A plist whose slot is a real calendar time does not make that time the
+    /// next run unless launchd is going to reach it. The two assertions below
+    /// are the same plist, the same clock and the same code — only the
+    /// manager's answer differs, so the difference between a time and an
+    /// explanation has to be the manager's answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_plist_launchd_did_not_load_reports_no_next_run() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_one_plist(home.path(), Unit::ReclaimStage);
+        let unloaded = launchd_answers(home.path(), false);
+
+        let none = next_run(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            &unloaded,
+            TEST_DOMAIN,
+            local_noon(),
+        );
+        assert_eq!(
+            none.value(),
+            None,
+            "a calendar slot launchd will never reach is not a next run"
+        );
+        let note = none.note().expect("the empty answer carries its reason");
+        assert!(
+            note.contains("has not loaded"),
+            "the manager answered that it is not loaded, and the note says so: {note}"
+        );
+
+        let loaded = launchd_answers(home.path(), true);
+        let known = next_run(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            &loaded,
+            TEST_DOMAIN,
+            local_noon(),
+        );
+        assert!(
+            known.value().is_some(),
+            "the same plist with the agent loaded is a time: {:?}",
+            known.note()
+        );
+    }
+
+    /// The other unknown: a `launchctl` that cannot be run is not a manager
+    /// that answered "not loaded", and the note must not collapse the two.
+    #[cfg(unix)]
+    #[test]
+    fn an_unaskable_launchctl_leaves_the_launchd_next_run_unknown() {
+        let home = tempfile::TempDir::new().unwrap();
+        write_one_plist(home.path(), Unit::ReclaimStage);
+
+        let next = next_run(
+            Unit::ReclaimStage,
+            Format::Launchd,
+            &[None],
+            home.path(),
+            &home.path().join("no-such-launchctl"),
+            TEST_DOMAIN,
+            local_noon(),
+        );
+        assert_eq!(next.value(), None);
+        let note = next.note().expect("the empty answer carries its reason");
+        assert!(
+            note.contains("could not be run to ask"),
+            "no answer is not the answer \"not loaded\": {note}"
         );
     }
 }
