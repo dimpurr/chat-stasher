@@ -176,13 +176,12 @@ pub(super) struct Hit {
 /// never indexed. The page would then call the index complete and print a zero
 /// as a proven absence over text nobody looked at.
 ///
-/// `indexed` and `total` are counted over the same set, so
-/// `indexed + not_searchable() == total` always — the three numbers on the
-/// coverage line and the JSON body add up because they are one measurement,
-/// not three.
+/// `indexed`, `total` and the two gaps are counted over the same set, so
+/// `indexed + not_searchable() == total` always — the numbers on the coverage
+/// line and the JSON body add up because they are one measurement, not several.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Coverage {
-    /// Sessions in this view the index holds a document for.
+    /// Sessions in this view the index holds searchable text for.
     pub indexed: usize,
     /// Sessions this view holds.
     pub total: usize,
@@ -190,21 +189,40 @@ pub(super) struct Coverage {
     /// hold, as `(machine, indexed, in view)`. The machine, not a ratio, is
     /// what makes the gap actionable — "1 machine behind" cannot be acted on.
     pub behind: Vec<(String, usize, usize)>,
+    /// Sessions in this view the index holds but cannot read, grouped by the
+    /// reason it could not: the archived format of the shard, `("sqlite", 141)`,
+    /// or the read failure itself where the archive could not hand it over.
+    ///
+    /// A third state beside "indexed" and "absent", and it is not a flavour of
+    /// either: the archive handed the index a shard, so the session is not
+    /// missing, and no query can match it, so it is not searched. Counting it
+    /// as indexed is how a zero came to be printed over 2,048 sessions nobody
+    /// had read (W255 C2); counting it as absent would accuse the archive of
+    /// losing shards it holds.
+    pub not_indexable: Vec<(String, usize)>,
 }
 
 impl Coverage {
-    /// True when every session in this view is in the index. This is what lets
-    /// a zero be read as an answer instead of as a hole in the index.
+    /// True when every session in this view can be answered for — searched, or
+    /// known to be out of reach. This is what lets a zero be read as an answer
+    /// instead of as a hole in the index, so an unreadable session makes it
+    /// false: a session nobody could read is a hole, whatever the reason.
     pub fn complete(&self) -> bool {
-        self.behind.is_empty()
+        self.behind.is_empty() && self.not_indexable.is_empty()
     }
 
-    /// Sessions in this view the index cannot answer for.
+    /// Sessions in this view the index cannot answer for, by every reason.
+    ///
+    /// The complement of `indexed`, and computed as one: the two lists above
+    /// are two partitions of this set — by machine for the sessions the index
+    /// holds nothing for, by reason for the ones it holds and cannot read — and
+    /// **neither is added into this number**. Adding them is how a session the
+    /// index held but could not read came to be counted twice, once as its
+    /// machine's gap and once as its format's, so that a page holding one such
+    /// session said two were not searchable (W267 review, High). A subtraction
+    /// of two counts taken over one set cannot double-count.
     pub fn not_searchable(&self) -> usize {
-        self.behind
-            .iter()
-            .map(|(_, indexed, in_view)| in_view.saturating_sub(*indexed))
-            .sum()
+        self.total.saturating_sub(self.indexed)
     }
 
     fn of(summary: &crate::fts::IndexSummary, data: &UiData) -> Self {
@@ -216,29 +234,60 @@ impl Coverage {
         // answer for, and counting it here is what would let a zero-hit query be
         // reported as a complete answer for text the current shard never
         // supplied.
-        let indexed_ids = count_by_machine_id(
-            in_view
-                .iter()
-                .filter(|id| summary.covers(id))
-                .map(String::as_str),
-        );
+        //
+        // The sessions that are not covered are split by **why**, and split
+        // here, in the one pass that walks the view: one that the index holds
+        // and could not read belongs to the format tally below, and one it holds
+        // nothing at all for belongs to the machine gap. Counting a session in
+        // both is how this page came to say "2 session(s) are not searchable"
+        // about one session (W267 review, High) — the two lists are two
+        // partitions of one set, never two sets.
+        let mut covered: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut unreadable: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut formats: BTreeMap<&str, usize> = BTreeMap::new();
+        for id in &in_view {
+            let machine = crate::ui::machine_of_document_id(id);
+            if summary.covers(id) {
+                *covered.entry(machine).or_insert(0) += 1;
+            } else if let Some(reason) = summary.not_indexable.get(id) {
+                *unreadable.entry(machine).or_insert(0) += 1;
+                *formats.entry(reason.as_str()).or_insert(0) += 1;
+            }
+        }
         let mut behind: Vec<(String, usize, usize)> = Vec::new();
         for (machine, count) in count_by_machine_id(in_view.iter().map(String::as_str)) {
             // reason: a machine the index holds no document for has indexed
             // **zero** of this view's sessions. That is the measurement the
             // coverage line is made of, not a default standing in for an
-            // unknown: `indexed_ids` counts this view's own sessions against
-            // the index's complete set of ids, so a missing machine key is an
+            // unknown: `covered` counts this view's own sessions against the
+            // index's complete set of ids, so a missing machine key is an
             // absence and not a failure to read.
-            let indexed = indexed_ids.get(&machine).copied().unwrap_or(0);
-            if indexed < count {
+            let indexed = covered.get(machine.as_str()).copied().unwrap_or(0);
+            // Only the sessions the index holds *nothing* for make a machine
+            // "behind": the ones it holds and cannot read are named by reason
+            // below, and a machine listed here for them would put one session
+            // on the page twice. `unreadable` cannot overcount — the two maps
+            // are filled from disjoint arms of one loop.
+            //
+            // reason: a machine with no unreadable session of its own has zero
+            // of them, which is the measurement this sum is over — the map is
+            // keyed by the machines that have one, so a missing key is an
+            // absence and not a failure to count.
+            let unreadable_here = unreadable.get(machine.as_str()).copied().unwrap_or(0);
+            if indexed + unreadable_here < count {
                 behind.push((machine, indexed, count));
             }
         }
+        let mut not_indexable: Vec<(String, usize)> = formats
+            .into_iter()
+            .map(|(reason, count)| (reason.to_string(), count))
+            .collect();
+        not_indexable.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         Self {
-            indexed: indexed_ids.values().sum(),
+            indexed: covered.values().sum(),
             total: in_view.len(),
             behind,
+            not_indexable,
         }
     }
 }
@@ -581,14 +630,35 @@ fn coverage_paragraph(answer: &Answer) -> String {
                         .join(", ")
                 )
             };
+            // Sessions the index holds and cannot read are named on the same
+            // line as the ones it is behind on, because they change the same
+            // thing: whether a zero below this line means anything.
+            let unreadable = if coverage.not_indexable.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " · <b>{count}</b> session(s) not indexable ({formats})",
+                    count = coverage
+                        .not_indexable
+                        .iter()
+                        .map(|(_, count)| *count)
+                        .sum::<usize>(),
+                    formats = coverage
+                        .not_indexable
+                        .iter()
+                        .map(|(format, count)| format!("{format} {count}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             let written = match summary.written_unix {
                 Some(unix) => fmt_unix(unix),
                 None => "unknown".to_string(),
             };
             format!(
                 "<p class=sub>index coverage: <b>{indexed}</b> of <b>{total}</b> session(s) in \
-                 this view indexed{behind} · index file written: {written} (the file's mtime, \
-                 not a recorded build time) · mode: fts (trigram)</p>\n",
+                 this view indexed{behind}{unreadable} · index file written: {written} (the \
+                 file's mtime, not a recorded build time) · mode: fts (trigram)</p>\n",
                 indexed = coverage.indexed,
                 total = coverage.total,
             )
@@ -619,8 +689,17 @@ fn index_parts_line(answer: &Answer) -> String {
         .map(|(label, state)| {
             let words = match state {
                 IndexState::Ready(summary) => format!(
-                    "ready — {} document(s){}",
-                    summary.ids.len(),
+                    "ready — {} document(s) indexed{}{}",
+                    // The indexed count, not what the file holds: a document
+                    // this destination cannot read is not one it can answer
+                    // for, and the number beside a destination label is read as
+                    // "how much can be searched here".
+                    summary.indexable(),
+                    if summary.not_indexable.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {} not indexable", summary.not_indexable.len())
+                    },
                     match summary.written_unix {
                         Some(unix) => format!(", written {}", esc(&fmt_unix(unix))),
                         None => String::new(),
@@ -963,8 +1042,8 @@ fn no_hit_html(
                 "<div class=warn><b>UNKNOWN — not \"not there\".</b> The index covers \
                  <b>{indexed}</b> of the <b>{total}</b> session(s) in this view, so \
                  <b>{missing}</b> session(s) are <i>not searchable</i>: a session the index \
-                 cannot answer for cannot be looked up, which is not the same as looking and not \
-                 finding it.<ul>{machines}</ul></div>\n",
+                 cannot answer for cannot be looked up, which is not the same as looking and \
+                 not finding it.<ul>{machines}{formats}</ul></div>\n",
                 indexed = coverage.indexed,
                 total = coverage.total,
                 missing = coverage.not_searchable(),
@@ -976,6 +1055,18 @@ fn no_hit_html(
                         esc(machine),
                         indexed,
                         in_view
+                    ))
+                    .collect::<String>(),
+                // The sessions the index holds and could not read are listed
+                // apart from the machines behind it, because the sentence that
+                // fixes them is different: re-running a build cannot help, and
+                // naming the format is what says so.
+                formats = coverage
+                    .not_indexable
+                    .iter()
+                    .map(|(format, count)| format!(
+                        "<li class=mono>{count} session(s) in this view {}</li>",
+                        esc(&crate::fts::not_indexable_label(format))
                     ))
                     .collect::<String>(),
             ),
@@ -1145,6 +1236,97 @@ mod tests {
         );
     }
 
+    /// A session the index holds but cannot read is the third state: not
+    /// indexed (no query can match it), and not absent (the archive handed its
+    /// shard over). The page must say which format could not be read and must
+    /// not print a zero as an absence.
+    ///
+    /// Before this state existed, such a session was counted as indexed, so the
+    /// page called the view complete and answered "not in the indexed archive"
+    /// over text nobody had read — the false negative W255 C2 measured on
+    /// 2,048 sessions.
+    #[test]
+    fn a_session_the_index_cannot_read_is_neither_indexed_nor_absent() {
+        let index = complete_index().with_unreadable(&[(ON_M2, "sqlite")]);
+        let html = page("/search?q=synthetic", &index).body;
+        assert!(html.contains("UNKNOWN — not \"not there\"."), "{html}");
+        assert!(
+            html.contains("not indexable: sqlite"),
+            "the format must be named, not just counted: {html}"
+        );
+        assert!(
+            !html.contains("Not in the indexed archive"),
+            "a view holding an unreadable session must never render a zero as absence: {html}"
+        );
+        // The coverage line counts it as *not* indexed and names the format,
+        // so the three numbers and the sentence above them agree.
+        assert!(
+            html.contains("session(s) not indexable (sqlite 1)"),
+            "{html}"
+        );
+        // 3 of the fixture's 4 sessions are answered for; the unreadable one is
+        // not folded into that 3.
+        assert!(
+            html.contains("index coverage: <b>3</b> of <b>4</b>"),
+            "{html}"
+        );
+
+        // The numbers are one measurement, and this is the arithmetic that
+        // makes the coverage line readable: the page said "2 session(s) are not
+        // searchable" for one such session, because the session was counted
+        // once as its machine's gap and once as its format's (W267 review,
+        // High). Computed, not read off the rendering, so a regression here is
+        // a wrong number rather than a changed word.
+        let coverage = Coverage::of(&index.summary(), &fixture::data());
+        assert_eq!(coverage.indexed, 3);
+        assert_eq!(coverage.total, 4);
+        assert_eq!(coverage.not_searchable(), 1);
+        assert_eq!(coverage.indexed + coverage.not_searchable(), coverage.total);
+        // And the session is listed once: `m-2` is not "behind", because the
+        // index does hold the session it is missing — it just cannot read it.
+        // It is named by the format list, which is the one place a reader can
+        // act on.
+        assert!(
+            coverage.behind.is_empty(),
+            "a machine whose only gap is unreadable sessions is not behind: {:?}",
+            coverage.behind
+        );
+        assert_eq!(coverage.not_indexable, vec![("sqlite".to_string(), 1)]);
+
+        // The same numbers on the machine-readable route, which publishes its
+        // own `not_searchable` rather than the rendered sentence.
+        let body = page_with(
+            "/api/search?q=definitely-not-in-this-archive",
+            &fixture::data(),
+            &index,
+        )
+        .body;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("`/api/search` is not JSON: {e}\n{body}"));
+        assert_eq!(value["coverage"]["indexed"].as_u64(), Some(3), "{body}");
+        assert_eq!(
+            value["coverage"]["not_searchable"].as_u64(),
+            Some(1),
+            "{body}"
+        );
+        assert_eq!(value["coverage"]["in_view"].as_u64(), Some(4), "{body}");
+        assert_eq!(
+            value["coverage"]["machines_behind"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "the session is listed once, and this is the other list: {body}"
+        );
+        // The reason is on this route too, so a consumer that never sees the
+        // page can tell an unreadable format from a machine the index is behind
+        // on — the fact a reader would act on.
+        assert_eq!(
+            value["coverage"]["not_indexable"],
+            serde_json::json!([{"reason": "sqlite", "count": 1}]),
+            "{body}"
+        );
+    }
+
     /// An index answers for a **session**, not for a slot: coverage is read
     /// from the ids the index holds, never from how many documents sit on each
     /// machine.
@@ -1250,6 +1432,8 @@ mod tests {
                 title: "synthetic title".to_string(),
                 body: format!("the quiet hedgehog walks in {id}"),
                 message_offsets: Vec::new(),
+                not_indexable: None,
+                unread_lines: 0,
             },
             bytes_read: 7,
         };

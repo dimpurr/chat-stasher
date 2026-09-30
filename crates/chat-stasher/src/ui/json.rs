@@ -327,6 +327,14 @@ fn search_json(
             "machines_behind": coverage.behind.iter().map(|(machine, indexed, in_view)| {
                 serde_json::json!({"machine": machine, "indexed": indexed, "in_view": in_view})
             }).collect::<Vec<_>>(),
+            // The other partition of `not_searchable`, and the same one the
+            // page renders: sessions the index holds and could not read, by the
+            // reason it could not. A consumer that reads only `not_searchable`
+            // learns that a zero is not an answer; this is what says which
+            // archived format to go and look at.
+            "not_indexable": coverage.not_indexable.iter().map(|(reason, count)| {
+                serde_json::json!({"reason": reason, "count": count})
+            }).collect::<Vec<_>>(),
         })
     });
     let (query_state, hits, too_short) = match &answer.outcome {

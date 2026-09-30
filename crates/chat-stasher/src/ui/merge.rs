@@ -342,17 +342,28 @@ impl TextIndex for MergedTextIndex {
             let mut ids: BTreeSet<String> = BTreeSet::new();
             let mut written: Option<i64> = None;
             let mut all_dated = true;
+            // A document that one part can answer for is searchable, because a
+            // query is asked of every part and the answers are unioned (see
+            // `query`). So the merged set of unreadable documents holds only
+            // the ones **every** part that holds them reports as unreadable —
+            // counting a session one destination could read as unreadable
+            // everywhere would hide text that is there.
+            //
             // Per id: how many readable parts hold it, and how many of those
-            // could not re-read it in their last build.
+            // could not re-read it in their last build. The reason is kept
+            // beside the tally because the merged summary reports it the same
+            // way a single part's does.
             let mut holders: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+            let mut reasons: BTreeMap<String, String> = BTreeMap::new();
             for state in &states {
                 if let IndexState::Ready(summary) = state {
                     ids.extend(summary.ids.iter().cloned());
                     for id in &summary.ids {
                         let entry = holders.entry(id.clone()).or_insert((0, 0));
                         entry.0 += 1;
-                        if summary.not_indexable.contains(id) {
+                        if let Some(reason) = summary.not_indexable.get(id) {
                             entry.1 += 1;
+                            reasons.entry(id.clone()).or_insert_with(|| reason.clone());
                         }
                     }
                     match (written, summary.written_unix) {
@@ -368,10 +379,11 @@ impl TextIndex for MergedTextIndex {
             // where the merged index can in fact answer. A part that never
             // mentioned the id does not hold it, so it does not vote either
             // way — the absence of a row is not a failure to read one.
-            let not_indexable: BTreeSet<String> = holders
-                .iter()
-                .filter(|(_, (holding, failing))| holding == failing)
-                .map(|(id, _)| id.clone())
+            let not_indexable: BTreeMap<String, String> = reasons
+                .into_iter()
+                .filter(|(id, _)| {
+                    matches!(holders.get(id), Some((holding, failing)) if holding == failing)
+                })
                 .collect();
             // The merged index is only as fresh as its oldest part, and if any
             // part records no write time at all, the union has none either: the
@@ -744,13 +756,24 @@ mod tests {
 #[cfg(test)]
 mod index_tests {
     use super::*;
-    use crate::fts::{DocText, Index, SourceDoc};
+    use crate::fts::{DocText, Index, LoadedDoc, SourceDoc};
 
     fn doc(title: &str, body: &str) -> DocText {
         DocText {
             title: title.into(),
             body: body.into(),
             message_offsets: Vec::new(),
+            not_indexable: None,
+            unread_lines: 0,
+        }
+    }
+
+    /// The same document as a build closure's answer, with the bytes the loader
+    /// reports having read beside it (C6).
+    fn loaded(title: &str, body: &str) -> LoadedDoc {
+        LoadedDoc {
+            text: doc(title, body),
+            bytes_read: 7,
         }
     }
 
@@ -820,7 +843,7 @@ mod index_tests {
             .into_iter()
             .map(|(label, state)| {
                 let word = match state {
-                    IndexState::Ready(summary) => format!("ready:{}", summary.ids.len()),
+                    IndexState::Ready(summary) => format!("ready:{}", summary.indexable()),
                     IndexState::Missing => "missing".to_string(),
                     IndexState::Unreadable(_) => "unreadable".to_string(),
                 };
@@ -867,6 +890,82 @@ mod index_tests {
         };
         assert_eq!(set.matches.len(), 1);
         assert_eq!(set.matches[0].id, "m-1/only-a");
+    }
+
+    /// One destination's index holding `docs` as `(id, readable)`.
+    fn index_marking(root: &std::path::Path, docs: &[(&str, Option<&str>)]) -> Index {
+        let index = Index::at(root.to_path_buf());
+        let sources: Vec<SourceDoc> = docs
+            .iter()
+            .map(|(id, readable)| {
+                SourceDoc::fingerprinted((*id).to_string(), format!("sha-{id}-{readable:?}"))
+            })
+            .collect();
+        let bodies: std::collections::BTreeMap<String, Option<&str>> = docs
+            .iter()
+            .map(|(id, readable)| ((*id).to_string(), *readable))
+            .collect();
+        index
+            .build(&sources, |id| match bodies.get(id).copied().flatten() {
+                Some(body) => Ok(loaded("synthetic title", body)),
+                None => {
+                    let mut text = doc("synthetic title", "");
+                    text.not_indexable = Some("sqlite".to_string());
+                    Ok(LoadedDoc {
+                        text,
+                        bytes_read: 7,
+                    })
+                }
+            })
+            .unwrap();
+        index
+    }
+
+    /// A document one destination cannot read is not unreadable in the union
+    /// when another destination holds it readably: a query runs against every
+    /// readable index, so the session **is** searchable through the part that
+    /// read it. Calling it unreadable would hide text that is there — the same
+    /// mistake, in the other direction, as counting an unreadable document as
+    /// indexed.
+    #[test]
+    fn a_document_the_union_cannot_read_is_one_no_part_could_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = index_marking(&dir.path().join("a"), &[("m-1/shared", None)]);
+        let b = index_marking(
+            &dir.path().join("b"),
+            &[("m-1/shared", Some("only beta read this hedgehog text"))],
+        );
+        let merged =
+            MergedTextIndex::new(vec![("alpha".into(), Some(a)), ("beta".into(), Some(b))]);
+        let IndexState::Ready(summary) = merged.state() else {
+            panic!("one readable part is a ready index");
+        };
+        assert_eq!(summary.ids.len(), 1);
+        assert!(
+            summary.not_indexable.is_empty(),
+            "a document beta can read is not unreadable in the union"
+        );
+        assert_eq!(summary.indexable(), 1);
+        let QueryResult::Matches(set) = merged.query("hedgehog").unwrap() else {
+            panic!("a long-enough query is answered");
+        };
+        assert_eq!(set.matches.len(), 1, "beta's copy answers the query");
+
+        // Both destinations unable to read it: no part can answer, so the
+        // union says so — and says it as unreadable, never as absent.
+        let dir = tempfile::tempdir().unwrap();
+        let a = index_marking(&dir.path().join("a"), &[("m-1/shared", None)]);
+        let b = index_marking(&dir.path().join("b"), &[("m-1/shared", None)]);
+        let merged =
+            MergedTextIndex::new(vec![("alpha".into(), Some(a)), ("beta".into(), Some(b))]);
+        let IndexState::Ready(summary) = merged.state() else {
+            panic!("two built indexes are ready");
+        };
+        assert_eq!(
+            summary.not_indexable.get("m-1/shared").map(String::as_str),
+            Some("sqlite")
+        );
+        assert_eq!(summary.indexable(), 0);
     }
 
     /// One destination with no index is named as such rather than silently

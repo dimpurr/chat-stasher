@@ -2100,8 +2100,41 @@ pub(crate) mod fixture {
             self
         }
 
+        /// The same index, with sessions it holds but cannot read marked by the
+        /// archived format it could not read — the state W255 C2 found on 2,048
+        /// sessions that every surface still counted as indexed.
+        ///
+        /// The ids are named rather than derived: an index marks a document
+        /// unreadable only when its shard was handed over and not understood,
+        /// so the fixture has to say which documents those were.
+        pub fn with_unreadable(mut self, unreadable: &[(&str, &str)]) -> Self {
+            if let IndexState::Ready(summary) = &mut self.state {
+                for (id, format) in unreadable {
+                    assert!(
+                        summary.ids.contains(*id),
+                        "an index cannot call a document unreadable while not holding it"
+                    );
+                    summary
+                        .not_indexable
+                        .insert((*id).to_string(), (*format).to_string());
+                }
+            }
+            self
+        }
+
         fn called(&self, call: String) {
             self.calls.borrow_mut().push(call);
+        }
+
+        /// The summary this stub reports, for a test that asks the coverage
+        /// question directly instead of reading the numbers off a rendering.
+        /// Panics for a stub that is not a readable index, which is the same
+        /// state a caller would have nothing to ask about.
+        pub fn summary(&self) -> crate::fts::IndexSummary {
+            match &self.state {
+                IndexState::Ready(summary) => summary.clone(),
+                _ => panic!("this stub does not hold a readable index"),
+            }
         }
     }
 
