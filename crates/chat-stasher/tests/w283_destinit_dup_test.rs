@@ -569,6 +569,62 @@ fn a_fresh_destination_over_a_tripled_stage_seals_nothing() {
     );
 }
 
+/// Duplicated lines may precede the remaining source lines. The cursor must
+/// find the longest complete source prefix anywhere in the stage, independent
+/// of how the old bug arranged its repeated copies.
+#[test]
+fn a_fresh_destination_recognizes_duplicated_line_arrangements() {
+    for (name, source, staged) in [
+        (
+            "single duplicated line",
+            b"A\n".as_slice(),
+            b"A\nA\n".as_slice(),
+        ),
+        (
+            "duplicate before remaining line",
+            b"A\nB\n".as_slice(),
+            b"A\nA\nB\n".as_slice(),
+        ),
+        (
+            "two duplicated copies",
+            b"A\nB\n".as_slice(),
+            b"A\nB\nA\nB\n".as_slice(),
+        ),
+    ] {
+        let fx = Fixture::new(source);
+        fx.plant(
+            &std::str::from_utf8(staged)
+                .unwrap()
+                .trim_end()
+                .split('\n')
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(fx.concat(), staged, "fixture arrangement: {name}");
+
+        fx.collect("fresh");
+        assert_eq!(
+            fx.concat(),
+            staged,
+            "already sealed source lines must not be appended again: {name}"
+        );
+    }
+}
+
+/// A genuine append after a doubled stage is still source data. The cursor
+/// finds the covered prefix and seals only the unseen B here.
+#[test]
+fn a_genuine_append_after_doubling_is_sealed_once() {
+    let fx = Fixture::new(b"A\n");
+    fx.collect("first");
+    fx.plant(&["A"]);
+    fx.append(b"B\n");
+
+    fx.collect("second");
+
+    assert_eq!(fx.concat(), b"A\nA\nB\n");
+    assert_eq!(fx.shard_count(), 3);
+}
+
 /// A body sealed over two passes (`A`, then `B`) and then re-sealed by the
 /// defect as *one* shard holding both — the shape a multi-shard body leaves
 /// when a destination with no cursor re-reads the whole source. The stage's

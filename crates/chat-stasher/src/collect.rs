@@ -391,24 +391,53 @@ fn stage_tail_is(body: &[u8], frame: &[u8]) -> bool {
     !frame.is_empty() && body.ends_with(frame)
 }
 
-/// The longest line boundary at which `body` and `source` agree.
+/// The longest source line prefix present contiguously in the stage.
 ///
-/// `body` is the stage's concatenation and `source` is the file being read, so
-/// the answer is how much of this source the stage already holds — which is the
-/// position the pass should resume from. It is always a line boundary: an
-/// offset that split a line would leave the next pass sealing the rest of that
-/// line as a line of its own.
-fn shared_prefix_boundary(body: &[u8], source: &[u8]) -> u64 {
-    let shared = body
-        .iter()
-        .zip(source)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let boundary = body[..shared]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
-    boundary as u64
+/// Old destination passes could seal the same source lines again in a new
+/// shard. Shard concatenation therefore is not necessarily a source prefix:
+/// `A,A,B` and `A,B,A,B` both hold a contiguous copy of the complete `A,B`
+/// source. Matching ordered lines preserves their meaning and multiplicity;
+/// source `A,A,B` still needs two adjacent `A` records before `B` is covered.
+fn covered_source_prefix(stage: &[u8], source: &[u8]) -> u64 {
+    let (stage_lines, _) = complete_lines(stage);
+    let (source_lines, source_complete_len) = complete_lines(source);
+    if source_lines.is_empty() {
+        return 0;
+    }
+
+    // KMP over complete lines finds the longest source prefix occurring as a
+    // contiguous run anywhere in the stage, in linear time even for large
+    // transcripts. Comparing line bytes also prevents a match from starting
+    // midway through a record.
+    let mut prefix = vec![0usize; source_lines.len()];
+    for index in 1..source_lines.len() {
+        let mut matched = prefix[index - 1];
+        while matched > 0 && source_lines[index] != source_lines[matched] {
+            matched = prefix[matched - 1];
+        }
+        if source_lines[index] == source_lines[matched] {
+            matched += 1;
+        }
+        prefix[index] = matched;
+    }
+
+    let mut matched = 0usize;
+    let mut best = 0usize;
+    for line in stage_lines {
+        while matched > 0 && line != source_lines[matched] {
+            matched = prefix[matched - 1];
+        }
+        if line == source_lines[matched] {
+            matched += 1;
+            best = best.max(matched);
+            if matched == source_lines.len() {
+                return source_complete_len as u64;
+            }
+        }
+    }
+
+    let covered_len: usize = source_lines[..best].iter().map(|line| line.len() + 1).sum();
+    covered_len.min(source_complete_len) as u64
 }
 
 /// The stage's own sealed shards, expressed as a cursor, when they provably
@@ -458,9 +487,9 @@ fn shared_prefix_boundary(body: &[u8], source: &[u8]) -> u64 {
 /// same evidence. Reading the stage's length as the position would put the pass
 /// past the end of an unchanged source (no cursor, so the whole file is read
 /// and sealed again: a third copy, and a fourth the next time), so the position
-/// is instead where the stage and the source **agree**, which is what
-/// [`shared_prefix_boundary`] answers for the one shape whose cursor is a prefix
-/// of a file. The whole-file and compressed shapes have no such cursor: what
+/// is instead the longest source prefix whose complete lines the stage already
+/// holds contiguously and in order. The whole-file and compressed shapes have
+/// no such incremental cursor: what
 /// they can ask is what the stage sealed *last*, and that is
 /// [`stage_tail_is`]. A SQLite session asks the same question at its own call
 /// site, against the export the pass has just produced.
@@ -509,39 +538,36 @@ fn stage_prefix_entry(
     }
 
     if is_jsonl_path(&record.absolute_path) {
-        // The stage's concatenation is a committed prefix of the file. Hand it
-        // back as an offset cursor; the read path re-reads `[0, offset)`,
-        // compares it against `prefix_sha256`, and only then reads the delta.
-        //
-        // It is a *prefix*, not the stage's length: a stage the defect already
-        // touched holds the body twice, which is longer than the unchanged
-        // source, and handing that length back would put the pass past the end
-        // of the file — where it used to give up, read the whole source and
-        // seal it again. So the position is the longest line boundary at which
-        // the two agree. That is the one place this function reads the source,
-        // and the cost is unavoidable: whether the stage is ahead of the source
-        // by a repetition cannot be told from the stage alone. The read path
-        // re-proves the answer by hashing `[0, offset)` against
-        // `prefix_sha256`, so an over-claim cannot survive it; an underestimate
-        // would cost a re-seal, never a lost turn.
-        let len = fs::metadata(&record.absolute_path)
+        // The stage may hold duplicated lines in a different arrangement than
+        // the source. Derive its cursor from a contiguous run of complete
+        // source lines, so duplicate arrangements are recognized without
+        // treating reordered or missing repeated lines as covered.
+        // `read_jsonl_delta` re-reads and hashes the claimed source
+        // prefix before it accepts this cursor.
+        let source_len = fs::metadata(&record.absolute_path)
             .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
             .len();
-        let head = read_range(&record.absolute_path, 0, len.min(sealed.len() as u64))
-            .with_context(|| {
-                format!(
-                    "read source prefix ({})",
-                    path_digest(&record.absolute_path)
-                )
-            })?;
-        let offset = shared_prefix_boundary(&sealed, &head);
+        // No covered prefix can be longer than the stage body, so cap this
+        // probe there instead of reading an arbitrarily larger source.
+        let source = read_range(
+            &record.absolute_path,
+            0,
+            source_len.min(sealed.len() as u64),
+        )
+        .with_context(|| {
+            format!(
+                "read source prefix ({})",
+                path_digest(&record.absolute_path)
+            )
+        })?;
+        let offset = covered_source_prefix(&sealed, &source);
         if offset == 0 {
             return Ok(None);
         }
         return Ok(Some(OffsetEntry {
             offset,
             prefix_len: offset,
-            prefix_sha256: sha256_hex(&sealed[..offset as usize]),
+            prefix_sha256: sha256_hex(&source[..offset as usize]),
             compressed: false,
             opencode: None,
             store_fingerprint: None,
