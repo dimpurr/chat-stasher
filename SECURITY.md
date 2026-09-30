@@ -67,7 +67,7 @@ actually claims (each is derived from code in `docs-dev/threat-model.md`):
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
    `:1373-1376`).
 4. `push` creating a snapshot that silently drops content it cannot account for
-   (`crates/chat-stasher/src/main.rs:7834-7841,7858-7862`).
+   (`crates/chat-stasher/src/main.rs:7765-7772,7789-7793`).
 
 **Known and already documented, so not a new finding** — these are written up in
 [`docs-dev/threat-model.md`](docs-dev/threat-model.md) and we are not currently defending
@@ -75,8 +75,10 @@ against them:
 
 - The plaintext window before delivery: a captured conversation sits unencrypted
   in the extension's outbox until the native host acknowledges it.
-- The master key file being readable by anything running as your user.
-- Losing the key file, which makes the archive permanently unreadable.
+- A master key file being readable by anything running as your user. There is one
+  per archive copy, so this is every file named `masterkey*.json` under the data
+  directory.
+- Losing a key file, which makes the copy it opens permanently unreadable.
 - Backup metadata (size and timing) visible to a remote destination provider.
 
 If you have found a *worse* consequence of one of those than what the threat

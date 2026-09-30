@@ -14,6 +14,7 @@ Nothing below runs on the lost machine and nothing below needs it. Every command
 ## What this needs
 
 - **The destination**, declared in your config the way the lost machine declared it, and **its key file**. A destination is a full copy of an archive, and the key file is the only thing that opens it. There is no key recovery: if that file is gone, nothing on this page can help ([troubleshooting.md](../troubleshooting.md#i-lost-the-master-key)).
+- **The right key file — this is the step people get wrong.** Each archive copy has its own key. The destination `offsite` is opened by `masterkey-offsite.json`, not by the lost machine's `masterkey.json`, which opens that machine's *local* archive and is not used here at all. Restore the destination's own key at the same path it had on the lost machine — `~/.local/share/chat-stasher/masterkey-<destination>.json`, unless that machine's config set `key_file` to somewhere else ([config.md → `[destinations.<name>]`](../config.md#destinationsname) documents `key_file`) — and put it back at exactly that path. Getting this wrong is not silent: the tool exits `3` and says `cannot read masterkey file … (lost key?)`, which means nothing was read, not that the archive is empty. [troubleshooting.md](../troubleshooting.md#i-lost-the-master-key) is the short version.
 - **`chat-stasher`, on any computer.** Reading an archive needs the tool, not the machine that wrote it. If you are on a replacement machine, [troubleshooting.md](../troubleshooting.md#i-want-to-read-my-archive-on-another-machine) is the two-minute version of getting a destination declared here.
 - **Patience for one step.** One command below reads every byte of the destination rather than its metadata, and says so where it appears.
 
@@ -407,7 +408,7 @@ If the conversation was never archived in the first place, nothing here recovers
 
 - **`verify --level l3` for a lost machine.** It reconciles against the archiving machine's stage, and that stage is gone. Step 6 above is written as blocked rather than left out, and a page that dropped it would be promising a proof the tool cannot make.
 - **The recovered activity index is not read by `overview` or a date search yet.** The rebuild derives it correctly and writes it under this machine's cache; those commands still read the archive's copy. Step 3 has the whole of it.
-- **There is no key recovery.** If the destination's key file is gone, its archive is gone. Keep more than one copy of the key, somewhere other than the disk it protects.
+- **There is no key recovery.** If the destination's key file is gone, its archive is gone. Keep more than one copy of the key, somewhere other than the disk it protects. And keep a copy of **each** key — the local archive's and every destination's are different files ([setup.md](../setup.md#3-the-master-key)), and a backup that has only one of them recovers only the copy that one opens.
 - **Nothing writes sessions back into a tool's own folder.** `export` writes files in the tool's format, and what you do with them is your call.
 - **There is no redaction.** Anything you export carries whatever the conversation carried.
 

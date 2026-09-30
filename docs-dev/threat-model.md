@@ -763,9 +763,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:7858-7862`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:7789-7793`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:7834-7841`).
+  (`crates/chat-stasher/src/main.rs:7765-7772`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -824,7 +824,7 @@ a real limitation of the current code.
    retrieval paths, and both are payload-output commands — each puts
    conversation content where you can read it. `read` dumps **one session at a
    time** to stdout and prints its SHA-256
-   (`crates/chat-stasher/src/main.rs:421-424,8085-8239`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:418-421,8016-8170`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:652-732`) — see exposure 5
@@ -839,7 +839,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703,2102-2107`; `crates/chat-stasher/src/main.rs:8405-8716`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703,2102-2107`; `crates/chat-stasher/src/main.rs:8336-8647`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

@@ -219,6 +219,21 @@ under its own heading below.
   registry-driven table below it carries the same split. "Did not scan" is not
   "there is none", and the two numbers are now separate — the same distinction
   `status` already made in its own warning, from the same definition.
+- **A destination's key file is now named wherever a destination is created, and
+  the setup wizard asks for a backup of every key.** Each archive copy has its
+  own key, and a second machine reads a destination with `masterkey-<destination>.json`
+  and never with the local `masterkey.json` — so a user who followed the wizard
+  literally, backing up the one file it named, could not read their off-site
+  copy after losing a machine: measured on a real second machine as exit `3` and
+  `cannot read masterkey file … (lost key?)`. The wizard now reports every key
+  it asks about in `masterkey.keys[]`, each with its `scope`, `name`, `path` and
+  `declared` state; `dest-init` names the destination key it created on stdout;
+  and `doctor` (and `status --json`) report which key files this machine holds,
+  whether each is present here, and whether the user has declared a backup of
+  it. `status` adds a line per destination whose key is missing here or has no
+  declared backup, and stays silent otherwise, so its default body is unchanged
+  on a machine with nothing to report. One `--masterkey-saved-elsewhere`
+  declaration still covers every key of a run; it is recorded per copy.
 - **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
   other OS it is refused up front, with the reason that the macOS keychain
   does not exist there, instead of trying to run a tool that cannot be

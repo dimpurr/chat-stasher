@@ -268,12 +268,12 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:11869-11877,11887-11910`).
+(`crates/chat-stasher/src/main.rs:11732-11740,11750-11773`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
-(`crates/chat-stasher/src/doctor.rs:1313-1353`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:1314-1358`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:367-374`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -551,21 +551,33 @@ once from your shell before registering the host.
 
 See section 2. If you already did it, you do not need to do it again.
 
-### 4.3 Decide where the archive lives, and **back up your master key file**
+### 4.3 Decide where the archive lives, and **back up every master key file**
 
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
 (`crates/chat-stasher/src/main.rs:330-362,425-473,486-535`).
 
-🔴 **The master key file is the only key. Lose it and the archive can never be
-read again; there is no way to recover it.** The source's own words are "The
-masterkey is the repository's only key — losing it means the repo is unreadable
-forever" (`crates/chat-stasher/src/store.rs:1559-1561`). The key file is written
-with owner-only-readable permissions, on platforms that can express them
-(`crates/chat-stasher/src/store.rs:1659-1667`).
+🔴 **A key file is the only key to the repository it opens. Lose it and that
+repository can never be read again; there is no way to recover it.** The
+source's own words are "The masterkey is the repository's only key — losing it
+means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1559-1561`).
+The key file is written with owner-only-readable permissions, on platforms that
+can express them (`crates/chat-stasher/src/store.rs:1659-1667`).
 
-**Make a copy of it somewhere else right now.** No one can do this for you.
+🔴 **And there is one key file per repository, not one per machine.** The local
+archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
+each declared destination has its own, defaulting to
+`~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
+destination's `key_file` (`crates/chat-stasher/src/main.rs:7557-7562`). A second
+machine reads a destination with **that destination's** key and does not use the
+local one at all — so a backup that copies only the local key cannot read the
+off-site copies. Measured on a real second machine: restoring only the local key
+gives exit `3` and `cannot read masterkey file …/masterkey-<destination>.json
+(lost key?)`, and the destination's own key alone is sufficient.
+
+**Make a copy of every key file somewhere else right now.** No one can do this
+for you, and one copy does not restore another.
 
 `chat-stasher setup` reaches this point from the other side, and it is the one
 case where that command writes anything while exiting `2`. A declaration that a
@@ -573,8 +585,8 @@ copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
 `--masterkey-saved-elsewhere` creates the local repository and the key, reports
 the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:13101-13108`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:12672-12678`).
+remote step and the timer (`crates/chat-stasher/src/main.rs:13107-13114`; the
+refusal's own wording is `crates/chat-stasher/src/main.rs:12678-12684`).
 Re-running it with the declaration continues from the key just created. Nothing
 is archived on that run, and every other missing parameter still refuses before
 the first write.
@@ -915,12 +927,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:15702-15704`). This is the
+does not (`crates/chat-stasher/src/main.rs:15876-15878`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:15416-15444`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:15597-15625`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -936,7 +948,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:15704-15837`):
+(`crates/chat-stasher/src/main.rs:15878-16011`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -949,7 +961,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:15683-15688`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:15857-15862`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -959,7 +971,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:15372-15397`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:15544-15578`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -975,16 +987,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:993-1130,1168-1227`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:852-989,1099-1158`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:1010-1130`).
+(`crates/chat-stasher/src/doctor.rs:869-989`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:1464,1984-2045`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:1469,1990-2051`).
 The destination probes are the one check that touches the network; see section
-4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:993-1130,1168-1227`).
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:852-989,1099-1158`).
 
 ### 5.1 Exporting a day
 
@@ -1039,8 +1051,10 @@ confirmed in the code, not a temporary disclaimer.
   (`crates/chat-stasher/src/main.rs:421-473`). Restoring = for now you have to
   write your own script loop.
 
-- **🔴 Lose the master key and there is no way to recover it.** There is no
-  recovery process, no recovery code, no customer service. The source's own
+- **🔴 Lose a master key file and there is no way to recover the repository it
+  opens.** There is no recovery process, no recovery code, no customer service.
+  There is one file per repository, so losing one loses that copy and no other;
+  back up every one of them (section 4.3). The source's own
   words are in section 4.3 (`crates/chat-stasher/src/store.rs:1559-1566`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
@@ -1171,7 +1185,7 @@ touch it again.**
   half is one install per profile, and a profile you skip captures nothing.
 - `chat-stasher init`
 - Decide where the archive lives
-- 🔴 Back up the master key file
+- 🔴 Back up **every** master key file — the local archive's and each destination's
 - 🔴 If the destination is remote, trust its host key once (section 4.4)
 - Install the timer
 

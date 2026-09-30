@@ -22,7 +22,7 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 |---|---|---|
 | `archive_root` | unset | A path for archived snapshots. `doctor` is the only command that reads it today: when no `rustic_repo` is set, it is the label that command uses for the single-destination case. The archive itself is `rustic_repo`. |
 | `rustic_repo` | `~/.local/share/chat-stasher/repo` | The local archive used when no destination is declared. |
-| `rustic_key_file` | `~/.local/share/chat-stasher/masterkey.json` | Its key file, created with the archive. |
+| `rustic_key_file` | `~/.local/share/chat-stasher/masterkey.json` | Its key file, created with the archive. This key opens the **local** archive only: each destination has a key file of its own, defaulting to `~/.local/share/chat-stasher/masterkey-<destination>.json` and set with that destination's `key_file`. |
 | `rustic_connections` | `4` | Concurrency for archive reads and writes. Maximum `10`. Raising it has not been measured to help. |
 | `rustic_cache_dir` | the platform cache folder, under `rustic` | Where archive **metadata** is cached. Never holds conversation data. |
 | `rustic_no_cache` | `false` | Turn that metadata cache off. Nothing is lost; each command re-reads metadata instead. |

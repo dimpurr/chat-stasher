@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8405-8716`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8336-8647`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -622,7 +622,7 @@ The parties who *do* see something, stated plainly:
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:702`, `:563-580`; `apps/extension/lib/gemini-capture.ts:150-234` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:287-387`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:588-621` |
-| **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key file. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
+| **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key files. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
 
 One further disclosure about the optional **backfill** feature, which walks your
@@ -930,13 +930,22 @@ staged shards, your config, and — with your archive — decrypt everything. On
 single-user desktop this is the normal situation; on a shared machine it is the
 dominant risk.
 
-**3. The master key is the only key, and losing it is unrecoverable.** There is
+**3. A master key file is the only key to the repository it opens, and losing it
+is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
 archive (`crates/chat-stasher/src/store.rs:1559-1566,1521-1525`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
 (`crates/chat-stasher/src/store.rs:1601-1686`).
+
+There is one key file per repository — `rustic_key_file` for the local archive,
+`key_file` per destination, defaulting to
+`~/.local/share/chat-stasher/masterkey-<destination>.json` — so losing one loses
+that copy alone, and a copy of one does not restore another. A second machine
+reads a destination with that destination's key and does not use the local one,
+which is why every key file has to be backed up
+(`crates/chat-stasher/src/main.rs:7557-7562`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

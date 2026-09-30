@@ -1200,6 +1200,194 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
     );
 }
 
+/// The key files the wizard names for the user to back up: every entry of the
+/// `masterkey.keys` array, falling back to `masterkey.path` (the local key)
+/// when the array is absent — the pre-fix shape that named only the local key
+/// and so could not recover a destination on a second machine (W281 BUG-2).
+fn wizard_key_paths(value: &serde_json::Value) -> Vec<PathBuf> {
+    match value["masterkey"]["keys"].as_array() {
+        Some(keys) => keys
+            .iter()
+            .filter_map(|key| key["path"].as_str())
+            .map(PathBuf::from)
+            .collect(),
+        None => value["masterkey"]["path"]
+            .as_str()
+            .map(|path| vec![PathBuf::from(path)])
+            .unwrap_or_default(),
+    }
+}
+
+/// W281 BUG-2's acceptance, as an assertion: a user who follows the wizard
+/// literally — backs up exactly the key files it names — can restore them on a
+/// second machine and read the destination back. The destination is an ordinary
+/// local-path repo seeded with this machine's history, so the round trip needs
+/// no network; the only thing that separates "I can recover" from BUG-2's
+/// hard `exit 3` is that the wizard names the destination's own key.
+#[test]
+fn a_second_machine_recovers_a_destination_using_every_key_the_wizard_named() {
+    // Machine A: one session, one adopted destination ("backup") whose repo is
+    // a shared directory. The destination has its own key, the default
+    // `masterkey-backup.json`, separate from the local one.
+    let a = Sandbox::new(true);
+    let shared = a.root.path().join("shared-archive");
+    a.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    let aout = a.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&aout);
+    assert_eq!(exit_code(&aout), 0, "value={value}");
+    assert_eq!(value["destination"]["dest_init"]["exit_code"], 0);
+
+    // Follow the wizard's instructions literally: back up every key it names.
+    let named = wizard_key_paths(&value);
+    assert!(
+        named
+            .iter()
+            .any(|path| path.file_name() == Some(std::ffi::OsStr::new("masterkey-backup.json"))),
+        "the wizard must name the destination's own key so the user knows to copy it; \
+         named: {named:?}"
+    );
+    assert!(
+        named
+            .iter()
+            .any(|path| path.file_name() == Some(std::ffi::OsStr::new("masterkey.json"))),
+        "the wizard must still name the local key; named: {named:?}"
+    );
+    let tape = a.root.path().join("backup-tape");
+    fs::create_dir_all(&tape).expect("the tape dir");
+    for path in &named {
+        fs::copy(path, tape.join(path.file_name().unwrap())).expect("copy the named key");
+    }
+
+    // Machine B: a fresh machine that only adopts the same destination, and
+    // whose only connection to A's archive is the keys put back at the same
+    // paths. B has no local repo and no stage.
+    let b = Sandbox::new(false);
+    b.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    fs::create_dir_all(b.data_root()).expect("the data root where keys are restored");
+    for key in &named {
+        let name = key.file_name().expect("a named key file");
+        fs::copy(tape.join(name), b.data_root().join(name)).expect("restore the key");
+    }
+
+    // Read the destination back on B: this is the recovery the promise is about.
+    let bout = b.command(&["search", "--destination", "backup", "--json"]);
+    let bvalue = json_of(&bout);
+    assert_eq!(
+        exit_code(&bout),
+        0,
+        "a second machine with the wizard-named keys must read the destination, not exit 3: \
+         search failed with {bvalue}"
+    );
+
+    // Each named key says which copy it opens and whether the user declared it.
+    // The declaration is a statement, never a verification, and the object has
+    // to keep those two apart.
+    let keys = value["masterkey"]["keys"]
+        .as_array()
+        .expect("the wizard names its keys as an array");
+    let destination_key = keys
+        .iter()
+        .find(|key| key["scope"] == "destination")
+        .expect("the destination's key is one of the named keys");
+    assert_eq!(destination_key["name"], "backup");
+    assert_eq!(destination_key["declared"], true);
+    assert_eq!(
+        destination_key["declaration_is_verified"], false,
+        "a declaration is a statement by the user, never something this tool checked"
+    );
+
+    // `doctor` repeats it from the other side: which keys this machine holds,
+    // and which of them the user has declared saved. The destination key is a
+    // separate row from the local one because it opens a separate copy.
+    let doctor = a.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let reported = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(reported["scope"], "destination");
+    assert_eq!(reported["exists"], true, "the wizard just created it here");
+    assert_eq!(reported["declared_saved"], true, "the run declared it");
+    assert!(
+        copies.iter().any(|row| row["scope"] == "local"),
+        "the local key is a row of its own: {dvalue}"
+    );
+}
+
+/// The other half of the same requirement, on the machine where it matters:
+/// `status` and `doctor` must say when a destination's key has **no declared
+/// backup**, because that is the state in which a lost machine loses that copy.
+///
+/// The fixture plants a destination key file directly rather than running the
+/// wizard: the point is the reporting of a key that exists here with nothing
+/// declared about it, which the wizard's own run cannot produce (it declares as
+/// it creates). The local key is deliberately absent — a machine that has not
+/// archived anything yet has none, and that is not a destination's problem.
+#[test]
+fn an_undeclared_destination_key_is_named_by_status_and_doctor() {
+    let sandbox = Sandbox::new(false);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    fs::create_dir_all(sandbox.data_root()).expect("the data root the key lives in");
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::write(
+        &destination_key,
+        b"opaque fixture bytes, never read as a key\n",
+    )
+    .expect("plant the destination key file");
+
+    // `status` says it, and says which file and what to do — this is the line a
+    // user who never finished the wizard actually reads.
+    let status = sandbox.command(&["status"]);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("[keys] destination=backup"),
+        "status must name the destination whose key has no declared backup; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&destination_key.display().to_string()),
+        "the line must carry the path the user has to copy; stderr:\n{stderr}"
+    );
+
+    // `doctor` reports the same fact in full, including the local copy that
+    // `status` stays quiet about.
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let reported = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(reported["exists"], true);
+    assert_eq!(
+        reported["declared_saved"], false,
+        "nothing declared this key saved, so it must not read as backed up"
+    );
+    let local = copies
+        .iter()
+        .find(|row| row["scope"] == "local")
+        .expect("doctor reports the local copy even when it has no key yet");
+    assert_eq!(
+        local["exists"], false,
+        "no repository and no key exist on this fixture; that is an honest absence, not a row \
+         omitted"
+    );
+}
+
 /// A destination declared by hand with no `repo` is a config-content problem
 /// this run *read* — so it is reported, not treated as a usage error.
 ///
