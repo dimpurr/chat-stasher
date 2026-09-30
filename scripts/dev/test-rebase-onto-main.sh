@@ -29,7 +29,14 @@ PY
 #!/usr/bin/env python3
 raise SystemExit(0)
 PY
-  chmod +x "$dir/scripts/relocate-citations.py" "$dir/scripts/check-citation-drift.py"
+  # rebase-onto-main.sh regenerates the output inventory before committing; the
+  # fixture stubs the generator deterministically, like the other two.
+  cat > "$dir/scripts/output-inventory.py" <<'PY'
+#!/usr/bin/env python3
+from pathlib import Path
+Path('docs-dev/output-inventory.txt').write_text('regenerated\n')
+PY
+  chmod +x "$dir/scripts/relocate-citations.py" "$dir/scripts/check-citation-drift.py" "$dir/scripts/output-inventory.py"
   cat > "$dir/README.md" <<'MD'
 Anchor `src/a.rs:1`.
 MD
