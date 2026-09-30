@@ -3324,6 +3324,17 @@ fn print_activity_index(freshness: &ActivityIndexFreshness) {
                 );
                 eprintln!("                   rebuild it with: {}", s.repair_command);
             }
+            // The repair command above can succeed without this warning ever
+            // clearing: a machine that is not this one has its index rebuilt
+            // read-only into a local derived file, because a partition's index
+            // is written only by the machine that owns it (ADR-017). Say which
+            // is which, rather than let the user run it twice and conclude the
+            // command is broken.
+            eprintln!(
+                "                 (a partition's index is repaired in the archive only for the \
+                 machine that owns it; another machine's is rebuilt read-only, into a local \
+                 derived index)"
+            );
         }
         ActivityIndexFreshness::Unknown { detail } => {
             eprintln!("               activity index: UNKNOWN — {detail}");

@@ -2065,6 +2065,7 @@ mod tests {
             title: None,
             provenance: None,
             account_keys: Vec::new(),
+            measured_body: None,
         };
         let t = indexed_time(&row);
         assert_eq!(t.first_unix, None);
@@ -2091,6 +2092,7 @@ mod tests {
             title: None,
             provenance: None,
             account_keys: Vec::new(),
+            measured_body: None,
         };
         assert_eq!(
             indexed_time(&row).why.as_deref(),
@@ -2115,6 +2117,7 @@ mod tests {
             title: None,
             provenance: None,
             account_keys: Vec::new(),
+            measured_body: None,
         };
         let t = indexed_time(&row);
         assert_eq!(

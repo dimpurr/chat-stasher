@@ -48,7 +48,7 @@
 //! and hashed in place — they are never printed, logged or returned.
 
 use anyhow::Context;
-use rustic_core::repofile::{MasterKey, NodeType, SnapshotFile};
+use rustic_core::repofile::{MasterKey, Node, NodeType, SnapshotFile};
 use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,6 +123,22 @@ impl ReadAllReport {
     pub fn complete(&self) -> bool {
         self.warnings.is_empty()
     }
+}
+
+/// What one cumulative single-machine session walk read.
+///
+/// `snapshots_in_repo` counts every snapshot in the repository, not just this
+/// machine's, so a caller can print "N of M scanned" the way `search` does:
+/// a short scan and a complete one must not render the same.
+#[derive(Debug, Default)]
+pub struct CumulativeSessionRead {
+    /// Sessions resolved and handed to the visitor, each exactly once.
+    pub sessions: usize,
+    /// This machine's snapshots walked, newest first. A walk that stops early
+    /// on an unreadable snapshot returns `Err` instead of a smaller number.
+    pub snapshots_scanned: usize,
+    /// Snapshots the repository holds, across every machine.
+    pub snapshots_in_repo: usize,
 }
 
 /// Newest snapshot per hostname group.
@@ -554,6 +570,116 @@ impl BackupStore {
                     bytes.push(buf);
                 }
                 out.insert(session, bytes);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Walk **one** machine's snapshots newest-first and hand every session's
+    /// concatenated shard body to `visit`, one session at a time.
+    ///
+    /// The resolution rule is ADR-021's, through the same
+    /// [`snapshots_by_host_newest_first`] resolver every other cumulative
+    /// reader uses: a session's **first** appearance wins, so the body handed
+    /// back is the newest one the archive holds, and it is assembled from that
+    /// snapshot's shards in global sequence order — byte for byte the rule
+    /// [`BackupStore::read_cumulative_sessions`] hashes by, so an index built
+    /// from this walk and a digest computed from that one describe the same
+    /// bytes.
+    ///
+    /// This is the walk a reader needs when the boundary is *not* "which
+    /// sessions are here" but "hand me each of them": the payload is delivered
+    /// through the callback rather than returned, because a machine's archived
+    /// bodies are gigabytes and nothing here may accumulate them. `visit` owns
+    /// whatever it makes of the bytes; they are not retained by this function.
+    ///
+    /// One machine rather than every machine, because the question this
+    /// answers — reconstruct a partition from the archive alone, without that
+    /// machine's stage — is per partition, and a caller that wants a second one
+    /// asks for it by name.
+    ///
+    /// A snapshot that cannot be walked is an `Err` naming it, never a skip:
+    /// continuing past it would answer a smaller question while rendering as a
+    /// complete answer (invariant 2 — exit 3, not a short count). The same
+    /// holds when the machine has no snapshots at all: "this repository does
+    /// not hold that machine" is an error, not an empty result.
+    pub fn for_each_archived_session<F>(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        mut visit: F,
+    ) -> anyhow::Result<CumulativeSessionRead>
+    where
+        F: FnMut(&str, &[u8]) -> anyhow::Result<()>,
+    {
+        let backends = self.backends()?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for archived sessions")?;
+        self.require_sound_packs(&repo)?;
+        let snaps = repo.get_all_snapshots().context("list snapshots")?;
+        let snapshots_in_repo = snaps.len();
+        let Some(host_snaps) = snapshots_by_host_newest_first(snaps)
+            .into_iter()
+            .find(|(host, _)| host == machine)
+            .map(|(_, snaps)| snaps)
+        else {
+            anyhow::bail!("no snapshot for machine `{machine}` in this repository");
+        };
+
+        let mut out = CumulativeSessionRead {
+            sessions: 0,
+            snapshots_scanned: 0,
+            snapshots_in_repo,
+        };
+        // Sessions already claimed by a newer snapshot. Kept across snapshots so
+        // an older copy can never overwrite the newer one (ADR-021).
+        let mut resolved: BTreeSet<String> = BTreeSet::new();
+        for snap in &host_snaps {
+            let snap_id = snap.id.to_hex().as_str().to_string();
+            let short = &snap_id[..8.min(snap_id.len())];
+            let root = repo
+                .node_from_snapshot_and_path(snap, "")
+                .with_context(|| format!("snapshot {short}: cannot read tree root"))?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())
+                .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+                .with_context(|| format!("snapshot {short}: cannot list tree"))?;
+            out.snapshots_scanned += 1;
+
+            let mut held: BTreeMap<String, Vec<(u64, &Node)>> = BTreeMap::new();
+            for (path, node) in &entries {
+                if node.node_type != NodeType::File {
+                    continue;
+                }
+                let Some((found_machine, session, shard)) = bucket_shard_path(path) else {
+                    continue;
+                };
+                if found_machine != machine || resolved.contains(&session) {
+                    continue;
+                }
+                held.entry(session)
+                    .or_default()
+                    .push((store_seq_of(&shard), node));
+            }
+
+            for (session, mut shards) in held {
+                if !resolved.insert(session.clone()) {
+                    continue;
+                }
+                shards.sort_by_key(|(seq, _)| *seq);
+                let mut concat = Vec::new();
+                for (_, node) in shards {
+                    let mut buf = Vec::new();
+                    repo.dump(node, &mut buf).with_context(|| {
+                        format!(
+                            "snapshot {short}: cannot read a shard of session `{}`",
+                            crate::id::short_session_id(&session)
+                        )
+                    })?;
+                    concat.extend_from_slice(&buf);
+                }
+                visit(&session, &concat)?;
+                out.sessions += 1;
             }
         }
         Ok(out)

@@ -95,6 +95,44 @@ pub struct ActivityRow {
     /// written before W219 has no such key and must still deserialize.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub account_keys: Vec<AccountKey>,
+    /// The conversation body this row was **measured from**: the identity the
+    /// stage's `manifest::SessionManifest` records for that body — its shard
+    /// count and the sha256 of its concatenated shards.
+    ///
+    /// It exists so a row can be verified before it is carried forward. A
+    /// rebuild that finds a session directory with no body in the stage keeps
+    /// the row the last rebuild wrote only while that row is still bound to the
+    /// body the stage's manifest records: the manifest is what `reclaim-stage`
+    /// writes immediately before it deletes a body, so a row bound to a
+    /// *different* identity describes content that no longer exists (the
+    /// session was re-sealed and reclaimed again), and keeping it would report
+    /// the previous conversation's times for it, forever.
+    ///
+    /// `None` is a row written before this field existed, or a row derived
+    /// somewhere the stage manifest is not the authority (the archive rebuild,
+    /// whose bytes are the archive's). Either way it is unverifiable, and an
+    /// unverifiable row is not a row that may be carried.
+    ///
+    /// Additive for the same reason as [`ActivityRow::source_zone`]: an index
+    /// written before this field existed has no such key, and must still
+    /// deserialize rather than failing the whole index read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_body: Option<MeasuredBody>,
+}
+
+/// The identity of one conversation body, as `manifest::SessionManifest` records
+/// it: how many sealed shards were concatenated, in global sequence order, and
+/// the sha256 of that concatenation.
+///
+/// Both halves are kept because both are what the manifest compares on, and a
+/// rebuild that kept a row on a partial match would be keeping a claim the
+/// stage no longer supports. Comparison is exact; there is no "close enough".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeasuredBody {
+    /// Number of sealed shards concatenated, in sequence order.
+    pub shard_count: usize,
+    /// Lowercase hex sha256 of the concatenated shard payload.
+    pub concat_sha256: String,
 }
 
 /// One **comparable** account key: the fingerprint value plus the `saltId` it
@@ -2032,6 +2070,11 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         title: Some(a.title),
         provenance: project_provenance(lines),
         account_keys: account_keys(lines),
+        // This function only ever sees lines, never the shard files they came
+        // from, so it cannot record what it measured. A caller that read the
+        // body from a stage (which is the only place the manifest is the
+        // authority on it) stamps the identity itself.
+        measured_body: None,
     }
 }
 

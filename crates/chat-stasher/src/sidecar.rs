@@ -12,10 +12,113 @@
 //! unit-testable; the repository / filesystem / CLI plumbing lives in `main.rs`.
 //! This module never prints or returns session content.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::activity::{ActivityRow, TimeSource as ActivityTimeSource};
 use crate::overview::{OverviewRow, TimeSource as OverviewTimeSource};
+
+/// Which destination a **derived** activity index describes.
+///
+/// A destination resolved from the config has a name; one named only by
+/// `--repo` does not, and the repository path has to stand in for it.
+#[derive(Debug, Clone, Copy)]
+pub enum DerivedIndexScope<'a> {
+    Destination(&'a str),
+    Repo(&'a Path),
+}
+
+/// Where a read-only archive rebuild writes the index it derived.
+///
+/// `meta/<machine>/activity-v1.jsonl` inside the archive is written by the
+/// machine that owns that partition (ADR-017: one writer per partition), so a
+/// machine rebuilding a **lost** machine's index has nowhere in the archive to
+/// put the result. It goes to this machine's cache instead:
+///
+/// `<platform cache>/chat-stasher/activity/destination/<name>/<machine>/activity-v1.jsonl`
+/// `<platform cache>/chat-stasher/activity/repo/<path…>/<machine>/activity-v1.jsonl`
+///
+/// The root is the platform cache directory (the ADR-034 shape) and a
+/// **sibling** of the body cache rather than a child of it: the body cache
+/// writes, counts and deletes only inside a root it marked, so a foreign file
+/// inside that root would be an unaccounted entry against its quota.
+///
+/// The `destination/` / `repo/` segment keeps the two scopes apart, and the
+/// repository scope keeps the path's own components, so neither a destination
+/// named after a path component nor two repositories with the same base name
+/// can land on each other's derived index.
+///
+/// Nothing here is archived and nothing here is authoritative: the file is a
+/// cache, recomputable from the archive, and its absence means "not rebuilt
+/// yet", never "that machine has no sessions".
+pub fn derived_activity_index_path(scope: DerivedIndexScope<'_>, machine: &str) -> PathBuf {
+    let root = derived_index_root();
+    match scope {
+        DerivedIndexScope::Destination(name) => root
+            .join("destination")
+            .join(sanitize_component(name))
+            .join(sanitize_component(machine))
+            .join("activity-v1.jsonl"),
+        DerivedIndexScope::Repo(path) => {
+            let mut out = root.join("repo");
+            for component in path.components() {
+                match component {
+                    // The root marker (`/`, `\`) carries no name and cannot
+                    // distinguish two paths, so it contributes nothing. A
+                    // Windows drive prefix (`C:`) does distinguish them and is
+                    // kept, sanitized.
+                    Component::RootDir => continue,
+                    Component::Prefix(prefix) => {
+                        out = out.join(sanitize_component(&prefix.as_os_str().to_string_lossy()));
+                    }
+                    Component::Normal(name) => {
+                        out = out.join(sanitize_component(&name.to_string_lossy()));
+                    }
+                    // Kept distinct rather than dropped: `/a/../b` and `/a/b`
+                    // are different paths, and a sanitizer that folded them
+                    // into one derived index would answer for the wrong
+                    // repository.
+                    Component::CurDir => out = out.join("_"),
+                    Component::ParentDir => out = out.join("__"),
+                }
+            }
+            out.join(sanitize_component(machine))
+                .join("activity-v1.jsonl")
+        }
+    }
+}
+
+/// The platform cache root for derived indexes, or a home-relative fallback
+/// when the platform offers no cache directory (the same fallback
+/// [`crate::body_cache::default_root`] documents).
+fn derived_index_root() -> PathBuf {
+    match crate::scanner::user_cache_dirs().into_iter().next() {
+        Some(dir) => dir.join("chat-stasher").join("activity"),
+        None => crate::config::home_dir()
+            .join(".cache")
+            .join("chat-stasher")
+            .join("activity"),
+    }
+}
+
+/// One path component that can only ever name a directory below the derived
+/// root: `.` and `..` are replaced, and so is every character a filesystem or a
+/// Windows path could read as structure. A destination name comes from the
+/// user's config, so this is the boundary that stops it from escaping the
+/// cache.
+fn sanitize_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        out = "_".to_string();
+    }
+    out
+}
 
 /// Infer the harness label from an archived session directory name.
 ///
@@ -396,6 +499,7 @@ mod tests {
             title: None,
             provenance: None,
             account_keys: Vec::new(),
+            measured_body: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");
