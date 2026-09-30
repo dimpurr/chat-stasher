@@ -8,7 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The index schema this build of the tool reads and writes.
@@ -32,6 +32,26 @@ use std::path::{Path, PathBuf};
 const SCHEMA_VERSION: i64 = 3;
 const MARKER: &str = ".chat-stasher-fts";
 const MARKER_CONTENT: &[u8] = b"chat-stasher fts index v1\n";
+
+/// Where the index records the sessions it holds but cannot answer for, id to
+/// reason. Written by every completed build, and read by every surface that has
+/// to say how much of a view a query was run over.
+const NOT_INDEXABLE_IDS_KEY: &str = "build_not_indexable_ids";
+
+/// How long a connection to one index waits on another one that holds its
+/// lock, in milliseconds.
+///
+/// One index is opened by more than one process in ordinary use — a build in
+/// one shell while the page polls the same destination in another, or two
+/// builds started together — and it is one SQLite database, so it is one lock
+/// at a time. Without a timeout the connection that arrives second is refused
+/// *at once*: `database is locked`, which `index build` reports as a build
+/// that did not finish and a page reports as an index it cannot read, for an
+/// index that is merely busy. The lock is held for one transaction, so the
+/// wait is short by construction; the bound exists so that a stuck holder
+/// surfaces as the failure it is instead of hanging the caller forever.
+/// Same value as the coordination database's own (`nativehost.rs`).
+const BUSY_TIMEOUT_MS: u32 = 5_000;
 
 /// The shortest query the trigram tokenizer can evaluate. Below it the index
 /// can return no candidate at all, so a short query is *not answerable* — a
@@ -241,18 +261,31 @@ impl LoadFailure {
 pub struct BuildStats {
     pub documents: usize,
     /// Sources the build attempted to read: every changed fingerprint, plus
-    /// every source the archive could not describe at all. This is
-    /// `indexed + not_indexable.len()`: every source the build took on is
-    /// either stored or named as not indexable, never dropped silently.
+    /// every source the archive could not describe at all. Every source this
+    /// build took on is either stored or named as not indexable, never dropped
+    /// silently — which is a statement about *this build's* work, so it is not
+    /// `indexed + not_indexable.len()`: that list outlives the build it was
+    /// reported by, and carries the sources it did not take on.
     pub read: usize,
     pub unchanged: usize,
     pub removed: usize,
     /// Sources whose load succeeded and whose text was stored (a subset of
     /// `read`).
     pub indexed: usize,
-    /// Sources whose load failed, in order, each with its reason. A malformed
-    /// or unreadable shard must not abort the rest of the archive's build, and
-    /// naming the session is what lets a user act on it (C1).
+    /// Sessions the index cannot answer for, each with its reason, in id order.
+    ///
+    /// A malformed or unreadable shard must not abort the rest of the archive's
+    /// build, and naming the session is what lets a user act on it (C1).
+    ///
+    /// Not this build's findings but the index's own standing list, updated by
+    /// this build: a source it examined joins the list when the read failed or
+    /// found no format it can read, and leaves it when the read succeeded, but
+    /// a source it did **not** examine (an unchanged fingerprint) keeps
+    /// whatever the attempt that did examine it found. "I did not look at it
+    /// this time" is not "it reads now", and a list rebuilt from the sources a
+    /// build happened to read empties itself on a rebuild, after which every
+    /// surface counts the sessions it holds and cannot read as searchable
+    /// (W255 C2). Bounded by the archive, not by the build.
     pub not_indexable: Vec<(String, String)>,
     /// Sources whose load succeeded but whose extracted body was empty. They
     /// are stored and counted as indexed, yet cannot match a query; a count
@@ -1150,9 +1183,15 @@ impl Index {
             bail!("no local index has been built; run `chat-stasher index build` (no archive read was performed)");
         }
         self.validate_owned_paths()?;
-        Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
-            "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
-        )
+        let connection =
+            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).context(
+                "open FTS index; it may be corrupt, use `chat-stasher index clear` then rebuild",
+            )?;
+        // A reader waits too: a query that arrives while a build is committing
+        // meets the write lock, and "the index is busy" must not come back as
+        // "the index cannot be read".
+        set_busy_timeout(&connection)?;
+        Ok(connection)
     }
 
     /// The read-only connection every reader of this index starts from: a
@@ -1232,7 +1271,7 @@ impl Index {
         // completed build wrote. They are read from that key rather than from
         // the rows because a source the build could not read at all has no row:
         // deriving this from the rows would leave it looking answerable.
-        let not_indexable = read_meta_reasons(&connection, "build_not_indexable_ids")?;
+        let not_indexable = read_meta_reasons(&connection, NOT_INDEXABLE_IDS_KEY)?;
         let written_unix = fs::metadata(&self.db_path)
             .and_then(|metadata| metadata.modified())
             .ok()
@@ -1440,34 +1479,47 @@ impl Index {
             {
                 bail!("refusing to adopt a non-empty unmarked FTS directory");
             }
-            let mut marker = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.root.join(MARKER))
-                .context("create FTS ownership marker")?;
-            use std::io::Write;
-            marker
-                .write_all(MARKER_CONTENT)
-                .context("write FTS ownership marker")?;
-            marker.sync_all().context("sync FTS ownership marker")?;
+            self.publish_marker()?;
             set_file_private(&self.root.join(MARKER))?;
         }
         set_dir_private(&self.root)?;
         set_file_private(&marker_path)?;
         let connection = Connection::open(&self.db_path)
             .context("open FTS index; corrupt databases are not replaced automatically")?;
+        // Set before the first statement, and before the journal mode below:
+        // the statement that most needs the wait is the one that takes the
+        // write lock, and there is nothing to wait for before that.
+        set_busy_timeout(&connection)?;
         set_file_private(&self.db_path)?;
-        connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
+            .context("configure the FTS index database")?;
         if existed {
             validate_schema(&connection)?;
         } else {
             create_schema(&connection)?;
         }
 
-        let tx = connection.unchecked_transaction()?;
+        // `BEGIN IMMEDIATE`, not the deferred default: this transaction reads
+        // the previous fingerprints before it writes, and a deferred one that
+        // has already taken a read lock and then asks for the write lock is not
+        // allowed to *wait* for it — SQLite answers `database is locked` on the
+        // spot, because the connection holding that lock may itself be waiting
+        // on this one. Taking the write lock at the start is what makes the
+        // wait an ordinary one, and the wait is what `BUSY_TIMEOUT_MS` bounds:
+        // without either, a build that meets another writer fails instead of
+        // queueing behind it (which is how `windows-latest` reported an index
+        // that was merely busy as a build that did not finish).
+        let tx = rusqlite::Transaction::new_unchecked(
+            &connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("begin the FTS index build transaction")?;
         let mut old = std::collections::BTreeMap::new();
         {
-            let mut statement = tx.prepare("SELECT id, source_sha256 FROM documents")?;
+            let mut statement = tx
+                .prepare("SELECT id, source_sha256 FROM documents")
+                .context("read the indexed source fingerprints")?;
             let rows = statement.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
@@ -1476,6 +1528,14 @@ impl Index {
                 old.insert(id, source_sha);
             }
         }
+        // The reasons the index could not vouch for a source as of the last
+        // attempt at each of them, carried through this build rather than
+        // rebuilt from it: a source this build does not examine keeps whatever
+        // the attempt that *did* examine it found. Keyed by id, and read here —
+        // inside the transaction, beside the fingerprints — so the map this
+        // build writes describes the sources it was given rather than a state
+        // another build had in between.
+        let mut unreadable = read_meta_reasons_if_present(&tx, NOT_INDEXABLE_IDS_KEY)?;
         let mut stats = BuildStats::default();
         let mut present = std::collections::BTreeSet::new();
         for source in sources {
@@ -1492,7 +1552,7 @@ impl Index {
                 SourceDoc::Fingerprinted { source_sha256, .. } => source_sha256,
                 SourceDoc::Unreadable { id, reason } => {
                     stats.read += 1;
-                    stats.not_indexable.push((id.clone(), reason.clone()));
+                    unreadable.insert(id.clone(), reason.clone());
                     continue;
                 }
             };
@@ -1521,9 +1581,7 @@ impl Index {
                 Ok(loaded) => loaded,
                 Err(failure) => {
                     stats.bytes_read += failure.bytes_read;
-                    stats
-                        .not_indexable
-                        .push((id.to_owned(), format!("{:#}", failure.error)));
+                    unreadable.insert(id.to_owned(), format!("{:#}", failure.error));
                     continue;
                 }
             };
@@ -1537,7 +1595,7 @@ impl Index {
             // into `indexed` is what let 2,048 sessions be reported searchable
             // that no query could ever match (W255 C2).
             if let Some(reason) = text.not_indexable.clone() {
-                stats.not_indexable.push((id.to_owned(), reason));
+                unreadable.insert(id.to_owned(), reason);
             } else if text.body.is_empty() {
                 stats.empty_body += 1;
             }
@@ -1548,8 +1606,10 @@ impl Index {
                 .iter()
                 .map(|offset| *offset as u64)
                 .collect();
-            tx.execute("DELETE FROM documents_fts WHERE id = ?1", [id])?;
-            tx.execute("DELETE FROM documents WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM documents_fts WHERE id = ?1", [id])
+                .context("replace the indexed document")?;
+            tx.execute("DELETE FROM documents WHERE id = ?1", [id])
+                .context("replace the indexed document")?;
             tx.execute(
                 "INSERT INTO documents(id, source_sha256, content_sha256, title, body, message_offsets) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1561,13 +1621,19 @@ impl Index {
                     text.body,
                     serde_json::to_string(&offsets).context("serialise message offsets")?
                 ],
-            )?;
+            )
+            .context("store the indexed document")?;
             tx.execute(
                 "INSERT INTO documents_fts(id, title, body) VALUES (?1, ?2, ?3)",
                 params![id, text.title, text.body],
-            )?;
+            )
+            .context("store the indexed document text")?;
             if text.not_indexable.is_none() {
                 stats.indexed += 1;
+                // This attempt read the source, which is what the record is
+                // about: whatever an earlier attempt found is spent, and the
+                // body stored above is the text a query is answered from.
+                unreadable.remove(id);
             }
         }
         let stale: Vec<String> = old
@@ -1576,13 +1642,24 @@ impl Index {
             .cloned()
             .collect();
         for id in &stale {
-            tx.execute("DELETE FROM documents_fts WHERE id = ?1", [id])?;
-            tx.execute("DELETE FROM documents WHERE id = ?1", [id])?;
+            tx.execute("DELETE FROM documents_fts WHERE id = ?1", [id])
+                .context("drop the removed document")?;
+            tx.execute("DELETE FROM documents WHERE id = ?1", [id])
+                .context("drop the removed document")?;
         }
         stats.removed = stale.len();
         stats.documents = sources.len();
+        // A session the archive no longer holds takes its record with it: the
+        // map is a claim about the sessions this index is answerable for, and
+        // an id with no source and no row is neither.
+        unreadable.retain(|id, _| present.contains(id.as_str()));
+        // The build's own report and what it leaves recorded are the same list,
+        // so the count `index check` reads back is the one this build printed.
+        // Sorted by id (the map's order) rather than by source order, so two
+        // runs over one index name the same sessions in the same order.
+        stats.not_indexable = unreadable.into_iter().collect();
         record_build_outcome(&tx, &stats)?;
-        tx.commit()?;
+        tx.commit().context("commit the FTS index build")?;
         set_file_private(&self.db_path)?;
         Ok(stats)
     }
@@ -1610,6 +1687,50 @@ impl Index {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error).context("read FTS ownership marker"),
         }
+    }
+
+    /// Publish the ownership marker for this index, atomically and
+    /// idempotently.
+    ///
+    /// The marker is the one thing two builds of the same index must agree on
+    /// before either may touch the database, and nothing above the call site is
+    /// a lock: both can find the directory unmarked and both can decide to mark
+    /// it. So publishing is a claim about a directory rather than a claim to
+    /// own one — the second publisher is making the same claim, and it must
+    /// adopt the marker rather than collide with it.
+    ///
+    /// The content is written beside the index and *moved* onto the final name,
+    /// which is what makes the two halves of that work. A `create_new` at the
+    /// final path fails the loser of the race outright (`index build` reporting
+    /// that it did not finish because another build of the same index had
+    /// already started), and even a loser that carried on would read a file
+    /// whose content another process had not written yet — an empty marker
+    /// reads as a *foreign* one, which `build` refuses as an unowned directory.
+    /// A rename publishes whole content or nothing.
+    ///
+    /// The staging file goes above the index directory, not inside it: the
+    /// call site refuses to adopt a directory holding anything but the marker,
+    /// so a staging file left there by a concurrent build would make this one
+    /// refuse the very directory its sibling had just created.
+    fn publish_marker(&self) -> Result<()> {
+        /// Distinguishes the staging files of concurrent publishers within one
+        /// process; the process id distinguishes them across processes.
+        static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = self
+            .root
+            .parent()
+            .unwrap_or(&self.root)
+            .join(format!("{MARKER}.{}.{sequence}.tmp", std::process::id()));
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&staging)
+                .with_context(|| format!("stage FTS ownership marker `{}`", staging.display()))?;
+            file.write_all(MARKER_CONTENT)
+                .context("write FTS ownership marker")?;
+            file.sync_all().context("sync FTS ownership marker")?;
+        }
+        fs::rename(&staging, self.root.join(MARKER)).context("publish FTS ownership marker")
     }
 
     fn validate_owned_paths_if_present(&self) -> Result<()> {
@@ -1661,11 +1782,29 @@ fn literal_match_query(query: &str) -> String {
     format!("\"{}\"", query.replace('"', "\"\""))
 }
 
+/// Create the schema of a fresh index, or adopt the one that is already there.
+///
+/// Idempotent on purpose. `build` calls this when the database file did not
+/// exist a moment ago, and two builds starting together both see that: the
+/// second one arrives at a database the first has already created from the same
+/// DDL. That is not a repair situation and not a collision either — the schema
+/// it would write is the schema it finds — so the second creator adopts it
+/// rather than failing with `table index_meta already exists`, which `index
+/// build` would report as a build that did not finish.
 fn create_schema(connection: &Connection) -> Result<()> {
-    let tx = connection.unchecked_transaction()?;
+    // `BEGIN IMMEDIATE` for the reason `build`'s transaction takes it, and one
+    // more: adopting a schema that already exists is a read of the schema and
+    // then a write of the version, and a reader that then asks for the write
+    // lock is refused on the spot rather than allowed to wait for it. The
+    // `IF NOT EXISTS` clauses are what make this path reachable with nothing
+    // written yet — the tables are there, so the DDL takes no lock at all, and
+    // the version insert is the first thing that needs one.
+    let tx =
+        rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)
+            .context("begin creating the FTS index schema")?;
     tx.execute_batch(
-        "CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-         CREATE TABLE documents (
+        "CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS documents (
              id TEXT PRIMARY KEY,
              source_sha256 TEXT NOT NULL,
              content_sha256 TEXT NOT NULL,
@@ -1673,16 +1812,20 @@ fn create_schema(connection: &Connection) -> Result<()> {
              body TEXT NOT NULL,
              message_offsets TEXT NOT NULL
          );
-         CREATE VIRTUAL TABLE documents_fts USING fts5(id UNINDEXED, title, body, tokenize='trigram');",
-    )?;
+         CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(id UNINDEXED, title, body, tokenize='trigram');",
+    )
+    .context("create the FTS index schema")?;
     // The version is written from the constant the reader compares against, not
     // repeated in the DDL: two copies of it are two things that can disagree,
-    // and the one nobody reads is the one that would rot.
+    // and the one nobody reads is the one that would rot. `OR IGNORE` so that
+    // adopting a schema does not rewrite the version another creator already
+    // recorded — or the `build_status` a build has since completed.
     tx.execute(
-        "INSERT INTO index_meta(key, value) VALUES ('schema_version', ?1), ('build_status', 'incomplete')",
+        "INSERT OR IGNORE INTO index_meta(key, value) VALUES ('schema_version', ?1), ('build_status', 'incomplete')",
         [SCHEMA_VERSION],
-    )?;
-    tx.commit()?;
+    )
+    .context("record the FTS index schema version")?;
+    tx.commit().context("commit the FTS index schema")?;
     Ok(())
 }
 
@@ -1766,7 +1909,7 @@ fn record_build_outcome(connection: &Connection, stats: &BuildStats) -> Result<(
     // not be read as, or the read failure — because that is what the dashboard
     // groups the unreadable sessions by.
     put(
-        "build_not_indexable_ids",
+        NOT_INDEXABLE_IDS_KEY,
         &serde_json::to_string(
             &stats
                 .not_indexable
@@ -1801,6 +1944,33 @@ fn read_meta_reasons(
     serde_json::from_str(&value).map_err(|error| {
         anyhow!("corrupt FTS index build metadata: `{key}` is not a JSON object of ids: {error}")
     })
+}
+
+/// [`read_meta_reasons`] for the writer: an index whose build has not finished
+/// yet has no record, and that is an empty map rather than the corruption the
+/// reader's version reports. The difference is the caller — a build is
+/// *carrying* the record forward and has to start somewhere, while a read of an
+/// index that claims a completed build is entitled to the key ('C7').
+fn read_meta_reasons_if_present(
+    connection: &Connection,
+    key: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM index_meta WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| anyhow!("corrupt FTS index build metadata: {error}"))?;
+    match value {
+        Some(value) => serde_json::from_str(&value).map_err(|error| {
+            anyhow!(
+                "corrupt FTS index build metadata: `{key}` is not a JSON object of ids: {error}"
+            )
+        }),
+        None => Ok(std::collections::BTreeMap::new()),
+    }
 }
 
 /// Read a numeric build-health counter recorded by a completed build.
@@ -1874,6 +2044,16 @@ fn validation_is_current(cached: &Option<DbIdentity>, current: &Option<DbIdentit
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Make a connection wait for another process's lock instead of failing on
+/// sight. Every connection this module opens gets one; [`BUSY_TIMEOUT_MS`] says
+/// why the index needs it.
+fn set_busy_timeout(connection: &Connection) -> Result<()> {
+    connection
+        .busy_timeout(std::time::Duration::from_millis(u64::from(BUSY_TIMEOUT_MS)))
+        .context("set FTS index lock timeout")?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2000,6 +2180,102 @@ mod tests {
         assert_eq!(one.matches("blueberry").unwrap().unwrap().len(), 0);
         assert_eq!(two.matches("blueberry").unwrap().unwrap().len(), 1);
         assert_eq!(two.matches("hedgehog").unwrap().unwrap().len(), 0);
+    }
+
+    /// A second process's write transaction is a wait, not a failure.
+    ///
+    /// The index lives in the OS cache directory and more than one process
+    /// opens it in ordinary use: a build in one shell while the page polls the
+    /// same destination in another, or two builds started together. Windows
+    /// enforces the locks SQLite takes — a connection that meets another
+    /// connection's lock is refused at once — so with no `busy_timeout` the
+    /// build dies with `database is locked` and stores nothing (W267,
+    /// `windows-latest`). This holds a real write transaction open on its own
+    /// connection and requires the build to wait for it and then finish.
+    #[test]
+    fn a_build_waits_for_another_writer_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc::fingerprinted("a", "sha-a1")];
+        index
+            .build(&sources, |id| Ok(the(doc(id, "synthetic first"), 0)))
+            .unwrap();
+
+        // The other process: a connection of its own, holding the write lock
+        // for as long as a build takes.
+        let blocker = Connection::open(index.db_path()).unwrap();
+        blocker
+            .execute_batch(
+                "BEGIN IMMEDIATE; \
+                 INSERT INTO index_meta(key, value) VALUES ('held', '1');",
+            )
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+
+        // The second build has real work to do — a changed source, so it
+        // writes a row rather than finding the fingerprint unchanged.
+        let changed = [SourceDoc::fingerprinted("a", "sha-a2")];
+        let stats = index
+            .build(&changed, |id| Ok(the(doc(id, "synthetic second"), 0)))
+            .expect("a build must wait for the other writer, not fail beside it");
+        release.join().unwrap();
+        assert_eq!(stats.read, 1);
+        assert_eq!(
+            index.matches("second").unwrap().unwrap().len(),
+            1,
+            "the waiting build's text is in the index"
+        );
+    }
+
+    /// Losing the schema-creation race is not a failure.
+    ///
+    /// Two builds that start together on an index that does not exist yet both
+    /// decide the schema has to be created. The second one to reach the
+    /// database must adopt what the first wrote instead of colliding with it —
+    /// the DDL is the same DDL, and there is nothing to repair.
+    #[test]
+    fn creating_the_schema_twice_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        index
+            .build(&[SourceDoc::fingerprinted("a", "sha-a1")], |id| {
+                Ok(the(doc(id, "synthetic"), 0))
+            })
+            .unwrap();
+        let connection = Connection::open(index.db_path()).unwrap();
+        create_schema(&connection).expect("the second creator must adopt the schema");
+        validate_schema(&connection).unwrap();
+    }
+
+    /// Losing the marker race is not a failure.
+    ///
+    /// The ownership marker is the one thing two builds of the same index must
+    /// agree on before either may touch the database. Publishing it is a
+    /// claim about the *directory*, and the second publisher of the same
+    /// directory is making the same claim: it must adopt the marker rather
+    /// than fail on it, and a marker that exists must always be a marker that
+    /// holds its content.
+    #[test]
+    fn publishing_the_marker_twice_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        index
+            .build(&[SourceDoc::fingerprinted("a", "sha-a1")], |id| {
+                Ok(the(doc(id, "synthetic"), 0))
+            })
+            .unwrap();
+        index
+            .publish_marker()
+            .expect("the second publisher must adopt the marker");
+        assert!(index.marker_is_ours().unwrap());
+        assert_eq!(
+            fs::read(index.root().join(MARKER)).unwrap(),
+            MARKER_CONTENT,
+            "a marker that exists is a marker that holds its whole content"
+        );
     }
 
     #[test]
@@ -2972,6 +3248,71 @@ mod tests {
         let healed = index.summary().unwrap();
         assert!(healed.not_indexable.is_empty());
         assert!(healed.covers("machine-one/session"));
+    }
+
+    /// A source this build did not examine keeps the reason the last attempt
+    /// at it found.
+    ///
+    /// `unchanged` means this build did not look at the source, and "I did not
+    /// look" is not "it reads now". Rebuilding an archive that has not changed
+    /// is the ordinary case — comparing fingerprints is the whole reason a
+    /// rebuild is cheap — and a record rewritten from *this* build's findings
+    /// empties itself there, after which every surface counts the sessions the
+    /// index holds and cannot read as covered: exactly the claim W255 C2 is
+    /// about, restored by running `index build` twice.
+    ///
+    /// The shape below is the one that loses the record: a shard the build
+    /// *read* and could not make text of stores a row, so the next build finds
+    /// its fingerprint unchanged and skips it. A source whose read fails
+    /// outright stores no row, is therefore attempted on every build, and
+    /// re-reports itself.
+    #[test]
+    fn an_unexamined_source_keeps_the_reason_it_could_not_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [
+            SourceDoc::fingerprinted("machine-one/good", "sha-good"),
+            SourceDoc::fingerprinted("machine-one/bad", "sha-bad"),
+        ];
+        // Captures nothing, so it is `Copy` and each build gets its own.
+        let load = |id: &str| {
+            if id == "machine-one/bad" {
+                let mut text = doc("synthetic title", "");
+                text.not_indexable = Some("sqlite".to_string());
+                return Ok(the(text, 7));
+            }
+            Ok(the(doc(id, "the quiet hedgehog walks"), 7))
+        };
+        let first = index.build(&sources, load).unwrap();
+        assert_eq!(first.indexed, 1);
+        assert_eq!(first.not_indexable.len(), 1);
+
+        let second = index.build(&sources, load).unwrap();
+        assert_eq!(second.read, 0, "nothing changed, so nothing was read");
+        assert_eq!(second.unchanged, 2);
+        assert_eq!(
+            second.not_indexable.len(),
+            1,
+            "a build that did not look at the source must not clear what the \
+             last attempt at it found"
+        );
+        assert_eq!(
+            second.not_indexable[0].1, "sqlite",
+            "and it keeps the reason"
+        );
+        // Which is what the surfaces a query is answered with are made of.
+        let summary = index.summary().unwrap();
+        assert!(summary.ids.contains("machine-one/bad"));
+        assert!(!summary.covers("machine-one/bad"));
+        assert_eq!(
+            index.check().unwrap().status,
+            CheckStatus::Partial {
+                indexed: 0,
+                not_indexable: 1,
+                empty_body: 0,
+                bytes_read: 0,
+            }
+        );
     }
 
     /// A source the archive cannot describe at all — non-empty, with no content

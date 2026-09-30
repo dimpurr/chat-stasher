@@ -8077,6 +8077,14 @@ fn cmd_index(action: IndexAction) -> ExitCode {
             })();
             match build_result {
                 Ok(stats) => {
+                    // `read`, `indexed`, `empty_body`, `bytes_read` and
+                    // `unchanged` are what *this* build did; `documents` and
+                    // `not_indexable` are what the index holds and cannot
+                    // answer for, which a build that read nothing changes no
+                    // more than it changes the archive. So a rebuild that
+                    // skipped every source prints `read=0 unchanged=4` beside
+                    // a non-zero `not_indexable`, and that is the point: the
+                    // sessions named below are still not searchable.
                     println!(
                         "[index] documents={} read={} indexed={} not_indexable={} empty_body={} unchanged={} removed={} bytes_read={}",
                         stats.documents,

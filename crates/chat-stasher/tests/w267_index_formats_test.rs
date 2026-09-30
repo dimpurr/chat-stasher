@@ -25,21 +25,42 @@ fn bin() -> Command {
 
 /// Run the CLI with a sandboxed HOME/XDG and an empty registry, so nothing
 /// reads or writes the real machine's config, registry or stage.
+///
+/// The cache root is one of those, and it is the one that is not spelled the
+/// same way on every platform: `$XDG_CACHE_HOME` on Linux, `$HOME/Library/
+/// Caches` on macOS, and **`%LOCALAPPDATA%`** on Windows — which is not a child
+/// of `$HOME` at all. A child that is given `$HOME` and not `%LOCALAPPDATA%`
+/// therefore reads and writes the *real* user's cache on Windows while every
+/// path it prints looks sandboxed, which is what put these tests in a shared
+/// index with each other there and nowhere else (W267; `windows-latest`).
+/// `USERPROFILE` is set beside `HOME` for the same reason `w242`'s harness sets
+/// both: a platform that prefers one must not fall back to the real machine's.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");
+    let cache = sandbox.join("cache");
     let registry = sandbox.join("registry.json");
-    fs::create_dir_all(&home).unwrap();
-    fs::write(
-        &registry,
-        r#"{"schema_version":1,"generated":"W267 synthetic","harnesses":[]}"#,
-    )
-    .unwrap();
+    for dir in [&home, &cache] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    // Written once: several children of one sandbox can be running at the same
+    // time (`every_parallel_build_of_one_destination_finishes`), and a rewrite
+    // under a reader would hand it a half-written registry.
+    if !registry.exists() {
+        fs::write(
+            &registry,
+            r#"{"schema_version":1,"generated":"W267 synthetic","harnesses":[]}"#,
+        )
+        .unwrap();
+    }
     bin()
         .args(args)
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", &cache)
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()
@@ -117,7 +138,16 @@ fn write_shard(stage: &Path, session: &str, bytes: &[u8]) {
 /// The stage is sealed with `push`, so what the index reads is what the
 /// archive holds — not the stage — which is the path the field test measured.
 fn make_repo(sandbox: &Path) -> (String, String) {
+    make_repo_with(sandbox, &[])
+}
+
+/// [`make_repo`] plus shards the four standard ones do not cover, for the tests
+/// about a shape none of them has.
+fn make_repo_with(sandbox: &Path, extra: &[(&str, &[u8])]) -> (String, String) {
     let stage = sandbox.join("stage");
+    for (session, bytes) in extra {
+        write_shard(&stage, session, bytes);
+    }
     write_shard(&stage, CLAUDE_CODE, CLAUDE_CODE_SHARD.as_bytes());
     write_shard(&stage, OPENCODE, OPENCODE_SHARD.as_bytes());
     write_shard(&stage, GROK, GROK_SHARD.as_bytes());
@@ -315,4 +345,150 @@ fn a_session_id_finds_its_session() {
             "`{query}` is an id prefix and must find the session: {found}"
         );
     }
+}
+
+/// Every build of one destination that starts together finishes.
+///
+/// This is the shape `windows-latest` failed in: one index under one cache
+/// root, several `index build` processes opening it at once, and the ones that
+/// arrived second dying with `database is locked` — which the CLI reports as a
+/// build that did not finish, over an index that was merely being written by
+/// its sibling. The three tests above run in parallel inside one binary, which
+/// is what made it appear there; this one does it on purpose, so the property
+/// is pinned on every platform rather than only where a sandbox leaks.
+///
+/// What each child must do is *finish*: the archive holds the same four shards
+/// for every one of them, so the index they leave behind is the same index
+/// whichever order they commit in — and the last assertion reads it back.
+#[test]
+fn every_parallel_build_of_one_destination_finishes() {
+    const BUILDERS: usize = 4;
+    let sandbox = tempfile::TempDir::new().unwrap();
+    make_repo(sandbox.path());
+
+    let builders: Vec<_> = (0..BUILDERS)
+        .map(|_| {
+            let sandbox = sandbox.path().to_path_buf();
+            std::thread::spawn(move || run(&sandbox, &["index", "build", "--destination", "alpha"]))
+        })
+        .collect();
+    for builder in builders {
+        let build = builder.join().unwrap();
+        assert!(
+            build.status.success(),
+            "a build that started beside its siblings did not finish: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+
+    // The index they left behind is the archive's: one more build over it finds
+    // every session already held and reads none of them again.
+    let stdout = stdout_of(&run(
+        sandbox.path(),
+        &["index", "build", "--destination", "alpha"],
+    ));
+    assert!(
+        stdout.contains("documents=4"),
+        "the parallel builds left a complete index: {stdout}"
+    );
+    let check = stdout_of(&run(
+        sandbox.path(),
+        &["index", "check", "--destination", "alpha"],
+    ));
+    assert!(
+        check.contains("[index] state=partial documents=4"),
+        "and it is the index the archive's shards describe: {check}"
+    );
+    // And a query is still answered with the archive's coverage of it. A build
+    // that read nothing must not report the two sessions it skipped as
+    // searchable — that is the claim this coverage exists to refuse (W255 C2),
+    // and it is one `index build` away from being made wrongly.
+    let found = json_of(&run(
+        sandbox.path(),
+        &[
+            "search",
+            "--destination",
+            "alpha",
+            "--text",
+            "hedgehog",
+            "--json",
+        ],
+    ));
+    assert_eq!(
+        found["index_covered"], 2,
+        "the two readable shards: {found}"
+    );
+    assert_eq!(
+        found["index_not_indexable"], 2,
+        "and the two the index still cannot read: {found}"
+    );
+}
+
+/// A shard the index *can* read that holds no prose is a measured emptiness,
+/// not a format it cannot read.
+///
+/// The three counts are three different statements and the build keeps them
+/// apart: `not_indexable` is "there is a format here I do not read", `missing`
+/// is "the archive holds nothing for this session", and an empty body is
+/// "I read it in full and there is no conversation in it". Folding an empty
+/// shard into the unreadable ones would send a reader looking at the archive
+/// for a format problem that does not exist; folding it into the indexed ones
+/// is what W255 C2 measured. The empty shard below is whitespace rather than
+/// zero bytes on purpose: `collect` filters a zero-byte file before it becomes
+/// a shard, so the empty body a reader actually meets is this one.
+#[test]
+fn a_shard_that_holds_no_prose_is_empty_and_not_unreadable() {
+    const EMPTY: &str = "claude-code.mbp-w267.019bf00d-97b6-7eb2-9bf8-eacbacc0a005";
+    let sandbox = tempfile::TempDir::new().unwrap();
+    make_repo_with(sandbox.path(), &[(EMPTY, b"\n")]);
+
+    let stdout = stdout_of(&run(
+        sandbox.path(),
+        &["index", "build", "--destination", "alpha"],
+    ));
+    assert!(
+        stdout.contains("documents=5 read=5 indexed=3 not_indexable=2 empty_body=1"),
+        "read in full, holding nothing, and not one of the two the build cannot read: {stdout}"
+    );
+    assert!(
+        !stdout.contains(EMPTY),
+        "an empty shard is not named as a session the index could not read: {stdout}"
+    );
+
+    // And it stays out of the format tally on the read path: the two sessions
+    // there are the two the build named, not three.
+    let check = stdout_of(&run(
+        sandbox.path(),
+        &["index", "check", "--destination", "alpha"],
+    ));
+    assert!(
+        check.contains("[index] not_indexable=2 (sqlite 2)"),
+        "{check}"
+    );
+
+    let found = json_of(&run(
+        sandbox.path(),
+        &[
+            "search",
+            "--destination",
+            "alpha",
+            "--text",
+            "hedgehog",
+            "--json",
+        ],
+    ));
+    // The three states partition the selection, which is what makes the line
+    // readable: an empty shard is *covered* (a query really was run over it and
+    // found nothing), and the two unreadable ones are neither covered nor
+    // missing.
+    let covered = found["index_covered"].as_u64().unwrap();
+    let not_indexable = found["index_not_indexable"].as_u64().unwrap();
+    let missing = found["index_missing"].as_u64().unwrap();
+    let selected = found["selected"].as_u64().unwrap();
+    assert_eq!(
+        covered + not_indexable + missing,
+        selected,
+        "the three must partition the selection: {found}"
+    );
+    assert_eq!((covered, not_indexable, missing), (3, 2, 0), "{found}");
 }
