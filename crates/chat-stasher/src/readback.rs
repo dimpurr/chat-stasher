@@ -69,6 +69,20 @@ pub struct SessionBackedUp {
     pub concat_bytes: u64,
     /// sha256 of the concatenated payload.
     pub sha256: String,
+    /// sha256 of each shard, in sequence order. Empty when the caller did not
+    /// ask for the shard-level evidence (the shard bodies are only in hand
+    /// while they are being dumped anyway, so this costs nothing there).
+    ///
+    /// W283: the three fields above cannot see a shard that was sealed twice —
+    /// a doubled body is a *consistent* triple. These can, because a re-seal
+    /// leaves a shard byte-identical to one already in the sequence.
+    pub shard_sha256: Vec<String>,
+    /// Byte length of each shard, same order as [`Self::shard_sha256`].
+    pub shard_bytes: Vec<u64>,
+    /// `(start, end)` shard-index ranges whose concatenated bytes equal a
+    /// later single shard. `end` is exclusive and is the index of that later
+    /// shard; only indices and digests leave readback, never payload bytes.
+    pub shard_run_duplicates: Vec<(usize, usize)>,
 }
 
 impl SessionBackedUp {
@@ -322,10 +336,30 @@ impl BackupStore {
                 // sequence is global across all buckets.
                 shards.sort_by_key(|(n, _)| store_seq_of(n));
                 let mut concat = Vec::new();
+                let mut shard_sha256 = Vec::with_capacity(shards.len());
+                let mut shard_bytes = Vec::with_capacity(shards.len());
+                let mut shard_run_duplicates = Vec::new();
+                let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
                 for (shard, idx) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(&entries[*idx].1, &mut buf)
                         .with_context(|| format!("dump shard {shard}"))?;
+                    let current_index = shard_sha256.len();
+                    for (start, offset) in shard_offsets.iter().copied().enumerate() {
+                        let Some(end_offset) = offset.checked_add(buf.len()) else {
+                            continue;
+                        };
+                        let ends_at_shard_boundary = end_offset == concat.len()
+                            || shard_offsets.binary_search(&end_offset).is_ok();
+                        if ends_at_shard_boundary
+                            && concat.get(offset..end_offset) == Some(buf.as_slice())
+                        {
+                            shard_run_duplicates.push((start, current_index));
+                        }
+                    }
+                    shard_offsets.push(concat.len());
+                    shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+                    shard_bytes.push(buf.len() as u64);
                     concat.extend_from_slice(&buf);
                 }
                 sessions.push(SessionBackedUp {
@@ -334,6 +368,9 @@ impl BackupStore {
                     shard_count: shards.len(),
                     concat_bytes: concat.len() as u64,
                     sha256: hex_digest(&Sha256::digest(&concat)),
+                    shard_sha256,
+                    shard_bytes,
+                    shard_run_duplicates,
                 });
             }
 
@@ -466,10 +503,30 @@ impl BackupStore {
             for (session_id, mut shards) in sessions_map {
                 shards.sort_by_key(|(n, _)| store_seq_of(n));
                 let mut concat = Vec::new();
+                let mut shard_sha256 = Vec::with_capacity(shards.len());
+                let mut shard_bytes = Vec::with_capacity(shards.len());
+                let mut shard_run_duplicates = Vec::new();
+                let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
                 for (shard, node) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
                         .with_context(|| format!("dump shard {shard}"))?;
+                    let current_index = shard_sha256.len();
+                    for (start, offset) in shard_offsets.iter().copied().enumerate() {
+                        let Some(end_offset) = offset.checked_add(buf.len()) else {
+                            continue;
+                        };
+                        let ends_at_shard_boundary = end_offset == concat.len()
+                            || shard_offsets.binary_search(&end_offset).is_ok();
+                        if ends_at_shard_boundary
+                            && concat.get(offset..end_offset) == Some(buf.as_slice())
+                        {
+                            shard_run_duplicates.push((start, current_index));
+                        }
+                    }
+                    shard_offsets.push(concat.len());
+                    shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+                    shard_bytes.push(buf.len() as u64);
                     concat.extend_from_slice(&buf);
                 }
                 sessions.push(SessionBackedUp {
@@ -478,6 +535,9 @@ impl BackupStore {
                     shard_count: shards.len(),
                     concat_bytes: concat.len() as u64,
                     sha256: hex_digest(&Sha256::digest(&concat)),
+                    shard_sha256,
+                    shard_bytes,
+                    shard_run_duplicates,
                 });
             }
 
@@ -814,6 +874,9 @@ mod tests {
             shard_count: 1,
             concat_bytes: payload.len() as u64,
             sha256: hex_digest(&Sha256::digest(&payload)),
+            shard_sha256: vec![hex_digest(&Sha256::digest(&payload))],
+            shard_bytes: vec![payload.len() as u64],
+            shard_run_duplicates: Vec::new(),
         };
         assert!(good.sha_matches(&payload));
         let mut bad = payload.clone();

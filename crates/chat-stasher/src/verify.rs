@@ -158,6 +158,100 @@ pub struct ReconcileRow {
     pub basis: ExpectationBasis,
 }
 
+/// A session whose archived shard sequence repeats shards byte-for-byte.
+///
+/// W283. The three-field triple L3 reconciles on is *self-consistent* on a
+/// doubled body — a re-seal of the whole source produces a longer
+/// concatenation with a matching digest, so nothing above this type can see it.
+/// A repeated shard can: the same bytes appear twice in one sequence.
+///
+/// It is reported as a **possible duplicate seal**, never as a verdict, and the
+/// difference is not timidity. Real content repeats — a harness may append
+/// bytes identical to bytes it already wrote, and a source staged as `a\n` that
+/// grows to `a\na\n` produces exactly the shard sequence a re-seal produces.
+/// Nothing in the archive records *why* a shard was written: the sealer stores
+/// payload bytes and nothing else, and the per-session summary
+/// (`manifest-v1.jsonl`) is derived from the same sealed tree, so it inherits
+/// the same ambiguity. Since a false "your archive is corrupt" is as much a
+/// lie as a false "OK", this is surfaced loudly and does not fail the run.
+///
+/// What the type carries is therefore the *shape* and not a cause:
+/// [`DuplicateSeal::repeated_body_shards`] says how much of the sequence is
+/// repeated from its start, which is what separates the shape a re-seal leaves
+/// from a block that merely recurs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateSeal {
+    pub machine: String,
+    pub session_id: String,
+    /// 0-based positions, in global sequence order, of the two shards whose
+    /// bytes are identical.
+    pub first: usize,
+    pub second: usize,
+    /// How many shards, counted from the start of the sequence, the shards from
+    /// `second` onward repeat byte for byte.
+    ///
+    /// `Some(1)` is one shard repeated (`A, A`) — what a re-seal of a body
+    /// small enough to be sealed in one shard leaves, and 1211 of the 1212 real
+    /// cases. `Some(n)` is the same event on a body that took n shards to seal
+    /// (`A, B, A, B`), which a test that compares one shard against the bytes
+    /// before it cannot see. `None` is a repeat that does *not* begin the
+    /// sequence — the weakest evidence of the three, and the one least
+    /// distinguishable from content that genuinely repeats.
+    pub repeated_body_shards: Option<usize>,
+    /// Earlier contiguous shard range whose concatenation equals `second`.
+    /// The end is exclusive. This covers collector snapshot re-seals such as
+    /// A, B, AB, where no individual shard repeats.
+    pub prior_run: Option<(usize, usize)>,
+}
+
+/// Find a repeated shard sequence in one archived session, if any.
+///
+/// The shape a re-seal leaves is looked for first: a run of shards at the start
+/// of the sequence that recurs immediately after itself. That is one shard in
+/// the common case and several when the body was sealed in several shards, and
+/// it is checked with sizes before digests so the common case is a handful of
+/// integer comparisons; the digest decides.
+///
+/// Failing that, the first byte-identical shard pair is reported, wherever in
+/// the sequence it falls — a block that recurs without beginning the sequence,
+/// which is all that can be said for it.
+pub fn duplicate_seal(session: &SessionBackedUp) -> Option<DuplicateSeal> {
+    let digests = &session.shard_sha256;
+    let sizes = &session.shard_bytes;
+    if digests.len() != sizes.len() || digests.len() < 2 {
+        return None;
+    }
+    let seal = |first: usize,
+                second: usize,
+                repeated_body_shards: Option<usize>,
+                prior_run: Option<(usize, usize)>| {
+        Some(DuplicateSeal {
+            machine: session.machine.clone(),
+            session_id: session.session_id.clone(),
+            first,
+            second,
+            repeated_body_shards,
+            prior_run,
+        })
+    };
+    for run in 1..=digests.len() / 2 {
+        if (0..run).all(|i| sizes[i] == sizes[run + i] && digests[i] == digests[run + i]) {
+            return seal(0, run, Some(run), None);
+        }
+    }
+    for j in 1..digests.len() {
+        for i in 0..j {
+            if sizes[i] == sizes[j] && digests[i] == digests[j] {
+                return seal(i, j, None, None);
+            }
+        }
+    }
+    if let Some(&(start, shard)) = session.shard_run_duplicates.first() {
+        return seal(start, shard, None, Some((start, shard)));
+    }
+    None
+}
+
 /// Full L3 result.
 #[derive(Debug, Clone)]
 pub struct ReconcileReport {
@@ -167,6 +261,9 @@ pub struct ReconcileReport {
     /// Sessions found in the archive but not in the manifest (informational —
     /// e.g. staging was cleaned up for that machine, or a push missed staging).
     pub extra_in_archive: Vec<(String, String)>,
+    /// Sessions whose shard sequence repeats a shard byte-for-byte. See
+    /// [`DuplicateSeal`] for why this is a possibility and not a failure.
+    pub possible_duplicate_seals: Vec<DuplicateSeal>,
     pub duration: Duration,
 }
 
@@ -352,10 +449,18 @@ impl BackupStore {
             all.len()
         };
 
+        // Over the sessions this read actually brought back — the expected
+        // manifest's, since that is the set L3 asks the archive for. The
+        // shard-level evidence is only in hand for those, and they are the ones
+        // the staging side claims to know about.
+        let possible_duplicate_seals: Vec<DuplicateSeal> =
+            obs_map.values().filter_map(duplicate_seal).collect();
+
         Ok(ReconcileReport {
             machines,
             rows,
             extra_in_archive,
+            possible_duplicate_seals,
             duration: start.elapsed(),
         })
     }
@@ -647,9 +752,73 @@ mod tests {
                 row(ExpectationBasis::StoredManifest),
             ],
             extra_in_archive: Vec::new(),
+            possible_duplicate_seals: Vec::new(),
             duration: Duration::ZERO,
         };
         assert_eq!(report.stored_basis_rows(), 2);
+    }
+
+    /// The detector must fire on the sequence a re-seal leaves and stay silent
+    /// on a sequence that merely contains a long shard.
+    #[test]
+    fn duplicate_seal_fires_only_on_repeated_shard_bytes() {
+        let session = |digests: &[&str], sizes: &[u64]| SessionBackedUp {
+            machine: "m".into(),
+            session_id: "s".into(),
+            shard_count: digests.len(),
+            concat_bytes: sizes.iter().sum(),
+            sha256: String::new(),
+            shard_sha256: digests.iter().map(|d| d.to_string()).collect(),
+            shard_bytes: sizes.to_vec(),
+            shard_run_duplicates: Vec::new(),
+        };
+
+        // The W281 repro: one source shard, then the same bytes sealed again.
+        let resealed = session(&["aa", "aa"], &[442, 442]);
+        let seal = duplicate_seal(&resealed).expect("a re-sealed shard must be reported");
+        assert_eq!((seal.first, seal.second), (0, 1));
+        assert_eq!(seal.repeated_body_shards, Some(1));
+
+        // Three destinations: still one report, still the whole-body shape.
+        let thrice = session(&["aa", "aa", "aa"], &[442, 442, 442]);
+        assert_eq!(
+            duplicate_seal(&thrice).unwrap().repeated_body_shards,
+            Some(1)
+        );
+
+        // A body sealed as two shards and then sealed again: `A, B, A, B`. The
+        // repeat is the whole body, so it must be named as one — a test that
+        // only compares a single shard against the bytes before it calls this
+        // a repeated block, which is the shape real repetition leaves.
+        let two_shard_body = session(&["aa", "bb", "aa", "bb"], &[442, 442, 442, 442]);
+        let seal = duplicate_seal(&two_shard_body).expect("a re-sealed body is a repeat");
+        assert_eq!(
+            (seal.first, seal.second, seal.repeated_body_shards),
+            (0, 2, Some(2)),
+            "A, B, A, B is a whole-body re-seal, not a repeated block"
+        );
+
+        // A body sealed twice and then grown: only the opening run repeats, and
+        // that run is the whole body the re-seal duplicated.
+        let grown = session(&["aa", "bb", "aa", "bb", "cc"], &[442, 442, 442, 442, 99]);
+        assert_eq!(
+            duplicate_seal(&grown).unwrap().repeated_body_shards,
+            Some(2)
+        );
+
+        // A genuinely appended delta that happens to repeat an earlier block is
+        // reported too, and *not* as a whole-body repeat: nothing in the
+        // archive can tell the two apart, which is why this is a possibility.
+        let real_repeat = session(&["aa", "bb", "bb"], &[10, 10, 10]);
+        let seal = duplicate_seal(&real_repeat).expect("a repeated block is still a repeat");
+        assert_eq!((seal.first, seal.second), (1, 2));
+        assert_eq!(seal.repeated_body_shards, None);
+
+        // Same length, different bytes: silence.
+        assert!(duplicate_seal(&session(&["aa", "bb"], &[442, 442])).is_none());
+        // One shard, or none: nothing to compare.
+        assert!(duplicate_seal(&session(&["aa"], &[442])).is_none());
+        assert!(duplicate_seal(&session(&[], &[])).is_none());
     }
 
     #[test]

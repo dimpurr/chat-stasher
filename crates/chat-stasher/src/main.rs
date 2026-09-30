@@ -9247,17 +9247,85 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
             display_session_id(s, full_ids)
         );
     }
+    // W283. A repeated shard is *not* a failure and must not be printed as one:
+    // a harness may legitimately append bytes identical to bytes already
+    // sealed, and the sealer records no provenance that could tell the two
+    // apart. It is not silent either — a doubled body reads as the source
+    // twice and nothing above this point can see it, which is how W281's
+    // doubled archive came back `L3 verdict: OK`. So it is named, per session,
+    // and counted into the verdict line.
+    for dup in &r.possible_duplicate_seals {
+        if let Some((start, end)) = dup.prior_run {
+            println!(
+                "  !? {:<12} {:<20} POSSIBLE DUPLICATE SEAL: shard {} repeats the concatenation of shards {}–{}",
+                dup.machine,
+                display_session_id(&dup.session_id, full_ids),
+                dup.second + 1,
+                start + 1,
+                end
+            );
+            continue;
+        }
+        let shape = match dup.repeated_body_shards {
+            // The shape 1211 of the real archive's 1212 cases have: the whole
+            // body sealed before this shard, as one shard.
+            Some(1) => {
+                " and is exactly the whole preceding body (the shape a re-seal leaves)".to_string()
+            }
+            // The same event on a body that took several shards to seal, where
+            // the repeat is the run and not any single shard in it.
+            Some(run) => format!(
+                " and is the first of {run} shards that repeat the body sealed before them \
+                 (the shape a re-seal of a {run}-shard body leaves)"
+            ),
+            // A block that recurs without beginning the sequence: reported,
+            // named for what it is, and the weakest of the three.
+            None => " (a repeated block, not the whole preceding body)".to_string(),
+        };
+        println!(
+            "  !? {:<12} {:<20} POSSIBLE DUPLICATE SEAL: shard {} repeats shard {} byte-for-byte{}",
+            dup.machine,
+            display_session_id(&dup.session_id, full_ids),
+            dup.second + 1,
+            dup.first + 1,
+            shape
+        );
+    }
+    if !r.possible_duplicate_seals.is_empty() {
+        println!(
+            "     (a repeated shard cannot be told apart from content that genuinely repeats; \
+             verify does not fail on it — check `read --all-machines` for the doubled body)"
+        );
+    }
     let verdict = if r.ok() {
-        "OK".to_string()
+        if r.possible_duplicate_seals.is_empty() {
+            "OK".to_string()
+        } else {
+            format!(
+                "OK ({} possible duplicate seal{} — see above; not counted as a failure)",
+                r.possible_duplicate_seals.len(),
+                if r.possible_duplicate_seals.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        }
     } else {
         let u = r.unverifiable();
         let f = r.failed();
-        if u > 0 && f > 0 {
-            format!("FAILED (failed={f}, unverifiable={u})")
-        } else if u > 0 {
-            format!("FAILED (unverifiable={u})")
+        let d = r.possible_duplicate_seals.len();
+        let dup = if d == 0 {
+            String::new()
         } else {
-            "FAILED".to_string()
+            format!(", possible-duplicate-seals={d}")
+        };
+        if u > 0 && f > 0 {
+            format!("FAILED (failed={f}, unverifiable={u}{dup})")
+        } else if u > 0 {
+            format!("FAILED (unverifiable={u}{dup})")
+        } else {
+            format!("FAILED{dup}")
         }
     };
     println!("[verify] L3 verdict       : {verdict}");

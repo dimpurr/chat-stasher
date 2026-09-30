@@ -333,6 +333,305 @@ pub enum DebtVerdict {
     Unverifiable(&'static str),
 }
 
+/// What the stage already holds for one session, in the exact framing the
+/// sealers write: each line followed by one newline. Empty when nothing is
+/// sealed — which is not the same as a session whose content is empty, so
+/// callers must keep the two apart by checking the shard count, not this
+/// length.
+fn stage_sealed_shards(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    let mut entries = store::sealed_shard_entries(&dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    entries
+        .into_iter()
+        .map(|(_, path)| fs::read(path).map_err(Into::into))
+        .collect()
+}
+
+/// Frame `lines` the way [`store::write_sealed_shard_bytes_with_cap`] does.
+fn seal_framed(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line);
+        raw.push(b'\n');
+    }
+    raw
+}
+
+/// Does the stage already hold exactly this export, for a destination that has
+/// no cursor of its own?
+///
+/// A SQLite session cannot be handed a stage-derived cursor the way a file
+/// source can: its cursor is a logical `(time_updated, id)` key, not a byte
+/// offset, so the stage says nothing about it until the session has been
+/// re-exported. Once it has, the comparison is exact — the sealer writes that
+/// export as one line, so the stage's concatenation either equals the framed
+/// line or it does not. A match means this destination is already owed
+/// nothing, and sealing again would store the conversation a second time.
+fn stage_holds_this_export(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+    json_line: &[u8],
+) -> anyhow::Result<bool> {
+    let sealed = stage_sealed_shards(stage, machine, session_id)?;
+    let mut framed = json_line.to_vec();
+    framed.push(b'\n');
+    Ok(stage_tail_is(&sealed, &framed))
+}
+
+/// Is `frame` one sealed shard, or an exact repeated-shard suffix, of the
+/// body sealed so far?
+///
+/// The snapshot shapes — a whole file, a compressed export, a SQLite session —
+/// have no incremental cursor. Each pass seals the whole current body as one
+/// shard, so the stage accumulates the versions it has seen and the newest one
+/// is its tail. The question for a destination with no cursor of its own is
+/// therefore whether the body this pass is about to seal is already there. A
+/// normal snapshot is one shard, even when it contains several lines, so a
+/// match against one complete tail shard is conclusive. The old defect could
+/// also split one export across shards and append the same shard sequence a
+/// second time; that exact repeated sequence is conclusive too. A run of
+/// distinct earlier snapshots is not: if shards `A`, `B` are followed by an
+/// export `A\nB\n`, their concatenation must not masquerade as one sealed
+/// export. After a compressed export `A\nB\n` shrinks to `B\n`, the new export
+/// is a byte suffix of the old one, but it is a new snapshot and must be sealed.
+fn stage_tail_is(shards: &[Vec<u8>], frame: &[u8]) -> bool {
+    if frame.is_empty() {
+        return false;
+    }
+    let mut remaining = frame.len();
+    for start in (0..shards.len()).rev() {
+        let shard = &shards[start];
+        if shard.len() > remaining || frame[remaining - shard.len()..remaining] != shard[..] {
+            return false;
+        }
+        remaining -= shard.len();
+        if remaining == 0 {
+            let shard_count = shards.len() - start;
+            return shard_count == 1
+                || (start >= shard_count && shards[start - shard_count..start] == shards[start..]);
+        }
+    }
+    false
+}
+
+/// The longest source line prefix present contiguously in the stage.
+///
+/// Old destination passes could seal the same source lines again in a new
+/// shard. Shard concatenation therefore is not necessarily a source prefix:
+/// `A,A,B` and `A,B,A,B` both hold a contiguous copy of the complete `A,B`
+/// source. Matching ordered lines preserves their meaning and multiplicity;
+/// source `A,A,B` still needs two adjacent `A` records before `B` is covered.
+fn covered_source_prefix(stage: &[u8], source: &[u8]) -> u64 {
+    let (stage_lines, _) = complete_lines(stage);
+    let (source_lines, source_complete_len) = complete_lines(source);
+    if source_lines.is_empty() {
+        return 0;
+    }
+
+    // KMP over complete lines finds the longest source prefix occurring as a
+    // contiguous run anywhere in the stage, in linear time even for large
+    // transcripts. Comparing line bytes also prevents a match from starting
+    // midway through a record.
+    let mut prefix = vec![0usize; source_lines.len()];
+    for index in 1..source_lines.len() {
+        let mut matched = prefix[index - 1];
+        while matched > 0 && source_lines[index] != source_lines[matched] {
+            matched = prefix[matched - 1];
+        }
+        if source_lines[index] == source_lines[matched] {
+            matched += 1;
+        }
+        prefix[index] = matched;
+    }
+
+    let mut matched = 0usize;
+    let mut best = 0usize;
+    for line in stage_lines {
+        while matched > 0 && line != source_lines[matched] {
+            matched = prefix[matched - 1];
+        }
+        if line == source_lines[matched] {
+            matched += 1;
+            best = best.max(matched);
+            if matched == source_lines.len() {
+                return source_complete_len as u64;
+            }
+        }
+    }
+
+    let covered_len: usize = source_lines[..best].iter().map(|line| line.len() + 1).sum();
+    covered_len.min(source_complete_len) as u64
+}
+
+/// The stage's own sealed shards, expressed as a cursor, when they provably
+/// hold the beginning of what this pass is about to read.
+///
+/// # The defect this exists to stop
+///
+/// The debt state is keyed by destination. A destination with no entry has
+/// never been read for, so its pass legitimately starts every source at offset
+/// zero — but the collector used to *seal what that reread produced*, even when
+/// the stage already held exactly those bytes. Every additional destination
+/// therefore added one more full copy of every session: `read` returned the
+/// conversation twice, `export` wrote it twice, the archive-derived activity
+/// index doubled `line_count`, and L3 said `OK` because it derived its
+/// expectation from the same doubled tree. `setup` step 4 and `dest-init` are
+/// exactly this pass, so every user who finished the wizard had it.
+///
+/// A destination must be given the shards the stage holds, never handed a
+/// second seal of them.
+///
+/// # Why this is not a write-time "have I seen these bytes" guard
+///
+/// Repeated content is real: a harness may append bytes identical to bytes
+/// already sealed (the source `a\n` growing to `a\na\n`). A guard that refused
+/// to write because the new bytes matched something already present would drop
+/// that turn — a silent omission, the one outcome this repository never trades
+/// away. So the decision is made *before* the read, as a cursor the ordinary
+/// read path then has to prove: the candidate prefix is handed to
+/// [`read_jsonl_delta`] as if it were a stored one, and the same SHA-256
+/// comparison guards it. A stage that does not match the source yields no
+/// cursor, and the pass falls back to the full read it did before.
+///
+/// `None` means "no evidence", never "empty", and every case that returns it
+/// falls back to the pre-existing full read rather than assuming the stage is
+/// up to date: nothing sealed at all, a logical (SQLite) cursor that cannot be
+/// spelled as a file offset, and a compressed or whole-file source the stage
+/// does not already cover in full. (An append-only jsonl source is the one case
+/// where partial coverage is exactly the information wanted.) A SQLite
+/// session's reuse is judged at its own call site instead, against the export
+/// it has just produced.
+///
+/// # A stage that holds the body more than once
+///
+/// The defect above ran on real machines, so this function has to read a stage
+/// it has already damaged: an affected session's body is there twice (or behind
+/// older versions of itself), which is not "no evidence" — it is *more* of the
+/// same evidence. Reading the stage's length as the position would put the pass
+/// past the end of an unchanged source (no cursor, so the whole file is read
+/// and sealed again: a third copy, and a fourth the next time), so the position
+/// is instead the longest source prefix whose complete lines the stage already
+/// holds contiguously and in order. The whole-file and compressed shapes have
+/// no such incremental cursor: what
+/// they can ask is what the stage sealed *last*, and that is
+/// [`stage_tail_is`]. A SQLite session asks the same question at its own call
+/// site, against the export the pass has just produced.
+fn stage_prefix_entry(
+    record: &SessionRecord,
+    stage: &Path,
+    machine: &str,
+) -> anyhow::Result<Option<OffsetEntry>> {
+    // A SQLite session's cursor is logical, not a file offset, so the stage
+    // cannot be turned into one without re-exporting the session. Those paths
+    // judge the reuse themselves, against the export they just produced.
+    if record.sqlite_layout.is_some() {
+        return Ok(None);
+    }
+    let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
+    if sealed_shards.is_empty() {
+        return Ok(None);
+    }
+
+    if record.compressed || is_zstd_path(&record.absolute_path) {
+        // The entry's offsets are over the *compressed* bytes while the stage
+        // holds the decoded lines, so no prefix of the file can be spelled as
+        // this cursor. Reuse is claimed only for the whole content: the entry
+        // then says "the stage already holds exactly this export", which is
+        // what `process_compressed` re-checks by hash.
+        let compressed = fs::read(&record.absolute_path).with_context(|| {
+            format!(
+                "read compressed source ({})",
+                path_digest(&record.absolute_path)
+            )
+        })?;
+        let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
+        let (lines, _) = complete_lines(&decoded);
+        if lines.is_empty() || !stage_tail_is(&sealed_shards, &seal_framed(&lines)) {
+            return Ok(None);
+        }
+        let len = compressed.len() as u64;
+        return Ok(Some(OffsetEntry {
+            offset: len,
+            prefix_len: len,
+            prefix_sha256: sha256_hex(&compressed),
+            compressed: true,
+            opencode: None,
+            store_fingerprint: None,
+        }));
+    }
+
+    if is_jsonl_path(&record.absolute_path) {
+        // The stage may hold duplicated lines in a different arrangement than
+        // the source. Derive its cursor from a contiguous run of complete
+        // source lines, so duplicate arrangements are recognized without
+        // treating reordered or missing repeated lines as covered.
+        // `read_jsonl_delta` re-reads and hashes the claimed source
+        // prefix before it accepts this cursor.
+        let sealed = sealed_shards.iter().flatten().copied().collect::<Vec<_>>();
+        let source_len = fs::metadata(&record.absolute_path)
+            .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
+            .len();
+        // No covered prefix can be longer than the stage body, so cap this
+        // probe there instead of reading an arbitrarily larger source.
+        let source = read_range(
+            &record.absolute_path,
+            0,
+            source_len.min(sealed.len() as u64),
+        )
+        .with_context(|| {
+            format!(
+                "read source prefix ({})",
+                path_digest(&record.absolute_path)
+            )
+        })?;
+        let offset = covered_source_prefix(&sealed, &source);
+        if offset == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(OffsetEntry {
+            offset,
+            prefix_len: offset,
+            prefix_sha256: sha256_hex(&source[..offset as usize]),
+            compressed: false,
+            opencode: None,
+            store_fingerprint: None,
+        }));
+    }
+
+    // Whole-file sources have no incremental model: `process_whole_file` seals
+    // the file in one shard or not at all, so the reuse means the stage's tail
+    // is already this file — which it is when the file has not changed since it
+    // was sealed last, and also when the defect sealed it twice.
+    let bytes = fs::read(&record.absolute_path)
+        .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
+    if bytes.is_empty()
+        || !stage_tail_is(
+            &stage_sealed_shards(stage, machine, &record.id)?,
+            &seal_framed(std::slice::from_ref(&bytes)),
+        )
+    {
+        return Ok(None);
+    }
+    // The sealer appends a newline after the single "line" it is given, so the
+    // sealed length is one byte longer than the file. The cursor is over the
+    // *file*, which is what `process_whole_file` re-checks by hash.
+    let len = bytes.len() as u64;
+    Ok(Some(OffsetEntry {
+        offset: len,
+        prefix_len: len,
+        prefix_sha256: sha256_hex(&bytes),
+        compressed: false,
+        opencode: None,
+        store_fingerprint: None,
+    }))
+}
+
 /// Observe what the stage currently holds for one session.
 fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
     let dir = store::session_shard_dir(stage, machine, session_id);
@@ -765,7 +1064,17 @@ pub fn collect_scan_report(
                 reason,
             });
         }
-        let old = stored.as_ref().map(|entry| entry.cursor.clone());
+        // A destination with no stored cursor has never been read for, so this
+        // pass would otherwise start every source at offset zero and seal the
+        // whole file again on top of shards the stage already holds. Ask the
+        // stage first: what it holds — verified against the source by the
+        // ordinary read path, not trusted because it is ours — is the position
+        // this destination actually starts from. A stage that disagrees with
+        // the source yields nothing here and the full read happens as before.
+        let old = match stored.as_ref() {
+            Some(entry) => Some(entry.cursor.clone()),
+            None => stage_prefix_entry(&record, stage, machine)?,
+        };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
         // it from being reused.
@@ -1036,6 +1345,21 @@ fn process_sqlite_snapshot(
     }
     let source_bytes = json_line.len() as u64;
     let digest = sha256_hex(&json_line);
+    // No cursor of this destination's own, and the stage already holds exactly
+    // this export: the destination is owed nothing, and sealing it again would
+    // store the conversation twice.
+    if old.is_none()
+        && !force_reset
+        && stage_holds_this_export(stage, machine, &record.id, &json_line)?
+    {
+        return Ok(unchanged_content_sqlite(
+            record,
+            cursor,
+            store_fingerprint,
+            source_bytes,
+            &digest,
+        ));
+    }
     if let Some(entry) = old {
         if !force_reset && export_content_matches(entry, source_bytes, &digest) {
             return Ok(unchanged_content_sqlite(
@@ -1263,6 +1587,18 @@ fn process_opencode(
         .map_err(|error| anyhow!("failed to read opencode session snapshot: {error}"))?;
     let source_bytes = snapshot.json_line.len() as u64;
     let digest = sha256_hex(&snapshot.json_line);
+    if old.is_none()
+        && !force_reset
+        && stage_holds_this_export(stage, machine, &record.id, &snapshot.json_line)?
+    {
+        return Ok(unchanged_content_sqlite(
+            record,
+            snapshot.cursor,
+            store_fingerprint,
+            source_bytes,
+            &digest,
+        ));
+    }
     if let Some(entry) = old {
         if !force_reset && export_content_matches(entry, source_bytes, &digest) {
             return Ok(unchanged_content_sqlite(

@@ -331,17 +331,50 @@ fn a_debt_the_archive_settles_is_not_reread() {
 
 /// The debt set is per destination: what one destination has been given says
 /// nothing about what another one owes.
+///
+/// A first pass for `dest-b` must therefore establish `dest-b`'s *own*
+/// position. It must not establish it by sealing the source a second time —
+/// that is W283, where `dest-init` doubled every session body in the stage for
+/// every destination added. The evidence it uses instead is the one ADR-012
+/// already accepts for a stored cursor: the shards are still sealed on the
+/// stage, so the debt is fully accounted for locally. The per-destination part
+/// is what this test pins, so it asserts the state directly rather than the
+/// read counters a reintroduced reseal would also satisfy.
 #[test]
 fn a_second_destination_starts_owing_everything() {
     let fx = fixture(b"one\ntwo\n");
+    let session = fx.session_id();
     let a_first = fx.collect(&unreachable("dest-a"));
     let b_first = fx.collect(&unreachable("dest-b"));
     let a_second = fx.collect(&unreachable("dest-a"));
 
     assert_eq!(a_first.lines_written, 2);
-    // dest-b has never been read for, so the source is unread *for it*.
-    assert_eq!(b_first.lines_written, 2);
-    assert_eq!(b_first.delta_bytes_read, b"one\ntwo\n".len() as u64);
+    // dest-b owes the session in its own right: its pass records that debt
+    // under its own key, with the shards the stage holds.
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fx.state.join("debts-v2.json")).unwrap()).unwrap();
+    for name in ["dest-a", "dest-b"] {
+        let entry = &state["destinations"][name]["files"]
+            [&format!("{}", fx.source.canonicalize().unwrap().to_string_lossy())];
+        assert_eq!(
+            entry["session_id"], session,
+            "{name} must hold its own entry for the session it owes:\n{state}"
+        );
+        assert_eq!(
+            entry["shards"]["shard_count"], 1,
+            "{name}'s debt must record the sealed shards, not a reseal:\n{state}"
+        );
+        assert_eq!(entry["shards"]["concat_bytes"], 8, "{state}");
+    }
+    // …but the bytes it owes are already sealed, so there is nothing to read
+    // again and nothing to seal again.
+    assert_eq!(b_first.lines_written, 0);
+    assert_eq!(b_first.delta_bytes_read, 0);
+    assert_eq!(
+        store::concat_shards(&fx.stage, MACHINE, &session).unwrap(),
+        b"one\ntwo\n",
+        "a second destination must not double the sealed body"
+    );
     // …and dest-a's own debt record survived dest-b's pass untouched.
     assert_eq!(a_second.lines_written, 0);
     assert_eq!(a_second.unverified_cursors, 0);
