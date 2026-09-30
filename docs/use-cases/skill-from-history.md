@@ -76,7 +76,7 @@ Read that as two separate claims. `matched=1` is the answer. `index_covered=4`, 
 | `index_not_indexable` above `0` | Those sessions' archived format cannot be read by this build. A `0` says nothing about them, and the command exits `3`. | Nothing yet, for those sessions. `--scan` reads the conversations themselves, and counts a format it cannot read the same way. |
 | `metadata_answer_complete=false` | A session could not be placed in time, so a date filter had no answer for it. | The query still answered; the caveat is named in the output. |
 
-A query shorter than three characters is refused rather than answered with no rows, because the index matches runs of three or more. `--scan` is the way around that: it reads the selected conversations themselves and matches case-insensitively, so it answers a shorter query and does not depend on the index being current. It is slower, and it downloads what it reads.
+A query shorter than three characters cannot be answered from the index, which matches runs of three or more. Today the CLI prints that as `matched=0` plus a suggestion line, `[search] suggestion: use a query of at least 3 characters`, and — when the index otherwise covers the selection — exits `1`, the same code as a search that read everything and matched nothing. On a short query the safe reading is the suggestion line, not the `0`: the index was never asked, so the zero is not a statement that the material is absent. `--scan` is the way around it: it reads the selected conversations themselves and matches case-insensitively, so it answers a shorter query and does not depend on the index being current. It is slower, and it downloads what it reads.
 
 **Which sessions are they?** The CLI tells you how many matched, not which. The dashboard's search page lists them, shows the matching line, and links each one into the reader:
 
@@ -93,9 +93,13 @@ chat-stasher search --destination offsite --session claude-code.0123456789abcdef
 ```
 
 ```
+…
 [search] matched      : 1
   claude-c~19478f  machine=0123456789abcdef0123456789abcdef  harness=claude-code  shards=1  bytes=242  snapshot=5ea17418  active=1772720400..1772720400
+…
 ```
+
+(The run's header lines and its closing `not matched  : 4` count are left out; the matched row is verbatim.)
 
 The id is the archive's own: it starts with the tool, so `--session aaaa0002` on its own finds nothing and says so. [Recover a lost machine's conversations](lost-machine.md#5-read-one-back) has that trap written out in full, and it applies here too.
 
