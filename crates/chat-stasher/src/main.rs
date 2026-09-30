@@ -10221,6 +10221,83 @@ mod decision_surface_tests {
         assert!(!setup_declaration_given(""));
     }
 
+    /// A declined prompt is not a declaration, and the key must stay undeclared
+    /// — the state the wizard reports as an owed step and the exit code `2`
+    /// comes from.
+    ///
+    /// The prompt says "NOT declared" in so many words. A key that reads as
+    /// declared anyway would let a run finish with `missing_parameters` empty
+    /// and the archive readable only from this machine's copy of a key nobody
+    /// confirmed — the one direction this must never get wrong, and the reason
+    /// the record is written only when the user made the statement.
+    #[test]
+    fn a_declined_prompt_leaves_the_key_undeclared() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = dir.path().join("masterkey.json");
+        std::fs::write(&key, b"opaque fixture bytes, never read as a key\n")
+            .expect("plant the key");
+        assert!(
+            !setup_declaration_from_answer(
+                SetupDeclarationAnswer::Declined,
+                chat_stasher::keydecl::LOCAL_SCOPE,
+                &key,
+                "masterkey",
+                dir.path(),
+            ),
+            "a declined prompt is not a declaration"
+        );
+        assert!(
+            !chat_stasher::keydecl::load(dir.path())
+                .contains_key(chat_stasher::keydecl::LOCAL_SCOPE),
+            "a declined prompt must record nothing at all"
+        );
+    }
+
+    /// A declaration that could not reach the disk is not one either: the
+    /// record *is* the value of the answer, because `status`/`doctor` read it on
+    /// later runs. Reporting the step as done would be the false "saved" in a
+    /// different shape.
+    #[test]
+    fn a_declaration_that_cannot_be_recorded_is_not_a_declaration() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The key file is absent, so the declaration has no file to be about
+        // and cannot be fingerprinted — the record must not be written.
+        let key = dir.path().join("never-created.json");
+        assert!(
+            !setup_declaration_from_answer(
+                SetupDeclarationAnswer::Declared,
+                &chat_stasher::keydecl::destination_scope("backup"),
+                &key,
+                "destination key for `backup`",
+                dir.path(),
+            ),
+            "an unrecorded declaration is not a declaration"
+        );
+        assert!(chat_stasher::keydecl::load(dir.path()).is_empty());
+    }
+
+    /// And the one case that *is* a declaration: the user said it and the
+    /// record is on the disk.
+    #[test]
+    fn a_declaration_the_user_made_and_the_run_recorded_counts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = dir.path().join("masterkey-backup.json");
+        std::fs::write(&key, b"opaque fixture bytes, never read as a key\n")
+            .expect("plant the key");
+        assert!(setup_declaration_from_answer(
+            SetupDeclarationAnswer::Declared,
+            &chat_stasher::keydecl::destination_scope("backup"),
+            &key,
+            "destination key for `backup`",
+            dir.path(),
+        ));
+        assert!(chat_stasher::keydecl::declared_for(
+            &chat_stasher::keydecl::load(dir.path()),
+            &chat_stasher::keydecl::destination_scope("backup"),
+            &key,
+        ));
+    }
+
     /// An empty answer takes the offered default; a typed path is expanded
     /// through the same boundary the config loader uses, so a `~` cannot reach
     /// the filesystem as a directory literally named `~`.
@@ -12124,9 +12201,16 @@ fn cmd_setup(
             // machine reads that destination with `masterkey-<name>.json`, so
             // creating or using one without the declaration reproduces BUG-2
             // (W281). Owed unless the flag covers it, it is the local key (an
-            // override sharing the local declaration), it was already recorded
-            // declared, or it is an adopted destination whose key was never
-            // created (nothing exists to back up).
+            // override sharing the local declaration), it is already recorded
+            // declared *for this file*, or it is an adopted destination whose
+            // key was never created (nothing exists to back up).
+            //
+            // This block runs only when the flag is absent. With the flag given
+            // there is nothing to refuse here: the flag covers the local key,
+            // and a destination key this run has still to create is reported by
+            // the declaration block below — after `dest-init` has run and the
+            // file exists to be named — rather than refused here before there is
+            // a file for the person to copy.
             if !masterkey_saved_elsewhere {
                 let name = destination.as_deref().expect("destination is some");
                 let dest_key = setup_destination_key_path(&config, name);
@@ -12134,8 +12218,11 @@ fn cmd_setup(
                     let will_configure = !setup_destination_declared(Some(name));
                     if will_configure || dest_key.exists() {
                         let state_dir = chat_stasher::collect::default_state_dir();
-                        let already_declared = chat_stasher::keydecl::load(&state_dir)
-                            .contains_key(&chat_stasher::keydecl::destination_scope(name));
+                        let already_declared = chat_stasher::keydecl::declared_for(
+                            &chat_stasher::keydecl::load(&state_dir),
+                            &chat_stasher::keydecl::destination_scope(name),
+                            &dest_key,
+                        );
                         if !already_declared && !premissing.contains(&"masterkey_saved_elsewhere") {
                             premissing.push("masterkey_saved_elsewhere");
                         }
@@ -12249,14 +12336,29 @@ fn cmd_setup(
     let declarations = chat_stasher::keydecl::load(&state_dir);
     // The single flag covers every key of this run. An existing, already
     // recorded declaration also counts, so a non-interactive re-run that does
-    // not pass the flag does not demand a redundancy.
+    // not pass the flag does not demand a redundancy — and it counts only when
+    // it is about the file this run would protect, not merely about the scope:
+    // a record made about another path, or about key bytes that have since been
+    // replaced, is not a declaration about this key.
     let declared = masterkey_saved_elsewhere;
-    let mut local_declared =
-        declared || declarations.contains_key(chat_stasher::keydecl::LOCAL_SCOPE);
+    let mut local_declared = declared
+        || chat_stasher::keydecl::declared_for(
+            &declarations,
+            chat_stasher::keydecl::LOCAL_SCOPE,
+            &local.key_file,
+        );
     if interactive {
         print_setup_local_report(&local, &chain);
         if setup_has_key(&local.save) {
-            local_declared = print_setup_masterkey(&local, &state_dir) || local_declared;
+            // Asked only for a key this run does not already hold a declaration
+            // for — the same rule the destination's prompt follows — and the
+            // answer is the one the run acts on: the wizard has just told a
+            // user who declined that the step is unfinished, and it must not
+            // then report the key as declared, or record it, because a flag or
+            // an older record happens to be there.
+            if !local_declared {
+                local_declared = print_setup_masterkey(&local, &state_dir);
+            }
         } else {
             println!(
                 "setup: masterkey: none exists yet, so there is nothing to declare saved — the \
@@ -12264,15 +12366,21 @@ fn cmd_setup(
             );
         }
     }
-    // The flag records the local declaration once the key exists. Only when the
-    // scope is not already recorded: re-writing the file on every run would be
-    // churn with no new fact in it. A declaration that cannot be persisted is
-    // not a declaration — the record is the whole point of it, because
+    // The flag records the local declaration once the key exists. Only when
+    // this key is not already recorded: re-writing the file on every run would
+    // be churn with no new fact in it — but a record made about another file,
+    // or about bytes that have since been replaced, is not a record about this
+    // one and is written over. A declaration that cannot be persisted is not a
+    // declaration — the record is the whole point of it, because
     // `status`/`doctor` read it on later runs — so a failed write clears the
     // flag the caller declared rather than reporting the step as done.
     if declared
         && setup_has_key(&local.save)
-        && !declarations.contains_key(chat_stasher::keydecl::LOCAL_SCOPE)
+        && !chat_stasher::keydecl::declared_for(
+            &declarations,
+            chat_stasher::keydecl::LOCAL_SCOPE,
+            &local.key_file,
+        )
     {
         if !record_key_declaration(
             &state_dir,
@@ -12357,6 +12465,20 @@ fn cmd_setup(
     // observation an interactive one gets on stderr.
     let credentials = setup_remote_credentials(&remote);
 
+    // Whether the destination's key file was on this disk **before the remote
+    // step**, which is the step that creates it.
+    //
+    // This is what decides whether `--masterkey-saved-elsewhere` may cover that
+    // key at all. The flag is a statement about files the user has already seen
+    // and copied; a key this run creates is not one of them, because at the
+    // moment the flag was given there was nothing to copy. A run that would
+    // declare such a key is declaring a backup nobody can have made, so it
+    // reports the declaration as still owed instead (see the destination
+    // declaration below).
+    let destination_key_existed_before = destination
+        .as_deref()
+        .map(|name| setup_destination_key_path(&config, name).exists());
+
     let remote_report = match destination.as_deref() {
         Some(name) => {
             if interactive {
@@ -12439,18 +12561,46 @@ fn cmd_setup(
     // machine reads that destination with *its* key — never with the local one
     // (ADR-013/039). So step 4's key is owed too, and the wizard names it and
     // asks for the same declaration. Interactive: ask now that the key exists.
-    // Non-interactive: the single flag (or an already recorded declaration)
-    // covers it; `dest_declared` reflects that.
+    // Non-interactive: the flag (or an already recorded declaration) covers it
+    // when it *may* — see `flag_covers_destination_key` — and `dest_declared`
+    // reflects that.
     let dest_declared_key = setup_destination_has_key(&remote_report, &config);
+    // The flag is a statement about key files the user has already seen, so it
+    // cannot cover one this run created: at the moment it was given there was no
+    // file to copy. A key that was not on the disk before the remote step and is
+    // here now exists because `dest-init` just made it; the declaration stays
+    // owed, the run stops with `2`, and the file the person has to copy is named
+    // in `masterkey.keys` (`declared: false`) — the same shape as the WIZ-1
+    // bootstrap, one step later in the flow. A later run, on a machine where the
+    // file is already there, declares it.
+    //
+    // The local key is deliberately not held to this, and the asymmetry is
+    // written down rather than implied: it is the file the flag is named after,
+    // the flow creates and names it on a run *without* the flag before the flag
+    // is ever passed (the bootstrap above), and a destination's key has no such
+    // step — this rule is it. A caller who passes the flag on the very first run
+    // of a fresh machine is skipping the local bootstrap, and that is their
+    // statement to make about a file at a documented path.
+    let destination_key_created_this_run =
+        matches!(dest_declared_key, Some(_)) && destination_key_existed_before == Some(false);
+    let flag_covers_destination_key = declared && !destination_key_created_this_run;
     let mut dest_declared = dest_declared_key
         .as_ref()
-        .map(|_| {
-            declared
+        .map(|key| {
+            flag_covers_destination_key
                 || remote_report
                     .name
                     .as_deref()
                     .map(|name| {
-                        declarations.contains_key(&chat_stasher::keydecl::destination_scope(name))
+                        // A recorded declaration counts only if it is about the
+                        // file this run would declare — that path, holding
+                        // those bytes. A destination whose `key_file` moved, or
+                        // whose key was re-created since, has no declaration.
+                        chat_stasher::keydecl::declared_for(
+                            &declarations,
+                            &chat_stasher::keydecl::destination_scope(name),
+                            key,
+                        )
                     })
                     // reason: `name` is present exactly when the report named a
                     // destination; a report without one reaches this with no
@@ -12477,16 +12627,16 @@ fn cmd_setup(
             }
         }
     }
-    // The same for the destination's key. Recorded once, and a failed write
-    // clears the declaration — including one the caller made with the flag —
-    // because an unrecorded declaration is exactly what `status` will keep
-    // reporting as missing, and claiming otherwise would be the false "saved"
-    // this file exists to prevent.
-    if declared {
+    // The same for the destination's key, for the keys the flag may cover.
+    // Recorded once, and a failed write clears the declaration — including one
+    // the caller made with the flag — because an unrecorded declaration is
+    // exactly what `status` will keep reporting as missing, and claiming
+    // otherwise would be the false "saved" this file exists to prevent.
+    if declared && !destination_key_created_this_run {
         if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref())
         {
             let scope = chat_stasher::keydecl::destination_scope(name);
-            if !declarations.contains_key(&scope)
+            if !chat_stasher::keydecl::declared_for(&declarations, &scope, key)
                 && !record_key_declaration(
                     &state_dir,
                     &scope,
@@ -13871,8 +14021,8 @@ fn setup_outcome_word(state: &chat_stasher::runstate::RunState) -> &'static str 
         chat_stasher::runstate::RunOutcome::Error => "ERROR",
     }
 }
-/// Print a key's path and, with an optional preamble labelling whose copy it
-/// is, ask for the declaration; returns whether the user made it.
+/// Print a key's path, ask for the declaration, and record it when it is made;
+/// returns whether this key is now *declared saved*.
 ///
 /// The wording carries a safety duty no check can: this file cannot be
 /// recreated, so an archive whose key is lost is an archive nobody reads again.
@@ -13882,13 +14032,34 @@ fn setup_outcome_word(state: &chat_stasher::runstate::RunState) -> &'static str 
 ///
 /// `scope` is the declaration record's scope id (`keydecl::LOCAL_SCOPE` or
 /// `keydecl::destination_scope`); a made declaration is persisted there so
-/// `status`/`doctor` can say this key has been declared saved.
+/// `status`/`doctor` can say this key has been declared saved. A declined
+/// answer is *not* a declaration, however the caller goes on to report it — see
+/// [`setup_declaration_from_answer`].
 fn print_setup_key_declaration(
     key_file: &std::path::Path,
     scope: &str,
     label: &str,
     state_dir: &std::path::Path,
 ) -> bool {
+    let answer = ask_setup_key_declaration(key_file, label);
+    setup_declaration_from_answer(answer, scope, key_file, label, state_dir)
+}
+
+/// What the declaration prompt came back with.
+///
+/// Three states, never two: the user made the statement, the user did not, or
+/// the answer could not be read at all. The last one is not a "no" — nothing
+/// was asked-and-answered — and it must not be reported as a declaration
+/// either way.
+enum SetupDeclarationAnswer {
+    Declared,
+    Declined,
+    Unread(String),
+}
+
+/// Print a key's path and ask for the declaration. Pure I/O: what the answer
+/// *means* is [`setup_declaration_from_answer`]'s job.
+fn ask_setup_key_declaration(key_file: &std::path::Path, label: &str) -> SetupDeclarationAnswer {
     println!("setup: {label}: {}", key_file.display());
     println!(
         "setup: That file is the only thing that can decrypt this archive copy. If it is lost \
@@ -13906,27 +14077,52 @@ fn print_setup_key_declaration(
     let prompt =
         format!("Type `{SETUP_MASTERKEY_DECLARATION}` to declare you have your own copy: ");
     let mut input = String::new();
-    let declared = match prompt_setup_value(&prompt, &mut input) {
-        Ok(()) if setup_declaration_given(&input) => {
+    match prompt_setup_value(&prompt, &mut input) {
+        Ok(()) if setup_declaration_given(&input) => SetupDeclarationAnswer::Declared,
+        Ok(()) => SetupDeclarationAnswer::Declined,
+        Err(error) => SetupDeclarationAnswer::Unread(error.to_string()),
+    }
+}
+
+/// Turn an answer into a declaration, recording it when it is one.
+///
+/// Separated from the prompt so the part that decides can be tested without a
+/// terminal. Two facts are required and this is where they meet: the user made
+/// the statement, **and** the record reached the disk.
+///
+/// Both directions of getting this wrong are the same failure: a key that reads
+/// as declared when nobody confirmed a copy lets a run finish with
+/// `missing_parameters` empty and the archive readable only from this machine's
+/// file. A decline is therefore answered `false` without touching the record —
+/// the wizard has just told the user the step is unfinished, and it must not
+/// report it as done to `status`/`doctor` in the same breath.
+fn setup_declaration_from_answer(
+    answer: SetupDeclarationAnswer,
+    scope: &str,
+    key_file: &std::path::Path,
+    label: &str,
+    state_dir: &std::path::Path,
+) -> bool {
+    match answer {
+        SetupDeclarationAnswer::Declared => {
             println!("setup: {label}: declared (unverified)");
-            true
+            // A made declaration is recorded so status/doctor can report it. A
+            // failed persist means the scope is *not* recorded — the caller
+            // treats it as not declared, never as saved.
+            record_key_declaration(state_dir, scope, key_file, label)
         }
-        Ok(()) => {
+        SetupDeclarationAnswer::Declined => {
             eprintln!(
                 "setup: {label}: NOT declared — this step is unfinished, and this archive copy \
                  is still readable only from this machine's file"
             );
             false
         }
-        Err(error) => {
+        SetupDeclarationAnswer::Unread(error) => {
             eprintln!("setup: could not read the {label} declaration: {error}");
             false
         }
-    };
-    // A made declaration is recorded so status/doctor can report it. A failed
-    // persist means the scope is *not* recorded — the caller treats it as not
-    // declared, never as saved.
-    !declared || record_key_declaration(state_dir, scope, key_file, label)
+    }
 }
 
 /// Persist a declaration the user made, returning whether it is now on the disk.

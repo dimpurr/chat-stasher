@@ -12,11 +12,18 @@
 //! of a record is the safe default ("not declared"); a present record for a key
 //! that no longer exists, or a malformed file, never reads as "declared".
 //!
+//! A record is about a **file**, not about a name: it carries the path the user
+//! was shown and the fingerprint of the bytes that were there (see
+//! [`declared_for`]). A key re-created at the same path is a different key, and
+//! the declaration made about the old one must not be read as a statement about
+//! it.
+//!
 //! `status`/`doctor` read this file to say which destination keys exist locally
 //! and which the user has declared saved.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -27,7 +34,12 @@ pub const KEY_DECLARATIONS_FILE: &str = "key-declarations.json";
 
 /// Bumped whenever the shape below changes incompatibly. An unknown version is
 /// treated as absent, never as declared.
-pub const KEY_DECLARATIONS_VERSION: u32 = 1;
+///
+/// `2` adds the fingerprint, which is what makes a record a statement about a
+/// *file* rather than about a path. A version-1 file is read as absent, so a
+/// record made by a build without fingerprints is re-asked rather than trusted
+/// about whatever now sits at that path.
+pub const KEY_DECLARATIONS_VERSION: u32 = 2;
 
 /// The scope id of the local repository's key.
 pub const LOCAL_SCOPE: &str = "local";
@@ -51,6 +63,11 @@ pub struct KeyDeclaration {
     pub path: PathBuf,
     /// Wall-clock seconds since the epoch when the statement was made.
     pub declared_at_unix: u64,
+    /// SHA-256 (hex) of the key file's bytes when the statement was made. A
+    /// path can hold a different key tomorrow — the file deleted and re-created
+    /// is a new key — and a declaration about the old bytes says nothing about
+    /// the new ones.
+    pub fingerprint: String,
     /// Always `false`: nothing here verifies that a copy exists.
     #[serde(default)]
     pub declaration_is_verified: bool,
@@ -94,6 +111,48 @@ pub fn load(state_dir: &Path) -> Declarations {
     }
 }
 
+/// The SHA-256 of a key file's bytes, hex — `None` when it cannot be read.
+///
+/// Not key material: a digest cannot be turned back into the key, and it is
+/// only ever compared with another digest the same way.
+pub fn fingerprint_of(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// Whether these declarations say the user keeps a copy of **`path` as it is
+/// now**.
+///
+/// Both halves are required, and each catches a different false "saved":
+/// * the recorded path must be the path being asked about, because a
+///   destination's `key_file` can change in the config and a declaration about
+///   the old file says nothing about the new one;
+/// * the bytes there must fingerprint to what was recorded, because a key file
+///   deleted and re-created at the same path is a *different key*, and the
+///   commonest way to get one is to re-run the wizard after losing the last
+///   copy — exactly when a false "saved" is most costly.
+///
+/// A file that is not there leaves the path match standing: the statement is
+/// about the user's copy, and deleting this machine's file does not unmake it.
+/// Whether the file is here is reported separately, so nothing is conflated.
+pub fn declared_for(declarations: &Declarations, scope: &str, path: &Path) -> bool {
+    let Some(entry) = declarations.get(scope) else {
+        return false;
+    };
+    if entry.path != path {
+        return false;
+    }
+    match fingerprint_of(path) {
+        Some(now) => now == entry.fingerprint,
+        None => true,
+    }
+}
+
 /// Record that the user declared they keep a copy of `path` for `scope`.
 ///
 /// Crash-safe: temp file + fsync + atomic rename (same shape as `runstate`).
@@ -101,13 +160,23 @@ pub fn load(state_dir: &Path) -> Declarations {
 /// drop another's record. A failure to persist means the scope is *not*
 /// recorded — the caller must treat it as "not declared", never claim the run
 /// succeeded at declaring.
+///
+/// A file that cannot be read is an error rather than a record without a
+/// fingerprint: the fingerprint is what makes the record a statement about
+/// *this* key, and a record that matched any file at that path would be the
+/// false "saved" this module exists to prevent. The caller renders the error
+/// and keeps the step owed.
 pub fn mark_declared(state_dir: &Path, scope: &str, path: &Path) -> anyhow::Result<()> {
+    let fingerprint = fingerprint_of(path).ok_or_else(|| {
+        anyhow::anyhow!("cannot read key file {} to fingerprint it", path.display())
+    })?;
     let mut declarations = load(state_dir);
     declarations.insert(
         scope.to_string(),
         KeyDeclaration {
             path: path.to_path_buf(),
             declared_at_unix: now_unix(),
+            fingerprint,
             declaration_is_verified: false,
         },
     );
@@ -132,6 +201,13 @@ pub fn mark_declared(state_dir: &Path, scope: &str, path: &Path) -> anyhow::Resu
 mod tests {
     use super::*;
 
+    /// A key file with opaque bytes — never read as a key, only fingerprinted.
+    fn plant_key(at: &Path) -> PathBuf {
+        fs::create_dir_all(at.parent().expect("a parent directory")).expect("key directory");
+        fs::write(at, b"opaque fixture bytes, never read as a key\n").expect("plant the key file");
+        at.to_path_buf()
+    }
+
     #[test]
     fn missing_file_reads_as_empty_not_declared() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -141,12 +217,75 @@ mod tests {
     #[test]
     fn mark_declared_round_trips_and_is_unverified() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let key = dir.path().join("masterkey-backup.json");
+        let key = plant_key(&dir.path().join("masterkey-backup.json"));
         mark_declared(dir.path(), "backup", &key).expect("persist");
         let decls = load(dir.path());
         let entry = decls.get("backup").expect("the scope is recorded");
         assert_eq!(entry.path, key);
         assert!(!entry.declaration_is_verified, "never verified");
+        assert!(declared_for(&decls, "backup", &key));
+    }
+
+    /// A key file that cannot be read cannot be declared: the fingerprint is
+    /// what makes the record a statement about *this* file, and a record
+    /// without one would match any key later placed at that path.
+    #[test]
+    fn declaring_a_key_file_that_cannot_be_read_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("masterkey-backup.json");
+        assert!(
+            mark_declared(dir.path(), "backup", &missing).is_err(),
+            "an unreadable key file has no fingerprint, so it cannot be declared"
+        );
+        assert!(
+            load(dir.path()).is_empty(),
+            "a refused declaration must record nothing"
+        );
+    }
+
+    /// The whole point of the fingerprint: the same path holding a *different*
+    /// key is a different file, and the declaration about the old one says
+    /// nothing about it. Re-creating the key at that path is what happens after
+    /// the user loses it — the moment a false "saved" costs the most.
+    #[test]
+    fn a_declaration_does_not_cover_a_key_re_created_at_the_same_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "backup", &key).expect("persist");
+        fs::write(&key, b"a different key, created after the copy was made\n").expect("replace it");
+        assert!(
+            !declared_for(&load(dir.path()), "backup", &key),
+            "the bytes changed, so the declaration is about a key that is no longer here"
+        );
+    }
+
+    /// And a declaration is about a path: another file's declaration must not
+    /// answer for this one, even in the same scope.
+    #[test]
+    fn a_declaration_for_another_path_does_not_cover_this_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let older = plant_key(&dir.path().join("masterkey-backup-old.json"));
+        let current = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "backup", &older).expect("persist");
+        assert!(
+            !declared_for(&load(dir.path()), "backup", &current),
+            "the declaration was made about another file"
+        );
+    }
+
+    /// A key file deleted after the declaration leaves the statement standing:
+    /// it was made about the user's copy, and this machine's file going away
+    /// does not unmake it. Whether the file is *here* is reported separately.
+    #[test]
+    fn a_declaration_survives_the_local_key_file_being_deleted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "backup", &key).expect("persist");
+        fs::remove_file(&key).expect("remove the local copy");
+        assert!(
+            declared_for(&load(dir.path()), "backup", &key),
+            "the declaration is about the copy the user keeps, not about this disk"
+        );
     }
 
     /// A destination a user calls `local` must not be recorded as the local
@@ -156,7 +295,7 @@ mod tests {
     #[test]
     fn a_destination_named_local_is_not_the_local_scope() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let dest = dir.path().join("masterkey-local.json");
+        let dest = plant_key(&dir.path().join("masterkey-local.json"));
         mark_declared(dir.path(), &destination_scope("local"), &dest).expect("persist");
         let decls = load(dir.path());
         assert!(
@@ -175,13 +314,10 @@ mod tests {
     #[test]
     fn declaring_one_scope_does_not_drop_another() {
         let dir = tempfile::tempdir().expect("temp dir");
-        mark_declared(dir.path(), "local", &dir.path().join("masterkey.json")).expect("a");
-        mark_declared(
-            dir.path(),
-            "backup",
-            &dir.path().join("masterkey-backup.json"),
-        )
-        .expect("b");
+        let local = plant_key(&dir.path().join("masterkey.json"));
+        let backup = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "local", &local).expect("a");
+        mark_declared(dir.path(), "backup", &backup).expect("b");
         let decls = load(dir.path());
         assert_eq!(decls.len(), 2, "both scopes survive a merge");
     }
@@ -212,6 +348,7 @@ mod tests {
                     KeyDeclaration {
                         path: dir.path().join("masterkey.json"),
                         declared_at_unix: 0,
+                        fingerprint: "0".repeat(64),
                         declaration_is_verified: false,
                     },
                 );
@@ -222,6 +359,35 @@ mod tests {
         assert!(
             load(dir.path()).is_empty(),
             "an unknown version is not declared"
+        );
+    }
+
+    /// The version before the fingerprint read as absent, rather than as a
+    /// declaration about whatever now sits at that path.
+    #[test]
+    fn a_version_1_record_is_not_a_declaration() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = plant_key(&dir.path().join("masterkey.json"));
+        let path = key_declarations_path(dir.path());
+        fs::create_dir_all(dir.path()).expect("state dir");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "declarations": {
+                "local": {
+                    "path": key.display().to_string(),
+                    "declared_at_unix": 0,
+                    "declaration_is_verified": false,
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&legacy).expect("serialise"),
+        )
+        .expect("write");
+        assert!(
+            load(dir.path()).is_empty(),
+            "a record without a fingerprint cannot say which key it was about"
         );
     }
 }

@@ -145,12 +145,14 @@ Exit codes:
 |---|---|
 | `0` | Everything it was asked to do finished. |
 | `1` | A step did not finish (`incomplete` is not empty). |
-| `2` | A required parameter is missing, or a flag is malformed. Nothing was written — with the single exception below. |
+| `2` | A required parameter is missing, or a flag is malformed — and the masterkey declaration is a required parameter the person, not the command line, can supply. Nothing was written, with the two exceptions below. |
 | `3` | Something could not be read (`unread` is not empty), or the scan could not run. |
 
 When several apply, `3` wins over `1`, and `1` wins over `2`.
 
 **The one refusal that writes something.** A person cannot confirm they have copied a file that does not exist yet. So when a run with no terminal owes exactly one thing — `missing_parameters` is `["masterkey_saved_elsewhere"]`, and nothing else is missing — it creates the local repository and the master key, reports the key's path in `masterkey.path`, and *then* exits `2`. Nothing else happens on that run: no archive pass, no remote step, no timer. `masterkey.keys` carries exactly the `local` entry here, because step 4 has not run and no destination key exists yet. Read the location to copy from `masterkey.path` rather than assuming the usual one, because your config can put the key somewhere else. Tell the user to copy that file somewhere off this disk, wait for their answer, and run the same command again with `--masterkey-saved-elsewhere`; it continues from the key that is already there. If anything else is missing as well, this does not happen, and that run writes nothing at all.
+
+**A destination key the run creates cannot be declared by a flag given before it existed.** The same rule, one step later in the flow. `--masterkey-saved-elsewhere` is a statement about key files the user has already seen, and a destination's key is created by `dest-init`, *during* the run — so on that run the declaration cannot be made: a first run with an off-site copy stops with `exit_code` `2` *even though the flag was on the command line*, with `missing_parameters` `["masterkey_saved_elsewhere"]` again and the `destination` entry of `masterkey.keys` carrying `declared: false` and the path of the file that was just created. Nothing is wrong with the command line and there is nothing to re-supply: the user copies that file, and the same command run again records the declaration, because the file is on the disk by then. Hand over every path in `masterkey.keys` whose `declared` is `false` — that is the entry still owed.
 
 **Every key, not the first one.** A completed run with a destination names **two** key files, and they open different copies:
 
@@ -166,7 +168,7 @@ When several apply, `3` wins over `1`, and `1` wins over `2`.
 }
 ```
 
-`masterkey.path` is the `local` entry's path, kept for callers written before `keys` existed. Hand the user **every** path in `keys`, and treat `declared` as a report of what they said, never as a check: `declaration_is_verified` is `false` for the same reason on every entry. A second machine needs the `destination` entry's file to read that destination — the `local` one will not do it.
+`masterkey.path` is the `local` entry's path, kept for callers written before `keys` existed. Hand the user **every** path in `keys`, and treat `declared` as a report of what they said, never as a check: `declaration_is_verified` is `false` for the same reason on every entry. A second machine needs the `destination` entry's file to read that destination — the `local` one will not do it. An entry whose `declared` is `false` is one nobody has confirmed: the run either asked and was not answered, or created that file itself and stopped — copy it and run again, as above.
 
 Three rules the wizard keeps, and your script should too:
 

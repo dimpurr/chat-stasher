@@ -90,7 +90,7 @@ The first-run wizard: [setup.md](setup.md).
 | Flag | Meaning |
 |---|---|
 | `--stage <dir>` | Stage folder. Required when not interactive. |
-| `--masterkey-saved-elsewhere` | The person declares they have a copy of **every key the run names** — the local archive's and each destination's. Not verified. |
+| `--masterkey-saved-elsewhere` | The person declares they have a copy of **every key the run names that is already on this machine** — the local archive's and each destination's. Not verified. A key this run creates is not covered: it did not exist when the flag was given, so the run stops with exit `2` and names the file instead. |
 | `--destination <name>` | Configure or verify this destination. Omit to skip the remote step. |
 | `--remote sftp\|s3` | Which recipe to write for a new destination. |
 | `--remote-endpoint`, `--remote-user`, `--remote-ssh-key`, `--remote-bucket`, `--remote-region`, `--remote-root` | The destination's values. `--remote-region` defaults to `auto`. |
@@ -99,7 +99,7 @@ The first-run wizard: [setup.md](setup.md).
 | `--install-schedule` / `--uninstall-schedule` | Install or remove the timers after setup. |
 | `--json` | One JSON object. Always on when not attached to a terminal. |
 
-Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. [setup.md](setup.md#for-scripts-and-agents) has the details.
+Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. The same rule reaches a destination's key one step later — a key `dest-init` created during the run cannot be covered by a flag given before it existed, so that run names the new file and stops with `2` as well. [setup.md](setup.md#for-scripts-and-agents) has the details.
 
 ### `doctor`
 

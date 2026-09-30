@@ -1170,6 +1170,12 @@ impl KeyInventoryRow {
 /// each declared destination's. A destination key is its own row unless it
 /// points at the local key (an override sharing the local archive's
 /// declaration), because then the local row already names it.
+///
+/// `declared_saved` is decided by `keydecl::declared_for`, not by the scope
+/// alone: a declaration is a statement about a *file* — that path, holding those
+/// bytes — so a destination whose `key_file` moved, or whose key was re-created
+/// at the same path, must not read as backed up on the strength of a record
+/// made about a different file.
 pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
     let data_root = default_data_root();
     let state_dir = crate::collect::default_state_dir();
@@ -1185,7 +1191,11 @@ pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
         name: None,
         path: local_path.clone(),
         exists: local_path.exists(),
-        declared_saved: declarations.contains_key(crate::keydecl::LOCAL_SCOPE),
+        declared_saved: crate::keydecl::declared_for(
+            &declarations,
+            crate::keydecl::LOCAL_SCOPE,
+            &local_path,
+        ),
     });
     let mut names: Vec<&String> = config.destinations.keys().collect();
     names.sort_unstable();
@@ -1202,7 +1212,11 @@ pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
             name: Some(name.clone()),
             path: key_file.clone(),
             exists: key_file.exists(),
-            declared_saved: declarations.contains_key(&crate::keydecl::destination_scope(name)),
+            declared_saved: crate::keydecl::declared_for(
+                &declarations,
+                &crate::keydecl::destination_scope(name),
+                &key_file,
+            ),
         });
     }
     out

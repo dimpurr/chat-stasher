@@ -1219,11 +1219,17 @@ fn wizard_key_paths(value: &serde_json::Value) -> Vec<PathBuf> {
 }
 
 /// W281 BUG-2's acceptance, as an assertion: a user who follows the wizard
-/// literally — backs up exactly the key files it names — can restore them on a
-/// second machine and read the destination back. The destination is an ordinary
-/// local-path repo seeded with this machine's history, so the round trip needs
-/// no network; the only thing that separates "I can recover" from BUG-2's
-/// hard `exit 3` is that the wizard names the destination's own key.
+/// literally — copies every key file it names, then runs the same command again
+/// — can restore those files on a second machine and read the destination back.
+/// The destination is an ordinary local-path repo seeded with this machine's
+/// history, so the round trip needs no network; the only thing that separates
+/// "I can recover" from BUG-2's hard `exit 3` is that the wizard names the
+/// destination's own key.
+///
+/// The two runs are the literal flow, not a convenience: the destination's key
+/// does not exist until the run that initialises the destination creates it, so
+/// that run cannot declare it — it stops with `2` and names the file it just
+/// created. A later run, on a machine where the file is already there, may.
 #[test]
 fn a_second_machine_recovers_a_destination_using_every_key_the_wizard_named() {
     // Machine A: one session, one adopted destination ("backup") whose repo is
@@ -1235,10 +1241,29 @@ fn a_second_machine_recovers_a_destination_using_every_key_the_wizard_named() {
         "[destinations.backup]\nrepo = '{}'\n",
         shared.display()
     ));
+
+    // The first run cannot declare a key that does not exist yet, and the
+    // destination's key is one of those: `dest-init` creates it during this
+    // run, so at the moment the flag was given there was no file to copy. The
+    // run therefore stops with `2` — the declaration is still owed — and names
+    // the file it just created, which is the whole point of stopping.
     let aout = a.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
     let value = json_of(&aout);
-    assert_eq!(exit_code(&aout), 0, "value={value}");
-    assert_eq!(value["destination"]["dest_init"]["exit_code"], 0);
+    assert_eq!(
+        exit_code(&aout),
+        2,
+        "the destination's key did not exist when the flag was given, so the declaration \
+         cannot have been made: {value}"
+    );
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"]),
+        "the declaration is the one thing still owed: {value}"
+    );
+    assert_eq!(
+        value["destination"]["dest_init"]["exit_code"], 0,
+        "the key exists because this run created it: {value}"
+    );
 
     // Follow the wizard's instructions literally: back up every key it names.
     let named = wizard_key_paths(&value);
@@ -1255,11 +1280,33 @@ fn a_second_machine_recovers_a_destination_using_every_key_the_wizard_named() {
             .any(|path| path.file_name() == Some(std::ffi::OsStr::new("masterkey.json"))),
         "the wizard must still name the local key; named: {named:?}"
     );
+    let created = value["masterkey"]["keys"]
+        .as_array()
+        .expect("the wizard names its keys as an array")
+        .iter()
+        .find(|key| key["scope"] == "destination")
+        .expect("the destination's key is one of the named keys");
+    assert_eq!(
+        created["declared"], false,
+        "a key this run created cannot be declared: nobody has had it to copy: {value}"
+    );
     let tape = a.root.path().join("backup-tape");
     fs::create_dir_all(&tape).expect("the tape dir");
     for path in &named {
         fs::copy(path, tape.join(path.file_name().unwrap())).expect("copy the named key");
     }
+
+    // The user copies the files, then runs the same command again. Now every
+    // key already exists on the disk, so the declaration covers them and the
+    // run finishes.
+    let aout = a.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&aout);
+    assert_eq!(
+        exit_code(&aout),
+        0,
+        "every named key is on the disk now, so the declaration can be recorded: {value}"
+    );
+    assert_eq!(value["destination"]["dest_init"]["exit_code"], 0);
 
     // Machine B: a fresh machine that only adopts the same destination, and
     // whose only connection to A's archive is the keys put back at the same
@@ -1385,6 +1432,139 @@ fn an_undeclared_destination_key_is_named_by_status_and_doctor() {
         local["exists"], false,
         "no repository and no key exist on this fixture; that is an honest absence, not a row \
          omitted"
+    );
+}
+
+/// The state directory the sandbox's `chat-stasher` writes its own records to
+/// (`$XDG_DATA_HOME/chat-stasher/state`), which is where a key declaration is
+/// recorded and read back from.
+fn state_dir(sandbox: &Sandbox) -> PathBuf {
+    sandbox
+        .root
+        .path()
+        .join("data")
+        .join("chat-stasher")
+        .join("state")
+}
+
+/// A declaration is about a **file**, not about a name.
+///
+/// The record the user made is a statement about the key file they were shown:
+/// that path, holding those bytes. A destination's `key_file` can change — the
+/// block is a hand-edited file — and a declaration made for the old file says
+/// nothing about the new one. Reporting it as `declared_saved` would be the
+/// false backup this whole surface exists to prevent: the user is told a copy
+/// of *this* key exists when the statement was about a different file that this
+/// machine no longer holds.
+#[test]
+fn a_declaration_made_about_another_key_file_does_not_cover_this_one() {
+    let sandbox = Sandbox::new(false);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    fs::create_dir_all(sandbox.data_root()).expect("the data root the key lives in");
+    // The key this machine holds now, and the older file the declaration was
+    // actually made about.
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::write(&destination_key, b"the current key file, never declared\n")
+        .expect("plant the current destination key");
+    let older_key = sandbox.data_root().join("masterkey-backup-old.json");
+    fs::write(&older_key, b"the key file the declaration was made about\n")
+        .expect("plant the older destination key");
+    chat_stasher::keydecl::mark_declared(
+        &state_dir(&sandbox),
+        &chat_stasher::keydecl::destination_scope("backup"),
+        &older_key,
+    )
+    .expect("record the declaration the user made, about the older file");
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let reported = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(
+        reported["path"],
+        destination_key.display().to_string(),
+        "the row is about the key this machine holds now: {dvalue}"
+    );
+    assert_eq!(
+        reported["declared_saved"], false,
+        "the declaration was made about a different file, so this key is not declared \
+         saved: {dvalue}"
+    );
+
+    // `status` says the same, because the user who reads only `status` is the
+    // one who has to be told to copy the file they actually hold.
+    let status = sandbox.command(&["status"]);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("[keys] destination=backup"),
+        "status must name the destination whose current key has no declared backup; \
+         stderr:\n{stderr}"
+    );
+}
+
+/// The other half of the same rule: the file at that path has to be the file
+/// the declaration was made about.
+///
+/// A key deleted and re-created at the same path — the wizard re-run after the
+/// user lost or removed it — is a *different* key. A record that matched on the
+/// path alone would report the new key as backed up because the old one was,
+/// which is the one direction this must never get wrong.
+#[test]
+fn a_declaration_does_not_cover_a_key_re_created_at_the_same_path() {
+    let sandbox = Sandbox::new(false);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    fs::create_dir_all(sandbox.data_root()).expect("the data root the key lives in");
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::write(&destination_key, b"the key the user copied elsewhere\n")
+        .expect("plant the destination key");
+    chat_stasher::keydecl::mark_declared(
+        &state_dir(&sandbox),
+        &chat_stasher::keydecl::destination_scope("backup"),
+        &destination_key,
+    )
+    .expect("record the declaration about the file that is there");
+
+    // The user loses that key and the wizard creates a new one at the same
+    // path. The bytes change; the path does not.
+    fs::write(
+        &destination_key,
+        b"a different key, created after the copy was made\n",
+    )
+    .expect("replace the destination key");
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let reported = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(
+        reported["declared_saved"], false,
+        "a declaration about the old key is not a declaration about the new one at the same \
+         path: {dvalue}"
+    );
+
+    let status = sandbox.command(&["status"]);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("[keys] destination=backup"),
+        "status must name the key whose backup nobody has confirmed; stderr:\n{stderr}"
     );
 }
 

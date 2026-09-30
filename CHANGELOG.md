@@ -233,7 +233,12 @@ under its own heading below.
   it. `status` adds a line per destination whose key is missing here or has no
   declared backup, and stays silent otherwise, so its default body is unchanged
   on a machine with nothing to report. One `--masterkey-saved-elsewhere`
-  declaration still covers every key of a run; it is recorded per copy.
+  declaration covers every key *already on this machine* when the run starts,
+  and is recorded per copy; a key the run itself creates — a destination's,
+  which `dest-init` makes — is not covered, because nobody can have copied a
+  file that did not exist when they answered. That run stops with `2`, names the
+  new file in `masterkey.keys[]` with `declared: false`, and the same command run
+  again records the declaration.
 - **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
   other OS it is refused up front, with the reason that the macOS keychain
   does not exist there, instead of trying to run a tool that cannot be
