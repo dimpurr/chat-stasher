@@ -186,6 +186,14 @@ A source destination that cannot be read makes the result incomplete, reported a
 | `l3` | Every staged session against the archive: shard count, bytes, SHA-256 | Needs `--stage` |
 | `all` (default) | All three | |
 
+L3 also names any session whose archived shard sequence repeats a shard byte for
+byte. The three checks above cannot see that — a body stored twice is
+self-consistent — and it is what leaves `read` and `export` returning a
+conversation twice. It is reported as a **possible** duplicate seal and does not
+fail the run: a harness may legitimately append bytes identical to bytes already
+sealed, and the archive records no provenance that could tell the two apart. The
+count is carried in the `L3 verdict` line so a green run cannot hide it.
+
 ### `reclaim-stage`
 
 Removes staged copies, but only for sessions that **every** declared destination proves it holds, byte for byte. An unreachable destination blocks it.

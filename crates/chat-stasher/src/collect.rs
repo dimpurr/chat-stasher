@@ -333,6 +333,175 @@ pub enum DebtVerdict {
     Unverifiable(&'static str),
 }
 
+/// What the stage already holds for one session, in the exact framing the
+/// sealers write: each line followed by one newline. Empty when nothing is
+/// sealed — which is not the same as a session whose content is empty, so
+/// callers must keep the two apart by checking the shard count, not this
+/// length.
+fn stage_sealed_content(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<Vec<u8>> {
+    store::concat_shards(stage, machine, session_id)
+}
+
+/// Frame `lines` the way [`store::write_sealed_shard_bytes_with_cap`] does.
+fn seal_framed(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line);
+        raw.push(b'\n');
+    }
+    raw
+}
+
+/// Does the stage already hold exactly this export, for a destination that has
+/// no cursor of its own?
+///
+/// A SQLite session cannot be handed a stage-derived cursor the way a file
+/// source can: its cursor is a logical `(time_updated, id)` key, not a byte
+/// offset, so the stage says nothing about it until the session has been
+/// re-exported. Once it has, the comparison is exact — the sealer writes that
+/// export as one line, so the stage's concatenation either equals the framed
+/// line or it does not. A match means this destination is already owed
+/// nothing, and sealing again would store the conversation a second time.
+fn stage_holds_this_export(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+    json_line: &[u8],
+) -> anyhow::Result<bool> {
+    let sealed = stage_sealed_content(stage, machine, session_id)?;
+    if sealed.is_empty() {
+        return Ok(false);
+    }
+    let mut framed = json_line.to_vec();
+    framed.push(b'\n');
+    Ok(framed == sealed)
+}
+
+/// The stage's own sealed shards, expressed as a cursor, when they provably
+/// hold the beginning of what this pass is about to read.
+///
+/// # The defect this exists to stop
+///
+/// The debt state is keyed by destination. A destination with no entry has
+/// never been read for, so its pass legitimately starts every source at offset
+/// zero — but the collector used to *seal what that reread produced*, even when
+/// the stage already held exactly those bytes. Every additional destination
+/// therefore added one more full copy of every session: `read` returned the
+/// conversation twice, `export` wrote it twice, the archive-derived activity
+/// index doubled `line_count`, and L3 said `OK` because it derived its
+/// expectation from the same doubled tree. `setup` step 4 and `dest-init` are
+/// exactly this pass, so every user who finished the wizard had it.
+///
+/// A destination must be given the shards the stage holds, never handed a
+/// second seal of them.
+///
+/// # Why this is not a write-time "have I seen these bytes" guard
+///
+/// Repeated content is real: a harness may append bytes identical to bytes
+/// already sealed (the source `a\n` growing to `a\na\n`). A guard that refused
+/// to write because the new bytes matched something already present would drop
+/// that turn — a silent omission, the one outcome this repository never trades
+/// away. So the decision is made *before* the read, as a cursor the ordinary
+/// read path then has to prove: the candidate prefix is handed to
+/// [`read_jsonl_delta`] as if it were a stored one, and the same SHA-256
+/// comparison guards it. A stage that does not match the source yields no
+/// cursor, and the pass falls back to the full read it did before.
+///
+/// `None` means "no evidence", never "empty", and every case that returns it
+/// falls back to the pre-existing full read rather than assuming the stage is
+/// up to date: nothing sealed at all, a logical (SQLite) cursor that cannot be
+/// spelled as a file offset, and a compressed or whole-file source the stage
+/// does not already cover in full. (An append-only jsonl source is the one case
+/// where partial coverage is exactly the information wanted.) A SQLite
+/// session's reuse is judged at its own call site instead, against the export
+/// it has just produced.
+fn stage_prefix_entry(
+    record: &SessionRecord,
+    stage: &Path,
+    machine: &str,
+) -> anyhow::Result<Option<OffsetEntry>> {
+    // A SQLite session's cursor is logical, not a file offset, so the stage
+    // cannot be turned into one without re-exporting the session. Those paths
+    // judge the reuse themselves, against the export they just produced.
+    if record.sqlite_layout.is_some() {
+        return Ok(None);
+    }
+    let sealed = stage_sealed_content(stage, machine, &record.id)?;
+    if sealed.is_empty() {
+        return Ok(None);
+    }
+
+    if record.compressed || is_zstd_path(&record.absolute_path) {
+        // The entry's offsets are over the *compressed* bytes while the stage
+        // holds the decoded lines, so no prefix of the file can be spelled as
+        // this cursor. Reuse is claimed only for the whole content: the entry
+        // then says "the stage already holds exactly this export", which is
+        // what `process_compressed` re-checks by hash.
+        let compressed = fs::read(&record.absolute_path).with_context(|| {
+            format!(
+                "read compressed source ({})",
+                path_digest(&record.absolute_path)
+            )
+        })?;
+        let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
+        let (lines, _) = complete_lines(&decoded);
+        if lines.is_empty() || seal_framed(&lines) != sealed {
+            return Ok(None);
+        }
+        let len = compressed.len() as u64;
+        return Ok(Some(OffsetEntry {
+            offset: len,
+            prefix_len: len,
+            prefix_sha256: sha256_hex(&compressed),
+            compressed: true,
+            opencode: None,
+            store_fingerprint: None,
+        }));
+    }
+
+    if is_jsonl_path(&record.absolute_path) {
+        // The stage's concatenation is a committed prefix of the file. Hand it
+        // back as an offset cursor; the read path re-reads `[0, offset)`,
+        // compares it against `prefix_sha256`, and only then reads the delta.
+        let len = fs::metadata(&record.absolute_path)
+            .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
+            .len();
+        let covered = sealed.len() as u64;
+        if covered > len {
+            return Ok(None);
+        }
+        return Ok(Some(OffsetEntry {
+            offset: covered,
+            prefix_len: covered,
+            prefix_sha256: sha256_hex(&sealed),
+            compressed: false,
+            opencode: None,
+            store_fingerprint: None,
+        }));
+    }
+
+    // Whole-file sources have no incremental model: `process_whole_file` seals
+    // the file in one shard or not at all. Reuse therefore means the stage
+    // already holds this file entire.
+    let bytes = fs::read(&record.absolute_path)
+        .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
+    if bytes.is_empty() || seal_framed(std::slice::from_ref(&bytes)) != sealed {
+        return Ok(None);
+    }
+    // The sealer appends a newline after the single "line" it is given, so the
+    // sealed length is one byte longer than the file. The cursor is over the
+    // *file*, which is what `process_whole_file` re-checks by hash.
+    let len = bytes.len() as u64;
+    Ok(Some(OffsetEntry {
+        offset: len,
+        prefix_len: len,
+        prefix_sha256: sha256_hex(&bytes),
+        compressed: false,
+        opencode: None,
+        store_fingerprint: None,
+    }))
+}
+
 /// Observe what the stage currently holds for one session.
 fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
     let dir = store::session_shard_dir(stage, machine, session_id);
@@ -765,7 +934,17 @@ pub fn collect_scan_report(
                 reason,
             });
         }
-        let old = stored.as_ref().map(|entry| entry.cursor.clone());
+        // A destination with no stored cursor has never been read for, so this
+        // pass would otherwise start every source at offset zero and seal the
+        // whole file again on top of shards the stage already holds. Ask the
+        // stage first: what it holds — verified against the source by the
+        // ordinary read path, not trusted because it is ours — is the position
+        // this destination actually starts from. A stage that disagrees with
+        // the source yields nothing here and the full read happens as before.
+        let old = match stored.as_ref() {
+            Some(entry) => Some(entry.cursor.clone()),
+            None => stage_prefix_entry(&record, stage, machine)?,
+        };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
         // it from being reused.
@@ -1036,6 +1215,21 @@ fn process_sqlite_snapshot(
     }
     let source_bytes = json_line.len() as u64;
     let digest = sha256_hex(&json_line);
+    // No cursor of this destination's own, and the stage already holds exactly
+    // this export: the destination is owed nothing, and sealing it again would
+    // store the conversation twice.
+    if old.is_none()
+        && !force_reset
+        && stage_holds_this_export(stage, machine, &record.id, &json_line)?
+    {
+        return Ok(unchanged_content_sqlite(
+            record,
+            cursor,
+            store_fingerprint,
+            source_bytes,
+            &digest,
+        ));
+    }
     if let Some(entry) = old {
         if !force_reset && export_content_matches(entry, source_bytes, &digest) {
             return Ok(unchanged_content_sqlite(
@@ -1263,6 +1457,18 @@ fn process_opencode(
         .map_err(|error| anyhow!("failed to read opencode session snapshot: {error}"))?;
     let source_bytes = snapshot.json_line.len() as u64;
     let digest = sha256_hex(&snapshot.json_line);
+    if old.is_none()
+        && !force_reset
+        && stage_holds_this_export(stage, machine, &record.id, &snapshot.json_line)?
+    {
+        return Ok(unchanged_content_sqlite(
+            record,
+            snapshot.cursor,
+            store_fingerprint,
+            source_bytes,
+            &digest,
+        ));
+    }
     if let Some(entry) = old {
         if !force_reset && export_content_matches(entry, source_bytes, &digest) {
             return Ok(unchanged_content_sqlite(
