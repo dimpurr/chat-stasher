@@ -273,7 +273,7 @@ archive would quietly stop being copied anywhere
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
-(`crates/chat-stasher/src/doctor.rs:1165-1205`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:1313-1353`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:367-374`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -955,16 +955,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:845-982,1020-1079`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:993-1130,1168-1227`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:862-982`).
+(`crates/chat-stasher/src/doctor.rs:1010-1130`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:1316,1836-1897`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:1464,1984-2045`).
 The destination probes are the one check that touches the network; see section
-4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:845-982,1020-1079`).
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:993-1130,1168-1227`).
 
 ### 5.1 Exporting a day
 

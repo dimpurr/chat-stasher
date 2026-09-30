@@ -182,6 +182,43 @@ under its own heading below.
 
 #### Fixed
 
+- **Codex sessions are found on Linux and Windows.** The registry's cell for
+  those two platforms spelled the store's location as the override variable
+  itself — `$CODEX_HOME/sessions/`, `%CODEX_HOME%\sessions\` — which is not a
+  form the scanner can expand, so on a default install `doctor` reported
+  `codex not installed (…)` with `sessions=unknown`, `status` counted it among
+  the harnesses "not probed at all", and `run-once` archived nothing from it.
+  Exporting `CODEX_HOME` did not help, because the override is resolved by
+  looking for the store's own directory layer in the template and that layer
+  was not there any more. Both cells now name the documented default
+  (`$HOME/.codex/sessions/`, `%USERPROFILE%\.codex\sessions\`) and keep
+  `env_override = CODEX_HOME`, which is the shape every other harness in the
+  registry already uses: an exported `CODEX_HOME` still wins, and the default is
+  what the template alone anchors. macOS was never affected. `doctor`, `status`,
+  `setup` and `run-once` all read the same cell, so all four are fixed together.
+- **`doctor` says which clock its session dates are on.** The D3 line printed
+  `earliest 2026-09-30T13:07:42Z` with nothing to say whether that was the
+  session file's modification time or the conversation's own time — and the
+  risk line below called it "your earliest session", so a session restored from
+  a backup or copied to a new machine (fresh mtime, old conversation) was
+  described as "about 0 days ago". Directory harnesses are probed from file
+  metadata, so their rows now read `earliest(mtime)`; a single-file SQLite store
+  carries the conversation's time in its own column, and its rows read
+  `earliest(session time)`. The Gemini and Claude Code risk lines name the
+  file-mtime clock too, and no longer state the session's *age* as the days
+  remaining: a file written today said "about 0 days ago … only about 0 days
+  left" under a 30-day window, and a session younger than that window could be
+  reported as "already about -30 days past the 30-day threshold". Each now says
+  how far the oldest batch is from the threshold, in whichever direction keeps
+  the sentence true.
+- **`doctor`'s coverage header no longer counts harnesses it never probed.**
+  `N/12 known harnesses hit on this machine` used the whole registry as its
+  denominator, so a machine where five cells were never opened reported a
+  fraction that read as a measurement over all twelve. The header now reads
+  `N/M probed harnesses hit on this machine · K not probed`, and the
+  registry-driven table below it carries the same split. "Did not scan" is not
+  "there is none", and the two numbers are now separate — the same distinction
+  `status` already made in its own warning, from the same definition.
 - **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
   other OS it is refused up front, with the reason that the macOS keychain
   does not exist there, instead of trying to run a tool that cannot be
