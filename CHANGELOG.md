@@ -231,7 +231,20 @@ under its own heading below.
   re-staged. A pass that read the tail but sealed nothing counts the session
   as unchanged, so a source that stops changing converges to a no-op pass
   and zero new snapshots, and the read that observed the tail is still
-  reported as bytes read. A file that never gains the newline keeps its tail
+  reported as bytes read. A `.jsonl.zst` rollout (a real class: codex
+  compresses idle rollouts) held the same tail in progress through the same
+  rule but churned through a separate hole: a pass that decoded it and found
+  no complete line recorded a zero cursor — an offset of 0 and the digest of
+  nothing, which can never match a nonempty source — and set its reset flag
+  unconditionally, so every later pass re-decoded the same bytes and still
+  counted the session as changed, and for compressed sources the convergence
+  sentence above was false. Such a pass now records the source it observed,
+  compressed length and digest — the same all-or-nothing cursor a sealing
+  pass writes, since decoding has no partial positions to offer — so an
+  unchanged source with nothing sealable answers from the remembered digest
+  as a no-op pass with no reset and no snapshot, and the first pass after
+  the newline arrives no longer matches, re-decodes, and seals the record in
+  full. A file that never gains the newline keeps its tail
   out of the archive rather than sealing a possibly torn record; of 2,180
   real session files measured across macOS and Windows, none ended without
   the trailing newline.

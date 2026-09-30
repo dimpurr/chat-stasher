@@ -185,6 +185,166 @@ fn unterminated_tail_converges_and_commits_once_complete() {
     );
 }
 
+/// A codex-style registry cell, the shape of the shipped one that lists
+/// `.jsonl` and `.jsonl.zst` side by side: a rollout compressed to
+/// `.jsonl.zst` is enumerated with `compressed` set, so the collector takes
+/// the decode-everything path these tests pin.
+fn compressed_registry() -> HarnessRegistry {
+    let cell = json!({
+        "template": "~/.codex/sessions",
+        "format": "jsonl / jsonl.zst",
+        "confidence": "source-confirmed",
+        "source": "synthetic fixture"
+    });
+    let paths = match scanner::current_platform() {
+        "macos" => json!({"macos": cell}),
+        "linux" => json!({"linux": cell}),
+        "windows" => json!({"windows": cell}),
+        platform => panic!("unexpected platform: {platform}"),
+    };
+    serde_json::from_value(json!({
+        "schema_version": 1,
+        "generated": "synthetic",
+        "harnesses": [{
+            "id": "codex",
+            "display_name": "synthetic",
+            "paths": paths
+        }]
+    }))
+    .unwrap()
+}
+
+fn scan_compressed(root: &Path) -> scanner::ScanReport {
+    let config = Config {
+        codex_sessions_dir: Some(root.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+    scanner::scan_with_registry(&config, &compressed_registry()).unwrap()
+}
+
+fn pass_compressed(root: &Path, stage: &Path, state: &Path) -> collect::CollectReport {
+    collect::collect_scan_report(
+        &scan_compressed(root),
+        stage,
+        "fixture-machine",
+        state,
+        20,
+        &dest(),
+    )
+    .unwrap()
+}
+
+/// The compressed double of the tail repro: a `.jsonl.zst` rollout whose
+/// decoded stream holds a single record and no newline must converge
+/// exactly like an uncompressed tail — no reset, no snapshot — and must
+/// still commit the record once its newline arrives.
+///
+/// This path had its own hole: a pass that decoded and found nothing
+/// sealable wrote a zero cursor — offset 0, prefix hash of nothing — which
+/// can never match a nonempty source, and set its reset flag
+/// unconditionally, so every later pass over a byte-identical source
+/// re-decoded it and still counted the session as `changed`: the
+/// convergence rule this file states was written for plain `.jsonl` and was
+/// false for every compressed rollout. Such a pass now records the source it
+/// observed — compressed length and digest, the same all-or-nothing cursor a
+/// sealing pass writes — so an unchanged source with nothing sealable is a
+/// no-op pass.
+#[test]
+fn compressed_unterminated_record_converges_and_commits_once_complete() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source_root = dir.path().join("source");
+    fs::create_dir_all(&source_root).unwrap();
+    let source = source_root.join("019bf00d-97b6-7eb2-9bf8-0000000003c3.jsonl.zst");
+    let record = b"w286 synthetic rollout record, one line, no newline yet";
+    let bytes = zstd::stream::encode_all(record.as_slice(), 3).unwrap();
+    fs::write(&source, &bytes).unwrap();
+    let compressed_len = bytes.len() as u64;
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+    let id = scan_compressed(&source_root).records[0].id.clone();
+
+    // Pass 1: the decoded stream holds one record and no newline, so no line
+    // is sealable and nothing is staged. The pass really did read the whole
+    // compressed source — decoding is all-or-nothing — and that read is
+    // reported, the same way a tail-probing pass reports its read.
+    let first = pass_compressed(&source_root, &stage, &state);
+    assert_eq!(first.lines_written, 0);
+    assert_eq!(first.shards_written, 0);
+    assert_eq!(first.reset_records, 0);
+    assert_eq!(first.changed_records, 0);
+    assert_eq!(first.unchanged_records, 1);
+    assert_eq!(
+        first.delta_bytes_read, compressed_len,
+        "the first pass reads the compressed source whole to decode it"
+    );
+
+    // Passes 2-4, source unchanged: the source is byte-identical to what
+    // pass 1 observed, so nothing sealable can have appeared and the pass
+    // must be a no-op — no decode, no reset, nothing staged, the session
+    // unchanged. Before the fix each of these passes rewrote the zero
+    // cursor, re-read and re-decoded the same bytes, flagged `reset`, and
+    // counted the session `changed`, so run-once pushed a fresh snapshot of
+    // an unchanged stage on every run, forever. This loop is the RED pair.
+    for pass_no in 2..=4 {
+        let report = pass_compressed(&source_root, &stage, &state);
+        assert_eq!(
+            report.changed_records, 0,
+            "pass {pass_no}: an unchanged source with nothing sealable changed nothing"
+        );
+        assert_eq!(report.unchanged_records, 1);
+        assert_eq!(
+            report.reset_records, 0,
+            "pass {pass_no}: an unchanged source must not be flagged as a reset"
+        );
+        assert_eq!(report.shards_written, 0);
+        assert_eq!(report.lines_written, 0);
+        assert_eq!(
+            report.delta_bytes_read, 0,
+            "pass {pass_no}: the remembered source digest answers, so nothing is re-read"
+        );
+    }
+
+    // Complete the record the way the writing harness would: the decoded
+    // stream gains its newline, and the compressed bytes change with it, so
+    // the remembered observation no longer matches. The record that sat
+    // unterminated is sealed in full — convergence must never hide growth.
+    let completed = [record.as_slice(), b"\n"].concat();
+    fs::write(
+        &source,
+        zstd::stream::encode_all(completed.as_slice(), 3).unwrap(),
+    )
+    .unwrap();
+    let fifth = pass_compressed(&source_root, &stage, &state);
+    assert_eq!(fifth.lines_written, 1);
+    assert_eq!(fifth.shards_written, 1);
+    assert_eq!(fifth.changed_records, 1);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &id).unwrap(),
+        completed,
+        "once the record completes, it is committed in full"
+    );
+
+    // Pass 6, unchanged again after the completion: back to the no-op, so
+    // the converged state is the steady state and not a one-step transition.
+    let sixth = pass_compressed(&source_root, &stage, &state);
+    assert_eq!(sixth.changed_records, 0);
+    assert_eq!(sixth.shards_written, 0);
+    assert_eq!(sixth.delta_bytes_read, 0);
+
+    println!(
+        "w286 compressed_source_bytes={} converged_changed={} converged_reset={} \
+         converged_delta_bytes={} completed_lines={} completed_stage_bytes={}",
+        compressed_len,
+        sixth.changed_records,
+        sixth.reset_records,
+        sixth.delta_bytes_read,
+        fifth.lines_written,
+        store::concat_shards(&stage, "fixture-machine", &id)
+            .unwrap()
+            .len()
+    );
+}
+
 /// Run the real binary with every ambient path redirected into `sandbox`.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");

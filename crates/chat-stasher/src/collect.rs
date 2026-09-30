@@ -22,6 +22,17 @@
 //! [`collect_scan_report`]): a source that stops changing must converge to a
 //! no-op pass rather than re-flagging the same tail as a change forever.
 //!
+//! The same rule binds a `.jsonl.zst` source, whose decoded stream can end
+//! the same way. Decoding is all-or-nothing, so its cursor is not a byte
+//! offset into the compressed file but the observation "this whole source,
+//! at this length and digest, was decoded and everything sealable in it was
+//! sealed" — written by a pass that found nothing sealable just as by one
+//! that sealed lines (`process_compressed`). A byte-identical source is
+//! therefore answerable from the remembered digest alone: the next pass is a
+//! no-op, not a reset. The first pass after a real change no longer matches
+//! the digest, re-decodes, and seals the record the earlier passes held in
+//! progress, so convergence never hides growth.
+//!
 //! The store *and* the per-session cursor answer two different questions, and
 //! conflating them cost a full re-export of every session on every store write.
 //! Which session changed is decided by that session's own cursor; whether
@@ -1404,24 +1415,23 @@ fn process_compressed(
             bucket_cap,
         )?)
     };
-    let state = if lines.is_empty() {
-        OffsetEntry {
-            offset: 0,
-            prefix_len: 0,
-            prefix_sha256: sha256_hex(&[]),
-            compressed: true,
-            opencode: None,
-            store_fingerprint: None,
-        }
-    } else {
-        OffsetEntry {
-            offset: source_len,
-            prefix_len: source_len,
-            prefix_sha256: digest,
-            compressed: true,
-            opencode: None,
-            store_fingerprint: None,
-        }
+    // Decoding is all-or-nothing, so a compressed cursor records the whole
+    // source it observed — length and digest — whether that pass sealed
+    // lines or found none to seal. That is what lets a stable source
+    // converge: a pass over a byte-identical source answers from the
+    // comparison above as a no-op, so a rollout whose decoded stream ends
+    // mid-record is re-observed only while it is actually changing, and the
+    // first pass after a real change re-decodes and seals the completed
+    // record. A zero cursor here (the pre-W286 spelling) could never match
+    // a nonempty source, and with `reset: old.is_some()` below it counted
+    // the session as changed on every pass forever.
+    let state = OffsetEntry {
+        offset: source_len,
+        prefix_len: source_len,
+        prefix_sha256: digest,
+        compressed: true,
+        opencode: None,
+        store_fingerprint: None,
     };
     Ok(Processed {
         state,
