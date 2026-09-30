@@ -599,16 +599,16 @@ enum Command {
     /// is `3` rather than `1`.
     ///
     /// `--text` searches the local FTS5 trigram index (substring matching for
-    /// runs of at least three characters). One- and two-character queries
-    /// return no FTS matches and suggest a longer query. `--scan` instead
-    /// reads selected conversations and performs a case-insensitive substring
-    /// match; it can answer short queries but reads archived content.
+    /// runs of at least three characters). A shorter query is refused, not
+    /// answered: the report says `matched=unknown` and the run exits `3`.
+    /// `--scan` reads selected conversations and matches them as plain text
+    /// instead; it answers short queries, at the cost of reading them.
     ///
     /// Exit codes distinguish the three answers, because two of them look the
     /// same and mean opposite things: `0` matched something, `1` read the whole
-    /// destination and answered for every session and nothing matched, `3`
-    /// could not finish — either reading it, or placing every session in time —
-    /// so "nothing matched" is unproven. `2` is a usage error, as elsewhere.
+    /// destination and answered for every session with no match, `3` could not
+    /// finish — reading it, placing every session in time, or evaluating the
+    /// query — so a zero proves nothing. `2` is a usage error, as elsewhere.
     Search {
         /// Destination to search. Required unless an explicit `--repo` is given.
         #[arg(long)]
@@ -624,7 +624,7 @@ enum Command {
         scan: bool,
         /// Emit one JSON object on stdout. Metadata searches include separate
         /// matched / not matched / could-not-be-placed groups; text searches
-        /// include counts for metadata read failures and unplaceable sessions.
+        /// carry coverage, read failures and a `query_state` for the query.
         #[arg(long)]
         json: bool,
         /// Also report what a full-text pass over the hits would cost.
@@ -4352,7 +4352,8 @@ fn cmd_search_text(
     let query_lower = query.to_lowercase();
     let mut matches = BTreeSet::new();
     let mut read_failures = 0usize;
-    let mut suggestion = false;
+    // Not "matched nothing": the index refused the query for its own length.
+    let mut not_answerable: Option<chat_stasher::fts::QueryTooShort> = None;
     let mut index_coverage = None;
     let mut index_truncated = false;
 
@@ -4439,25 +4440,22 @@ fn cmd_search_text(
             .saturating_sub(indexed)
             .saturating_sub(unreadable.len());
         index_coverage = Some((indexed, missing, unreadable));
-        if query.chars().count() < chat_stasher::fts::MIN_QUERY_CHARS {
-            suggestion = true;
-        } else {
-            match index.matches(query) {
-                Ok(Ok(found)) => {
-                    index_truncated = found.truncated;
-                    matches.extend(
-                        found
-                            .matches
-                            .into_iter()
-                            .map(|hit| hit.id)
-                            .filter(|id| selected.contains(id)),
-                    );
-                }
-                Ok(Err(_)) => suggestion = true,
-                Err(error) => {
-                    eprintln!("search: mode=fts; {error:#}");
-                    return ExitCode::from(3);
-                }
+        // The length rule is `Index::matches`' own, not a copy that could drift.
+        match index.matches(query) {
+            Ok(Ok(found)) => {
+                index_truncated = found.truncated;
+                matches.extend(
+                    found
+                        .matches
+                        .into_iter()
+                        .map(|hit| hit.id)
+                        .filter(|id| selected.contains(id)),
+                );
+            }
+            Ok(Err(short)) => not_answerable = Some(short),
+            Err(error) => {
+                eprintln!("search: mode=fts; {error:#}");
+                return ExitCode::from(3);
             }
         }
     }
@@ -4470,9 +4468,10 @@ fn cmd_search_text(
             serde_json::json!({
                 "mode": mode,
                 "query_length": query.chars().count(),
+                "query_minimum": chat_stasher::fts::MIN_QUERY_CHARS,
                 "selected": selected.len(),
-                "matched": matches.len(),
-                "suggestion": suggestion.then_some("use a query of at least 3 characters"),
+                "matched": not_answerable.is_none().then_some(matches.len()),
+                "query_state": if not_answerable.is_some() { "too_short" } else { "answered" },
                 "read_failures": read_failures,
                 "index_covered": coverage.map(|coverage| coverage.0),
                 "index_missing": coverage.map(|coverage| coverage.1),
@@ -4497,9 +4496,9 @@ fn cmd_search_text(
     } else {
         println!("[search] mode={mode}");
         println!("[search] selected={}", selected.len());
-        println!("[search] matched={}", matches.len());
-        if suggestion {
-            println!("[search] suggestion: use a query of at least 3 characters");
+        match not_answerable {
+            Some(_) => println!("[search] matched=unknown — a query shorter than the index's minimum cannot be evaluated, so nothing was searched: this is not a zero-result. Lengthen the query, or use `--scan`, which reads the conversations themselves."),
+            None => println!("[search] matched={}", matches.len()),
         }
         if let Some(coverage) = index_coverage.as_ref() {
             println!("[search] index_covered={}", coverage.0);
@@ -4541,15 +4540,16 @@ fn cmd_search_text(
             );
         }
     }
-    // `3` is "did not finish reading": sessions whose shard this build cannot
-    // read are part of that, because a query that did not run over them cannot
-    // prove their text is absent.
+    // `3` is "did not finish reading", and both of these are part of it: a
+    // session whose shard could not be read, and a query the index cannot
+    // evaluate at all. Neither leaves a negative behind — nothing was read.
     if read_failures > 0
         || index_coverage
             .as_ref()
             .is_some_and(|coverage| coverage.1 > 0 || !coverage.2.is_empty())
         || index_truncated
         || !report.answer_complete()
+        || not_answerable.is_some()
     {
         ExitCode::from(3)
     } else if matches.is_empty() {

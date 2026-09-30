@@ -160,7 +160,9 @@ A session the index has not read cannot be searched, and the page says so instea
 
 ### A one- or two-character search finds nothing
 
-The index matches runs of three or more characters. For a shorter query, use `chat-stasher search --destination <name> --scan --text <query>` from the terminal. It reads the conversations themselves, so it is slower and downloads what it reads.
+The index matches runs of three or more characters, so a shorter query cannot be evaluated at all — that is a different answer from "searched, and the text is not there". The dashboard says so on the page; `chat-stasher search --text` exits `3` and prints `matched=unknown` instead of a count, and its JSON reports `query_state: "too_short"`.
+
+For a shorter query, use `chat-stasher search --destination <name> --scan --text <query>` from the terminal. That matches the conversations themselves, so one or two characters are a real search there. It is slower and downloads what it reads.
 
 ### `search` or `export` exits `3` with "0 matched"
 

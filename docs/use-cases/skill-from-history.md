@@ -76,7 +76,42 @@ Read that as two separate claims. `matched=1` is the answer. `index_covered=4`, 
 | `index_not_indexable` above `0` | Those sessions' archived format cannot be read by this build. A `0` says nothing about them, and the command exits `3`. | Nothing yet, for those sessions. `--scan` reads the conversations themselves, and counts a format it cannot read the same way. |
 | `metadata_answer_complete=false` | A session could not be placed in time, so a date filter had no answer for it. | The query still answered; the caveat is named in the output. |
 
-A query shorter than three characters cannot be answered from the index, which matches runs of three or more. Today the CLI prints that as `matched=0` plus a suggestion line, `[search] suggestion: use a query of at least 3 characters`, and — when the index otherwise covers the selection — exits `1`, the same code as a search that read everything and matched nothing. On a short query the safe reading is the suggestion line, not the `0`: the index was never asked, so the zero is not a statement that the material is absent. `--scan` is the way around it: it reads the selected conversations themselves and matches case-insensitively, so it answers a shorter query and does not depend on the index being current. It is slower, and it downloads what it reads.
+A query shorter than three characters cannot be answered from the index at all, which matches runs of three or more. That is not a search that ran and found nothing, and the run does not report it as one: `--text` exits `3` — the same *this proves nothing* code as a snapshot it could not read — and prints `matched=unknown` where a count would otherwise be.
+
+```sh
+chat-stasher search --destination offsite --machine 0123456789abcdef0123456789abcdef --text ke
+```
+
+```
+search: mode=fts
+[search] mode=fts
+[search] selected=4
+[search] matched=unknown — a query shorter than the index's minimum cannot be evaluated, so nothing was searched: this is not a zero-result. Lengthen the query, or use `--scan`, which reads the conversations themselves.
+[search] index_covered=4
+[search] index_missing=0
+[search] index_not_indexable=0 (none)
+[search] index_truncated=false
+[search] metadata_unreadable_parts=0
+[search] unplaceable_sessions=0
+[search] metadata_answer_complete=true
+EXIT=3
+```
+
+`--json` carries the same distinction as data, for a caller that reads the object instead of the line: `query_state` is `"too_short"`, where a query that was evaluated says `"answered"`; `matched` is `null` rather than `0`; and `query_minimum` sits beside `query_length`, so the caller can name the length that would have been answered.
+
+```sh
+chat-stasher search --destination offsite --machine 0123456789abcdef0123456789abcdef --text ke --json
+```
+
+```
+search: mode=fts
+{"cost":null,"index_covered":4,"index_missing":0,"index_not_indexable":0,"index_not_indexable_formats":"none","index_truncated":false,"matched":null,"metadata_answer_complete":true,"metadata_unreadable_parts":0,"mode":"fts","query_length":2,"query_minimum":3,"query_state":"too_short","read_failures":0,"selected":4,"unplaceable_sessions":0}
+EXIT=3
+```
+
+The exit code is the part to read, because `1` is the code that means *a proven negative*: a three-character query the index does answer writes `matched=0` and exits `1`, and that zero is a measurement. A query the index cannot evaluate never reaches a measurement, so it never writes that pair.
+
+`--scan` is the way around the limit: it matches the conversations themselves instead of the index, so a shorter query is evaluable there and the answer does not depend on the index being current. It is slower, and it downloads what it reads.
 
 **Which sessions are they?** The CLI tells you how many matched, not which. The dashboard's search page lists them, shows the matching line, and links each one into the reader:
 

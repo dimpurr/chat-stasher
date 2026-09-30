@@ -626,23 +626,23 @@ help_doc     crates/chat-stasher/src/main.rs:598  "0 matched" answer cannot be t
 help_doc     crates/chat-stasher/src/main.rs:599  is `3` rather than `1`.
 help_doc     crates/chat-stasher/src/main.rs:600
 help_doc     crates/chat-stasher/src/main.rs:601  `--text` searches the local FTS5 trigram index (substring matching for
-help_doc     crates/chat-stasher/src/main.rs:602  runs of at least three characters). One- and two-character queries
-help_doc     crates/chat-stasher/src/main.rs:603  return no FTS matches and suggest a longer query. `--scan` instead
-help_doc     crates/chat-stasher/src/main.rs:604  reads selected conversations and performs a case-insensitive substring
-help_doc     crates/chat-stasher/src/main.rs:605  match; it can answer short queries but reads archived content.
+help_doc     crates/chat-stasher/src/main.rs:602  runs of at least three characters). A shorter query is refused, not
+help_doc     crates/chat-stasher/src/main.rs:603  answered: the report says `matched=unknown` and the run exits `3`.
+help_doc     crates/chat-stasher/src/main.rs:604  `--scan` reads selected conversations and matches them as plain text
+help_doc     crates/chat-stasher/src/main.rs:605  instead; it answers short queries, at the cost of reading them.
 help_doc     crates/chat-stasher/src/main.rs:606
 help_doc     crates/chat-stasher/src/main.rs:607  Exit codes distinguish the three answers, because two of them look the
 help_doc     crates/chat-stasher/src/main.rs:608  same and mean opposite things: `0` matched something, `1` read the whole
-help_doc     crates/chat-stasher/src/main.rs:609  destination and answered for every session and nothing matched, `3`
-help_doc     crates/chat-stasher/src/main.rs:610  could not finish — either reading it, or placing every session in time —
-help_doc     crates/chat-stasher/src/main.rs:611  so "nothing matched" is unproven. `2` is a usage error, as elsewhere.
+help_doc     crates/chat-stasher/src/main.rs:609  destination and answered for every session with no match, `3` could not
+help_doc     crates/chat-stasher/src/main.rs:610  finish — reading it, placing every session in time, or evaluating the
+help_doc     crates/chat-stasher/src/main.rs:611  query — so a zero proves nothing. `2` is a usage error, as elsewhere.
 help_doc     crates/chat-stasher/src/main.rs:613  Destination to search. Required unless an explicit `--repo` is given.
 help_doc     crates/chat-stasher/src/main.rs:616  The shared filters (session / machine / harness / time window).
 help_doc     crates/chat-stasher/src/main.rs:619  Search indexed titles and user/assistant text with SQLite's trigram tokenizer.
 help_doc     crates/chat-stasher/src/main.rs:622  Read selected sessions and perform a case-insensitive substring scan.
 help_doc     crates/chat-stasher/src/main.rs:625  Emit one JSON object on stdout. Metadata searches include separate
 help_doc     crates/chat-stasher/src/main.rs:626  matched / not matched / could-not-be-placed groups; text searches
-help_doc     crates/chat-stasher/src/main.rs:627  include counts for metadata read failures and unplaceable sessions.
+help_doc     crates/chat-stasher/src/main.rs:627  carry coverage, read failures and a `query_state` for the query.
 help_doc     crates/chat-stasher/src/main.rs:630  Also report what a full-text pass over the hits would cost.
 help_doc     crates/chat-stasher/src/main.rs:633  Repository path override.
 help_doc     crates/chat-stasher/src/main.rs:636  Masterkey file override.
@@ -1276,25 +1276,25 @@ eprintln     crates/chat-stasher/src/main.rs:4276  "search: this is not an empty
 eprintln     crates/chat-stasher/src/main.rs:4301  "{warning}"
 print        crates/chat-stasher/src/main.rs:4303  "{}"
 eprintln     crates/chat-stasher/src/main.rs:4315  "{warning}"
-eprintln     crates/chat-stasher/src/main.rs:4408  "search: mode=fts; no operating-system cache directory is available"
-eprintln     crates/chat-stasher/src/main.rs:4416  "search: mode=fts; {error:#}"
-eprintln     crates/chat-stasher/src/main.rs:4458  "search: mode=fts; {error:#}"
-println      crates/chat-stasher/src/main.rs:4469  "{}"
-println      crates/chat-stasher/src/main.rs:4498  "[search] mode={mode}"
-println      crates/chat-stasher/src/main.rs:4499  "[search] selected={}"
-println      crates/chat-stasher/src/main.rs:4500  "[search] matched={}"
-println      crates/chat-stasher/src/main.rs:4502  "[search] suggestion: use a query of at least 3 characters"
-println      crates/chat-stasher/src/main.rs:4505  "[search] index_covered={}"
-println      crates/chat-stasher/src/main.rs:4506  "[search] index_missing={}"
-println      crates/chat-stasher/src/main.rs:4508  "[search] index_not_indexable={} ({})"
-println      crates/chat-stasher/src/main.rs:4513  "[search] index is behind the selected archive sessions; run `chat-stasher index build`"
-println      crates/chat-stasher/src/main.rs:4517  "[search] the index holds those sessions but cannot read their archived format, so their text was not searched: a session that was not read is not a session the query is absent from"
-println      crates/chat-stasher/src/main.rs:4523  "[search] index_truncated={index_truncated}"
-println      crates/chat-stasher/src/main.rs:4525  "[search] unreadable_sessions={read_failures}"
-println      crates/chat-stasher/src/main.rs:4528  "[search] metadata_unreadable_parts={}"
-println      crates/chat-stasher/src/main.rs:4531  "[search] unplaceable_sessions={}"
-println      crates/chat-stasher/src/main.rs:4533  "[search] metadata_answer_complete={}"
-println      crates/chat-stasher/src/main.rs:4539  "[search] cost sessions={} shards={} data_blobs={} plaintext_bytes={}"
+eprintln     crates/chat-stasher/src/main.rs:4409  "search: mode=fts; no operating-system cache directory is available"
+eprintln     crates/chat-stasher/src/main.rs:4417  "search: mode=fts; {error:#}"
+eprintln     crates/chat-stasher/src/main.rs:4457  "search: mode=fts; {error:#}"
+println      crates/chat-stasher/src/main.rs:4467  "{}"
+println      crates/chat-stasher/src/main.rs:4497  "[search] mode={mode}"
+println      crates/chat-stasher/src/main.rs:4498  "[search] selected={}"
+println      crates/chat-stasher/src/main.rs:4500  "[search] matched=unknown — a query shorter than the index's minimum cannot be evaluated, so nothing was searched: this is not a zero-result. Lengthen the query, or use `--scan`, which reads the conversations themselves."
+println      crates/chat-stasher/src/main.rs:4501  "[search] matched={}"
+println      crates/chat-stasher/src/main.rs:4504  "[search] index_covered={}"
+println      crates/chat-stasher/src/main.rs:4505  "[search] index_missing={}"
+println      crates/chat-stasher/src/main.rs:4507  "[search] index_not_indexable={} ({})"
+println      crates/chat-stasher/src/main.rs:4512  "[search] index is behind the selected archive sessions; run `chat-stasher index build`"
+println      crates/chat-stasher/src/main.rs:4516  "[search] the index holds those sessions but cannot read their archived format, so their text was not searched: a session that was not read is not a session the query is absent from"
+println      crates/chat-stasher/src/main.rs:4522  "[search] index_truncated={index_truncated}"
+println      crates/chat-stasher/src/main.rs:4524  "[search] unreadable_sessions={read_failures}"
+println      crates/chat-stasher/src/main.rs:4527  "[search] metadata_unreadable_parts={}"
+println      crates/chat-stasher/src/main.rs:4530  "[search] unplaceable_sessions={}"
+println      crates/chat-stasher/src/main.rs:4532  "[search] metadata_answer_complete={}"
+println      crates/chat-stasher/src/main.rs:4538  "[search] cost sessions={} shards={} data_blobs={} plaintext_bytes={}"
 println      crates/chat-stasher/src/main.rs:4569  "[search] destination  : {}"
 println      crates/chat-stasher/src/main.rs:4582  "[search] snapshots scanned: {} of {} in repo{}{}"
 println      crates/chat-stasher/src/main.rs:4596  "[search] sessions seen: {}"
