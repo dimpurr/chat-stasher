@@ -41,6 +41,9 @@ It ends with one line, for example `[schedule] installed agents: 1 unchanged: 0`
 Running it again is safe. A timer that is already installed with the same content is left alone and counted as `unchanged`. One whose content changed, for example because you moved the binary, is rewritten and reloaded.
 
 > [!NOTE]
+> **A failed install leaves nothing behind.** The scheduler is talked to *after* the unit files are written — that is the only order `systemctl` can accept them in — so on a machine with no user systemd session (WSL without systemd, for instance) the manager refuses and the install fails. The failed install then rolls itself back: it stops the timers it had got enabled, removes the unit files it created and puts back the ones it replaced. `status` reports `not_installed`, never an installed timer that is armed nowhere.
+
+> [!NOTE]
 > On Linux, pass `--format systemd` every time, including for `schedule uninstall`. Without it the command renders a launchd timer.
 
 ### Which binary the timer runs
@@ -122,7 +125,7 @@ The first line is the verdict. It is read from the record the last pass left beh
 
 "Stopped" means no pass for more than four intervals (at least one hour). `status` exits `0` only when the verdict is healthy, and `1` otherwise, so it works as a check in a script. Its report is on stderr: run it bare, not through a pipe, if you want the exit code.
 
-`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. The last pass is reported separately, in `run_state`, and so is the verdict: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field.
+`status --json` adds a `local` section: whether the timer units are installed, which ones, when the next run is due and why, and the sessions still staged and waiting to upload. On Linux, `installed` needs two things: every unit file present, *and* systemd confirming each timer active. Files the manager did not confirm are reported as `unconfirmed` — the reason sits beside it in `next_run_why` ("systemd did not report a next run", or the manager could not be asked at all). The last pass is reported separately, in `run_state`: a file that is in place is not proof that the scheduler loaded it, so installed files and a healthy verdict are never one field.
 
 ### When it runs
 
@@ -186,7 +189,10 @@ chat-stasher schedule --stage ~/stash/chat-stasher/stage \
 
 With `--output`, it writes the file and prints the exact command that loads it. Nothing is loaded until you run that command. With more than one destination, `--output` must be a folder.
 
-**Windows** has no built-in timer support. Use Task Scheduler to run `chat-stasher run-once --stage <stage> --destination <name>` every hour.
+**Windows** has no built-in timer support: every `chat-stasher schedule` action there refuses with exit 2 and writes nothing — this build has no scheduler integration for Windows, and writing systemd unit files a platform without systemd cannot load was a defect, not a feature. Create the pass yourself instead, as a per-user task in Task Scheduler that runs `chat-stasher run-once --stage <stage> --destination <name>` every hour.
+
+> [!NOTE]
+> A build before this refusal could write `chat-stasher-run-once-*.service` and `.timer` unit files into your home folder's `.config\systemd\user` directory. They schedule nothing on Windows: delete them.
 
 ## See also
 

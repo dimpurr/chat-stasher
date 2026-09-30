@@ -84,6 +84,8 @@ Install the scheduler now? [y/N]:
 
 Answer `y` to install the timer, one per declared destination. The wizard then tells you when the timer will next run, if the system scheduler can say. On macOS an interval timer has no fixed next time, and the wizard says that instead of guessing. [schedule.md](schedule.md) covers the timer in full.
 
+On Windows there is no question: this build has no scheduler integration there, so the wizard skips the step and points at the manual Task Scheduler steps in [schedule.md](schedule.md#doing-it-by-hand). A `setup --install-schedule` run on Windows reports the scheduler step as `not_attempted`, with the same pointer, and the run is `INCOMPLETE` — the archive is left without a timer, which is a fact and not a failure of the archive itself.
+
 ### The summary
 
 The wizard ends with one summary: the local archive, the destination, the timer and the browser host. Anything that did not finish is named on its own line:

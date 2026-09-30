@@ -572,6 +572,19 @@ pub fn uninstall_launchd_agents(
     Ok(removed)
 }
 
+/// Install (or re-install) a rendered set of systemd user units.
+///
+/// The scheduler steps that can refuse — `daemon-reload`, enabling each timer —
+/// all run *after* the unit files have been written, because `daemon-reload`
+/// cannot read a unit that is not on disk yet. A refusal from any of them
+/// therefore happens on a machine whose disk already holds part of a schedule
+/// no manager will arm, which is precisely the state W282 §2 caught `status`
+/// reporting as `installed: true`: file presence alone was the probe, and the
+/// files were present. So this call rolls itself back instead: on any failure
+/// after writing starts it stops the timers it enabled, restores the bytes
+/// each unit file had before this call (or removes the files it created), and
+/// asks a manager that had re-read to re-read again, so the machine ends the
+/// failed install the way it began it.
 pub fn install_systemd_units(
     home: &Path,
     files: &[TemplateFile],
@@ -582,21 +595,61 @@ pub fn install_systemd_units(
         .with_context(|| format!("create systemd user unit directory {}", units.display()))?;
     let mut changed = false;
     let mut timers = Vec::new();
+    // What each unit file this call rewrote had under it before: `None` means
+    // the file did not exist, so the roll-back deletes it rather than writing
+    // something back. The bytes are captured *before* the first write, which
+    // is the only moment they can be captured.
+    let mut written: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
     for file in files {
         let path = units.join(&file.name);
-        let same = fs::read(&path)
-            .map(|bytes| bytes == file.content.as_bytes())
-            .unwrap_or(false); // reason: absent or unreadable units must be rewritten before they can be enabled
+        let previous = match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                // Refuse to overwrite a file this call could not read back.
+                // The roll-back below restores what it saved, and a file that
+                // cannot be read cannot be saved; without this refusal an
+                // install that later failed would delete a unit it never
+                // understood, which is not the pre-call state either.
+                bail!(
+                    "systemd unit {} exists but cannot be read ({error}), so a failed \
+                     install could not put it back the way it was; make the file readable \
+                     and run the install again",
+                    path.display()
+                );
+            }
+        };
+        let same = previous.as_deref() == Some(file.content.as_bytes()); // reason: an absent or unreadable unit is treated as changed, so install rewrites and reloads it
         if !same {
-            write_atomic(&path, file.content.as_bytes())
-                .with_context(|| format!("write systemd unit {}", path.display()))?;
+            if let Err(error) = write_atomic(&path, file.content.as_bytes()) {
+                let error = anyhow::Error::from(error)
+                    .context(format!("write systemd unit {}", path.display()));
+                return Err(rollback_systemd_install(
+                    error,
+                    &written,
+                    &[],
+                    false,
+                    systemctl,
+                ));
+            }
+            written.push((path, previous));
             changed = true;
         }
         if file.name.ends_with(".timer") {
             timers.push(file.name.clone());
         }
     }
-    systemctl_run(systemctl, &["--user", "daemon-reload"])?;
+    if let Err(error) = systemctl_run(systemctl, &["--user", "daemon-reload"]) {
+        // The manager has re-read nothing, so restoring the disk is the whole
+        // undo: any in-memory units still describe the restored bytes.
+        return Err(rollback_systemd_install(
+            error,
+            &written,
+            &[],
+            false,
+            systemctl,
+        ));
+    }
     let mut active = true;
     for timer in &timers {
         let output = Command::new(systemctl)
@@ -604,12 +657,29 @@ pub fn install_systemd_units(
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .with_context(|| format!("check systemd timer {timer}"))?;
-        active &= output.success();
+            .with_context(|| format!("check systemd timer {timer}"));
+        match output {
+            Ok(output) => active &= output.success(),
+            Err(error) => {
+                return Err(rollback_systemd_install(
+                    error,
+                    &written,
+                    &[],
+                    true,
+                    systemctl,
+                ));
+            }
+        }
     }
+    let mut enabled: Vec<String> = Vec::new();
     if !active || changed {
         for timer in &timers {
-            systemctl_run(systemctl, &["--user", "enable", "--now", timer])?;
+            if let Err(error) = systemctl_run(systemctl, &["--user", "enable", "--now", timer]) {
+                return Err(rollback_systemd_install(
+                    error, &written, &enabled, true, systemctl,
+                ));
+            }
+            enabled.push(timer.clone());
         }
     }
     Ok(vec![if changed || !active {
@@ -617,6 +687,69 @@ pub fn install_systemd_units(
     } else {
         InstallResult::Unchanged
     }])
+}
+
+/// Undo what a failed [`install_systemd_units`] did to the machine, and attach
+/// a sentence about the outcome to the error that stopped the install.
+///
+/// Every step is best-effort by construction: the caller's error happened
+/// first and must stay the primary error, so a roll-back step that fails is
+/// reported in the context rather than replacing what it failed to undo.
+///
+/// `reload_happened` says whether `daemon-reload` had succeeded before the
+/// failure: only then did the manager re-read the units this call had already
+/// rewritten, so only then does the roll-back have to ask it to re-read the
+/// restored bytes — otherwise the manager's in-memory units still describe
+/// the pre-call state the disk now has again.
+fn rollback_systemd_install(
+    error: anyhow::Error,
+    written: &[(PathBuf, Option<Vec<u8>>)],
+    enabled: &[String],
+    reload_happened: bool,
+    systemctl: &Path,
+) -> anyhow::Error {
+    let mut unrestored: Vec<String> = Vec::new();
+    for timer in enabled {
+        if let Err(stop_error) = systemctl_run(systemctl, &["--user", "disable", "--now", timer]) {
+            unrestored.push(format!(
+                "the timer {timer} stayed armed ({stop_error}) — a schedule this failed \
+                 install had already enabled is still enabled"
+            ));
+        }
+    }
+    for (path, previous) in written {
+        let undone = match previous {
+            Some(bytes) => {
+                fs::write(path, bytes).with_context(|| format!("restore {}", path.display()))
+            }
+            None => fs::remove_file(path).with_context(|| format!("remove {}", path.display())),
+        };
+        if let Err(undo_error) = undone {
+            unrestored.push(format!("{undo_error:#}"));
+        }
+    }
+    if reload_happened {
+        if let Err(reload_error) = systemctl_run(systemctl, &["--user", "daemon-reload"]) {
+            unrestored.push(format!(
+                "daemon-reload could not run after the roll-back ({reload_error}), so the \
+                 manager may still hold unit definitions the files on disk no longer contain"
+            ));
+        }
+    }
+    if unrestored.is_empty() {
+        error.context(
+            "the failed install was rolled back: every unit file it created was removed and \
+             every one it replaced got its previous content back, so the machine is as it was \
+             before `schedule install` ran",
+        )
+    } else {
+        error.context(format!(
+            "the failed install was rolled back incompletely — part of it is still on the \
+             machine: {}. Run `schedule uninstall` again once the manager is usable, and \
+             check `systemctl --user list-timers` before trusting any schedule it reports",
+            unrestored.join("; ")
+        ))
+    }
 }
 
 pub fn uninstall_systemd_units(home: &Path, timers: &[String], systemctl: &Path) -> Result<usize> {
@@ -699,23 +832,50 @@ pub fn install_targets(declared: &[String], requested: &[String]) -> Vec<Option<
     declared.iter().cloned().map(Some).collect()
 }
 
-/// Whether the unit files `schedule install` writes are present on this
-/// machine.
+/// The state of one scheduled job on this machine, from the install `schedule
+/// install` performs.
 ///
-/// This is **file presence**, which is what [`install_launchd_agents`] and
-/// [`install_systemd_units`] create and what [`uninstall_launchd_agents`] /
-/// [`uninstall_systemd_units`] remove; it is not a claim that the scheduler has
-/// *loaded* the unit. [`next_run`] is the loaded-state probe, and the two are
-/// reported side by side rather than one standing in for the other.
+/// The two formats answer differently, and the difference is deliberate:
+///
+/// * **systemd** is asked, not just looked at. W282 §2 measured the failure
+///   mode of asking less: with no user session the install's `daemon-reload`
+///   failed *after* the unit files were on disk, no timer was armed, and
+///   `status` — whose one job is answering "is the scheduled archive
+///   working?" — reported `installed: true` from file presence alone. So for
+///   systemd every expected timer file being present is only half the answer;
+///   [`ScheduleInstall::Installed`] additionally requires the manager to
+///   confirm each timer active, and files the manager did not confirm are
+///   [`ScheduleInstall::Unconfirmed`] — the caller reports them with the
+///   reason [`next_run`] carries (the manager answered "not armed", or could
+///   not be asked at all), so "could not ask" never collapses into "not
+///   armed".
+/// * **launchd** (macOS) reads file presence only. W282 validated the defect
+///   on systemd and Windows and did not flag macOS, so its probe stays what
+///   it was; a macOS claim is carried by the run-state verdict beside it
+///   rather than by this enum.
+///
+/// File presence stays half of the systemd answer because it is what
+/// [`install_systemd_units`] creates and what [`uninstall_systemd_units`]
+/// removes; it is reported, never silently substituted for the manager's
+/// answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleInstall {
-    /// Every expected unit file exists.
+    /// Every expected unit file exists, and the scheduler confirmed the timer
+    /// is active where the format gets an answer (systemd; see the enum doc
+    /// for why launchd needs none).
     Installed,
     /// No expected unit file exists.
     NotInstalled,
     /// Some expected unit files exist and some do not: an interrupted install
     /// or a hand-removed unit, which is neither of the two clean states.
     Partial { present: usize, expected: usize },
+    /// Every expected unit file exists and the manager did not confirm the
+    /// timer active — it answered "inactive", or it could not be asked. The
+    /// file is not the schedule: a unit systemd has not loaded protects
+    /// nothing while looking exactly like one that does. `present` and
+    /// `expected` stay in the answer so `Partial` and `Unconfirmed` can be
+    /// told apart with the same fields; here they are equal by construction.
+    Unconfirmed { present: usize, expected: usize },
 }
 
 /// The path of the timer/service file a `schedule install` for one
@@ -742,14 +902,18 @@ pub fn unit_file_name(unit: Unit, format: Format, destination: Option<&str>) -> 
     }
 }
 
-/// Classify the presence of the units in `targets`. An empty `targets` is
+/// Classify the state of the units in `targets`. An empty `targets` is
 /// [`ScheduleInstall::NotInstalled`]: there is no unit to be present, and
 /// calling that "installed" would invert the answer.
+///
+/// `systemctl` is only run by the systemd arm, mirroring [`next_run`]; the
+/// launchd arm reads file presence, as the enum doc records.
 pub fn schedule_install_state(
     unit: Unit,
     format: Format,
     targets: &[Option<String>],
     home: &Path,
+    systemctl: &Path,
 ) -> ScheduleInstall {
     if targets.is_empty() {
         return ScheduleInstall::NotInstalled;
@@ -759,13 +923,53 @@ pub fn schedule_install_state(
         .iter()
         .filter(|destination| unit_file_path(unit, format, destination.as_deref(), home).is_file())
         .count();
-    if present == expected {
-        ScheduleInstall::Installed
-    } else if present == 0 {
-        ScheduleInstall::NotInstalled
-    } else {
-        ScheduleInstall::Partial { present, expected }
+    if present == 0 {
+        return ScheduleInstall::NotInstalled;
     }
+    if present < expected {
+        return ScheduleInstall::Partial { present, expected };
+    }
+    // Every timer file is present — half of the answer. The other half is the
+    // manager's: the report's §2 had files on disk and no timer armed, and an
+    // install state that stopped at the files is the false positive it filed.
+    match format {
+        Format::Launchd => ScheduleInstall::Installed,
+        Format::Systemd => {
+            let confirmed = targets.iter().all(|destination| {
+                systemd_timer_active(
+                    systemctl,
+                    &systemd_timer_name_for_destination(unit, destination.as_deref()),
+                )
+            });
+            if confirmed {
+                ScheduleInstall::Installed
+            } else {
+                ScheduleInstall::Unconfirmed { present, expected }
+            }
+        }
+    }
+}
+
+/// Whether `systemctl --user is-active` confirms one timer active — the same
+/// question [`install_systemd_units`] asks itself before re-enabling, so the
+/// state probe and the installer cannot disagree about what "armed" means.
+///
+/// A manager that cannot be asked (no `systemctl` on this machine, no user
+/// session to reach) confirms nothing: that is not "inactive", it is no answer,
+/// and the states stay distinguishable at the surface that prints the reason
+/// ([`next_run`]'s note says "could not be run to ask", not "did not report
+/// one").
+fn systemd_timer_active(systemctl: &Path, timer: &str) -> bool {
+    Command::new(systemctl)
+        .args(["--user", "is-active", "--quiet", timer])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        // reason: a spawn failure is the absence of an answer, and the caller
+        // reports "not confirmed" rather than "inactive" — the note beside the
+        // state carries which one it was.
+        .unwrap_or(false)
 }
 
 /// Ask the scheduler for the next run of the units that were just installed.
@@ -1976,6 +2180,225 @@ mod tests {
         assert_eq!(calls.matches("disable --now").count(), 1);
     }
 
+    /// The unit pair `render` writes for one destination without one, planted
+    /// under a temp home so several roll-back tests below read the same shape
+    /// the installer writes.
+    fn run_once_units() -> Vec<TemplateFile> {
+        vec![
+            TemplateFile {
+                name: "chat-stasher-run-once.service".into(),
+                content: "service-v1".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once.timer".into(),
+                content: "timer-v1".into(),
+            },
+        ]
+    }
+
+    fn units_dir(home: &Path) -> PathBuf {
+        home.join(".config/systemd/user")
+    }
+
+    /// W282 §2, the report's own repro: with no user systemd session (PID 1 is
+    /// init), `schedule install --format systemd` wrote both unit files and
+    /// then failed at `daemon-reload`. The files it left behind made
+    /// `schedule_install_state` — and so `status` — report an installed timer
+    /// that was armed nowhere: a protected archive that was not protected. The
+    /// install must instead leave the machine as it found it.
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_reload_failure_leaves_no_unit_files_behind() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let script_body =
+            "#!/bin/sh\ncase \"$2\" in\n  daemon-reload) exit 1;;\n  *) exit 0;;\nesac\n";
+        crate::test_support::plant_executable(&script, script_body);
+
+        let install = install_systemd_units(temp.path(), &run_once_units(), &script);
+        assert!(
+            install.is_err(),
+            "a manager that refuses to reload is an install failure: {install:?}"
+        );
+        let units = units_dir(temp.path());
+        for name in [
+            "chat-stasher-run-once.service",
+            "chat-stasher-run-once.timer",
+        ] {
+            assert!(
+                !units.join(name).is_file(),
+                "the failed install must not leave {name} behind (W282 §2: the leftover file \
+                 made status report an installed timer that was armed nowhere)"
+            );
+        }
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &[None],
+                temp.path(),
+                &script
+            ),
+            ScheduleInstall::NotInstalled,
+            "a failed install is no install; status must report the machine as the failed \
+             install left it"
+        );
+    }
+
+    /// The same defect one step later: `daemon-reload` succeeds but arming the
+    /// timer fails (no user session to enable it into), still after both files
+    /// were written. The roll-back obligation is the same, and so is the
+    /// status claim it protects.
+    #[cfg(unix)]
+    #[test]
+    fn an_enable_failure_leaves_no_unit_files_behind() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let script_body = "#!/bin/sh\ncase \"$2\" in\n  enable) exit 1;;\n  *) exit 0;;\nesac\n";
+        crate::test_support::plant_executable(&script, script_body);
+
+        let install = install_systemd_units(temp.path(), &run_once_units(), &script);
+        assert!(
+            install.is_err(),
+            "a manager that will not arm the timer is an install failure: {install:?}"
+        );
+        let units = units_dir(temp.path());
+        for name in [
+            "chat-stasher-run-once.service",
+            "chat-stasher-run-once.timer",
+        ] {
+            assert!(
+                !units.join(name).is_file(),
+                "the failed install must not leave {name} behind after a failed enable either"
+            );
+        }
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &[None],
+                temp.path(),
+                &script
+            ),
+            ScheduleInstall::NotInstalled
+        );
+    }
+
+    /// A failed *re*install must restore the units it replaced, byte for byte:
+    /// a broken upgrade must not delete the working timer's definition along
+    /// with its own. This is the `daemon-reload` failure (the report's first
+    /// repro) on top of a previous successful install, which is the shape a
+    /// re-run after a renamed binary or a changed cadence takes.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_reinstall_restores_the_units_it_replaced() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let units = units_dir(temp.path());
+        fs::create_dir_all(&units).expect("create systemd unit directory");
+        fs::write(units.join("chat-stasher-run-once.service"), "service-v0").unwrap();
+        fs::write(units.join("chat-stasher-run-once.timer"), "timer-v0").unwrap();
+        let script = temp.path().join("systemctl");
+        let script_body =
+            "#!/bin/sh\ncase \"$2\" in\n  daemon-reload) exit 1;;\n  *) exit 0;;\nesac\n";
+        crate::test_support::plant_executable(&script, script_body);
+
+        let upgraded = vec![
+            TemplateFile {
+                name: "chat-stasher-run-once.service".into(),
+                content: "service-v1-new-binary".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once.timer".into(),
+                content: "timer-v1-new-cadence".into(),
+            },
+        ];
+        let install = install_systemd_units(temp.path(), &upgraded, &script);
+        assert!(
+            install.is_err(),
+            "the manager refuses the reload: {install:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(units.join("chat-stasher-run-once.service")).expect(
+                "the pre-existing service file must still be there, restored rather than \
+                 deleted by the failed upgrade"
+            ),
+            "service-v0"
+        );
+        assert_eq!(
+            fs::read_to_string(units.join("chat-stasher-run-once.timer"))
+                .expect("the pre-existing timer file must still be there, restored"),
+            "timer-v0"
+        );
+    }
+
+    /// With more than one destination, `enable --now` runs one timer at a
+    /// time. A failure on the second must also stop the first: a roll-back
+    /// that leaves a timer it had already armed is a half install, and the
+    /// armed half is the dangerous one — the machine looks installed to the
+    /// process that is running, after the command that owns it failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_multi_destination_install_stops_the_timers_it_had_armed() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let script = temp.path().join("systemctl");
+        let log = temp.path().join("calls");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> \"{}\"\n\
+             case \"$2\" in\n\
+               enable) case \"$4\" in\n\
+                 chat-stasher-run-once-beta.timer) exit 1;;\n\
+                 *) exit 0;;\n\
+               esac;;\n\
+               *) exit 0;;\n\
+             esac\n",
+            log.display()
+        );
+        crate::test_support::plant_executable(&script, &script_body);
+
+        let files = vec![
+            TemplateFile {
+                name: "chat-stasher-run-once-alpha.service".into(),
+                content: "alpha-service".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once-alpha.timer".into(),
+                content: "alpha-timer".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once-beta.service".into(),
+                content: "beta-service".into(),
+            },
+            TemplateFile {
+                name: "chat-stasher-run-once-beta.timer".into(),
+                content: "beta-timer".into(),
+            },
+        ];
+        let install = install_systemd_units(temp.path(), &files, &script);
+        assert!(install.is_err(), "beta refuses to arm: {install:?}");
+        let units = units_dir(temp.path());
+        for name in [
+            "chat-stasher-run-once-alpha.service",
+            "chat-stasher-run-once-alpha.timer",
+            "chat-stasher-run-once-beta.service",
+            "chat-stasher-run-once-beta.timer",
+        ] {
+            assert!(
+                !units.join(name).is_file(),
+                "the failed install must not leave {name} behind"
+            );
+        }
+        let calls = fs::read_to_string(log).expect("read fake systemctl log");
+        assert_eq!(
+            calls
+                .matches("disable --now chat-stasher-run-once-alpha.timer")
+                .count(),
+            1,
+            "the timer that was armed before the failure must be stopped by the roll-back: \
+             {calls}"
+        );
+    }
+
     /// The plists `render` produced, saved where the installer saves them, so a
     /// probe reads the same bytes launchd would.
     fn write_plists(home: &Path, files: &[TemplateFile]) {
@@ -2336,7 +2759,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &targets,
+                home.path(),
+                Path::new("launchctl"),
+            ),
             ScheduleInstall::NotInstalled
         );
         let a = dir.join(format!(
@@ -2345,7 +2774,13 @@ mod tests {
         ));
         fs::write(&a, b"<plist/>").unwrap();
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &targets,
+                home.path(),
+                Path::new("launchctl"),
+            ),
             ScheduleInstall::Partial {
                 present: 1,
                 expected: 2
@@ -2357,36 +2792,207 @@ mod tests {
         ));
         fs::write(&b, b"<plist/>").unwrap();
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Launchd, &targets, home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &targets,
+                home.path(),
+                Path::new("launchctl"),
+            ),
             ScheduleInstall::Installed
         );
 
         // No expected unit is no install, never "trivially installed".
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Launchd, &[], home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Launchd,
+                &[],
+                home.path(),
+                Path::new("launchctl")
+            ),
             ScheduleInstall::NotInstalled
         );
     }
 
-    /// systemd reads the same state from the timer unit path.
+    /// systemd reads the same state from the timer unit path — plus the
+    /// manager's confirmation, without which two timer files alone are
+    /// [`ScheduleInstall::Unconfirmed`] (see the tests below).
+    #[cfg(unix)]
     #[test]
     fn schedule_install_state_reads_systemd_timer_files() {
         let home = tempfile::TempDir::new().unwrap();
         let targets = vec![None];
-        let dir = home.path().join(".config/systemd/user");
+        let dir = units_dir(home.path());
         fs::create_dir_all(&dir).unwrap();
+        let fake = ArmedFake::plant(home.path(), true);
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Systemd, &targets, home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &targets,
+                home.path(),
+                &fake.script,
+            ),
             ScheduleInstall::NotInstalled
         );
         fs::write(dir.join(SYSTEMD_TIMER), b"[Timer]\n").unwrap();
         assert_eq!(
-            schedule_install_state(Unit::RunOnce, Format::Systemd, &targets, home.path()),
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &targets,
+                home.path(),
+                &fake.script,
+            ),
             ScheduleInstall::Installed
         );
         assert_eq!(
             unit_file_name(Unit::RunOnce, Format::Systemd, None),
             SYSTEMD_TIMER
+        );
+    }
+
+    /// A fake `systemctl` whose `is-active` answer the next tests control.
+    /// One file stands for the manager's armed state, matching what a real
+    /// manager answers for a timer it has *not* armed: a non-zero exit.
+    #[cfg(unix)]
+    struct ArmedFake {
+        script: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ArmedFake {
+        fn plant(dir: &Path, armed: bool) -> ArmedFake {
+            let script = dir.join("systemctl");
+            let body = if armed {
+                "#!/bin/sh\ncase \"$2\" in is-active) exit 0;; *) exit 0;; esac\n"
+            } else {
+                "#!/bin/sh\ncase \"$2\" in is-active) exit 1;; *) exit 0;; esac\n"
+            };
+            crate::test_support::plant_executable(&script, body);
+            ArmedFake { script }
+        }
+    }
+
+    /// The report's §2 status half: all the unit files present, no timer
+    /// armed, and `status` claiming `installed: true` from file presence
+    /// alone. File presence is now only half the systemd answer — the manager
+    /// must confirm each timer active for [`ScheduleInstall::Installed`], and
+    /// anything else the files say is reported as [`ScheduleInstall::Unconfirmed`]
+    /// rather than claimed as an install. The manager's own "not armed" answer
+    /// is the case a user must be able to see instead of a lie.
+    #[cfg(unix)]
+    #[test]
+    fn present_units_the_manager_did_not_confirm_are_unconfirmed() {
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = units_dir(home.path());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SYSTEMD_SERVICE), b"[Service]\n").unwrap();
+        fs::write(dir.join(SYSTEMD_TIMER), b"[Timer]\n").unwrap();
+        let fake = ArmedFake::plant(home.path(), false);
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &[None],
+                home.path(),
+                &fake.script
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 1,
+                expected: 1
+            }
+        );
+    }
+
+    /// The same files, a manager that confirms the timer — that is the one
+    /// pair of facts an "installed" claim needs, so an install state that
+    /// reported less than both would be the opposite defect: a healthy timer
+    /// talked down. Both halves must be observable separately.
+    #[cfg(unix)]
+    #[test]
+    fn present_units_the_manager_confirms_are_installed() {
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = units_dir(home.path());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SYSTEMD_SERVICE), b"[Service]\n").unwrap();
+        fs::write(dir.join(SYSTEMD_TIMER), b"[Timer]\n").unwrap();
+        let fake = ArmedFake::plant(home.path(), true);
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &[None],
+                home.path(),
+                &fake.script
+            ),
+            ScheduleInstall::Installed
+        );
+    }
+
+    /// A manager that cannot be asked at all (WSL without a user systemd
+    /// session, a `systemctl` that is not installed) is a third state, not
+    /// "the manager said no": the answer's note carries which one it was, so
+    /// the install state itself must not collapse the two into a claim
+    /// stronger than either. Both report as unconfirmed here; the note —
+    /// `next_run`'s — is what distinguishes them at the surface that prints
+    /// it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unaskable_manager_still_gets_no_installed_claim() {
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = units_dir(home.path());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SYSTEMD_SERVICE), b"[Service]\n").unwrap();
+        fs::write(dir.join(SYSTEMD_TIMER), b"[Timer]\n").unwrap();
+
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &[None],
+                home.path(),
+                &home.path().join("no-such-systemctl"),
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 1,
+                expected: 1
+            }
+        );
+    }
+
+    /// Multi-destination: every timer file present, and the manager confirming
+    /// none of them. The fields stay in the answer so `Partial` and
+    /// `Unconfirmed` remain distinguishable by the same two numbers, and the
+    /// two unconfirmed timers count as files — as they always did.
+    #[cfg(unix)]
+    #[test]
+    fn one_unconfirmed_timer_unconfirms_the_whole_install() {
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = units_dir(home.path());
+        fs::create_dir_all(&dir).unwrap();
+        for destination in ["alpha", "beta"] {
+            let stem = format!("chat-stasher-run-once-{destination}");
+            fs::write(dir.join(format!("{stem}.service")), b"[Service]\n").unwrap();
+            fs::write(dir.join(format!("{stem}.timer")), b"[Timer]\n").unwrap();
+        }
+        let fake = ArmedFake::plant(home.path(), false);
+        let targets = vec![Some("alpha".to_string()), Some("beta".to_string())];
+        assert_eq!(
+            schedule_install_state(
+                Unit::RunOnce,
+                Format::Systemd,
+                &targets,
+                home.path(),
+                &fake.script
+            ),
+            ScheduleInstall::Unconfirmed {
+                present: 2,
+                expected: 2
+            }
         );
     }
 }

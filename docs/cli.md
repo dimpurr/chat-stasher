@@ -132,8 +132,9 @@ Renders the hourly timer, or installs and removes it. See [schedule.md](schedule
 |---|---|
 | `schedule --stage <dir>` | Prints the timer. Changes nothing. |
 | `schedule --stage <dir> --output <path>` | Writes the timer file and prints the command that loads it. Loads nothing. |
-| `schedule install --stage <dir>` | Writes and loads the timer. One per declared destination, unless `--destination` narrows it. |
+| `schedule install --stage <dir>` | Writes and loads the timer. One per declared destination, unless `--destination` narrows it. A failed install stops the timers it had enabled and removes or restores the unit files it wrote, leaving `status` reporting `not_installed`, never an installed timer that is armed nowhere. |
 | `schedule uninstall` | Stops and removes the timers for the declared (or named) destinations. |
+| `schedule …` on Windows | Refuses with exit `2` and changes nothing: this build has no scheduler integration there. See the "Doing it by hand" section of [schedule.md](schedule.md). |
 
 | Flag | Meaning |
 |---|---|
@@ -161,7 +162,7 @@ Is the scheduled archive working? The first line is the verdict, read from the r
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-| `--json` | One JSON object, including a `local` section: the timer units installed, the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. |
+| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. |
 | `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
 
 ### `dest-init`
