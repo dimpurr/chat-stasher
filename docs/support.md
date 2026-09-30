@@ -164,7 +164,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 |---|---|---|---|
 | macOS, Apple Silicon and Intel | Yes | Yes | launchd (`schedule install`) |
 | Linux, x86-64 and arm64 | From 0.5.0: statically linked, any distribution | Yes, from 0.5.0 | systemd user timer (`schedule install --format systemd`) |
-| Windows, x86-64 | From 0.5.0: `chat-stasher-windows-x86_64.exe` | No: download the file | None built in. Use Task Scheduler. |
+| Windows, x86-64 | From 0.5.0: `chat-stasher-windows-x86_64.exe` | No: download the file | None built in (`schedule` refuses with exit 2). Use Task Scheduler. |
 
 From 0.5.0, `npm install -g chat-stasher` and `cargo install chat-stasher` also work. Before that, Linux and Windows build from source. See [install.md](install.md).
 

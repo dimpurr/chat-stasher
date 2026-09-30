@@ -253,6 +253,9 @@ enum Command {
     },
     /// Render a launchd plist or systemd user service/timer. The optional
     /// install/uninstall actions manage launchd agents or systemd user units.
+    /// On Windows the command refuses with exit 2 and points at the manual
+    /// Task Scheduler steps instead: this build has no scheduler integration
+    /// there.
     Schedule {
         /// Optional action. Without it, only render the templates.
         #[command(subcommand)]
@@ -6860,6 +6863,63 @@ fn run_once_pass(
     (ExitCode::SUCCESS, state)
 }
 
+/// The refusal message `schedule` prints on an OS this build has no supported
+/// scheduler integration for. Windows is the one such platform: reported and
+/// measured in the same validation round that motivated this guard, `schedule
+/// install` there wrote **systemd** user unit files into the profile — for a
+/// service manager Windows does not have — failed to load them, left them
+/// behind, and let `status` call them installed, while `schedule uninstall`
+/// failed the same way and left no supported way to remove the debris.
+///
+/// Task Scheduler *is* schedulable from a program, but this build refuses
+/// rather than integrates, for reasons that are properties of the work, not
+/// of this file: the per-user task schtasks.exe can create without a
+/// password runs only while its user is logged on, so an archive that looks
+/// scheduled silently never runs on the machines it exists for; the
+/// `schtasks /Query` output that would feed `status` and `next-run` is
+/// localized (the field labels are translated per Windows display language),
+/// so a parser verified on one machine reports unknown on the next for a
+/// reason no local check can catch; and the reporting round that filed this
+/// had to build on real Windows hardware to see any of it, which mock tests
+/// on another platform cannot stand in for. The manual steps below are what
+/// `docs/schedule.md` already documented for Windows, so no capability is
+/// withdrawn — the pretence of an installable timer is.
+///
+/// The decision is made from an OS *name*, not a `cfg`: both arms therefore
+/// compile and are tested on every platform (see `schedule_platform_tests`),
+/// rather than one platform's correctness being compiled out of the others'
+/// test runs.
+fn schedule_platform_refusal(os: &str) -> Option<&'static str> {
+    if os == "windows" {
+        Some(
+            "Windows has no supported scheduler in this build, so nothing was written or \
+             installed. `schedule install` on Windows used to write systemd user unit files \
+             for a service manager the platform does not have and then fail; this refusal \
+             replaces that. To schedule the pass, create a per-user task in Task Scheduler \
+             that runs `chat-stasher run-once --stage <stage>` every hour — add \
+             `--destination <name>` once the config declares destinations. A complete \
+             copy-pasteable `schtasks.exe` command, what to check afterwards and the \
+             logon caveat are in docs/schedule.md#windows-a-task-in-task-scheduler. Unit \
+             files an earlier build left in your home folder's .config\\systemd\\user \
+             directory schedule nothing on Windows: delete \
+             chat-stasher-run-once.service, chat-stasher-run-once.timer and any \
+             chat-stasher-run-once-<destination>.service / .timer there",
+        )
+    } else {
+        None
+    }
+}
+
+/// The platform guard `cmd_schedule` opens with, factored so a test on any
+/// platform can run it: it both prints the refusal and yields the exit code,
+/// so the two can never drift apart the way a printed message and a returned
+/// integer can when they live at different call sites.
+fn apply_schedule_platform_refusal(os: &str) -> Option<ExitCode> {
+    let refusal = schedule_platform_refusal(os)?;
+    eprintln!("schedule: {refusal}");
+    Some(ExitCode::from(2))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_schedule(
     action: Option<ScheduleAction>,
@@ -6879,6 +6939,12 @@ fn cmd_schedule(
     keep_ssh_masters: bool,
     quiet: bool,
 ) -> ExitCode {
+    // A platform without a supported scheduler integration is refused before
+    // anything is read, rendered or (above all) written — the whole command is
+    // unusable there, so nothing else about the invocation matters.
+    if let Some(code) = apply_schedule_platform_refusal(std::env::consts::OS) {
+        return code;
+    }
     let config = match config_or_refuse("schedule") {
         Ok(config) => config,
         Err(code) => return code,
@@ -7157,6 +7223,20 @@ fn scheduler_tool_path(format: schedule::Format) -> PathBuf {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default))
+}
+
+/// The launchd domain the read-only probes ask about — [`launchd_domain`], with
+/// an unresolvable one left empty rather than fatal.
+///
+/// An install or an uninstall cannot proceed without a domain and gets
+/// `launchd_domain`'s error; a *report* must still be produced, because "we
+/// could not ask" is an answer a reader can act on and a missing report is not.
+fn launchd_probe_domain() -> String {
+    // reason: an empty domain builds a target (`/label`) that `launchctl print`
+    // will not confirm, so both probes report unconfirmed and an unknown next
+    // run — the honest answer for "nobody could be asked", and never a claim
+    // that an agent is loaded.
+    launchd_domain().unwrap_or_default()
 }
 
 fn launchd_domain() -> anyhow::Result<String> {
@@ -12224,7 +12304,12 @@ fn cmd_setup(
             .to_string(),
     );
 
-    if interactive {
+    // The scheduler question is only offered where answering it can lead
+    // somewhere: on a platform `schedule` refuses (see
+    // `schedule_platform_refusal`), a "yes" would go straight to that refusal,
+    // so the wizard asks nothing and the refusal travels only through the
+    // summary line an answer would have earned.
+    if interactive && schedule_platform_refusal(std::env::consts::OS).is_none() {
         if !install_schedule && !uninstall_schedule {
             let mut input = String::new();
             match prompt_setup_value("Install the scheduler now? [y/N]: ", &mut input) {
@@ -12332,9 +12417,19 @@ fn cmd_setup(
                     &schedule_targets,
                     &config::home_dir(),
                     &scheduler_tool_path(setup_schedule_format()),
+                    &launchd_probe_domain(),
                     chrono::Local::now(),
                 );
             }
+        } else if schedule_platform_refusal(std::env::consts::OS).is_some() {
+            // Not "failed": the step was refused by the platform before it
+            // attempted anything, and `cmd_schedule` has already printed the
+            // refusal with its own exit path. The step still counts as
+            // unfinished — a wizard that ends here leaves this archive with
+            // no timer, whatever the platform's opinion of timers is.
+            schedule_status = "not_attempted";
+            incomplete.push("schedule");
+            exit_code = setup_exit_code(&missing, &incomplete, &remote_gaps.unread);
         } else {
             schedule_status = "failed";
             incomplete.push("schedule");
@@ -14574,7 +14669,20 @@ fn print_setup_summary(
     println!("setup: scheduler: {schedule_status}");
     println!("setup: {}", setup_next_run_line(next_run));
     if !install_schedule && !uninstall_schedule {
-        println!("setup: scheduler was skipped; run `chat-stasher setup --install-schedule` to install it");
+        // The advice a skip earns depends on what a retry can reach: where
+        // `schedule` refuses (see `schedule_platform_refusal`), "run
+        // `--install-schedule`" would send the reader into a refusal, and the
+        // honest next step is the platform's own scheduler with the document
+        // that spells it out.
+        if schedule_platform_refusal(std::env::consts::OS).is_some() {
+            println!(
+                "setup: scheduler was skipped, and this platform has no supported scheduler \
+                 in this build; run the pass with your platform's scheduler directly — the \
+                 steps are in docs/schedule.md"
+            );
+        } else {
+            println!("setup: scheduler was skipped; run `chat-stasher setup --install-schedule` to install it");
+        }
     }
 
     // The host step is a **report**, not an attempted step, and it is rendered
@@ -15339,23 +15447,32 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
     let mut declared: Vec<String> = config.destinations.keys().cloned().collect();
     declared.sort_unstable();
     let targets = schedule::install_targets(&declared, &[]);
+    let tool = scheduler_tool_path(format);
+    let domain = launchd_probe_domain();
     let install = schedule::schedule_install_state(
         schedule::Unit::RunOnce,
         format,
         &targets,
         &config::home_dir(),
+        &tool,
+        &domain,
     );
     let (schedule_kind, installed) = match install {
         schedule::ScheduleInstall::Installed => ("installed", true),
         schedule::ScheduleInstall::NotInstalled => ("not_installed", false),
         schedule::ScheduleInstall::Partial { .. } => ("partial", false),
+        // The units are on disk but the manager did not confirm the timer
+        // armed. `next_run` right below carries which of the two that was:
+        // the manager answered "inactive", or it could not be asked at all.
+        schedule::ScheduleInstall::Unconfirmed { .. } => ("unconfirmed", false),
     };
     let next_run = schedule::next_run(
         schedule::Unit::RunOnce,
         format,
         &targets,
         &config::home_dir(),
-        &scheduler_tool_path(format),
+        &tool,
+        &domain,
         chrono::Local::now(),
     );
     let units: Vec<String> = targets
@@ -15947,6 +16064,63 @@ mod setup_scheduler_tests {
             serde_json::json!(
                 "no scheduler timer was installed by this run, so there is no next run to report"
             )
+        );
+    }
+}
+
+#[cfg(test)]
+mod schedule_platform_tests {
+    use super::*;
+
+    /// W282 §3: on Windows `schedule install` wrote systemd user unit files
+    /// for a service manager the platform does not have, failed to load them,
+    /// left them behind, and let `status` report an install while `uninstall`
+    /// failed the same way. The fix chosen for this build is to refuse the
+    /// whole command on that platform — see `schedule_platform_refusal` for
+    /// why refusing was chosen over integrating schtasks.exe. The decision is
+    /// made from an OS name, so this test compiles and runs on every platform
+    /// and asserts both sides, rather than one platform's correctness being
+    /// compiled out of the others' runs.
+    #[test]
+    fn the_schedule_command_refuses_windows_and_only_windows() {
+        let refused = apply_schedule_platform_refusal("windows")
+            .expect("Windows has no supported scheduler integration in this build");
+        assert_eq!(refused, ExitCode::from(2), "the refusal is a usage error");
+        for supported in ["macos", "linux"] {
+            assert_eq!(
+                apply_schedule_platform_refusal(supported),
+                None,
+                "{supported} keeps the launchd/systemd integrations it has"
+            );
+        }
+    }
+
+    /// A refusal the reader cannot act on is a refusal in name only, so the
+    /// sentence must carry what was *not* done, the manual Task Scheduler
+    /// steps that replace it, and what to do about unit files a build from
+    /// before the refusal may have left in the profile. The wording also has
+    /// to stay distinguishable from a failed lookup: no tool was run and no
+    /// file was read, and none of the words may read as one that was.
+    #[test]
+    fn the_windows_refusal_names_the_manual_steps_and_the_old_debris() {
+        let refusal = schedule_platform_refusal("windows")
+            .expect("the refusal exists for the platform that has no scheduler");
+        for word in [
+            "nothing was written or installed",
+            "Task Scheduler",
+            "run-once --stage <stage>",
+            "docs/schedule.md#windows-a-task-in-task-scheduler",
+            "systemd",
+            "delete chat-stasher-run-once.service, chat-stasher-run-once.timer",
+        ] {
+            assert!(
+                refusal.contains(word),
+                "the refusal must tell the reader {word}: {refusal}"
+            );
+        }
+        assert!(
+            !refusal.contains("could not be run"),
+            "no tool was attempted, and the wording must not read as if one failed: {refusal}"
         );
     }
 }

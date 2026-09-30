@@ -72,7 +72,7 @@ A prebuilt `chat-stasher-windows-x86_64.exe` is published from **0.5.0**. The in
 Two things are known about Windows, and neither is a promise:
 
 - One Claude Code path-handling detail is unverified. Windows session paths are readable slugs while they are short and a hashed directory once they are long, and whether the drive-letter colon and the backslash are sanitised the same way in both cases has not been measured on real Windows hardware.
-- `schedule` renders launchd and systemd timers only. Use Task Scheduler to run `chat-stasher run-once --stage <stage>` yourself.
+- `schedule` renders launchd and systemd timers only, and on Windows it refuses with exit 2 and changes nothing rather than writing unit files for a scheduler the platform does not have. Use Task Scheduler to run `chat-stasher run-once --stage <stage>` yourself — a copy-pasteable `schtasks` command and what to check afterwards are in [schedule.md](schedule.md#windows-a-task-in-task-scheduler).
 
 ### npm and cargo
 
