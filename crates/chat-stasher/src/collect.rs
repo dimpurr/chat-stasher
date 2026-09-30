@@ -9,6 +9,30 @@
 //! complete session export, deliberately preferring a measurable duplicate
 //! over a silent omission.
 //!
+//! # An unterminated final line is in progress, not a change
+//!
+//! A JSONL source whose last line has no trailing newline is treated as
+//! *being written*: only newline-terminated lines are ever sealed, because a
+//! torn last record may be half of a write. The unterminated tail stays
+//! behind the cursor and is re-read from it on every later pass, so the pass
+//! that sees the next newline commits the tail in full — nothing is lost by
+//! waiting, and the sealed prefix is never re-staged. A pass that re-read the
+//! tail while no newline completed it staged nothing new, so it
+//! counts the session as *unchanged* (the classification lives in
+//! [`collect_scan_report`]): a source that stops changing must converge to a
+//! no-op pass rather than re-flagging the same tail as a change forever.
+//!
+//! The same rule binds a `.jsonl.zst` source, whose decoded stream can end
+//! the same way. Decoding is all-or-nothing, so its cursor is not a byte
+//! offset into the compressed file but the observation "this whole source,
+//! at this length and digest, was decoded and everything sealable in it was
+//! sealed" — written by a pass that found nothing sealable just as by one
+//! that sealed lines (`process_compressed`). A byte-identical source is
+//! therefore answerable from the remembered digest alone: the next pass is a
+//! no-op, not a reset. The first pass after a real change no longer matches
+//! the digest, re-decodes, and seals the record the earlier passes held in
+//! progress, so convergence never hides growth.
+//!
 //! The store *and* the per-session cursor answer two different questions, and
 //! conflating them cost a full re-export of every session on every store write.
 //! Which session changed is decided by that session's own cursor; whether
@@ -755,7 +779,20 @@ pub fn collect_scan_report(
         ) {
             Ok(processed) => {
                 let outcome = processed.outcome;
-                let changed = outcome.bytes_read > 0 || outcome.reset;
+                // W286: a session is "changed" exactly when this pass handed
+                // new content to the archive — a sealed shard — or had to
+                // reset its cursor and reread. Bytes that were read but
+                // committed nothing do not qualify: an unterminated final
+                // line is deliberately treated as *in progress* (it may be
+                // half of a write), so a pass re-reads it, seals nothing,
+                // and must leave the session unchanged. Counting it as
+                // changed re-flagged the same stable tail on every pass
+                // forever, and `run-once` answered that flag with a fresh
+                // snapshot of an unchanged stage on every run. The read that
+                // observed the tail is still reported honestly through
+                // `bytes_read`; it is the archive-additional work that is
+                // absent, and absent work must not be spelled "changed".
+                let changed = outcome.shard.is_some() || outcome.reset;
                 if changed {
                     report.changed_records += 1;
                 } else {
@@ -1378,24 +1415,23 @@ fn process_compressed(
             bucket_cap,
         )?)
     };
-    let state = if lines.is_empty() {
-        OffsetEntry {
-            offset: 0,
-            prefix_len: 0,
-            prefix_sha256: sha256_hex(&[]),
-            compressed: true,
-            opencode: None,
-            store_fingerprint: None,
-        }
-    } else {
-        OffsetEntry {
-            offset: source_len,
-            prefix_len: source_len,
-            prefix_sha256: digest,
-            compressed: true,
-            opencode: None,
-            store_fingerprint: None,
-        }
+    // Decoding is all-or-nothing, so a compressed cursor records the whole
+    // source it observed — length and digest — whether that pass sealed
+    // lines or found none to seal. That is what lets a stable source
+    // converge: a pass over a byte-identical source answers from the
+    // comparison above as a no-op, so a rollout whose decoded stream ends
+    // mid-record is re-observed only while it is actually changing, and the
+    // first pass after a real change re-decodes and seals the completed
+    // record. A zero cursor here (the pre-W286 spelling) could never match
+    // a nonempty source, and with `reset: old.is_some()` below it counted
+    // the session as changed on every pass forever.
+    let state = OffsetEntry {
+        offset: source_len,
+        prefix_len: source_len,
+        prefix_sha256: digest,
+        compressed: true,
+        opencode: None,
+        store_fingerprint: None,
     };
     Ok(Processed {
         state,

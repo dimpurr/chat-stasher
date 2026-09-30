@@ -253,6 +253,38 @@ under its own heading below.
   measured anything does not belong in the stored tree. A file's mtime is
   kept, because that is what change detection reads, so a changed stage still
   re-uploads and an unchanged one still reports every file unmodified.
+- **A session file whose last line has no trailing newline no longer creates
+  a new snapshot on every pass.** Only newline-terminated lines were ever
+  sealed — an unterminated final record may be half of a write — but the
+  collector re-read that tail on every pass and still counted the session as
+  changed, so every `run-once` pushed a fresh snapshot of an unchanged stage,
+  re-adding the same bytes each run and never converging: measured on the
+  Windows machine as one more snapshot on each of four passes over one
+  stable stage, and `setup` reported its idempotence link as not observed
+  while still calling the run healthy. The rule is now decided and stated: an
+  unterminated final line is *in progress* — it is re-read from the committed
+  offset on every later pass and is committed in full by the pass that first
+  sees its newline, so a tail is never lost and the sealed prefix is never
+  re-staged. A pass that read the tail but sealed nothing counts the session
+  as unchanged, so a source that stops changing converges to a no-op pass
+  and zero new snapshots, and the read that observed the tail is still
+  reported as bytes read. A `.jsonl.zst` rollout (a real class: codex
+  compresses idle rollouts) held the same tail in progress through the same
+  rule but churned through a separate hole: a pass that decoded it and found
+  no complete line recorded a zero cursor — an offset of 0 and the digest of
+  nothing, which can never match a nonempty source — and set its reset flag
+  unconditionally, so every later pass re-decoded the same bytes and still
+  counted the session as changed, and for compressed sources the convergence
+  sentence above was false. Such a pass now records the source it observed,
+  compressed length and digest — the same all-or-nothing cursor a sealing
+  pass writes, since decoding has no partial positions to offer — so an
+  unchanged source with nothing sealable answers from the remembered digest
+  as a no-op pass with no reset and no snapshot, and the first pass after
+  the newline arrives no longer matches, re-decodes, and seals the record in
+  full. A file that never gains the newline keeps its tail
+  out of the archive rather than sealing a possibly torn record; of 2,180
+  real session files measured across macOS and Windows, none ended without
+  the trailing newline.
 - **A truncated pack is refused instead of crashing or hanging.** A metadata
   pack shorter than the index records made `read` panic (exit 101) and
   `verify` never return, on a repository with the default metadata cache; both
