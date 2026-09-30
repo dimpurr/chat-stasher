@@ -279,14 +279,16 @@ Finds sessions in **one** destination, always named.
 | `--day`, `--since`, `--until` | Local calendar days, `YYYY-MM-DD`. Filters on the **conversation's own dates**, not on when it was backed up. |
 | `--text <query>` | Search conversation text in the [local index](#index). Three characters or more. |
 | `--scan` | With `--text`: read the selected conversations and match case-insensitively instead. Answers short queries, and downloads what it reads. |
-| `--cost` | Also report what reading the matched sessions in full would cost. |
+| `--cost` | Also report what reading the selected sessions in full would cost. |
 | `--json` | One object: matched, not matched, and could-not-be-placed groups. Text searches carry the index's coverage and a `query_state` for the query. |
 
 A `--text` query shorter than the three characters the index's trigram tokenizer
 matches cannot be evaluated at all, so it is not a search that found nothing: the
 run exits `3` — the same "this proves nothing" family as an unreadable snapshot —
 the report prints `matched=unknown` where a count would otherwise be, and the
-JSON says `query_state: "too_short"` beside `query_length` and `query_minimum`.
+JSON says `query_state: "too_short"` beside `query_length` and `query_minimum`,
+and `matched` is `null` rather than a count — so a caller that reads `matched` as
+an integer fails here instead of being handed a `0` that was never measured.
 `--scan` answers such a query by matching the conversations themselves.
 
 Without `--text`, search reads metadata only and never downloads a conversation. It walks **every snapshot** of a machine — not just the newest one — so a session whose local bodies have been reclaimed (`reclaim-stage` deletes them once every destination has proved it holds them) is still found, reported against the snapshot that actually holds it. The run says `snapshots scanned: N of M`, and names the shortfall when there is one (`2 of 3, 1 unreadable`); a snapshot that could not be walked is a set of sessions that was never looked for, so `not in this destination`, exit `1`, is printed only when all M were walked, and anything less is exit `3` — an unknown, never a negative.
