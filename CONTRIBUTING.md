@@ -69,6 +69,8 @@ bash scripts/selftest-check-static-binary.sh
 bash scripts/selftest-crates-version-state.sh
 bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
+bash scripts/dev/test-rebase-onto-main.sh
+bash scripts/dev/test-merge-drivers.sh
 python3 scripts/dev/scoreboard.py --selftest
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh
@@ -81,6 +83,20 @@ bash scripts/smoke/linux-smoke.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+
+`test-rebase-onto-main.sh` and `test-merge-drivers.sh` are the pair for the
+derived-file merge rule described under "Resolving a merge" below. Both build
+throwaway repositories, so they need no history and cannot leave this tree dirty.
+The first drives `rebase-onto-main.sh` through a citation-only conflict, a prose
+refusal, a code-conflict rollback, a rebase with the driver registered, and the
+textual fallback a clone without the driver gets; the second pins what git itself
+does with the drivers — under `merge` *and* under `rebase` — and asserts both
+states of a fresh clone, so a driver that stopped being consulted cannot pass as a
+fixture that happened not to conflict. Cases 4 and 5 of the rebase test are the
+only checks anywhere that run the tool's regeneration step against the real
+`scripts/output-inventory.py` rather than a stub, and they judge the committed
+file with the generator's own `--check`, so a regeneration that silently stopped
+happening goes red here instead of committing a stale recording.
 
 `scripts/dev/scoreboard.py --selftest` is the scoreboard generator's own suite.
 It builds every input it judges — synthetic ext-status reports, overview
@@ -320,11 +336,34 @@ abort and restore the original SHA. A relocation that needs a human leaves the
 branch rebased and uncommitted so the reported citations can be reviewed. A
 successful run commits `Relocate citations after rebasing onto main`.
 
-The workflow's throwaway-repository self-test covers citation conflicts,
-prose refusal, and code-conflict rollback:
+Both derived files also carry a `merge=regenerate-*` driver (`.gitattributes`).
+Git does not read drivers out of a checkout, so register them once per clone:
+
+```sh
+bash scripts/dev/setup-merge-drivers.sh
+```
+
+With the drivers registered, a merge or rebase never *stops* on the two
+recordings: the driver keeps the current side, which is disposable by
+construction — it is exactly what regeneration replaces. That makes re-deriving
+them mandatory rather than a tidy-up, and it is why the step above is not
+optional: the value the driver leaves committed is only correct once
+`relocate-citations.py` (for `citations.lock`) and `output-inventory.py` (for
+`output-inventory.txt`) have re-derived it from the merged tree. Landing a merge
+by hand rather than with `rebase-onto-main.sh` is the same work — the flow above
+— and the two gates are the alarm either way: `check-citation-drift.py` and
+`output-inventory.py --check` compare the committed recordings against the tree
+they claim to describe, so a skipped regeneration is red, never quietly stale. A
+clone that never ran the setup gets git's ordinary textual conflict on these two
+files instead, which is the conflict this section resolves by hand.
+
+The workflow's throwaway-repository self-tests cover citation conflicts, prose
+refusal, code-conflict rollback, and the derived files both with and without the
+drivers:
 
 ```sh
 bash scripts/dev/test-rebase-onto-main.sh
+bash scripts/dev/test-merge-drivers.sh
 ```
 
 ## Reloading the extension during development

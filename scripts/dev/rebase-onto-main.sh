@@ -101,8 +101,12 @@ while [ "$rebase_rc" -ne 0 ]; do
   bad=0
   while IFS= read -r path; do
     case "$path" in
-      README.md|docs-dev/*.md|docs-dev/citations.lock) ;;
+      README.md|docs-dev/*.md|docs-dev/citations.lock|docs-dev/output-inventory.txt) ;;
       *)
+        # Both derived files (citations.lock, output-inventory.txt) are resolved
+        # as the current side here and regenerated from the merged tree below;
+        # output-inventory.txt cannot feed the citation scan, so taking --ours
+        # on it cannot hide a relocation problem. Anything else is code.
         echo "[rebase-citations] code or unsupported conflict; aborting: $path" >&2
         bad=1
         ;;
@@ -137,6 +141,14 @@ fi
 
 python3 scripts/check-citation-drift.py || {
   echo "[rebase-citations] citation drift check failed" >&2
+  exit 1
+}
+
+# output-inventory.txt is derived from the merged source and was resolved above
+# as the current side; regenerate it so the committed value matches the merged
+# tree. (citations.lock was already rewritten by relocate-citations.py.)
+python3 scripts/output-inventory.py || {
+  echo "[rebase-citations] output-inventory regeneration failed" >&2
   exit 1
 }
 

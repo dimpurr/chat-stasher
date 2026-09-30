@@ -323,6 +323,26 @@ jobs:
       - name: Citation relocation self-test
         run: bash scripts/selftest-relocate-citations.sh
 
+      # The rest of that toolchain's self-tests: the rebase driver that runs
+      # relocate-citations.py on a branch, and the derived-file merge drivers
+      # that decide whether the rebase stops on docs-dev/citations.lock and
+      # docs-dev/output-inventory.txt first. CONTRIBUTING.md lists both as local
+      # checks, so CI has to run them too - otherwise the two sets drift and a
+      # green local run stops meaning a green pull request. Both build throwaway
+      # repositories under a temp directory, so they need no history, no network,
+      # and no toolchain beyond git and python3, which this job already uses. They
+      # edit fixtures through python3 rather than `sed -i ''` for exactly this
+      # runner: the BSD spelling is a syntax error under GNU sed, and a suite that
+      # cannot run on the machine CI uses stops covering what it guards. The
+      # rebase one also runs the regeneration step against the real
+      # scripts/output-inventory.py, which is the only place that step is
+      # exercised outside a human's merge.
+      - name: Rebase-onto-main self-test
+        run: bash scripts/dev/test-rebase-onto-main.sh
+
+      - name: Merge driver self-test
+        run: bash scripts/dev/test-merge-drivers.sh
+
       # Every link between our own Markdown files, and every `#fragment` on
       # one, must resolve. Nothing else in this workflow reads a document for
       # its links, so a file that moves or a heading that is renamed under a
