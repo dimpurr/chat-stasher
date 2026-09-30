@@ -9255,6 +9255,17 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     // doubled archive came back `L3 verdict: OK`. So it is named, per session,
     // and counted into the verdict line.
     for dup in &r.possible_duplicate_seals {
+        if let Some((start, end)) = dup.prior_run {
+            println!(
+                "  !? {:<12} {:<20} POSSIBLE DUPLICATE SEAL: shard {} repeats the concatenation of shards {}–{}",
+                dup.machine,
+                display_session_id(&dup.session_id, full_ids),
+                dup.second + 1,
+                start + 1,
+                end
+            );
+            continue;
+        }
         let shape = match dup.repeated_body_shards {
             // The shape 1211 of the real archive's 1212 cases have: the whole
             // body sealed before this shard, as one shard.

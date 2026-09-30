@@ -830,6 +830,34 @@ fn a_fresh_destination_over_a_compressed_source_with_an_older_version_seals_noth
     );
 }
 
+/// A shrink or rewrite is a new snapshot even when its bytes happen to be a
+/// suffix of an older compressed export. It must be recorded on a fresh
+/// destination rather than mistaken for an export already sealed.
+#[test]
+fn a_fresh_destination_records_a_shrunken_compressed_export() {
+    let older = b"{\"uuid\":\"u1\"}\n{\"uuid\":\"u2\"}\n";
+    let fx = Fixture::named(
+        "session.jsonl.zst",
+        "jsonl / jsonl.zst",
+        None,
+        &zstd::stream::encode_all(&older[..], 3).unwrap(),
+    );
+    fx.collect("first");
+    let current = b"{\"uuid\":\"u2\"}\n";
+    fs::write(
+        &fx.source,
+        zstd::stream::encode_all(&current[..], 3).unwrap(),
+    )
+    .unwrap();
+    fx.collect("second");
+    assert_eq!(
+        fx.shard_count(),
+        2,
+        "a shrunken export that is only a suffix of the older snapshot is a new version"
+    );
+    assert_eq!(fx.concat(), [older.as_slice(), current.as_slice()].concat());
+}
+
 /// Append one message to the fixture session, so its next export differs.
 fn add_message(db: &Path, id: &str, at: i64) {
     let conn = rusqlite::Connection::open(db).unwrap();

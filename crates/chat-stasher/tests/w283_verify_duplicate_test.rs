@@ -203,6 +203,81 @@ fn l3_names_a_multi_shard_reseal() {
     );
 }
 
+/// The collector's snapshot exports seal the whole decoded body as one shard.
+/// If an incremental source first sealed A and B, then was re-sealed as the
+/// snapshot AB, L3 sees `A, B, AB`: the last shard is the concatenation of a
+/// run of earlier shards even though none of their individual bytes repeat.
+#[test]
+fn l3_names_collector_shard_that_repeats_a_prior_run() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let a = br#"{"uuid":"u1"}"#.to_vec();
+    let b = br#"{"uuid":"u2"}"#.to_vec();
+    for lines in [vec![a.clone()], vec![b.clone()], vec![a, b]] {
+        chat_stasher::store::write_sealed_shard_bytes_with_cap(
+            chat_stasher::store::StageWriter::Collect,
+            &stage,
+            MACHINE,
+            SESSION,
+            &lines,
+            20,
+        )
+        .unwrap();
+    }
+
+    let (ok, out) = push_then_verify_l3(sandbox, &stage);
+    assert!(
+        out.contains("POSSIBLE DUPLICATE SEAL"),
+        "L3 must detect a shard that repeats a concatenation of earlier shards:\n{out}"
+    );
+    assert!(
+        out.contains("shard 3 repeats the concatenation of shards 1–2"),
+        "L3 must identify the earlier run that the shard repeats:\n{out}"
+    );
+    assert!(
+        ok,
+        "a repeated run is a possibility, not corruption:\n{out}"
+    );
+}
+
+/// A repeated run can be embedded after unrelated earlier content. This pins
+/// run detection separately from the whole-prefix case above.
+#[test]
+fn l3_names_collector_shard_that_repeats_a_nonprefix_run() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let noise = br#"{"uuid":"noise"}"#.to_vec();
+    let a = br#"{"uuid":"u1"}"#.to_vec();
+    let b = br#"{"uuid":"u2"}"#.to_vec();
+    for lines in [vec![noise], vec![a.clone()], vec![b.clone()], vec![a, b]] {
+        chat_stasher::store::write_sealed_shard_bytes_with_cap(
+            chat_stasher::store::StageWriter::Collect,
+            &stage,
+            MACHINE,
+            SESSION,
+            &lines,
+            20,
+        )
+        .unwrap();
+    }
+
+    let (ok, out) = push_then_verify_l3(sandbox, &stage);
+    assert!(
+        out.contains("POSSIBLE DUPLICATE SEAL"),
+        "L3 must detect a shard that repeats any earlier contiguous run:\n{out}"
+    );
+    assert!(
+        out.contains("shard 4 repeats the concatenation of shards 2–3"),
+        "L3 must identify the matching non-prefix run:\n{out}"
+    );
+    assert!(
+        ok,
+        "a repeated run is a possibility, not corruption:\n{out}"
+    );
+}
+
 /// The other side of that line: shard 3 repeating shard 2 while shard 1 differs
 /// is a repeated *block*, which is the shape real repetition leaves as much as a
 /// re-seal — so it is named as a block and not as a repeated body.

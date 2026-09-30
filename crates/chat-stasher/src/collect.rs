@@ -338,8 +338,18 @@ pub enum DebtVerdict {
 /// sealed — which is not the same as a session whose content is empty, so
 /// callers must keep the two apart by checking the shard count, not this
 /// length.
-fn stage_sealed_content(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<Vec<u8>> {
-    store::concat_shards(stage, machine, session_id)
+fn stage_sealed_shards(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    let mut entries = store::sealed_shard_entries(&dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    entries
+        .into_iter()
+        .map(|(_, path)| fs::read(path).map_err(Into::into))
+        .collect()
 }
 
 /// Frame `lines` the way [`store::write_sealed_shard_bytes_with_cap`] does.
@@ -368,13 +378,13 @@ fn stage_holds_this_export(
     session_id: &str,
     json_line: &[u8],
 ) -> anyhow::Result<bool> {
-    let sealed = stage_sealed_content(stage, machine, session_id)?;
+    let sealed = stage_sealed_shards(stage, machine, session_id)?;
     let mut framed = json_line.to_vec();
     framed.push(b'\n');
     Ok(stage_tail_is(&sealed, &framed))
 }
 
-/// Is `frame` the body the stage sealed last?
+/// Is `frame` a whole-shard suffix of the body sealed so far?
 ///
 /// The snapshot shapes — a whole file, a compressed export, a SQLite session —
 /// have no incremental cursor. Each pass seals the whole current body as one
@@ -383,12 +393,24 @@ fn stage_holds_this_export(
 /// therefore whether the body this pass is about to seal is already there, and
 /// the answer must not depend on how much *else* is: a stage holding that body
 /// twice (the defect's own work) and one holding it behind older versions of
-/// itself are both stages that already have it.
-///
-/// Comparing the whole body for equality — which is what this used to do — says
-/// "no" to all of them, and each "no" seals the body again.
-fn stage_tail_is(body: &[u8], frame: &[u8]) -> bool {
-    !frame.is_empty() && body.ends_with(frame)
+/// itself are both stages that already have it. The match must cover complete
+/// shards. After a compressed export `A\nB\n` shrinks to `B\n`, the new export
+/// is a byte suffix of the old one, but it is a new snapshot and must be sealed.
+fn stage_tail_is(shards: &[Vec<u8>], frame: &[u8]) -> bool {
+    if frame.is_empty() {
+        return false;
+    }
+    let mut remaining = frame.len();
+    for shard in shards.iter().rev() {
+        if shard.len() > remaining || frame[remaining - shard.len()..remaining] != shard[..] {
+            return false;
+        }
+        remaining -= shard.len();
+        if remaining == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// The longest source line prefix present contiguously in the stage.
@@ -504,8 +526,8 @@ fn stage_prefix_entry(
     if record.sqlite_layout.is_some() {
         return Ok(None);
     }
-    let sealed = stage_sealed_content(stage, machine, &record.id)?;
-    if sealed.is_empty() {
+    let sealed_shards = stage_sealed_shards(stage, machine, &record.id)?;
+    if sealed_shards.is_empty() {
         return Ok(None);
     }
 
@@ -523,7 +545,7 @@ fn stage_prefix_entry(
         })?;
         let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
         let (lines, _) = complete_lines(&decoded);
-        if lines.is_empty() || !stage_tail_is(&sealed, &seal_framed(&lines)) {
+        if lines.is_empty() || !stage_tail_is(&sealed_shards, &seal_framed(&lines)) {
             return Ok(None);
         }
         let len = compressed.len() as u64;
@@ -544,6 +566,7 @@ fn stage_prefix_entry(
         // treating reordered or missing repeated lines as covered.
         // `read_jsonl_delta` re-reads and hashes the claimed source
         // prefix before it accepts this cursor.
+        let sealed = sealed_shards.iter().flatten().copied().collect::<Vec<_>>();
         let source_len = fs::metadata(&record.absolute_path)
             .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
             .len();
@@ -580,7 +603,12 @@ fn stage_prefix_entry(
     // was sealed last, and also when the defect sealed it twice.
     let bytes = fs::read(&record.absolute_path)
         .with_context(|| format!("read source bytes ({})", path_digest(&record.absolute_path)))?;
-    if bytes.is_empty() || !stage_tail_is(&sealed, &seal_framed(std::slice::from_ref(&bytes))) {
+    if bytes.is_empty()
+        || !stage_tail_is(
+            &stage_sealed_shards(stage, machine, &record.id)?,
+            &seal_framed(std::slice::from_ref(&bytes)),
+        )
+    {
         return Ok(None);
     }
     // The sealer appends a newline after the single "line" it is given, so the

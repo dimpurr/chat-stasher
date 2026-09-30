@@ -198,6 +198,10 @@ pub struct DuplicateSeal {
     /// sequence — the weakest evidence of the three, and the one least
     /// distinguishable from content that genuinely repeats.
     pub repeated_body_shards: Option<usize>,
+    /// Earlier contiguous shard range whose concatenation equals `second`.
+    /// The end is exclusive. This covers collector snapshot re-seals such as
+    /// A, B, AB, where no individual shard repeats.
+    pub prior_run: Option<(usize, usize)>,
 }
 
 /// Find a repeated shard sequence in one archived session, if any.
@@ -217,26 +221,33 @@ pub fn duplicate_seal(session: &SessionBackedUp) -> Option<DuplicateSeal> {
     if digests.len() != sizes.len() || digests.len() < 2 {
         return None;
     }
-    let seal = |first: usize, second: usize, repeated_body_shards: Option<usize>| {
+    let seal = |first: usize,
+                second: usize,
+                repeated_body_shards: Option<usize>,
+                prior_run: Option<(usize, usize)>| {
         Some(DuplicateSeal {
             machine: session.machine.clone(),
             session_id: session.session_id.clone(),
             first,
             second,
             repeated_body_shards,
+            prior_run,
         })
     };
     for run in 1..=digests.len() / 2 {
         if (0..run).all(|i| sizes[i] == sizes[run + i] && digests[i] == digests[run + i]) {
-            return seal(0, run, Some(run));
+            return seal(0, run, Some(run), None);
         }
     }
     for j in 1..digests.len() {
         for i in 0..j {
             if sizes[i] == sizes[j] && digests[i] == digests[j] {
-                return seal(i, j, None);
+                return seal(i, j, None, None);
             }
         }
+    }
+    if let Some(&(start, shard)) = session.shard_run_duplicates.first() {
+        return seal(start, shard, None, Some((start, shard)));
     }
     None
 }
@@ -759,6 +770,7 @@ mod tests {
             sha256: String::new(),
             shard_sha256: digests.iter().map(|d| d.to_string()).collect(),
             shard_bytes: sizes.to_vec(),
+            shard_run_duplicates: Vec::new(),
         };
 
         // The W281 repro: one source shard, then the same bytes sealed again.
