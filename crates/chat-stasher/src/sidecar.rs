@@ -499,6 +499,7 @@ mod tests {
             title: None,
             provenance: None,
             account_keys: Vec::new(),
+            measured_body: None,
         };
         let o = to_overview_row(&exact);
         assert_eq!(o.session_id, "s1");

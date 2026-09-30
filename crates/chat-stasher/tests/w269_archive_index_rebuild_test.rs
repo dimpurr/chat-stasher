@@ -76,6 +76,45 @@ fn store_config(repo: &Path, key: &Path) -> StoreConfig {
     }
 }
 
+/// A content digest of every file under `root`, path and bytes both.
+///
+/// The read-only contract is "the destination did not change", and a snapshot
+/// count is a proxy for it: a rebuild that rewrote a snapshot's metadata, or
+/// left an index file behind in the repository, would keep the count and break
+/// the contract. This makes the claim measurable on the fixture.
+fn tree_digest(root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                files.insert(rel, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut hasher = Sha256::new();
+    for (rel, bytes) in files {
+        hasher.update(rel.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// How many snapshots the repository holds per hostname.
 fn snapshots_per_host(cfg: &StoreConfig, mk: &MasterKey) -> BTreeMap<String, usize> {
     let backends = BackupStore::for_metadata_query(cfg.clone())
@@ -164,6 +203,7 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
         Some(&2),
         "two snapshots for the lost machine"
     );
+    let repo_before = tree_digest(&repo);
 
     // A config naming THIS machine's partition, so the rebuild of `lost` is
     // another machine's partition and must take the read-only path.
@@ -232,6 +272,175 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
     assert_eq!(
         after, before,
         "a read-only rebuild must not append a snapshot"
+    );
+    assert_eq!(
+        tree_digest(&repo),
+        repo_before,
+        "a read-only rebuild must not change one byte of the destination"
+    );
+}
+
+/// The fixture for the *current* machine's side of the same question: this
+/// sandbox's config names `mbp-here`, the archive holds `mbp-here`'s sessions,
+/// and the stage that machine would have is the sandbox's own `stage` path —
+/// which the caller either deletes or never has.
+///
+/// Returns `(repo, key, session id)`; the masterkey is read back from the key
+/// file so a test can count the repository's snapshots.
+fn own_machine_archive(sandbox: &Path) -> (PathBuf, PathBuf, String) {
+    let machine = "mbp-here";
+    let session = "claude-code.mbp-here.019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string();
+    let stage = sandbox.join("stage");
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let cfg = store_config(&repo, &key);
+    let mk = MasterKey::new();
+    chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
+
+    write_shard(
+        &stage,
+        machine,
+        &session,
+        &[
+            cc_line("2025-01-15T12:34:56Z"),
+            cc_line("2025-01-15T13:45:07Z"),
+        ],
+    );
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "machine = \"{machine}\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
+            repo.display(),
+            key.display()
+        ),
+    )
+    .unwrap();
+    (repo, key, session)
+}
+
+/// SRCH-2 review, High 2: a machine whose stage is gone must be able to rebuild
+/// **its own** index from the archive. The publishing repair restores the shards
+/// into `--stage` first, so with no `--stage` at all there is nothing to restore
+/// into — and the rebuild must then be the read-only one rather than a usage
+/// error, because for this machine the archive is the only copy left.
+#[test]
+fn the_current_machine_with_no_stage_rebuilds_read_only() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let (repo, key, session) = own_machine_archive(sandbox);
+    let cfg = store_config(&repo, &key);
+    let mk = chat_stasher::store::load_key_file(&cfg).unwrap();
+
+    let before = snapshots_per_host(&cfg, &mk);
+    assert_eq!(before.get("mbp-here"), Some(&1), "one snapshot to read");
+    let repo_before = tree_digest(&repo);
+
+    let out = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--rebuild",
+            "--destination",
+            "fixture",
+            "--machine",
+            "mbp-here",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "the own-machine rebuild with no stage should exit 0, not refuse:\n{stdout}\n{stderr}"
+    );
+
+    // The real conversation span, derived from the archive and published to a
+    // local derived index rather than into the machine's partition.
+    let derived = reported(&stdout, "derived").expect("stdout names the derived index");
+    assert!(
+        Path::new(&derived).is_file(),
+        "the derived index must exist at {derived}"
+    );
+    let rows = index_rows(Path::new(&derived));
+    let row = rows
+        .get(&session)
+        .unwrap_or_else(|| panic!("the session must have a row:\n{stdout}"));
+    assert_eq!(row["line_count"].as_u64(), Some(2), "row: {row}");
+    assert_eq!(row["first_unix"].as_i64(), Some(1736944496), "row: {row}");
+
+    // And nothing was appended: this machine's partition is untouched.
+    assert_eq!(
+        snapshots_per_host(&cfg, &mk),
+        before,
+        "a read-only rebuild must not append a snapshot"
+    );
+    assert_eq!(
+        tree_digest(&repo),
+        repo_before,
+        "a read-only rebuild must not change one byte of the destination"
+    );
+}
+
+/// The same contract for a `--stage` that is named but is not a directory:
+/// there is nowhere to restore the shards into, so the rebuild is read-only
+/// rather than a refusal — and it says so, because an operator who expected a
+/// repaired snapshot needs to know why none was appended.
+#[test]
+fn the_current_machine_with_a_missing_stage_rebuilds_read_only() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let (repo, key, session) = own_machine_archive(sandbox);
+    let cfg = store_config(&repo, &key);
+    let mk = chat_stasher::store::load_key_file(&cfg).unwrap();
+    let before = snapshots_per_host(&cfg, &mk);
+    let repo_before = tree_digest(&repo);
+
+    let gone = sandbox.join("stage-gone");
+    assert!(!gone.exists(), "the fixture must not have this directory");
+    let out = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--rebuild",
+            "--destination",
+            "fixture",
+            "--machine",
+            "mbp-here",
+            "--stage",
+            gone.to_str().unwrap(),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "a missing stage directory must not refuse the rebuild:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not a directory"),
+        "the run must say the stage was unusable:\n{stderr}"
+    );
+
+    let derived = reported(&stdout, "derived").expect("stdout names the derived index");
+    let rows = index_rows(Path::new(&derived));
+    let row = rows
+        .get(&session)
+        .unwrap_or_else(|| panic!("the session must have a row:\n{stdout}"));
+    assert_eq!(row["first_unix"].as_i64(), Some(1736944496), "row: {row}");
+    assert_eq!(
+        snapshots_per_host(&cfg, &mk),
+        before,
+        "a read-only rebuild must not append a snapshot"
+    );
+    assert_eq!(
+        tree_digest(&repo),
+        repo_before,
+        "a read-only rebuild must not change one byte of the destination"
     );
 }
 
