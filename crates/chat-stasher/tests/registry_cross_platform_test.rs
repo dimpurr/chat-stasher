@@ -112,10 +112,18 @@ fn normalized_segments(template: &str) -> Vec<String> {
 /// everything else must match.
 fn whitelisted_structure_reasons() -> &'static [(&'static str, &'static str)] {
     &[
-        (
-            "codex",
-            "macOS cell writes the expanded default `~/.codex/sessions/` while linux/windows write the `$CODEX_HOME`/`%CODEX_HOME%` override variable — whose default *is* `~/.codex`. Both resolve to `<codex-home>/sessions/`; only the notation differs (the `.codex` segment is inlined on macOS but baked into the variable elsewhere). Not a missing layer.",
-        ),
+        // W285: codex used to sit here. Its macOS cell wrote the expanded
+        // default `~/.codex/sessions/` while linux/windows baked the same
+        // layer into the override variable (`$CODEX_HOME/sessions/`,
+        // `%CODEX_HOME%\sessions\`), and the entry called that "only the
+        // notation differs". It was not: this build's resolver expands a fixed
+        // set of base variables and cannot expand an arbitrary per-install
+        // override, so the two foreign cells resolved to nothing at all —
+        // every Codex session on Linux and Windows was invisible. All three
+        // cells now name the documented default (`~` / `$HOME` / `%USERPROFILE%`
+        // + `.codex/sessions/`) and carry `env_override: CODEX_HOME`, which is
+        // the shape every other harness here uses: the override still wins when
+        // exported, and the default is what the template alone anchors.
         (
             "cursor",
             "macOS stores app data under `~/Library/Application Support/Cursor/User/…` (extra `Library/Application Support` base segments), Linux under `$XDG_CONFIG_HOME/Cursor/User/…` (~/.config), Windows under `%APPDATA%\\Cursor\\User\\…`. A genuine per-OS app-data base-directory convention (the task's own example), not a missing layer.",

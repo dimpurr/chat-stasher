@@ -15654,12 +15654,15 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
 /// The clause appended to "No sessions were found on this machine" when that
 /// sentence would otherwise be a claim we cannot back.
 ///
-/// Counted here are the probes that never looked: `unascertained` (scanning a guessed
-/// path is forbidden), a template that does not reduce to a root, and B82's
-/// `Indeterminate` (the path could not be stat'd, is the wrong type, or its
-/// store refused to enumerate). Deliberately *not* counted: `Missing` (looked,
-/// nothing there) and `SkipWrongPlatform` (no cell for this platform, so
-/// there is nothing on this machine to have missed).
+/// The rule for which probes count — never looked: `unascertained` (scanning a
+/// guessed path is forbidden), a template that does not reduce to a root, and
+/// B82's `Indeterminate` (the path could not be stat'd, is the wrong type, or
+/// its store refused to enumerate); deliberately *not* `Missing` (looked,
+/// nothing there) or `SkipWrongPlatform` (no cell for this platform) — now
+/// lives in one place, [`scanner::HarnessProbe::not_probed_p`], because
+/// `doctor`'s coverage summary needs the same distinction (W285 §6) and a
+/// second spelling of "not probed" is how the two commands start disagreeing
+/// about the same machine.
 ///
 /// Empty string when every probe was actually looked at — a machine with
 /// sessions, or a genuinely empty one, prints what it printed before.
@@ -15667,14 +15670,7 @@ fn unlooked_notice(report: &scanner::ScanReport) -> String {
     let unlooked: Vec<&str> = report
         .probes
         .iter()
-        .filter(|p| {
-            matches!(
-                p.state,
-                scanner::ProbeState::SkipUnascertained
-                    | scanner::ProbeState::SkipUnresolvable
-                    | scanner::ProbeState::Indeterminate
-            )
-        })
+        .filter(|p| p.not_probed_p())
         .map(|p| p.id.as_str())
         .collect();
     if unlooked.is_empty() {

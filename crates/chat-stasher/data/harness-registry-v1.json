@@ -62,20 +62,20 @@
           "source": "known fact (measured on macOS)"
         },
         "linux": {
-          "template": "$CODEX_HOME/sessions/",
+          "template": "$HOME/.codex/sessions/",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
           "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()(dirs::home_dir().push(\".codex\"))+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235",
-          "notes": "Default when CODEX_HOME is unset: $HOME/.codex/sessions/."
+          "notes": "CODEX_HOME, when set and non-empty, replaces the `.codex` layer (so sessions live at $CODEX_HOME/sessions/); unset, the default is $HOME/.codex/sessions/ (W285: the cell used to spell the template `$CODEX_HOME/sessions/`, which this build's resolver cannot expand — an unresolvable template degrades to `skip_unresolvable`, so on Linux every Codex session was invisible whether or not CODEX_HOME was exported)."
         },
         "windows": {
-          "template": "%CODEX_HOME%\\sessions\\",
+          "template": "%USERPROFILE%\\.codex\\sessions\\",
           "env_override": "CODEX_HOME",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
           "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)",
-          "notes": "Default when CODEX_HOME is unset: %USERPROFILE%\\.codex\\sessions\\."
+          "notes": "CODEX_HOME, when set and non-empty, replaces the `.codex` layer (sessions then live at %CODEX_HOME%\\sessions\\); unset, the default is %USERPROFILE%\\.codex\\sessions\\ (W285: same unresolvable-template defect as the linux cell)."
         }
       },
       "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override.",

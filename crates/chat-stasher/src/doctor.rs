@@ -360,8 +360,44 @@ impl GeminiRetention {
 // D3 — coverage: which harnesses exist, and all of them accounted for?
 // ---------------------------------------------------------------------------
 
+/// Which clock a footprint's `earliest` / `latest` were read from.
+///
+/// W285 §5: doctor reported one of two different quantities under one
+/// unlabelled name, and no reader could tell which. A directory harness is
+/// probed from file metadata, so its footprint carries the **file mtime**; a
+/// single-file SQLite store carries a per-session time column of its own
+/// (the registry's `sql_time_json_path`), which is the **conversation's** time.
+/// `search`, `export` and the UI report conversation time for both kinds, so
+/// the two surfaces disagreed about what "a session's date" means.
+///
+/// Neither clock is wrong, and which one is *relevant* depends on the question:
+/// a harness that rotates by file age deletes on mtime, so mtime is the clock
+/// that predicts deletion; conversation time is the clock that describes the
+/// conversation. The fix is to say which one a row shows rather than to pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeBasis {
+    /// File metadata modification time (directory harnesses).
+    FileMtime,
+    /// The store's own recorded per-session time (single-file SQLite stores).
+    SessionTime,
+    /// Nothing was measured — `earliest` / `latest` are both `None`.
+    Unmeasured,
+}
+
+impl TimeBasis {
+    /// The word this clock is printed under. `Unmeasured` has no value to
+    /// qualify, so it labels nothing.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            TimeBasis::FileMtime => Some("mtime"),
+            TimeBasis::SessionTime => Some("session time"),
+            TimeBasis::Unmeasured => None,
+        }
+    }
+}
+
 /// One harness's session footprint: count, bytes, and — the column with the
-/// most signal — **earliest session timestamp/mtime**, because it answers
+/// most signal — **earliest session timestamp**, because it answers
 /// "how old is the oldest thing I've kept?" It directly bounds how much
 /// history survives any retention policy.
 #[derive(Debug, Clone)]
@@ -392,6 +428,9 @@ pub struct HarnessFootprint {
     pub unreadable_entry_count: Option<u64>,
     /// `None` means the footprint was not measured; it is not an empty store.
     pub total_bytes: Option<u64>,
+    /// The clock `earliest` / `latest` were read from. Printed with them, so a
+    /// row can never be read as the other clock — see [`TimeBasis`].
+    pub time_basis: TimeBasis,
     pub earliest: Option<SystemTime>,
     pub latest: Option<SystemTime>,
     pub compressed_count: u64,
@@ -412,6 +451,11 @@ pub fn coverage_from_records<'a>(
     // this pass produced records, a concurrent removal cannot erase them.
     let installed = root.is_dir() || !recs.is_empty();
     let total_bytes = Some(recs.iter().map(|r| r.byte_size).sum());
+    // A `SessionRecord` carries file metadata only (`byte_size` + `mtime`), so
+    // this row's times are file mtimes — named as such on the D3 line, because
+    // the same session's *conversation* time (what `search` / the UI show) is a
+    // different number and this table never read it.
+    let time_basis = TimeBasis::FileMtime;
     let earliest = recs.iter().map(|r| r.mtime).min();
     let latest = recs.iter().map(|r| r.mtime).max();
     let compressed_count = recs.iter().filter(|r| r.compressed).count() as u64;
@@ -428,6 +472,7 @@ pub fn coverage_from_records<'a>(
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes,
+        time_basis,
         earliest,
         latest,
         compressed_count,
@@ -523,6 +568,87 @@ fn footprint_root_label(f: &HarnessFootprint) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// The three numbers the D3 coverage summary is made of.
+///
+/// W285 §6: `hit/known` used to be the whole summary, with `known` being every
+/// harness the registry lists for this platform. On a machine where some of
+/// them were `skip(template)` / `skip(uncertain)` — never opened — that read as
+/// a measurement over the whole registry, when only `probed` of them were
+/// looked at. `probed` and `never_probed` are reported separately so the
+/// denominator can never absorb a harness nobody opened. `hit` keeps its own
+/// meaning: the harness is here. It is `0` on a machine with nothing installed,
+/// which says "looked, found nothing" — not "did not look".
+struct Coverage {
+    hit: usize,
+    probed: usize,
+    known: usize,
+}
+
+impl Coverage {
+    /// Harnesses that were never looked at at all — the number the old header
+    /// silently added to the denominator. See
+    /// [`scanner::HarnessProbe::not_probed_p`] for which states those are, and
+    /// `status` for the same figure.
+    fn never_probed(&self) -> usize {
+        self.known - self.probed
+    }
+}
+
+fn probe_coverage(probes: &[scanner::HarnessProbe]) -> Coverage {
+    Coverage {
+        hit: probes.iter().filter(|p| p.installed_p()).count(),
+        probed: probes.iter().filter(|p| p.probed_p()).count(),
+        known: probes.len(),
+    }
+}
+
+/// The D3 timestamp columns, each qualified by the clock it was read from.
+///
+/// W285 §5: `earliest 2026-09-30T13:07:42Z` did not say whether that was the
+/// session file's mtime or the conversation's own time — and the risk line
+/// below then called it "your earliest session" with no qualification at all,
+/// so a session restored from a backup (fresh mtime, old conversation) was
+/// described as "about 0 days ago" and, under a 30-day policy, also as having
+/// "only about 0 days left". `status --sessions` had always labelled its column
+/// `mtime(sec)`; doctor now names the clock the same way. Naming it is the
+/// honest fix rather than switching it: a harness that rotates by file age
+/// deletes on mtime, so mtime is the clock that predicts deletion, while
+/// conversation time is the clock that describes the conversation.
+fn footprint_times(f: &HarnessFootprint) -> String {
+    let stamp = |t: Option<SystemTime>| t.map(format_timestamp).unwrap_or_else(|| "-".to_string());
+    match f.time_basis.label() {
+        Some(clock) => format!(
+            "earliest({clock}) {} · latest({clock}) {}",
+            stamp(f.earliest),
+            stamp(f.latest)
+        ),
+        None => format!(
+            "earliest {} · latest {}",
+            stamp(f.earliest),
+            stamp(f.latest)
+        ),
+    }
+}
+
+/// How far the oldest session sits from a rotation threshold, said without a
+/// sign flip: a session younger than the window is *not* "minus N days past" it.
+///
+/// W285 §5: the Gemini line read "about 0 days ago … already about -30 days
+/// past the 30-day threshold" on a freshly written file. The Claude line had
+/// the mirror-image of the same defect — "about 0 days ago … only about 0 days
+/// left" — because it printed the session's age as the time remaining.
+fn threshold_phrase(days_old: f64, threshold: f64) -> String {
+    let over = days_old - threshold;
+    if over >= 0.0 {
+        format!("already about {over:.0} days past the {threshold:.0}-day threshold")
+    } else {
+        format!(
+            "about {:.0} days from the {threshold:.0}-day threshold",
+            -over
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // D4 — risk synthesis (the whole value of this command)
 // ---------------------------------------------------------------------------
@@ -542,6 +668,9 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         unreadable_count: probe.unreadable_count,
         unreadable_entry_count: probe.unreadable_entry_count,
         total_bytes: probe.bytes,
+        // The probe read the store's own time column, not the .db file's mtime,
+        // so this row is on the conversation clock.
+        time_basis: TimeBasis::SessionTime,
         earliest: probe.earliest,
         latest: probe.latest,
         compressed_count: 0,
@@ -615,6 +744,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes: None,
+        time_basis: TimeBasis::Unmeasured,
         earliest: None,
         latest: None,
         compressed_count: 0,
@@ -665,10 +795,23 @@ fn build_risks(
                 // trade a false alarm for a missing one.
                 risks.push(match claude_fp.earliest.and_then(|e| days_since(e).map(|d| (e, d))) {
                     Some((earliest, days_old)) => {
+                        // W285 §5: this number is days-since-**mtime** (see
+                        // `coverage_from_records`), so the sentence names the
+                        // clock it is measured on and no longer calls it "your
+                        // earliest session" unqualified. It also used to end
+                        // "...your history has only about {days_old} days
+                        // left", which is the session's *age* printed as the
+                        // time remaining: a file written today gave "about 0
+                        // days ago ... only about 0 days left" — a
+                        // self-contradictory false alarm. Under a 30-day window
+                        // the oldest batch has 30 - age days before it is
+                        // deleted, so that is what is stated, in whichever
+                        // direction keeps the sentence true.
                         format!(
-                            "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days. Your earliest session is {} (about {days_old:.0} days ago, today {today}).\
-                             \n    — the next cleanup run will delete the first batch older than 30 days; your history has only about {days_old:.0} days left.",
-                            format_date(earliest)
+                            "🔴 Claude Code: cleanupPeriodDays is unset → default 30 days. Your oldest session file's mtime is {} (about {days_old:.0} days ago, today {today}).\
+                             \n    — cleanup deletes on that same file-mtime clock; the oldest batch is {}.",
+                            format_date(earliest),
+                            threshold_phrase(days_old, 30.0)
                         )
                     }
                     None => format!(
@@ -722,10 +865,15 @@ fn build_risks(
         // as a pair, the fabricated default has nowhere left to live.
         risks.push(match (gem_earliest, gem_days) {
             (Some(date), Some(days)) => {
-                let over = days - 30.0;
+                // W285 §5: same two defects as the Claude line above — the
+                // number is days-since-mtime and went unlabelled, and `over`
+                // was printed raw, so a session younger than the window was
+                // described as "already about -30 days past the 30-day
+                // threshold".
                 format!(
-                    "🔴 Gemini: sessionRetention not configured (default 30 days, enabled=true). Your earliest session is {date} (about {days:.0} days ago, today {today}) — already about {over:.0} days past the 30-day threshold.\
+                    "🔴 Gemini: sessionRetention not configured (default 30 days, enabled=true). Your oldest session file's mtime is {date} (about {days:.0} days ago, today {today}) — {}.\
                      \n    — cleanup has not triggered (or run) yet, but the next run will delete the earliest batch. Sessions live in ~/.gemini/tmp (the directory is literally named tmp).",
+                    threshold_phrase(days, 30.0)
                 )
             }
             _ => format!(
@@ -2890,20 +3038,13 @@ pub fn print_report(r: &DoctorReport) {
             }
             let count = footprint_count_label(f);
             let count_detail = footprint_count_detail(f);
-            let earliest = f
-                .earliest
-                .map(format_timestamp)
-                .unwrap_or_else(|| "-".to_string());
-            let latest = f
-                .latest
-                .map(format_timestamp)
-                .unwrap_or_else(|| "-".to_string());
             eprintln!(
-                "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}",
+                "  {:<10} sessions {:<6}{} · {} · {}",
                 f.name,
                 count,
                 count_detail,
-                footprint_bytes_label(f)
+                footprint_bytes_label(f),
+                footprint_times(f)
             );
             if !f.note.is_empty() {
                 eprintln!("             ({})", f.note);
@@ -2947,12 +3088,15 @@ pub fn print_report(r: &DoctorReport) {
         return;
     }
 
-    let (known, installed) = (
-        r.probes.len(),
-        r.probes.iter().filter(|p| p.installed_p()).count(),
-    );
+    // W285 §6: the denominator is what was looked at, and the never-probed
+    // remainder is named beside it rather than folded into a fraction that
+    // reads as a measurement over the whole registry.
+    let coverage = probe_coverage(&r.probes);
     eprintln!(
-        "D3 · Coverage — {installed}/{known} known harnesses hit on this machine (registry v1 driven); rotation analysis subjects:",
+        "D3 · Coverage — {hit}/{probed} probed harnesses hit on this machine · {never} not probed (registry v1 driven); rotation analysis subjects:",
+        hit = coverage.hit,
+        probed = coverage.probed,
+        never = coverage.never_probed(),
     );
     for f in &r.footprints {
         if !f.installed {
@@ -2965,20 +3109,13 @@ pub fn print_report(r: &DoctorReport) {
         }
         let count = footprint_count_label(f);
         let count_detail = footprint_count_detail(f);
-        let earliest = f
-            .earliest
-            .map(format_timestamp)
-            .unwrap_or_else(|| "-".to_string());
-        let latest = f
-            .latest
-            .map(format_timestamp)
-            .unwrap_or_else(|| "-".to_string());
         eprintln!(
-            "  {:<10} sessions {:<6}{} · {} · earliest {earliest} · latest {latest}",
+            "  {:<10} sessions {:<6}{} · {} · {}",
             f.name,
             count,
             count_detail,
-            footprint_bytes_label(f)
+            footprint_bytes_label(f),
+            footprint_times(f)
         );
         if !f.note.is_empty() {
             eprintln!("             ({})", f.note);
@@ -3504,10 +3641,15 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         return;
     }
     let platform = scanner::current_platform();
-    let hit = probes.iter().filter(|p| p.installed_p()).count();
+    // W285 §6: same split as the D3 header above — the denominator is what was
+    // looked at, and the never-probed remainder is named rather than folded
+    // into a fraction that looks like a measurement over the whole registry.
+    let coverage = probe_coverage(probes);
     eprintln!(
-        "  [registry] driven table — platform={platform} · {hit}/{n} harnesses hit / scanned successfully",
-        n = probes.len()
+        "  [registry] driven table — platform={platform} · {hit}/{probed} probed harnesses hit / scanned successfully · {never} not probed",
+        hit = coverage.hit,
+        probed = coverage.probed,
+        never = coverage.never_probed(),
     );
     for p in probes {
         let mark = match p.state {
@@ -3802,6 +3944,7 @@ mod b90_unknown_count_tests {
             unreadable_count: unreadable,
             unreadable_entry_count: Some(0),
             total_bytes: None,
+            time_basis: TimeBasis::Unmeasured,
             earliest: None,
             latest: None,
             compressed_count: 0,
@@ -3877,6 +4020,7 @@ mod json_tests {
             unreadable_count: None,
             unreadable_entry_count: Some(0),
             total_bytes: Some(4096),
+            time_basis: TimeBasis::SessionTime,
             earliest: Some(UNIX_EPOCH),
             latest: None,
             compressed_count: 0,
@@ -4310,6 +4454,131 @@ mod json_tests {
             v["total_bytes"]["kind"],
             serde_json::json!("not_applicable"),
             "a deliberately-disabled cache is not a number; the switch itself is the answer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod w285_coverage_and_clock_tests {
+    use super::*;
+    use crate::scanner::{Confidence, HarnessProbe, ProbeState};
+
+    fn probe(id: &str, state: ProbeState) -> HarnessProbe {
+        HarnessProbe {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            root: None,
+            confidence: Confidence::Unascertained,
+            state,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        }
+    }
+
+    /// W285 §6, as arithmetic: a harness nobody looked at is in `known` and in
+    /// `never_probed`, and never in the denominator the summary shows. The old
+    /// header reported `hit/known` — "0/12" for a machine where two of the
+    /// twelve had no resolvable root and were never opened.
+    #[test]
+    fn never_probed_harnesses_leave_the_denominator_and_are_counted_beside_it() {
+        let probes = vec![
+            probe("scanned", ProbeState::Scanned),
+            probe("missing", ProbeState::Missing),
+            probe("unresolvable", ProbeState::SkipUnresolvable),
+            probe("unascertained", ProbeState::SkipUnascertained),
+            probe("indeterminate", ProbeState::Indeterminate),
+            probe("other-platform", ProbeState::SkipWrongPlatform),
+        ];
+        let coverage = probe_coverage(&probes);
+
+        assert_eq!(coverage.known, 6, "every registry harness is still counted");
+        assert_eq!(
+            coverage.hit, 1,
+            "only the scanned harness is here; a missing one is a look that found nothing"
+        );
+        assert_eq!(
+            coverage.probed, 3,
+            "scanned + missing + wrong-platform were looked at or do not apply"
+        );
+        assert_eq!(
+            coverage.never_probed(),
+            3,
+            "the two Skip* cells and the indeterminate one were never established, and are named separately"
+        );
+        assert_eq!(
+            coverage.hit + coverage.never_probed(),
+            4,
+            "the defect this replaces: `hit/known` would have printed 1/6 here"
+        );
+    }
+
+    /// W285 §5: the two clocks are distinguishable in what doctor prints, so a
+    /// directory row can never be read as the conversation time `search` shows.
+    #[test]
+    fn each_footprint_row_names_the_clock_its_timestamps_came_from() {
+        let mut dir_row = default_footprint("claude-code", PathBuf::from("/nowhere"));
+        dir_row.installed = true;
+        dir_row.time_basis = TimeBasis::FileMtime;
+        dir_row.earliest = Some(UNIX_EPOCH);
+        dir_row.latest = Some(UNIX_EPOCH);
+        assert_eq!(
+            footprint_times(&dir_row),
+            "earliest(mtime) 1970-01-01T00:00:00Z · latest(mtime) 1970-01-01T00:00:00Z"
+        );
+
+        let mut sqlite_row = default_footprint("opencode", PathBuf::from("/nowhere/store.db"));
+        sqlite_row.installed = true;
+        sqlite_row.time_basis = TimeBasis::SessionTime;
+        sqlite_row.earliest = Some(UNIX_EPOCH);
+        sqlite_row.latest = Some(UNIX_EPOCH);
+        assert_eq!(
+            footprint_times(&sqlite_row),
+            "earliest(session time) 1970-01-01T00:00:00Z · latest(session time) 1970-01-01T00:00:00Z"
+        );
+
+        let unmeasured = default_footprint("gemini", PathBuf::from("/nowhere"));
+        assert_eq!(
+            footprint_times(&unmeasured),
+            "earliest - · latest -",
+            "an unmeasured row claims no clock at all"
+        );
+    }
+
+    /// W285 §5: the sentence a reader acts on. A session younger than the window
+    /// must not be described as "already about -30 days past" the threshold, and
+    /// a session older than it must not be described as being still ahead of it.
+    #[test]
+    fn the_threshold_phrase_never_flips_a_sign() {
+        assert_eq!(
+            threshold_phrase(0.0, 30.0),
+            "about 30 days from the 30-day threshold"
+        );
+        assert_eq!(
+            threshold_phrase(29.0, 30.0),
+            "about 1 days from the 30-day threshold"
+        );
+        assert_eq!(
+            threshold_phrase(30.0, 30.0),
+            "already about 0 days past the 30-day threshold"
+        );
+        assert_eq!(
+            threshold_phrase(47.0, 30.0),
+            "already about 17 days past the 30-day threshold"
+        );
+        assert!(
+            !threshold_phrase(0.0, 30.0).contains("past"),
+            "a session younger than the window is ahead of the threshold, never past it"
+        );
+        assert!(
+            !threshold_phrase(47.0, 30.0).contains("from"),
+            "a session older than the window is past the threshold, not still approaching it"
         );
     }
 }

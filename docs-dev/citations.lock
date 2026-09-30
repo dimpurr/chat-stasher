@@ -537,17 +537,17 @@ crates/chat-stasher/src/destinit.rs:104-118  4e3ae691d5bc  lines=15
   <- docs-dev/threat-model.md:775  :: /// `false` — which this module then used as *evidence* tha…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:775  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:845-982  8eaa126b7da4  lines=138
+crates/chat-stasher/src/doctor.rs:993-1130  8eaa126b7da4  lines=138
   <- docs-dev/install.md:958, docs-dev/install.md:967  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:862-982  c5360136b94d  lines=121
+crates/chat-stasher/src/doctor.rs:1010-1130  c5360136b94d  lines=121
   <- docs-dev/install.md:962  :: pub enum ActivityIndexFreshness {
-crates/chat-stasher/src/doctor.rs:1020-1079  27bdba3065bb  lines=60
+crates/chat-stasher/src/doctor.rs:1168-1227  27bdba3065bb  lines=60
   <- docs-dev/install.md:958, docs-dev/install.md:967  :: /// Connect once to every declared destination, read-only.
-crates/chat-stasher/src/doctor.rs:1165-1205  18d862731eeb  lines=41
+crates/chat-stasher/src/doctor.rs:1313-1353  18d862731eeb  lines=41
   <- docs-dev/install.md:276  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:1316  fcc70a706d6f  lines=1
+crates/chat-stasher/src/doctor.rs:1464  fcc70a706d6f  lines=1
   <- docs-dev/install.md:965  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:1836-1897  7c29760692b2  lines=62
+crates/chat-stasher/src/doctor.rs:1984-2045  7c29760692b2  lines=62
   <- docs-dev/install.md:965  :: pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndex…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:842  :: //! Local, disposable full-text index for one archive desti…

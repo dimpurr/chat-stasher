@@ -541,6 +541,43 @@ impl HarnessProbe {
         matches!(self.state, ProbeState::Scanned | ProbeState::FileTarget)
     }
 
+    /// True when this harness was **never looked at**: the probe resolved no
+    /// root, was forbidden to scan a guessed path, or could not even establish
+    /// whether the source exists.
+    ///
+    /// This is the definition `status`'s "⚠ but N harness(es) were not probed
+    /// at all" warning already used (`main.rs`, `unlooked_notice`). It lives
+    /// here now, as one predicate, because W285 §6 needed the same distinction
+    /// in `doctor`'s coverage summary: a header counting every registry harness
+    /// in its denominator — `N/12 harnesses hit` — reads as a measurement over
+    /// all twelve, while some of them were never opened. Two commands each
+    /// spelling their own version of "not probed" is how `doctor` and `status`
+    /// start contradicting each other about the same machine.
+    ///
+    /// Two deliberate exclusions, both from the recorded B82 wording:
+    ///   * `Missing` — looked, and nothing is there. A measured absence, and
+    ///     the one state where a count of `0` is earned.
+    ///   * `SkipWrongPlatform` — the registry has no cell for this platform, so
+    ///     there is nothing on this machine to have missed.
+    pub fn not_probed_p(&self) -> bool {
+        matches!(
+            self.state,
+            ProbeState::SkipUnascertained
+                | ProbeState::SkipUnresolvable
+                | ProbeState::Indeterminate
+        )
+    }
+
+    /// True when this probe actually looked — whether or not the store was
+    /// there. The complement of [`Self::not_probed_p`], and the other half of
+    /// the pair: `installed_p` answers "is it here", this answers "did we
+    /// check", and they come apart in both directions (`Missing` looked and
+    /// found nothing; every `Skip*` state found nothing because it never
+    /// looked).
+    pub fn probed_p(&self) -> bool {
+        !self.not_probed_p()
+    }
+
     /// True when the cell was a community claim the report must flag.
     pub fn low_confidence_p(&self) -> bool {
         self.confidence.is_low_confidence()
@@ -2580,5 +2617,67 @@ mod tests {
             static_prefix_root("$CODEX_HOME").is_none(),
             "an unresolved per-install override is still refused, by name"
         );
+    }
+
+    /// W285 §6 — "never probed" is its own state, and the predicate that names
+    /// it covers exactly the three states B82 recorded, no more and no fewer.
+    ///
+    /// All seven states are asserted, so the partition is pinned rather than
+    /// assumed: `probed_p` and `not_probed_p` are the two questions `doctor`'s
+    /// coverage summary and `status`'s warning ask of every probe, and a state
+    /// moved from one group to the other is a change in what those reports
+    /// claim — this is the test that makes it visible.
+    #[test]
+    fn never_probed_covers_the_three_unlooked_states_and_nothing_else() {
+        let probe = |state: ProbeState| HarnessProbe {
+            id: "x".to_string(),
+            display_name: "x".to_string(),
+            root: None,
+            confidence: Confidence::Unascertained,
+            state,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        };
+
+        // Either an answer about the machine exists (a count, or a measured
+        // absence), or the question does not apply to this platform.
+        for state in [
+            ProbeState::Scanned,
+            ProbeState::FileTarget,
+            ProbeState::Missing,
+            // No cell for this platform — nothing here to have missed.
+            ProbeState::SkipWrongPlatform,
+        ] {
+            assert!(
+                !probe(state).not_probed_p(),
+                "{state:?} was looked at (or is not applicable), so it must not be counted as never probed"
+            );
+            assert!(probe(state).probed_p(), "{state:?} must count as probed");
+        }
+
+        // Never looked at: the probe resolved no root, was forbidden to try, or
+        // could not even establish whether the source exists. The third is
+        // B82's own wording, kept here so `doctor` cannot re-decide it alone.
+        for state in [
+            ProbeState::SkipUnascertained,
+            ProbeState::SkipUnresolvable,
+            ProbeState::Indeterminate,
+        ] {
+            assert!(
+                probe(state).not_probed_p(),
+                "{state:?} never established anything and must be counted as never probed"
+            );
+            assert!(
+                !probe(state).probed_p(),
+                "{state:?} must not count as probed"
+            );
+        }
     }
 }
