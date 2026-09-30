@@ -9,6 +9,19 @@
 //! complete session export, deliberately preferring a measurable duplicate
 //! over a silent omission.
 //!
+//! # An unterminated final line is in progress, not a change
+//!
+//! A JSONL source whose last line has no trailing newline is treated as
+//! *being written*: only newline-terminated lines are ever sealed, because a
+//! torn last record may be half of a write. The unterminated tail stays
+//! behind the cursor and is re-read from it on every later pass, so the pass
+//! that sees the next newline commits the tail in full — nothing is lost by
+//! waiting, and the sealed prefix is never re-staged. A pass that re-read the
+//! tail while no newline completed it staged nothing new, so it
+//! counts the session as *unchanged* (the classification lives in
+//! [`collect_scan_report`]): a source that stops changing must converge to a
+//! no-op pass rather than re-flagging the same tail as a change forever.
+//!
 //! The store *and* the per-session cursor answer two different questions, and
 //! conflating them cost a full re-export of every session on every store write.
 //! Which session changed is decided by that session's own cursor; whether
@@ -755,7 +768,20 @@ pub fn collect_scan_report(
         ) {
             Ok(processed) => {
                 let outcome = processed.outcome;
-                let changed = outcome.bytes_read > 0 || outcome.reset;
+                // W286: a session is "changed" exactly when this pass handed
+                // new content to the archive — a sealed shard — or had to
+                // reset its cursor and reread. Bytes that were read but
+                // committed nothing do not qualify: an unterminated final
+                // line is deliberately treated as *in progress* (it may be
+                // half of a write), so a pass re-reads it, seals nothing,
+                // and must leave the session unchanged. Counting it as
+                // changed re-flagged the same stable tail on every pass
+                // forever, and `run-once` answered that flag with a fresh
+                // snapshot of an unchanged stage on every run. The read that
+                // observed the tail is still reported honestly through
+                // `bytes_read`; it is the archive-additional work that is
+                // absent, and absent work must not be spelled "changed".
+                let changed = outcome.shard.is_some() || outcome.reset;
                 if changed {
                     report.changed_records += 1;
                 } else {
