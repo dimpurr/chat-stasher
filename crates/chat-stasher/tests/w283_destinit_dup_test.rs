@@ -858,6 +858,49 @@ fn a_fresh_destination_records_a_shrunken_compressed_export() {
     assert_eq!(fx.concat(), [older.as_slice(), current.as_slice()].concat());
 }
 
+/// Distinct earlier snapshots may each occupy one shard. Their concatenation
+/// is not evidence that the current, whole compressed export was ever sealed
+/// as one snapshot. In particular, seeing A then B must not make a fresh
+/// destination skip the new export AB.
+#[test]
+fn a_fresh_destination_seals_a_compressed_export_after_distinct_snapshot_shards() {
+    let current = b"A\nB\n";
+    let fx = Fixture::named(
+        "session.jsonl.zst",
+        "jsonl / jsonl.zst",
+        None,
+        &zstd::stream::encode_all(&current[..], 3).unwrap(),
+    );
+    fx.plant(&["A"]);
+    fx.plant(&["B"]);
+
+    fx.collect("fresh");
+
+    assert_eq!(fx.shard_count(), 3, "AB is a new compressed snapshot");
+    assert_eq!(fx.concat(), b"A\nB\nA\nB\n");
+}
+
+/// A multi-shard export repeated by the old bug is distinguishable from two
+/// distinct snapshots because the exact shard sequence appears twice.
+#[test]
+fn a_fresh_destination_recognizes_an_exact_repeated_compressed_shard_sequence() {
+    let current = b"A\nB\n";
+    let fx = Fixture::named(
+        "session.jsonl.zst",
+        "jsonl / jsonl.zst",
+        None,
+        &zstd::stream::encode_all(&current[..], 3).unwrap(),
+    );
+    for line in ["A", "B", "A", "B"] {
+        fx.plant(&[line]);
+    }
+
+    fx.collect("fresh");
+
+    assert_eq!(fx.shard_count(), 4, "the repeated export is already sealed");
+    assert_eq!(fx.concat(), b"A\nB\nA\nB\n");
+}
+
 /// Append one message to the fixture session, so its next export differs.
 fn add_message(db: &Path, id: &str, at: i64) {
     let conn = rusqlite::Connection::open(db).unwrap();

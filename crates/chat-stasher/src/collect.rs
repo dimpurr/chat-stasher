@@ -384,30 +384,37 @@ fn stage_holds_this_export(
     Ok(stage_tail_is(&sealed, &framed))
 }
 
-/// Is `frame` a whole-shard suffix of the body sealed so far?
+/// Is `frame` one sealed shard, or an exact repeated-shard suffix, of the
+/// body sealed so far?
 ///
 /// The snapshot shapes — a whole file, a compressed export, a SQLite session —
 /// have no incremental cursor. Each pass seals the whole current body as one
 /// shard, so the stage accumulates the versions it has seen and the newest one
 /// is its tail. The question for a destination with no cursor of its own is
-/// therefore whether the body this pass is about to seal is already there, and
-/// the answer must not depend on how much *else* is: a stage holding that body
-/// twice (the defect's own work) and one holding it behind older versions of
-/// itself are both stages that already have it. The match must cover complete
-/// shards. After a compressed export `A\nB\n` shrinks to `B\n`, the new export
+/// therefore whether the body this pass is about to seal is already there. A
+/// normal snapshot is one shard, even when it contains several lines, so a
+/// match against one complete tail shard is conclusive. The old defect could
+/// also split one export across shards and append the same shard sequence a
+/// second time; that exact repeated sequence is conclusive too. A run of
+/// distinct earlier snapshots is not: if shards `A`, `B` are followed by an
+/// export `A\nB\n`, their concatenation must not masquerade as one sealed
+/// export. After a compressed export `A\nB\n` shrinks to `B\n`, the new export
 /// is a byte suffix of the old one, but it is a new snapshot and must be sealed.
 fn stage_tail_is(shards: &[Vec<u8>], frame: &[u8]) -> bool {
     if frame.is_empty() {
         return false;
     }
     let mut remaining = frame.len();
-    for shard in shards.iter().rev() {
+    for start in (0..shards.len()).rev() {
+        let shard = &shards[start];
         if shard.len() > remaining || frame[remaining - shard.len()..remaining] != shard[..] {
             return false;
         }
         remaining -= shard.len();
         if remaining == 0 {
-            return true;
+            let shard_count = shards.len() - start;
+            return shard_count == 1
+                || (start >= shard_count && shards[start - shard_count..start] == shards[start..]);
         }
     }
     false
