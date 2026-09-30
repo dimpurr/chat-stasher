@@ -1058,14 +1058,29 @@ enum Command {
     /// `<stage>/meta/<machine>/activity-v1.jsonl` — the file the `overview`
     /// command reads back out of a destination.
     ///
-    /// With `--rebuild --destination`, every archived session for that machine
-    /// is restored to a temporary child of `--stage`, the full index is
-    /// rebuilt, and a new complete snapshot is appended. Existing snapshots
-    /// remain immutable. No snapshot is written until the scan and every
-    /// session restore finish, and only the named machine partition is pushed.
-    /// The rebuild is safe to re-run, but each run starts over and is not
-    /// resumable. A same-machine snapshot found before publication restarts the
-    /// rebuild so the appended snapshot cannot hide that newer session.
+    /// With `--rebuild --destination`, the index is rebuilt from the archive,
+    /// which is all a machine whose stage is gone still needs: no source
+    /// machine, and no copy of its stage.
+    ///
+    /// What that rebuild does depends on which partition is named, because a
+    /// partition's index is written by the machine that owns it (ADR-017):
+    ///
+    /// * **This machine's own partition** — every archived session is restored
+    ///   to a temporary child of `--stage` (required for this mode), the full
+    ///   index is rebuilt and a new complete snapshot is appended. Existing
+    ///   snapshots stay immutable; nothing is pushed until the scan and every
+    ///   restore finish. A same-machine snapshot found before publication
+    ///   restarts the rebuild so the appended snapshot cannot hide it.
+    /// * **Any other machine** — the rebuild is **read-only**. That machine's
+    ///   archived sessions are read cumulatively across its snapshots and the
+    ///   rows are written to a derived index in this machine's cache (the path
+    ///   is printed). The destination is not modified at all: no snapshot is
+    ///   appended and no path in the named machine's partition is written,
+    ///   because no record authorizes one machine to rewrite another's.
+    ///
+    /// Both modes are safe to re-run, and neither is resumable: each run starts
+    /// over. A read-only run needs the destination and the masterkey; it does
+    /// not need `--stage`.
     ///
     /// The harness label is inferred from the session directory name: the
     /// canonical archived ids are `<source>.<machine>.<native-id>`, so the
@@ -1090,8 +1105,9 @@ enum Command {
     /// means "finished and then failed".
     ActivityIndex {
         /// Local stage directory, or an existing workspace directory for a
-        /// destination rebuild. Temporary restored shards are removed after
-        /// the new snapshot is written.
+        /// destination rebuild of **this** machine's own partition (temporary
+        /// restored shards are removed after the new snapshot is written).
+        /// Not needed to rebuild another machine read-only.
         #[arg(long)]
         stage: Option<PathBuf>,
         /// Machine partition for `sessions/<machine>/…`.
@@ -1104,8 +1120,10 @@ enum Command {
         /// provided for repair workflows and makes that intent visible.
         #[arg(long)]
         rebuild: bool,
-        /// Destination to rebuild from and append the repaired snapshot to.
-        /// Requires `--rebuild`; either this or `--repo` must be named.
+        /// Destination to rebuild from. Requires `--rebuild`; either this or
+        /// `--repo` must be named. Appends the repaired snapshot when the named
+        /// `--machine` is this machine's own partition; otherwise the rebuild
+        /// is read-only and the result goes to a derived local index.
         #[arg(long)]
         destination: Option<String>,
         /// Repository path override for destination rebuilds.
@@ -2389,6 +2407,20 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
 /// cost of a full rebuild is ~6.5 s on a 759-session stage (0.18% of the 3600 s
 /// run-once period), which is nothing next to the correctness it buys.
 ///
+/// 🆕 One exception, and it is the whole reason this function reads the index
+/// it is about to replace: **a session whose body this stage no longer holds
+/// keeps the row it already had.** ADR-020 Phase 4 reclaims a session's shard
+/// bodies once every declared destination has proved it holds every byte, and
+/// leaves the session directory (with only its `shard-seq` counter) behind. A
+/// rebuild that measured that empty directory would rewrite a known row as
+/// zero lines and an unknown time (field measurement: 2,832 of m3's 2,835
+/// claude-code sessions). That is not a missing measurement — it is a measured
+/// row being replaced by the absence of a body, which is invariant 1's failure
+/// exactly. So the previous index is carried forward for those sessions, and a
+/// reclaimed session with no previous row is recorded as
+/// [`activity::TimeSource::Unknown`] naming the reclaim rather than as "no
+/// conversation content", which the empty directory would otherwise look like.
+///
 /// `print_skips` controls the per-session "no inferable harness" stderr line:
 /// `activity-index` wants it (it is part of its existing output), `run-once`
 /// only wants the count.
@@ -2456,6 +2488,12 @@ fn rebuild_activity_index(
         )));
     }
     let out_path = meta_dir.join("activity-v1.jsonl");
+    // The rows the last rebuild measured, and which sessions the manifest says
+    // once had a body here. Both are read before the index is replaced: they
+    // are the only records of a reclaimed session's times that this stage still
+    // holds (see the doc comment above).
+    let previous = read_previous_activity_rows(&out_path)?;
+    let reclaimed = reclaimed_session_bodies(stage, machine);
     let mut index_temp = tempfile::Builder::new()
         .prefix(".activity-index-")
         .tempfile_in(&meta_dir)
@@ -2470,16 +2508,6 @@ fn rebuild_activity_index(
             // empty id falls through infer_harness → None → counted as unknown,
             // so an unknown id is tallied, never silently indexed.
             .unwrap_or_default();
-        let harness = sidecar::infer_harness(&session_id).unwrap_or_else(|| {
-            sessions_without_harness += 1;
-            if print_skips {
-                eprintln!(
-                    "activity-index: session `{}` has no inferable harness — indexed with unknown time",
-                    chat_stasher::id::short_session_id(&session_id)
-                );
-            }
-            "unknown".to_string()
-        });
 
         // Global sequence order across both legacy and bucketed layouts.
         let mut shards = match store::sealed_shard_entries(&session_dir) {
@@ -2491,6 +2519,65 @@ fn rebuild_activity_index(
             }
         };
         shards.sort_by_key(|(seq, _)| *seq);
+
+        // Resolved on demand, because a row carried forward from the previous
+        // index needs no harness at all — and must not be counted, or announced,
+        // as one whose harness this build could not read.
+        let mut harness_for_session = || {
+            let inferred = sidecar::infer_harness(&session_id);
+            if inferred.is_none() {
+                sessions_without_harness += 1;
+                if print_skips {
+                    eprintln!(
+                        "activity-index: session `{}` has no inferable harness — indexed with unknown time",
+                        chat_stasher::id::short_session_id(&session_id)
+                    );
+                }
+            }
+            inferred.unwrap_or_else(|| "unknown".to_string())
+        };
+
+        // No body in this stage: either reclaimed, or a session that never had
+        // one. Neither may be measured from the empty directory — the row the
+        // last rebuild wrote is the last measurement there was, and the manifest
+        // is what tells a reclaimed body apart from an empty session.
+        if shards.is_empty() {
+            // `None` (the manifest could not be read) counts as reclaimed: the
+            // conservative direction is "this body is not here", never "this
+            // session holds no conversation".
+            let reclaimed = reclaimed
+                .as_ref()
+                .map_or(true, |sessions| sessions.contains(&session_id));
+            let row = match previous.as_ref().and_then(|rows| rows.get(&session_id)) {
+                // Carried forward verbatim. Re-deriving it is impossible (the
+                // bytes are gone) and replacing it with zeros is the defect.
+                Some(row) => row.clone(),
+                None if reclaimed => {
+                    let harness = harness_for_session();
+                    let mut row = activity::build_row(&session_id, machine, &harness, &[]);
+                    row.time_source = activity::TimeSource::Unknown {
+                        why: RECLAIMED_BODY_WHY.to_string(),
+                    };
+                    row
+                }
+                // A session directory with no body and no manifest row: nothing
+                // was ever sealed here, and `build_row`'s empty-input reading
+                // (no conversation content) is the honest one.
+                None => {
+                    let harness = harness_for_session();
+                    activity::build_row(&session_id, machine, &harness, &[])
+                }
+            };
+            index_temp
+                .write_all(activity::to_jsonl(&row).as_bytes())
+                .map_err(|e| {
+                    ActivityIndexError::Write(format!("cannot append activity row: {e}"))
+                })?;
+            rows_written += 1;
+            continue;
+        }
+
+        let harness = harness_for_session();
 
         let mut lines: Vec<String> = Vec::new();
         for (_, shard) in shards {
@@ -2533,6 +2620,73 @@ fn rebuild_activity_index(
     })
 }
 
+/// The `why` on a reclaimed session's row when no earlier index row recorded
+/// its times. It names the cause and the repair, because the alternative a
+/// reader would otherwise read — "this session holds no conversation content"
+/// — is a claim about the conversation that nothing here supports.
+const RECLAIMED_BODY_WHY: &str =
+    "the body was reclaimed from this stage and no earlier index row recorded its times";
+
+/// The rows of the activity index already at `path`, keyed by session id.
+///
+/// `Ok(None)` is "there is no previous index" (the file does not exist) — the
+/// state every machine starts in, and not an error. A line that does not parse
+/// is skipped rather than failing the read: this is derived data, and one
+/// damaged line must not cost the machine the times the intact lines still
+/// carry. A file that exists and cannot be *read* is an error, because
+/// treating it as absent is exactly how a rebuild would silently replace known
+/// rows with zeros (invariant 2: that is exit 3, not a shorter answer).
+fn read_previous_activity_rows(
+    path: &Path,
+) -> Result<Option<BTreeMap<String, activity::ActivityRow>>, ActivityIndexError> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(ActivityIndexError::Read(format!(
+                "cannot read the previous activity index {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let mut rows: BTreeMap<String, activity::ActivityRow> = BTreeMap::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<activity::ActivityRow>(line) {
+            rows.insert(row.session_id.clone(), row);
+        }
+    }
+    Ok(Some(rows))
+}
+
+/// Which sessions of `machine` the stage's manifest says once had a body here.
+///
+/// `read_manifest`'s retained rows are written by `reclaim-stage` immediately
+/// before it deletes a body (`stagereclaim::refresh_manifest`), so a row with a
+/// nonzero shard count is the record that this session's body existed and is
+/// now elsewhere. `None` — the manifest itself could not be read — means the
+/// two states cannot be told apart; the caller then treats every body-less
+/// session as reclaimed, which is the honest direction (see [`RECLAIMED_BODY_WHY`]).
+fn reclaimed_session_bodies(stage: &Path, machine: &str) -> Option<BTreeSet<String>> {
+    match chat_stasher::manifest::read_manifest(stage, machine) {
+        Ok(chat_stasher::manifest::ManifestFileState::Loaded(rows)) => Some(
+            rows.into_iter()
+                .filter(|row| row.shard_count > 0)
+                .map(|row| row.session_id)
+                .collect(),
+        ),
+        // No manifest at all, or an empty one: no session was ever recorded as
+        // having a body here, which is a complete answer of zero.
+        Ok(_) => Some(BTreeSet::new()),
+        // Unreadable or damaged: an unknown, and an unknown must not be read as
+        // "no session was ever reclaimed".
+        Err(_) => None,
+    }
+}
+
 /// Replace a derived sidecar only after its complete contents have reached
 /// disk. The sibling temporary file keeps rename on the same filesystem, and
 /// readers see either the old complete index or the new complete index.
@@ -2572,11 +2726,13 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `activity-index` — build the activity sidecar for one machine partition
 /// (ADR-017).
 ///
-/// Thin CLI wrapper over [`rebuild_activity_index`]. Exit codes follow the
-/// house family (`collect`/`search`): `0` = the whole partition was read and
-/// the index written; `3` = the stage could not be read (or reading was
-/// interrupted), so no complete index exists; `1` = every session was read but
-/// the output file could not be written; `2` = usage error (enforced by clap).
+/// Thin CLI wrapper over [`rebuild_activity_index`] (the local stage) and
+/// [`rebuild_activity_index_from_archive`] (read-only, for a machine whose
+/// stage is not here). Exit codes follow the house family
+/// (`collect`/`search`): `0` = the whole partition was read and the index
+/// written; `3` = the source could not be read (or reading was interrupted), so
+/// no complete index exists; `1` = every session was read but the output file
+/// could not be written; `2` = usage error (enforced by clap).
 #[allow(clippy::too_many_arguments)]
 fn cmd_activity_index(
     stage: Option<&Path>,
@@ -2603,10 +2759,6 @@ fn cmd_activity_index(
             eprintln!("activity-index: destination repair requires --rebuild");
             return ExitCode::from(2);
         }
-        let Some(workspace) = stage else {
-            eprintln!("activity-index: destination repair requires --stage <work-directory>");
-            return ExitCode::from(2);
-        };
         if destination.is_none() && repo.is_none() {
             eprintln!("activity-index: name the destination or pass --repo");
             return ExitCode::from(2);
@@ -2624,25 +2776,83 @@ fn cmd_activity_index(
             Err(e) => {
                 eprintln!(
                     "activity-index: {}",
-                    redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+                    redact_activity_index_paths(&format!("{e:#}"), &cfg, stage)
                 );
                 reap_remote(&cfg, keep_ssh_masters);
                 return ExitCode::from(3);
             }
         };
-        return match rebuild_destination_partition(workspace, &cfg, &machine, &mk) {
-            Ok((sessions, summary)) => {
-                println!("[activity-index] machine  : {machine}");
-                println!("[activity-index] sessions : {sessions}");
-                println!("[activity-index] snapshots: {}", summary.snapshots_in_repo);
-                println!("[activity-index] repaired snapshot appended");
+        // A partition's index is written by the machine that owns it (ADR-017:
+        // one writer per partition, which is what makes the file conflict-free).
+        // Repairing *this* machine's own partition is the command's original
+        // job and still appends a repaired snapshot. Any other machine is
+        // rebuilt **read-only**: the index is derived from the archive into a
+        // local cache, and no path in the named machine's partition is touched.
+        if local_partition(&config).as_deref() == Some(machine.as_str()) {
+            let Some(workspace) = stage else {
+                eprintln!("activity-index: destination repair requires --stage <work-directory>");
+                return ExitCode::from(2);
+            };
+            return match rebuild_destination_partition(workspace, &cfg, &machine, &mk) {
+                Ok((sessions, summary)) => {
+                    println!("[activity-index] machine  : {machine}");
+                    println!("[activity-index] sessions : {sessions}");
+                    println!("[activity-index] snapshots: {}", summary.snapshots_in_repo);
+                    println!("[activity-index] repaired snapshot appended");
+                    reap_remote(&cfg, keep_ssh_masters);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!(
+                        "activity-index: destination rebuild failed: {}",
+                        redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+                    );
+                    reap_remote(&cfg, keep_ssh_masters);
+                    match e {
+                        ActivityIndexError::Read(_) => ExitCode::from(3),
+                        ActivityIndexError::Write(_) => ExitCode::from(1),
+                    }
+                }
+            };
+        }
+        let scope = match destination.as_deref() {
+            Some(name) => sidecar::DerivedIndexScope::Destination(name),
+            None => sidecar::DerivedIndexScope::Repo(Path::new(&cfg.repo_root)),
+        };
+        return match rebuild_activity_index_from_archive(&cfg, &machine, &mk, scope) {
+            Ok(outcome) => {
+                println!("[activity-index] machine   : {machine}");
+                println!("[activity-index] sessions  : {}", outcome.sessions_indexed);
+                println!(
+                    "[activity-index] snapshots : {} of {} scanned",
+                    outcome.snapshots_scanned, outcome.snapshots_in_repo
+                );
+                println!(
+                    "[activity-index] derived   : {}",
+                    outcome.out_path.display()
+                );
+                println!(
+                    "[activity-index] elapsed   : {}ms",
+                    outcome.elapsed.as_millis()
+                );
+                println!(
+                    "[activity-index] read-only : the destination was not modified — a partition's \
+                     index is written only by the machine that owns it"
+                );
+                if outcome.sessions_without_harness > 0 {
+                    println!(
+                        "[activity-index] no-harness: {} session(s) name no harness this build knows \
+                         — indexed with unknown time",
+                        outcome.sessions_without_harness
+                    );
+                }
                 reap_remote(&cfg, keep_ssh_masters);
                 ExitCode::SUCCESS
             }
             Err(e) => {
                 eprintln!(
-                    "activity-index: destination rebuild failed: {}",
-                    redact_activity_index_paths(&format!("{e:#}"), &cfg, Some(workspace))
+                    "activity-index: archive rebuild failed: {}",
+                    redact_activity_index_paths(&format!("{e:#}"), &cfg, None)
                 );
                 reap_remote(&cfg, keep_ssh_masters);
                 match e {
@@ -2880,6 +3090,131 @@ fn list_destination_machine_snapshot_ids(
         .filter(|snapshot| snapshot.hostname == machine)
         .map(|snapshot| snapshot.id.to_hex().as_str().to_string())
         .collect())
+}
+
+/// Outcome of a read-only rebuild of one machine's index from the archive.
+#[derive(Debug)]
+struct DerivedIndexOutcome {
+    /// Sessions whose rows were written.
+    sessions_indexed: usize,
+    /// Sessions whose id named no harness this build knows (`unknown`).
+    sessions_without_harness: usize,
+    /// The machine's snapshots this walk read, newest first.
+    snapshots_scanned: usize,
+    /// Every snapshot in the repository, so a short scan cannot render as a
+    /// complete one.
+    snapshots_in_repo: usize,
+    /// Absolute path of the derived index written.
+    out_path: PathBuf,
+    elapsed: std::time::Duration,
+}
+
+/// Rebuild one machine's activity index from the archive alone (SRCH-2).
+///
+/// Read-only with respect to the destination: every archived body of `machine`
+/// is read through the ADR-021 cumulative walk
+/// ([`readback::BackupStore::for_each_archived_session`] — one session at a
+/// time, first appearance wins, so the bytes are the newest copy the archive
+/// holds), one row is derived per session, and the rows are written to a local
+/// derived index ([`sidecar::derived_activity_index_path`]).
+///
+/// Why not the archive: `meta/<machine>/activity-v1.jsonl` inside the archive
+/// is written by the machine that owns that partition (ADR-017 — one writer per
+/// partition, which is what keeps the file conflict-free). A machine rebuilding
+/// a **lost** machine's index is by definition not that machine, so it has
+/// nowhere in the archive to put the result; the derived index goes to this
+/// machine's cache instead. No snapshot is pushed and no path in the named
+/// machine's partition is touched.
+///
+/// This is the command that makes "the machine is gone" survivable: it needs
+/// only this destination and the masterkey, not the source machine or its
+/// stage. It is also the expensive one — it reads the machine's archived
+/// bodies, which is what `reclaim-stage` deleted the local copy of — so it is
+/// run on demand rather than on a schedule.
+///
+/// Exit-code family follows the stage rebuild: `Read` = the archive could not
+/// be walked to the end, so no complete index exists (exit 3); `Write` = every
+/// session was read and the derived index could not be written (exit 1).
+fn rebuild_activity_index_from_archive(
+    cfg: &StoreConfig,
+    machine: &str,
+    mk: &MasterKey,
+    scope: sidecar::DerivedIndexScope<'_>,
+) -> Result<DerivedIndexOutcome, ActivityIndexError> {
+    let started = std::time::Instant::now();
+    let out_path = sidecar::derived_activity_index_path(scope, machine);
+    let parent = out_path.parent().ok_or_else(|| {
+        ActivityIndexError::Write(format!(
+            "derived index path {} has no parent",
+            out_path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|e| {
+        ActivityIndexError::Write(format!("cannot create {}: {e}", parent.display()))
+    })?;
+    let mut index_temp = tempfile::Builder::new()
+        .prefix(".activity-index-")
+        .tempfile_in(parent)
+        .map_err(|e| ActivityIndexError::Write(format!("cannot create derived index: {e}")))?;
+
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mut sessions_indexed = 0usize;
+    let mut sessions_without_harness = 0usize;
+    // A write failure must come back as exit 1, not as the exit-3 "the read did
+    // not finish" the walk itself reports, so it is recorded here and checked
+    // once the walk is over. The walk keeps going so the message names the
+    // first failure rather than the last.
+    let mut write_error: Option<String> = None;
+    let walk = store.for_each_archived_session(mk, machine, |session_id, bytes| {
+        if write_error.is_some() {
+            return Ok(());
+        }
+        let harness = sidecar::infer_harness(session_id).unwrap_or_else(|| {
+            sessions_without_harness += 1;
+            "unknown".to_string()
+        });
+        let text = String::from_utf8_lossy(bytes);
+        let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+        let row = activity::build_row(session_id, machine, &harness, &refs);
+        if let Err(e) = index_temp.write_all(activity::to_jsonl(&row).as_bytes()) {
+            write_error = Some(format!("cannot append activity row: {e}"));
+            return Ok(());
+        }
+        sessions_indexed += 1;
+        Ok(())
+    });
+    let read = match walk {
+        Ok(read) => read,
+        Err(e) => {
+            return Err(ActivityIndexError::Read(format!(
+                "cannot read machine `{machine}` from the destination: {e:#}"
+            )))
+        }
+    };
+    if let Some(message) = write_error {
+        return Err(ActivityIndexError::Write(message));
+    }
+
+    // A complete read is published only after every row is on disk, the same
+    // discipline as the stage rebuild: a reader sees the previous complete
+    // derived index or the new one, never a partial file.
+    index_temp
+        .as_file()
+        .sync_all()
+        .map_err(|e| ActivityIndexError::Write(format!("cannot sync derived index: {e}")))?;
+    index_temp.persist(&out_path).map_err(|e| {
+        ActivityIndexError::Write(format!("cannot publish derived index: {}", e.error))
+    })?;
+
+    Ok(DerivedIndexOutcome {
+        sessions_indexed,
+        sessions_without_harness,
+        snapshots_scanned: read.snapshots_scanned,
+        snapshots_in_repo: read.snapshots_in_repo,
+        out_path,
+        elapsed: started.elapsed(),
+    })
 }
 
 /// Store the writer version in the stage so a successful push carries it in
@@ -3614,6 +3949,26 @@ fn resolve_machine(
     explicit: Option<&str>,
 ) -> Result<String, ExitCode> {
     resolve_machine_at(command, config, explicit, &machine_identity_path())
+}
+
+/// This machine's archive partition, when a config or an identity file already
+/// names one — `None` when it does not know.
+///
+/// Deliberately **not** [`resolve_machine`], which generates an identity when
+/// none exists: a command asking "is this partition mine?" must not answer by
+/// creating one, and a machine that has never pushed has no partition that a
+/// rebuild could claim to own.
+fn local_partition(config: &Config) -> Option<String> {
+    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
+        return Some(machine.to_string());
+    }
+    match identity::load_identity_state(&machine_identity_path()) {
+        identity::IdentityFileState::Loaded(id) => Some(id.as_hex()),
+        // Missing or unusable: this machine's partition is an unknown, and an
+        // unknown is not a name — the caller falls through to the read-only
+        // path rather than writing a partition it cannot identify.
+        _ => None,
+    }
 }
 
 /// [`resolve_machine`] with the identity path supplied explicitly, so the
@@ -10843,6 +11198,79 @@ mod decision_surface_tests {
                 && rows[0].contains(r#""last_unix":1736948707"#),
             "row must carry the conversation span: {}",
             rows[0]
+        );
+    }
+
+    /// A reclaimed session (ADR-020 Phase 4) keeps the row the last rebuild
+    /// measured. Its body is gone from this stage, so measuring the empty
+    /// directory that remains would rewrite a known span as zero lines and an
+    /// unknown time — SRCH-2's 2,832-of-2,835 field shape.
+    #[test]
+    fn rebuild_activity_index_keeps_a_reclaimed_sessions_times() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        write_shard(
+            &stage,
+            machine,
+            session,
+            &[
+                cc_line("2025-01-15T12:34:56.789Z"),
+                cc_line("2025-01-15T13:45:07Z"),
+            ],
+        );
+        rebuild_activity_index(&stage, machine, false).expect("first rebuild");
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        let measured = fs::read_to_string(&index).unwrap();
+        assert!(
+            measured.contains(r#""first_unix":1736944496"#),
+            "the measured row carries the span: {measured}"
+        );
+
+        let removed = chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session)
+            .expect("reclaim the body");
+        assert_eq!(removed, 1, "the shard body goes, the session dir stays");
+
+        rebuild_activity_index(&stage, machine, false).expect("second rebuild");
+        let after = fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            after, measured,
+            "a rebuild over a reclaimed body must keep the row it already had"
+        );
+    }
+
+    /// A reclaimed session with no earlier row is an explicit unknown naming
+    /// the reclaim — never "this session holds no conversation content", which
+    /// is what the empty directory alone would look like.
+    #[test]
+    fn rebuild_activity_index_names_a_reclaimed_body_with_no_earlier_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "mbp-test";
+        let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+        write_shard(
+            &stage,
+            machine,
+            session,
+            &[cc_line("2025-01-15T12:34:56.789Z")],
+        );
+        // The manifest records the body before the reclaim deletes it, and no
+        // index row was ever written.
+        let manifest = chat_stasher::manifest::generate_manifest(&stage, machine).unwrap();
+        chat_stasher::manifest::write_manifest(&stage, machine, &manifest).unwrap();
+        chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+
+        rebuild_activity_index(&stage, machine, false).expect("rebuild");
+        let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+        let content = fs::read_to_string(&index).unwrap();
+        assert!(
+            content.contains(RECLAIMED_BODY_WHY),
+            "the row must name the reclaim: {content}"
+        );
+        assert!(
+            !content.contains("no_conversation_content"),
+            "an unmeasured body must not be recorded as 'no conversation content': {content}"
         );
     }
 

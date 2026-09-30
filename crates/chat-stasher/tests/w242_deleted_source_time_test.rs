@@ -44,6 +44,15 @@ fn cc_line(ts: &str) -> String {
 }
 
 /// Run the real binary with every ambient path redirected into `sandbox`.
+///
+/// The sandbox declares `machine = MACHINE`, and that is part of the fixture
+/// rather than decoration: `activity-index --rebuild` repairs a partition in
+/// the archive only for the machine that owns it, and rebuilds any other
+/// machine read-only into a local derived index (ADR-017 — a partition has one
+/// writer). This fixture has exactly one machine, whose stage is deleted, so
+/// the partition being rebuilt is this machine's own. Without the declaration
+/// the sandbox has no identity at all, and the rebuild would rightly refuse to
+/// treat a partition it cannot claim as its own.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");
     let registry = sandbox.join("registry.json");
@@ -51,6 +60,13 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     fs::write(
         &registry,
         r#"{"schema_version":1,"generated":"W242 deleted source","harnesses":[]}"#,
+    )
+    .unwrap();
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!("machine = \"{MACHINE}\"\n"),
     )
     .unwrap();
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))

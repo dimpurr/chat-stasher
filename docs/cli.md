@@ -391,7 +391,7 @@ These run inside `run-once`, `dest-init` and the browser host, or repair specifi
 | `collect` | Reads new session data from each tool into the stage. Exits `3` when a tool has sessions this build cannot archive. |
 | `push` | Moves sealed stage data into the archive. |
 | `seal` | Seals one file already inside the stage. Refuses any tool whose files are unsafe to rename. |
-| `activity-index` | Rebuilds the per-machine activity index. `--rebuild --destination <name>` repairs it inside an archive by appending a new snapshot. |
+| `activity-index` | Rebuilds the per-machine activity index. `--rebuild --destination <name> --machine <name>` rebuilds it from the archive — all a machine whose stage is gone still needs. Your own machine's partition is repaired in the archive by appending a new snapshot; any other machine's is rebuilt read-only into a local derived index and the archive is left untouched (a partition's index is written only by the machine that owns it). |
 | `machine-declare` | Records this machine's display name (default: its host name). |
 | `machine-label` | Names a machine that can no longer name itself, such as a sold laptop. |
 | `native-host` | The host process the browser starts. `--self-test` prints one line of JSON and exits. |
