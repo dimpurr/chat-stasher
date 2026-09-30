@@ -27,6 +27,7 @@ Read this once. It applies to every kind.
 - **`run-once --destination <name>`** keeps a destination current. `schedule install` gives **every declared destination its own timer**, each running `run-once --destination <name>`; pass `--destination` yourself to narrow it to one, and repeat the flag to pick several. See [schedule.md → With destinations declared](schedule.md#with-destinations-declared).
 - **`doctor` dials each declared destination once, read-only.** It reports each one as reached, not reached (with the reason), or not configured. It creates nothing.
 - **Unknown is not empty.** A destination that cannot be read makes a command exit `3`, meaning "did not finish". It never reports the destination as empty.
+- **A destination outlives the machine that wrote to it.** Everything in it is readable from any other computer that has its key file, which is what makes a sold or wiped machine a recovery task rather than a loss: [Recover a lost machine's conversations](use-cases/lost-machine.md).
 
 To check an archive's integrity at any time:
 
