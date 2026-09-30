@@ -13,8 +13,11 @@ web chat platforms from `apps/extension/lib/contract.ts`'s `ALL_PLATFORMS` —
 the same two sources `gen-support-matrix.py` renders, loaded through that
 script so the two can never drift.
 
-Inputs, each optional. A missing input is shown as "source unavailable" and
-is never folded into a zero:
+Four inputs, each optional: a missing input is shown as "source unavailable"
+and is never folded into a zero. The editorial fields are the exception to
+being handed in — they already live in the two platform sources this script
+loads, so they are read from there by default and `--editorial` only overrides
+them (see below).
 
   --ext-status DIR    The native host's per-install status reports: the
                       `ext-status` directory of a machine's local stage.
@@ -45,14 +48,34 @@ is never folded into a zero:
                       without the export it was measured against is
                       unreadable.
 
-  --editorial FILE    The SB-1 editorial fields, a JSON object of the shape
-                      {"platforms": {"<platform-id>": {"status": str,
+  (editorial)         Read by default from the two sources under `--root`
+                      that already carry these fields, so the board's editorial
+                      columns are never a second copy somebody has to keep in
+                      step: each harness row's `verified` / `dev_priority` /
+                      `known_issue` from the registry, and each platform row's
+                      `lastVerified` / `devPriority` / `knownIssue` from the
+                      extension contract, both normalized by
+                      `gen-support-matrix.py` before this script sees them. The
+                      two id spaces are kept apart rather than unioned: where
+                      one id names both a local tool and a web platform (grok),
+                      each row reads its own family's record, and a list that
+                      has to name such a row says which of the two it means. A
+                      row carrying no field at all is absent from the reading,
+                      which is what "nothing recorded" means; it is not the
+                      same state as a source that could not be read.
+
+  --editorial FILE    Override for the editorial fields above, a JSON object of
+                      the shape {"platforms": {"<platform-id>": {"status": str,
                       "dev_priority": str, "last_verified": "YYYY-MM-DD",
                       "known_issues": str}}}; every field optional per
-                      platform. `last_verified` drives the re-verification
-                      rule; a date that will not parse is shown as written and
-                      proves nothing. Rows for ids this product does not know
-                      are listed, never dropped.
+                      platform. An override REPLACES the sources (a named file
+                      that cannot be read is unavailable, never silently
+                      swapped for the built-in reading), and its rows are keyed
+                      by bare id, so one row covers every row carrying that id.
+                      `last_verified` drives the re-verification rule; a date
+                      that will not parse is shown as written and proves
+                      nothing. Rows for ids this product does not know are
+                      listed, never dropped.
 
 Output: markdown on stdout, or to `--out`. Sections, top to bottom:
 
@@ -90,7 +113,10 @@ ANOMALIES rules and their knobs:
                         sessions stay outside numerator and denominator
                         (ADR-035).
   verification-stale   A platform's editorial `last_verified` is more than
-                        --verify-days (default 90) days before the run.
+                        --verify-days (default 90) days before the run. Rows
+                        that carry editorial fields but no readable date are
+                        named as unjudged rather than passed: "nobody has
+                        recorded a verification" is not "verified recently".
   source-stale /        One of the four inputs is missing or unreadable
   source-unavailable    (unavailable), or older than the freshness limit
                         (stale): each install's own status report, whatever
@@ -102,9 +128,11 @@ ANOMALIES rules and their knobs:
                         threshold `overview --json` marks a status record
                         stale with). A status record or a whole source with
                         no readable timestamp also counts as stale. The
-                        editorial file's own age is deliberately not judged
-                        here: its rows carry per-platform verification dates,
-                        and the 90-day rule above is where that age shows up.
+                        editorial source's own age is deliberately not judged
+                        here: its rows carry per-platform verification dates
+                        (and, by default, it is the same two source files the
+                        platform axes come from), so the 90-day rule above is
+                        where that age shows up.
 
 Exit codes (the CLI contract, kept for a plumbing tool): 0 = the board was
 generated, including a board whose anomalies are the point of the run;
@@ -117,11 +145,14 @@ carries none):
 
   chat-stasher overview --destination <name> --json > overview-snapshot.json
   python3 scripts/dev/scoreboard.py \\
+      --root <checkout> \\
       --ext-status <stage>/ext-status \\
       --overview overview-snapshot.json \\
       --oracle oracle/out \\
-      --editorial editorial.json \\
       --out SCOREBOARD.md
+
+The editorial fields come from `--root`, so the pipeline has nothing to
+produce for them; add `--editorial <file>` only to overrule the sources.
 
 The board itself carries machine names, browser/profile labels and
 per-platform counts — treat wherever `--out` points the way you treat any
@@ -233,10 +264,24 @@ def esc(text: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+# The two families a row can belong to. A row's editorial record is filed under
+# (family, id): the families carry the same field names because the generator
+# normalizes both sources to one shape, but they are two id spaces, and an id
+# in both (grok) is two rows with two different records, never one row unioned
+# from two files.
+FAMILY_LOCAL = "local"
+FAMILY_WEB = "web"
+
+
 @dataclass(frozen=True)
 class LocalTool:
     id: str
     display: str
+    # The SB-1 editorial fields as the registry states them, already validated
+    # and normalized by gen-support-matrix.py (None = nothing recorded).
+    verified: dict[str, Any] | None = None
+    dev_priority: str | None = None
+    known_issue: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,12 +289,18 @@ class WebPlatform:
     id: str
     channel: str
     credibility: str
+    verified: dict[str, Any] | None = None
+    dev_priority: str | None = None
+    known_issue: str | None = None
 
 
 @dataclass(frozen=True)
 class Catalog:
     local: list[LocalTool]
     web: list[WebPlatform]
+    # The two source files this catalog was read from, so the editorial reading
+    # can report their age without a second hard-coded copy of the paths.
+    sources: dict[str, str] = field(default_factory=dict)
 
     @property
     def local_ids(self) -> set[str]:
@@ -287,12 +338,37 @@ def load_catalog(root: str) -> Catalog:
         contract = gen.parse_contract_platforms(root)
     except Exception as exc:
         raise UsageError(f"cannot read the platform sources under {root!r}: {exc}") from exc
-    local = [LocalTool(id=h["id"], display=h.get("display_name") or h["id"]) for h in harnesses]
-    web = [WebPlatform(id=p["id"], channel=p["channel"], credibility=p["credibility"]) for p in contract]
+    local = [
+        LocalTool(
+            id=h["id"],
+            display=h.get("display_name") or h["id"],
+            verified=h.get("verified"),
+            dev_priority=h.get("dev_priority"),
+            known_issue=h.get("known_issue"),
+        )
+        for h in harnesses
+    ]
+    # The contract spells the same three fields in camelCase; they are renamed
+    # once, here, so the editorial reading has one vocabulary to build from.
+    web = [
+        WebPlatform(
+            id=p["id"],
+            channel=p["channel"],
+            credibility=p["credibility"],
+            verified=p.get("lastVerified"),
+            dev_priority=p.get("devPriority"),
+            known_issue=p.get("knownIssue"),
+        )
+        for p in contract
+    ]
     # An id CAN appear in both lists (grok the xAI CLI and grok.com the chat
     # platform share it) — the archive's id space itself mixes them, and the
     # board marks those cells rather than pretending the two are one.
-    return Catalog(local=local, web=web)
+    sources = {
+        "harness registry": os.path.join(root, gen.REGISTRY_REL),
+        "extension contract": os.path.join(root, gen.CONTRACT_REL),
+    }
+    return Catalog(local=local, web=web, sources=sources)
 
 
 # ---------------------------------------------------------------------------
@@ -784,9 +860,17 @@ def read_oracle(paths: list[str] | None) -> OracleReading:
 @dataclass
 class EditorialEntry:
     platform: str
+    # Which row this entry belongs to: FAMILY_LOCAL / FAMILY_WEB for a row read
+    # from its own source, "" for an override row, which is keyed by bare id
+    # and governs every row carrying that id.
+    family: str = ""
     fields: dict[str, str] = field(default_factory=dict)
     last_verified: dt.date | None = None
     last_verified_raw: str | None = None
+
+    @property
+    def dated(self) -> bool:
+        return self.last_verified is not None
 
 
 @dataclass
@@ -794,13 +878,77 @@ class EditorialReading:
     available: bool
     reason: str | None
     mtime: dt.datetime | None
-    entries: dict[str, EditorialEntry] = field(default_factory=dict)
+    # Keyed (family, id) so a lookup never has to ask which source answered.
+    entries: dict[tuple[str, str], EditorialEntry] = field(default_factory=dict)
+    # One row per recorded entry, in source order, for the rules and notes that
+    # are about the reading as a whole rather than one table cell.
+    rows: list[EditorialEntry] = field(default_factory=list)
     newest_last_verified: dt.date | None = None
+    # Where the fields came from — the override file, or the two SB-1 sources.
+    origin: str | None = None
+    derived: bool = False
+
+    def for_row(self, family: str, platform: str) -> EditorialEntry | None:
+        if not self.available:
+            return None
+        return self.entries.get((family, platform))
+
+    def label(self, entry: EditorialEntry, catalog: Catalog) -> str:
+        """The entry's name in a list.
+
+        An id that is both a local tool and a web platform is two rows with two
+        records; a sentence that names one of them has to say which, exactly as
+        the tables mark that pair rather than pretending they are one.
+        """
+        if entry.family and entry.platform in catalog.shared_ids:
+            kind = "local tool" if entry.family == FAMILY_LOCAL else "web platform"
+            return f"{entry.platform} ({kind})"
+        return entry.platform
 
 
-def read_editorial(path: str | None) -> EditorialReading:
-    if path is None:
-        return EditorialReading(False, "not provided (--editorial)", None)
+def _editorial_entry(
+    family: str,
+    platform: str,
+    verified: dict[str, Any] | None,
+    dev_priority: str | None,
+    known_issue: str | None,
+) -> EditorialEntry | None:
+    """One entry from a source record, or None when nothing is recorded.
+
+    None is "this row carries no editorial field at all", which the tables
+    render as a dash — never as a guess, and never as the same thing as a
+    source that could not be read.
+    """
+    fields: dict[str, str] = {}
+    if dev_priority:
+        fields["dev_priority"] = dev_priority
+    if known_issue:
+        # One internal vocabulary for both families, so a note or a cell reads
+        # the same whichever source answered.
+        fields["known_issues"] = known_issue
+    raw_date = (verified or {}).get("date")
+    if not fields and not isinstance(raw_date, str):
+        return None
+    entry = EditorialEntry(platform=platform, family=family, fields=fields)
+    if isinstance(raw_date, str) and raw_date:
+        # The generator validates this shape at load time; it is kept as
+        # raw-plus-parsed anyway, so a date that somehow will not parse shows
+        # as written instead of turning into an absent one.
+        entry.last_verified_raw = raw_date
+        entry.last_verified = parse_date(raw_date)
+    return entry
+
+
+def _finish_reading(reading: EditorialReading) -> EditorialReading:
+    for entry in reading.rows:
+        if entry.last_verified is not None and (
+            reading.newest_last_verified is None or entry.last_verified > reading.newest_last_verified
+        ):
+            reading.newest_last_verified = entry.last_verified
+    return reading
+
+
+def _read_editorial_override(path: str) -> EditorialReading:
     if not os.path.isfile(path):
         return EditorialReading(False, f"{path} is not a file", None)
     try:
@@ -814,7 +962,7 @@ def read_editorial(path: str | None) -> EditorialReading:
         return EditorialReading(False, f"not valid JSON: {exc}", None)
     if not isinstance(parsed, dict) or not isinstance(parsed.get("platforms"), dict):
         return EditorialReading(False, "no `platforms` object", None)
-    reading = EditorialReading(True, None, None)
+    reading = EditorialReading(True, None, None, origin=f"override file {path}")
     reading.mtime = dt.datetime.fromtimestamp(os.stat(path).st_mtime, tz=dt.timezone.utc)
     for platform, entry in parsed["platforms"].items():
         if not isinstance(platform, str) or not isinstance(entry, dict):
@@ -827,12 +975,45 @@ def read_editorial(path: str | None) -> EditorialReading:
         if isinstance(raw_date, str) and raw_date:
             value.last_verified_raw = raw_date
             value.last_verified = parse_date(raw_date)
-            if value.last_verified and (
-                reading.newest_last_verified is None or value.last_verified > reading.newest_last_verified
-            ):
-                reading.newest_last_verified = value.last_verified
-        reading.entries[platform] = value
-    return reading
+        reading.rows.append(value)
+        # An override is keyed by bare id, so it answers for every row that
+        # carries the id — including both rows of a shared one.
+        reading.entries[(FAMILY_LOCAL, platform)] = value
+        reading.entries[(FAMILY_WEB, platform)] = value
+    return _finish_reading(reading)
+
+
+def _read_editorial_from_sources(catalog: Catalog, root: str) -> EditorialReading:
+    reading = EditorialReading(True, None, None, origin=f"the SB-1 sources under {root}", derived=True)
+    for tool in catalog.local:
+        entry = _editorial_entry(FAMILY_LOCAL, tool.id, tool.verified, tool.dev_priority, tool.known_issue)
+        if entry is not None:
+            reading.entries[(FAMILY_LOCAL, tool.id)] = entry
+            reading.rows.append(entry)
+    for platform in catalog.web:
+        entry = _editorial_entry(
+            FAMILY_WEB, platform.id, platform.verified, platform.dev_priority, platform.known_issue
+        )
+        if entry is not None:
+            reading.entries[(FAMILY_WEB, platform.id)] = entry
+            reading.rows.append(entry)
+    mtimes = []
+    for path in catalog.sources.values():
+        try:
+            mtimes.append(os.stat(path).st_mtime)
+        except OSError:
+            continue
+    if mtimes:
+        reading.mtime = dt.datetime.fromtimestamp(max(mtimes), tz=dt.timezone.utc)
+    return _finish_reading(reading)
+
+
+def read_editorial(path: str | None, catalog: Catalog, root: str) -> EditorialReading:
+    if path is not None:
+        # An override that cannot be read is unavailable. Falling back to the
+        # built-in reading would answer a question nobody asked.
+        return _read_editorial_override(path)
+    return _read_editorial_from_sources(catalog, root)
 
 
 # ---------------------------------------------------------------------------
@@ -1090,17 +1271,18 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     # -- verification age -----------------------------------------------------
     missing_verified: list[str] = []
     if editorial.available:
-        for platform_id, entry in sorted(editorial.entries.items()):
+        for entry in editorial.rows:
+            label = editorial.label(entry, args.catalog)
             if entry.last_verified is None:
                 if entry.last_verified_raw:
-                    missing_verified.append(f"{platform_id} (unparseable {entry.last_verified_raw!r})")
+                    missing_verified.append(f"{label} (unparseable {entry.last_verified_raw!r})")
                 else:
-                    missing_verified.append(platform_id)
+                    missing_verified.append(label)
                 continue
             age = (now.date() - entry.last_verified).days
             if age > args.verify_days:
                 ev.anomalies.append(
-                    f"verification-stale: {platform_id} — last verified {entry.last_verified.isoformat()} "
+                    f"verification-stale: {label} — last verified {entry.last_verified.isoformat()} "
                     f"({fmt_age(age * 86400.0)} ago, above the {args.verify_days:.0f} d window)"
                 )
 
@@ -1163,12 +1345,15 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     for problem in oracle.unreadable:
         ev.notes.append(f"unreadable oracle file: {problem}")
     if editorial.available:
-        unknown_editorial = sorted(p for p in editorial.entries if p not in cat_web_ids and p not in args.catalog.local_ids)
-        for platform_id in unknown_editorial:
-            value = editorial.entries[platform_id]
+        unknown_editorial = [
+            e
+            for e in editorial.rows
+            if e.platform not in cat_web_ids and e.platform not in args.catalog.local_ids
+        ]
+        for value in sorted(unknown_editorial, key=lambda e: e.platform):
             parts = [f"{k}={v}" for k, v in sorted(value.fields.items())]
             shown = f" ({'; '.join(parts)})" if parts else ""
-            ev.notes.append(f"editorial row for an id this product does not know: {platform_id}{shown}")
+            ev.notes.append(f"editorial row for an id this product does not know: {value.platform}{shown}")
 
     # -- not-evaluable bookkeeping ----------------------------------------------
     if not ext.available:
@@ -1208,6 +1393,10 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
         ev.not_evaluable.append("verification-stale — editorial fields are unavailable")
     elif missing_verified:
         ev.not_evaluable.append("verification-stale — no readable last_verified date for: " + ", ".join(missing_verified))
+    elif not editorial.rows:
+        ev.not_evaluable.append(
+            f"verification-stale — the editorial source ({editorial.origin}) records no editorial row at all"
+        )
     if not oracle.available:
         ev.not_evaluable.append("oracle completeness — oracle comparison results are unavailable")
 
@@ -1313,12 +1502,19 @@ def _source_rows(
         rows.append(("editorial fields", f"{UNAVAILABLE} — {editorial.reason}", "n/a"))
         anomalies.append(f"source-unavailable: editorial fields — {editorial.reason}")
     else:
-        state_text = f"available · {len(editorial.entries)} platform row(s)"
-        freshness = f"file mtime {iso_z(editorial.mtime)}" if editorial.mtime else ABSENT
+        dated = sum(1 for entry in editorial.rows if entry.dated)
+        state_text = (
+            f"available · {len(editorial.rows)} editorial row(s) · {dated} with a last_verified date"
+            f" · {editorial.origin}"
+        )
+        if editorial.mtime:
+            freshness = f"{'newest source' if editorial.derived else 'file'} mtime {iso_z(editorial.mtime)}"
+        else:
+            freshness = ABSENT
         if editorial.newest_last_verified is not None:
             freshness += f" · newest last_verified {editorial.newest_last_verified.isoformat()}"
         else:
-            freshness += " · no readable last_verified date in the file"
+            freshness += " · no readable last_verified date in the source"
         rows.append(("editorial fields", state_text, freshness))
 
     # previous-run state (its own row: rule 2 lives or dies here)
@@ -1436,7 +1632,7 @@ def render_markdown(
     out.append("| " + " | ".join(header) + " |")
     out.append("|" + "---|" * len(header))
     for platform in catalog.web:
-        entry = editorial.entries.get(platform.id)
+        entry = editorial.for_row(FAMILY_WEB, platform.id)
         cells: list[str] = [esc(platform.id)]
         reporting = ext.reporting(platform.id)
         if ext.available:
@@ -1539,7 +1735,7 @@ def render_markdown(
     out.append("| " + " | ".join(esc(h) for h in header) + " |")
     out.append("|" + "---|" * len(header))
     for tool in catalog.local:
-        entry = editorial.entries.get(tool.id)
+        entry = editorial.for_row(FAMILY_LOCAL, tool.id)
         cells: list[str] = [esc(tool.display)]
         if tool.id in catalog.shared_ids:
             cells[0] += " 🔶"
@@ -1666,7 +1862,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--oracle", action="append", default=None, help="an oracle results directory or file (repeatable)"
     )
-    parser.add_argument("--editorial", help="the SB-1 editorial fields JSON file")
+    parser.add_argument(
+        "--editorial",
+        help="override the editorial fields with this JSON file (default: read them from the two platform sources under --root)",
+    )
     parser.add_argument("--now", help="the reference clock, RFC3339 (default: the system clock)")
     parser.add_argument(
         "--stale-hours", type=float, default=DEFAULT_STALE_HOURS,
@@ -1738,7 +1937,7 @@ def main(argv: list[str]) -> int:
     ext = read_ext_status(args.ext_status)
     overview = read_overview(args.overview)
     oracle = read_oracle(args.oracle)
-    editorial = read_editorial(args.editorial)
+    editorial = read_editorial(args.editorial, args.catalog, args.root or default_root())
     state = load_state(resolve_state(args))
     ev = evaluate(args, ext, overview, oracle, editorial, state)
     board = render_markdown(args, ext, overview, oracle, editorial, state, ev)
@@ -2316,7 +2515,20 @@ def selftest() -> int:
         for tool in catalog.local:
             expect(tool.display in text, f"local tool row exists with zero inputs: {tool.id}")
         expect("pending-rising + no-new-capture (web) — extension status reports are unavailable" in text, "the rise rule explains itself when its input is missing")
-        expect("verification-stale — editorial fields are unavailable" in text, "the verify rule explains itself when its input is missing")
+        # The editorial fields are not an absent input here: they are read from
+        # the same two sources the platform axes come from, so a run with no
+        # other input still judges every row that carries a verification date.
+        expect("source-unavailable: editorial fields" not in text, "the editorial fields are not unavailable when the two sources are present")
+        expect(f"the SB-1 sources under {repo_root}" in text, "the editorial source says which reading answered")
+        result = run_cli(
+            base_args(repo_root, None, None, None, os.path.join(tmp, "not-a-file.json")) + ["--no-state"]
+        )
+        expect(
+            "source-unavailable: editorial fields — " in result.stdout
+            and "not-a-file.json is not a file" in result.stdout,
+            "an override that cannot be read is unavailable, never silently the built-in reading",
+        )
+        expect("verification-stale — editorial fields are unavailable" in result.stdout, "the verify rule explains itself when its input is missing")
         expect("time-unknown-share + no-new-capture (local tools) — overview document is unavailable" in text, "the share rule explains itself when its input is missing")
 
         # ---------------- case: stale sources ----------------------------------
@@ -2341,7 +2553,229 @@ def selftest() -> int:
         text = result.stdout
         rows = [line for line in text.splitlines() if line.startswith("| Claude Code ")]
         expect(any("| 1 sess" in line and "| 2 |" in line and "| 1 |" in line for line in rows), "one conversation on two machines reads 2 rows and 1 conversation")
-        expect(any(line.endswith("| 0 sessions | - | - | - |") for line in text.splitlines()), "a tool with no rows shows a measured 0 sessions, never a negative-space guess")
+        # The dedup document holds two machines and one tool, so a tool with no
+        # sessions at all reads 0 in each machine cell and 0 sessions overall.
+        # The row no longer ends in three dashes: its editorial columns come
+        # from the real registry now, and a recorded priority is not a dash.
+        second_display = catalog.local[1].display
+        expect(
+            any(
+                line.startswith(f"| {second_display} ") and "| 0 | - | 0 sessions |" in line
+                for line in text.splitlines()
+            ),
+            "a tool with no rows shows a measured 0 sessions, never a negative-space guess",
+        )
+
+        # ---------------- case: editorial fields from their own sources --------
+        # A root built from the real registry and contract shapes, so the
+        # reading is exercised through the same generator loaders the real
+        # sources go through. Dates are picked against NOW: one fresh, one 120
+        # days old (past the 90-day window), and rows with no date at all.
+        fixture_root = os.path.join(tmp, "fixture-repo")
+        gen = _load_generator(repo_root)
+        # --root has to hold the generator too: it is what reads the two
+        # sources, so the fixture exercises the real loaders and their
+        # validation, not a fixture-only shortcut.
+        with open(os.path.join(repo_root, "scripts", "gen-support-matrix.py"), "r", encoding="utf-8") as handle:
+            generator_source = handle.read()
+        os.makedirs(os.path.join(fixture_root, "scripts"), exist_ok=True)
+        with open(os.path.join(fixture_root, "scripts", "gen-support-matrix.py"), "w", encoding="utf-8") as handle:
+            handle.write(generator_source)
+        stale_date = (NOW_DT - dt.timedelta(days=120)).date().isoformat()
+        fresh_date = (NOW_DT - dt.timedelta(days=4)).date().isoformat()
+        _write_json(
+            os.path.join(fixture_root, gen.REGISTRY_REL),
+            {
+                "schema_version": 1,
+                "generated": "2026-01-01",
+                "harnesses": [
+                    {
+                        "id": "tool-fresh",
+                        "display_name": "Tool Fresh",
+                        "verified": {
+                            "date": fresh_date,
+                            "scope": "a real session archived end to end",
+                        },
+                        "dev_priority": "high",
+                        "known_issue": "one caveat with a pointer",
+                        "paths": {
+                            "macos": {
+                                "template": "~/.tool-fresh/<uuid>.jsonl",
+                                "format": "jsonl",
+                                "confidence": "source-confirmed",
+                                "source": "measured",
+                            }
+                        },
+                    },
+                    {
+                        "id": "tool-stale",
+                        "display_name": "Tool Stale",
+                        "verified": {"date": stale_date, "scope": "a real session archived end to end"},
+                        "dev_priority": "normal",
+                        "paths": {
+                            "macos": {
+                                "template": "~/.tool-stale",
+                                "format": "sqlite",
+                                "confidence": "from-source",
+                                "source": "measured",
+                            }
+                        },
+                    },
+                    {
+                        "id": "tool-silent",
+                        "display_name": "Tool Silent",
+                        "dev_priority": "low",
+                        "known_issue": "no end-to-end run recorded yet",
+                        "paths": {
+                            "macos": {
+                                "template": "~/.tool-silent",
+                                "format": "jsonl",
+                                "confidence": "unascertained",
+                                "source": "not read",
+                            }
+                        },
+                    },
+                    # Two ids that name both a local tool and a web platform,
+                    # with different records on each side: the CLI row must not
+                    # inherit the platform's verification, or the reverse.
+                    {
+                        "id": "shared-local-silent",
+                        "display_name": "Shared Local Silent",
+                        "dev_priority": "low",
+                        "known_issue": "the tool side has no verification",
+                        "paths": {
+                            "macos": {
+                                "template": "~/.shared",
+                                "format": "jsonl",
+                                "confidence": "from-source",
+                                "source": "measured",
+                            }
+                        },
+                    },
+                    {
+                        "id": "shared-web-silent",
+                        "display_name": "Shared Web Silent",
+                        "verified": {"date": fresh_date, "scope": "the tool side was verified"},
+                        "dev_priority": "high",
+                        "paths": {
+                            "macos": {
+                                "template": "~/.shared-web",
+                                "format": "jsonl",
+                                "confidence": "from-source",
+                                "source": "measured",
+                            }
+                        },
+                    },
+                ],
+            },
+        )
+        os.makedirs(os.path.join(fixture_root, os.path.dirname(gen.CONTRACT_REL)), exist_ok=True)
+        with open(os.path.join(fixture_root, gen.CONTRACT_REL), "w", encoding="utf-8") as handle:
+            handle.write(
+                "export const ALL_PLATFORMS: readonly ChatPlatform[] = [\n"
+                "  {\n"
+                "    id: 'web-fresh',\n"
+                "    origins: ['https://web-fresh.example'],\n"
+                "    devPriority: 'normal',\n"
+                "    knownIssue: 'one caveat with a pointer',\n"
+                "    lastVerified: {\n"
+                f"      date: '{fresh_date}',\n"
+                "      version: '1.2.3',\n"
+                "      scope: 'a real conversation archived end to end',\n"
+                "    },\n"
+                "    credibility: 'from-source',\n"
+                "    channel: 'stable',\n"
+                "  },\n"
+                "  {\n"
+                "    id: 'web-stale',\n"
+                "    origins: ['https://web-stale.example'],\n"
+                "    lastVerified: {\n"
+                f"      date: '{stale_date}',\n"
+                "      scope: 'a real conversation archived end to end',\n"
+                "    },\n"
+                "    credibility: 'from-source',\n"
+                "    channel: 'experimental',\n"
+                "  },\n"
+                "  {\n"
+                "    id: 'shared-local-silent',\n"
+                "    origins: ['https://shared-local-silent.example'],\n"
+                "    devPriority: 'high',\n"
+                "    lastVerified: {\n"
+                f"      date: '{fresh_date}',\n"
+                "      scope: 'the platform side was verified',\n"
+                "    },\n"
+                "    credibility: 'from-source',\n"
+                "    channel: 'stable',\n"
+                "  },\n"
+                "  {\n"
+                "    id: 'shared-web-silent',\n"
+                "    origins: ['https://shared-web-silent.example'],\n"
+                "    devPriority: 'low',\n"
+                "    knownIssue: 'the platform side has no verification',\n"
+                "    credibility: 'unverified',\n"
+                "    channel: 'experimental',\n"
+                "  },\n"
+                "];\n"
+            )
+        result = run_cli(base_args(fixture_root) + ["--no-state"])
+        expect(result.returncode == 0, f"the fixture-root run exits 0 (got {result.returncode}: {result.stderr})")
+        text = result.stdout
+        expect(
+            f"available · 9 editorial row(s) · 6 with a last_verified date · the SB-1 sources under {fixture_root}" in text,
+            "the editorial source row counts the real-shaped rows and names the reading that answered",
+        )
+        expect("source-unavailable: editorial fields" not in text, "the two sources are present, so the fields are available")
+        expect(
+            f"verification-stale: tool-stale — last verified {stale_date} (120.0 d ago, above the 90 d window)" in text,
+            "a registry verification past the window is stale",
+        )
+        expect(
+            f"verification-stale: web-stale — last verified {stale_date} (120.0 d ago, above the 90 d window)" in text,
+            "a contract verification past the window is stale",
+        )
+        expect("verification-stale: tool-fresh" not in text and "verification-stale: web-fresh" not in text, "a fresh verification is not stale")
+        expect(
+            "verification-stale — no readable last_verified date for: "
+            "tool-silent, shared-local-silent (local tool), shared-web-silent (web platform)" in text,
+            "rows carrying editorial fields but no date are named, and a shared id says which of the two rows it means",
+        )
+        local_shared = [
+            line for line in text.splitlines() if line.startswith("| Shared Local Silent")
+        ]
+        web_shared = [line for line in text.splitlines() if line.startswith("| shared-local-silent ")]
+        expect(
+            len(local_shared) == 1 and local_shared[0].endswith("| low | - |"),
+            "the local row of a shared id reads the registry's record, not the contract's",
+        )
+        expect(
+            len(web_shared) == 1 and f"| - | high | {fresh_date} |" in web_shared[0],
+            "the web row of a shared id reads the contract's record",
+        )
+        reversed_local = [line for line in text.splitlines() if line.startswith("| Shared Web Silent")]
+        reversed_web = [line for line in text.splitlines() if line.startswith("| shared-web-silent ")]
+        expect(
+            len(reversed_local) == 1 and reversed_local[0].endswith(f"| high | {fresh_date} |"),
+            "the qualifier follows the row, not the id: the local row keeps the registry's date",
+        )
+        expect(
+            len(reversed_web) == 1 and "| - | low | - |" in reversed_web[0],
+            "the web row of the reversed pair has no date of its own",
+        )
+        # An override replaces that reading rather than adding to it.
+        override_path = _write_json(
+            os.path.join(tmp, "editorial-override.json"),
+            {"platforms": {"tool-stale": {"dev_priority": "P0", "last_verified": fresh_date}}},
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(fixture_root, editorial=override_path) + ["--no-state"])
+        expect(result.returncode == 0, "the override run exits 0")
+        text = result.stdout
+        expect(
+            f"available · 1 editorial row(s) · 1 with a last_verified date · override file {override_path}" in text,
+            "an override replaces the sources and says so",
+        )
+        expect("verification-stale: " not in text, "the override's fresh date leaves no stale row")
+        expect("no readable last_verified date for" not in text, "rows absent from the override are not reported at all")
 
         # ---------------- case: read-only inputs -------------------------------
         input_paths: dict[str, bytes] = {}
