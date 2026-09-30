@@ -24,8 +24,9 @@ crates/chat-stasher/tests/fixtures/ui-bodies/*.response.txt text eol=lf
 # matter how the texts are recombined — which is what made each merge need an
 # extra worker. Git's merge drivers cannot see the merged tree (see
 # scripts/dev/regenerate-merge-drivers.py), so the merge keeps the current side
-# and the integration tool (scripts/dev/rebase-onto-main.sh) regenerates both
-# files before committing.
+# and the integration step regenerates both files before committing: either
+# scripts/dev/rebase-onto-main.sh, or the manual flow for a direct merge in
+# CONTRIBUTING.md ("Resolving a merge").
 #
 # `merge=regenerate-*` names a driver registered per clone by
 # `scripts/dev/setup-merge-drivers.sh` (git does not read drivers out of the

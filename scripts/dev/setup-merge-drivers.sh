@@ -22,13 +22,25 @@ DRIVER="$ROOT/scripts/dev/regenerate-merge-drivers.py"
   exit 1
 }
 
-git config merge.regenerate-citations.driver \
+# Report success only for a key that was actually set. `set -e` would be the
+# shorter way to fail, but it would also make a failed `git config` (a read-only
+# .git/config, say) exit without naming which key could not be written — and the
+# failure this guards against is a script that prints "registered" and leaves a
+# clone without a driver.
+register() { # key value
+  git config "$1" "$2" || {
+    echo "[setup-merge-drivers] could not set $1" >&2
+    exit 1
+  }
+}
+
+register merge.regenerate-citations.driver \
   "python3 $DRIVER citations %O %A %B"
-git config merge.regenerate-citations.name \
+register merge.regenerate-citations.name \
   "regenerate docs-dev/citations.lock from the merged tree"
-git config merge.regenerate-inventory.driver \
+register merge.regenerate-inventory.driver \
   "python3 $DRIVER inventory %O %A %B"
-git config merge.regenerate-inventory.name \
+register merge.regenerate-inventory.name \
   "regenerate docs-dev/output-inventory.txt from the merged tree"
 
 echo "[setup-merge-drivers] registered regenerate-citations and regenerate-inventory"

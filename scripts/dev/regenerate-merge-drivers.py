@@ -17,11 +17,13 @@ the driver ran.) No per-blob merge driver can see the merged tree.
 
 So the correct behaviour for these files at merge time is: never *stop* the
 merge over a recording, take the current side (disposable — it is exactly the
-thing regeneration replaces), and let the integration tool regenerate. That is
+thing regeneration replaces), and let the integration step regenerate. That is
 what this driver does: it exits 0, which tells git to keep ``%A`` (the current
-branch's version) as the resolution, and ``scripts/dev/rebase-onto-main.sh``
-runs after the merge/rebase resolves and regenerates both files from the merged
-tree before committing.
+branch's version) as the resolution, and the integration step regenerates both
+files from the merged tree before committing. There are two of those, and the
+value the driver leaves behind is only ever corrected by one of them:
+``scripts/dev/rebase-onto-main.sh`` when the branch is rebased, and the manual
+flow in CONTRIBUTING.md ("Resolving a merge") when a merge is landed directly.
 
 The alternative — marking these files so a merge always stops and a human
 regenerates by hand — is precisely the extra rebase worker this removes, and it
@@ -42,8 +44,9 @@ def main(argv: list[str]) -> int:
         return 2
     kind = argv[1]
     print(
-        f"[merge-regenerate] {kind}: resolved from the current side; "
-        "regenerate from the merged tree at integration (rebase-onto-main.sh)",
+        f"[merge-regenerate] {kind}: resolved from the current side; regenerate "
+        'from the merged tree before committing (rebase-onto-main.sh for a rebase, '
+        'CONTRIBUTING.md "Resolving a merge" for a direct merge)',
         file=sys.stderr,
     )
     return 0
