@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,821-988,990-1005`; `crates/chat-stasher/src/main.rs:8246-8511`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1665,1667-1682`; `crates/chat-stasher/src/main.rs:8295-8606`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
