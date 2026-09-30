@@ -25,6 +25,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Run the real binary with every ambient path redirected into `sandbox`.
+///
+/// `%LOCALAPPDATA%` is set beside `HOME` for the reason `w267` spells out: on
+/// Windows the cache root is not a child of `$HOME` at all, so a child given
+/// only `HOME` writes the real user's cache while every path it prints looks
+/// sandboxed. This suite is the one that makes the difference visible, because
+/// the read-only rebuild publishes its **derived index** into exactly that
+/// cache: with the root left ambient, the two read-only tests below resolve one
+/// path outside both of their sandboxes and race to replace it, and the loser's
+/// `tempfile::persist` returns `Access is denied` — which is what made this
+/// suite red on `windows-latest` while every other platform stayed green.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");
     let registry = sandbox.join("registry.json");
@@ -38,6 +48,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
@@ -63,6 +74,30 @@ fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
         .join("000");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("000001.jsonl"), lines.join("\n") + "\n").unwrap();
+}
+
+/// The `config.toml` a sandbox's child loads: the machine that owns this
+/// sandbox, and one `fixture` destination.
+///
+/// Every value goes in a TOML **literal** string (`'…'`), not a basic one. A
+/// basic string treats `\` as its escape character, so the `"C:\…"` a Windows
+/// `Path::display()` produces is not valid TOML at all: it parses only because
+/// the loader recovers it and prints an unescaped-backslash warning. A fixture
+/// must not lean on the recovery path — it would make the Windows run load a
+/// config by a route the unix run never takes, and it would put a warning on
+/// the stderr of every Windows test that reads it.
+fn write_sandbox_config(sandbox: &Path, machine: &str, repo: &Path, key: &Path) {
+    let config_dir = sandbox.join("config").join("chat-stasher");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "machine = '{machine}'\n\n[destinations.fixture]\nrepo = '{}'\nkey_file = '{}'\n",
+            repo.display(),
+            key.display()
+        ),
+    )
+    .unwrap();
 }
 
 fn store_config(repo: &Path, key: &Path) -> StoreConfig {
@@ -141,6 +176,25 @@ fn reported(stdout: &str, label: &str) -> Option<String> {
     })
 }
 
+/// The derived index a read-only rebuild reports must be written **inside** the
+/// sandbox it was given.
+///
+/// The file is a cache under the platform cache root, and that root is not
+/// derived from `$HOME` on every platform: on Windows it is `%LOCALAPPDATA%`, so
+/// a child handed `HOME` alone publishes to the real user's cache and every path
+/// the run prints still looks sandboxed. Asserting containment is what turns
+/// that escape into this suite's own failure instead of a driver-side accident —
+/// with two tests resolving the one ambient path, the race for it is what
+/// actually surfaced on `windows-latest`, and a run that lost no race would have
+/// stayed green while reading and writing the runner's real cache.
+fn assert_derived_is_sandboxed(sandbox: &Path, derived: &str) {
+    assert!(
+        Path::new(derived).starts_with(sandbox),
+        "the derived index must be written inside the sandbox, not to the real \
+         user's cache: {derived}"
+    );
+}
+
 /// Every row of a JSONL activity index, keyed by session id.
 fn index_rows(path: &Path) -> BTreeMap<String, serde_json::Value> {
     let raw = fs::read_to_string(path).expect("the derived index must be readable");
@@ -207,17 +261,7 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
 
     // A config naming THIS machine's partition, so the rebuild of `lost` is
     // another machine's partition and must take the read-only path.
-    let config_dir = sandbox.join("config").join("chat-stasher");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            "machine = \"{here}\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
-            repo.display(),
-            key.display()
-        ),
-    )
-    .unwrap();
+    write_sandbox_config(sandbox, here, &repo, &key);
 
     // No `--stage`: the whole point is that the source machine's stage is not
     // needed, and neither is any other.
@@ -240,6 +284,7 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
     );
 
     let derived = reported(&stdout, "derived").expect("stdout names the derived index");
+    assert_derived_is_sandboxed(sandbox, &derived);
     let derived = PathBuf::from(derived);
     let rows = index_rows(&derived);
 
@@ -310,17 +355,7 @@ fn own_machine_archive(sandbox: &Path) -> (PathBuf, PathBuf, String) {
         .push(&stage, &mk)
         .unwrap();
 
-    let config_dir = sandbox.join("config").join("chat-stasher");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            "machine = \"{machine}\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
-            repo.display(),
-            key.display()
-        ),
-    )
-    .unwrap();
+    write_sandbox_config(sandbox, machine, &repo, &key);
     (repo, key, session)
 }
 
@@ -362,6 +397,7 @@ fn the_current_machine_with_no_stage_rebuilds_read_only() {
     // The real conversation span, derived from the archive and published to a
     // local derived index rather than into the machine's partition.
     let derived = reported(&stdout, "derived").expect("stdout names the derived index");
+    assert_derived_is_sandboxed(sandbox, &derived);
     assert!(
         Path::new(&derived).is_file(),
         "the derived index must exist at {derived}"
@@ -427,6 +463,7 @@ fn the_current_machine_with_a_missing_stage_rebuilds_read_only() {
     );
 
     let derived = reported(&stdout, "derived").expect("stdout names the derived index");
+    assert_derived_is_sandboxed(sandbox, &derived);
     let rows = index_rows(Path::new(&derived));
     let row = rows
         .get(&session)
@@ -467,17 +504,7 @@ fn a_machine_the_destination_does_not_hold_is_an_error_not_an_empty_index() {
         .push(&stage, &mk)
         .unwrap();
 
-    let config_dir = sandbox.join("config").join("chat-stasher");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            "machine = \"mbp-here\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
-            repo.display(),
-            key.display()
-        ),
-    )
-    .unwrap();
+    write_sandbox_config(sandbox, "mbp-here", &repo, &key);
 
     let out = run(
         sandbox,
