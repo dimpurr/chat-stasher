@@ -892,6 +892,34 @@ mod index_tests {
         assert_eq!(set.matches[0].id, "m-1/only-a");
     }
 
+    /// A query the trigram tokenizer cannot evaluate is refused by *every*
+    /// copy, so the merged answer has to be that refusal — not the zero-hit
+    /// merge of two indexes that each had nothing to add.
+    ///
+    /// A guard rather than a fix's regression test: this path already carried
+    /// `TooShort` through when the CLI was collapsing it into `matched=0`
+    /// (W274), and the merge is the one search path with no test of its own.
+    /// Deleting the `if matches.is_empty()` fallback in `query` — the block that
+    /// asks one usable index whether the query was answerable at all — turns it
+    /// red.
+    #[test]
+    fn a_short_query_is_refused_by_the_merge_not_merged_into_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = index(&dir.path().join("a"), &[("m-1/one", "a hedgehog appears")]);
+        let b = index(&dir.path().join("b"), &[("m-1/two", "another hedgehog")]);
+        let merged =
+            MergedTextIndex::new(vec![("alpha".into(), Some(a)), ("beta".into(), Some(b))]);
+
+        match merged.query("ke").unwrap() {
+            QueryResult::TooShort(short) => assert_eq!(
+                (short.chars, short.minimum),
+                (2, 3),
+                "the refusal carries the two numbers a reader is told"
+            ),
+            other => panic!("a query the tokenizer cannot evaluate is not an answer: {other:?}"),
+        }
+    }
+
     /// One destination's index holding `docs` as `(id, readable)`.
     fn index_marking(root: &std::path::Path, docs: &[(&str, Option<&str>)]) -> Index {
         let index = Index::at(root.to_path_buf());
