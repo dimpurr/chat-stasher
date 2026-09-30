@@ -4606,6 +4606,15 @@ fn search_human(report: &chat_stasher::search::SearchReport, cost: bool) -> Exit
             "  <-- the rest were not looked at, so a miss proves nothing"
         }
     );
+    // SRCH-1B: of the snapshots accounted for above, how many were answered
+    // from the local session cache. It is a count of *this run* — the same
+    // destination reports a different number on a cold cache, a warm one and
+    // with no cache at all — which is exactly why it is printed rather than
+    // folded into the count above it.
+    println!(
+        "[search] snapshots from cache: {}",
+        report.snapshots_from_cache
+    );
     println!("[search] sessions seen: {}", report.sessions_seen);
     println!("[search] data blobs read: {}", report.data_blobs_read);
     println!("[search] index files read: {}", report.index_files_read);

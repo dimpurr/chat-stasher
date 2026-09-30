@@ -1061,9 +1061,30 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
     let json = |text: &str| -> serde_json::Value {
         serde_json::from_str(text).unwrap_or_else(|e| panic!("not one JSON object ({e}):\n{text}"))
     };
+    // The answer, with the one field that is a property of the *run* rather
+    // than of the archive removed: `snapshots_from_cache` says what the cache
+    // served, so the three runs must differ in exactly that and agree on
+    // everything else. It is asserted on its own below, so it cannot become the
+    // field a real difference hides behind.
+    let answer = |mut value: serde_json::Value| -> serde_json::Value {
+        assert!(
+            value.get("snapshots_from_cache").is_some(),
+            "the report must say how many snapshots came from the cache: {value}"
+        );
+        value
+            .as_object_mut()
+            .expect("a report is one JSON object")
+            .remove("snapshots_from_cache");
+        value
+    };
     let cold_json = json(&cold.stdout);
     let rustic_json = json(&rustic.stdout);
     let warm_json = json(&warm.stdout);
+    let (cold_answer, rustic_answer, warm_answer) = (
+        answer(cold_json.clone()),
+        answer(rustic_json.clone()),
+        answer(warm_json.clone()),
+    );
     let (cold_ms, cold_bytes, cold_rx, cold_ssh) = (
         cold.ms,
         cold.link_bytes,
@@ -1089,8 +1110,11 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
          [W271-sftp]   cold (nothing cached)      = {cold_ms}ms · {cold_bytes} B · {cold_rx} responses · {cold_ssh} ssh connections\n\
          [W271-sftp]   rustic cache warm only     = {rustic_ms}ms · {rustic_bytes} B · {rustic_rx} responses · {rustic_ssh} ssh connections\n\
          [W271-sftp]   snapshot cache warm        = {warm_ms}ms · {warm_bytes} B · {warm_rx} responses · {warm_ssh} ssh connections\n\
-         [W271-sftp]   scanned {} of {} snapshots in every run; cold->warm {:.1}x, rustic-only->warm {:.1}x",
+         [W271-sftp]   scanned {} of {} snapshots in every run; from_cache {} / {} / {}; \
+         cold->warm {:.1}x, rustic-only->warm {:.1}x",
         cold_json["snapshots_scanned"], cold_json["snapshots_in_repo"],
+        cold_json["snapshots_from_cache"], rustic_json["snapshots_from_cache"],
+        warm_json["snapshots_from_cache"],
         cold_ms as f64 / warm_ms.max(1) as f64,
         rustic_ms as f64 / warm_ms.max(1) as f64,
     );
@@ -1098,12 +1122,22 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
     // The answer is the same in every run — a cache may change the cost, never
     // the result.
     assert_eq!(
-        cold_json, warm_json,
+        cold_answer, warm_answer,
         "the cold and warm runs must report the same search"
     );
     assert_eq!(
-        cold_json, rustic_json,
+        cold_answer, rustic_answer,
         "the middle run differs only in what was cached, never in what it found"
+    );
+    // And what each run says it served, which is the only thing that may differ:
+    // cold and the emptied-cache run served nothing, and the warm one was
+    // answered by the entries the runs before it wrote.
+    assert_eq!(cold_json["snapshots_from_cache"], serde_json::json!(0));
+    assert_eq!(rustic_json["snapshots_from_cache"], serde_json::json!(0));
+    assert_eq!(
+        warm_json["snapshots_from_cache"],
+        serde_json::json!(W271_SNAPSHOTS as u64),
+        "every snapshot is answered from the cache on the warm run, and the report says so"
     );
     assert_eq!(
         cold_json["snapshots_in_repo"].as_u64(),

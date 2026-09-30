@@ -58,7 +58,16 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1457-1665,1667-1682`; `crates/chat-stasher/src/main.rs:7823-8134`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:7832-8143`).
+- **The snapshot session cache is plaintext too, but holds identifiers rather
+  than text.** A repeated `search` keeps each snapshot's session list — session
+  ids, the machine partition, shard counts and byte sizes — in a
+  destination-scoped cache under the operating-system cache directory, so a
+  repeat search does not walk every snapshot again. No conversation text and no
+  decrypted byte is stored, the root and its files are owner-only (0700 and
+  0600, the same as the index), and deleting the directory costs nothing but the
+  next search's speed: no part of the archive depends on it
+  (`crates/chat-stasher/src/snapshot_cache.rs:1-66`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the

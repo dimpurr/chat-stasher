@@ -550,6 +550,7 @@ fn report_json_and_no_hit_line_distinguish_a_partial_scan() {
         destination: "opendal:sftp".to_string(),
         snapshots_in_repo: 417,
         snapshots_scanned: 3,
+        snapshots_from_cache: 0,
         sessions_seen: 4041,
         window: None,
         hits: Vec::new(),
@@ -581,6 +582,7 @@ fn report_json_and_no_hit_line_distinguish_a_partial_scan() {
     // The same report with every snapshot walked *is* allowed to answer.
     let complete = SearchReport {
         snapshots_scanned: 417,
+        snapshots_from_cache: 0,
         ..partial
     };
     assert!(complete.scanned_all_snapshots());

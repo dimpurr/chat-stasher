@@ -28,6 +28,15 @@
 //! 4. `an_unreadable_snapshot_stays_unreadable_with_a_cache` — the newest
 //!    snapshot's packs are deleted, so its tree cannot be walked. Cached or not,
 //!    the answer must stay "we did not finish reading this destination".
+//! 5. `a_pack_lost_after_the_cache_was_written_is_not_answered_from_it` — the
+//!    same damage, but done **after** a run has filled the cache. An entry says
+//!    what a snapshot held; it does not say the destination can still read it,
+//!    and no entry may be allowed to stand in for a walk that would fail.
+//!
+//! The one field every comparison here leaves out is `snapshots_from_cache`: it
+//! counts what the cache served, so a cold run and a warm run *must* differ
+//! there, and comparing answers means comparing everything else. It is asserted
+//! separately in each test, so a difference cannot hide behind it.
 //!
 //! Everything is synthetic and local (temp dirs, generated payload): no real
 //! conversation, account or hostname appears. Only counts, sizes and session id
@@ -122,6 +131,29 @@ fn uncached(cfg: &StoreConfig) -> BackupStore {
 /// verdict are all in it, so comparing it is comparing the answer.
 fn json(report: &SearchReport) -> String {
     report_json(report, false)
+}
+
+/// The answer, with the one field that describes the **run** rather than the
+/// archive taken out.
+///
+/// `snapshots_from_cache` counts what the cache served, so a cold run, a warm
+/// run and a run with no cache at all report different numbers there and the
+/// same answer for everything else. It is removed here and asserted on its own
+/// in every test that compares two reports, so it can never be the field a real
+/// difference hides behind — and it is asserted to be *present*, so a report
+/// that stopped saying it cannot pass by being quiet.
+fn answer(report: &SearchReport) -> serde_json::Value {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&json(report)).expect("a report is one JSON object");
+    assert!(
+        value.get("snapshots_from_cache").is_some(),
+        "the report must say how many snapshots came from the cache: {value}"
+    );
+    value
+        .as_object_mut()
+        .expect("a report is one JSON object")
+        .remove("snapshots_from_cache");
+    value
 }
 
 /// The entry file for `snapshot_id`, wherever this cache puts it.
@@ -266,25 +298,45 @@ fn cached_and_uncached_searches_agree() {
 
     println!(
         "[W271] json equality: uncached={} B, cold-cached={} B, warm-cached={} B; \
-         sessions_seen={} scanned={}/{} hits={}",
+         sessions_seen={} scanned={}/{} from_cache={}/{}/{} hits={}",
         json(&plain).len(),
         json(&cold).len(),
         json(&warm).len(),
         warm.sessions_seen,
         warm.snapshots_scanned,
         warm.snapshots_in_repo,
+        plain.snapshots_from_cache,
+        cold.snapshots_from_cache,
+        warm.snapshots_from_cache,
         warm.hits.len()
     );
 
     assert_eq!(
-        json(&cold),
-        json(&plain),
+        answer(&cold),
+        answer(&plain),
         "a cold cache must return exactly the uncached answer"
     );
     assert_eq!(
-        json(&warm),
-        json(&plain),
+        answer(&warm),
+        answer(&plain),
         "a warm cache must return exactly the uncached answer"
+    );
+    // And the count that *is* allowed to differ, asserted rather than ignored:
+    // a cache that was never consulted would otherwise pass both comparisons
+    // above without ever having served anything.
+    assert_eq!(
+        plain.snapshots_from_cache, 0,
+        "an uncached run has no cache"
+    );
+    assert_eq!(cold.snapshots_from_cache, 0, "a cold cache serves nothing");
+    assert_eq!(
+        warm.snapshots_from_cache, 2,
+        "a warm run is answered from the cache, and says so"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json(&warm)).unwrap()["snapshots_from_cache"],
+        serde_json::json!(2),
+        "and the --json report must carry it, not just the report struct"
     );
 
     // The numbers the answer is built from, asserted directly so a change to
@@ -342,8 +394,8 @@ fn an_entry_for_a_pruned_snapshot_is_dropped() {
     assert_eq!(warm.snapshots_in_repo, 1, "the pruned listing");
     assert_eq!(plain.sessions_seen, 2, "the pruned archive holds two");
     assert_eq!(
-        json(&warm),
-        json(&plain),
+        answer(&warm),
+        answer(&plain),
         "the warm run must answer for the archive that is there now"
     );
     assert!(
@@ -406,8 +458,8 @@ fn a_damaged_entry_is_rebuilt_and_never_trusted() {
 
     assert_eq!(f.cache.corrupt(), 1, "the damaged entry must be rejected");
     assert_eq!(
-        json(&warm),
-        json(&plain),
+        answer(&warm),
+        answer(&plain),
         "a damaged entry must be rebuilt, never trusted"
     );
     assert_eq!(warm.hits.len(), 3);
@@ -482,8 +534,8 @@ fn an_unreadable_snapshot_stays_unreadable_with_a_cache() {
     assert!(!cold.complete(), "a partial reading is not a finished one");
 
     assert_eq!(
-        json(&warm),
-        json(&plain),
+        answer(&warm),
+        answer(&plain),
         "a cache must not turn an unreadable snapshot into a readable one"
     );
     assert_eq!(warm.snapshots_scanned, 1);
@@ -502,6 +554,92 @@ fn an_unreadable_snapshot_stays_unreadable_with_a_cache() {
     assert!(
         !entry_present_for(&cache, &cold),
         "no entry may be written for a snapshot that could not be read"
+    );
+}
+
+/// A pack lost **after** the cache was written must not be answered from it.
+///
+/// This is the direction the test above cannot reach: there the damage is done
+/// first, so no entry for the damaged snapshot is ever written, and a cache
+/// that trusted its own bytes would pass it. Here every snapshot is walked and
+/// cached while the archive is healthy, and only then does the destination lose
+/// its packs.
+///
+/// A snapshot's id proves its *contents* cannot change. It says nothing about
+/// whether the destination still holds them, and the uncached path answers that
+/// question by failing: its walk cannot fetch a tree, so the snapshot lands in
+/// `unreadable` and the answer comes back partial. A hit accepted on the
+/// strength of its own bytes would report the same archive as complete — a
+/// wrong answer, not a slower one, and the one thing this cache may never do.
+/// The failure it must reach instead is the same one, in the same words, that
+/// the uncached run gives.
+#[test]
+fn a_pack_lost_after_the_cache_was_written_is_not_answered_from_it() {
+    let f = fixture();
+
+    // 1 · a healthy run fills the cache: both snapshots are walked and written.
+    let cold = f.search_cached();
+    assert_eq!(cold.snapshots_scanned, 2, "both snapshots were walked");
+    assert_eq!(cold.snapshots_from_cache, 0, "nothing was cached yet");
+    assert!(cold.answer_complete(), "the archive is readable so far");
+    for host in &cold.hosts {
+        assert!(
+            entry_path(&f.cache, &host.snapshot_id).exists(),
+            "every snapshot has an entry before the damage"
+        );
+    }
+
+    // 2 · the destination loses every pack it holds. Nothing recreates them;
+    //     the snapshot files, the key and the index files are all still there,
+    //     which is exactly what a partially lost destination looks like.
+    let packs = pack_files(&f.repo());
+    assert!(!packs.is_empty(), "the fixture wrote no packs");
+    for pack in &packs {
+        fs::remove_file(pack).unwrap();
+    }
+
+    // 3 · the warm run must answer what the archive is *now*: unreadable on
+    //     every snapshot, from the cache or not.
+    let warm = f.search_cached();
+    let plain = f.search_uncached();
+
+    println!(
+        "[W271] every pack removed after a warm cache: \
+         warm scanned={}/{} unreadable={} from_cache={} ; \
+         uncached scanned={}/{} unreadable={}",
+        warm.snapshots_scanned,
+        warm.snapshots_in_repo,
+        warm.unreadable.len(),
+        warm.snapshots_from_cache,
+        plain.snapshots_scanned,
+        plain.snapshots_in_repo,
+        plain.unreadable.len()
+    );
+
+    assert_eq!(
+        answer(&warm),
+        answer(&plain),
+        "a cache must not answer for a destination that can no longer be read"
+    );
+    assert_eq!(
+        warm.snapshots_scanned, 0,
+        "no snapshot could be walked, so none was accounted for"
+    );
+    assert_eq!(
+        warm.snapshots_from_cache, 0,
+        "an entry whose trees are gone is not an answer"
+    );
+    assert_eq!(
+        warm.unreadable.len(),
+        warm.snapshots_in_repo,
+        "every snapshot is reported as unreadable, not silently skipped"
+    );
+    assert!(!warm.complete());
+    assert!(!warm.answer_complete());
+    assert_eq!(
+        warm.sessions_seen, 0,
+        "and the sessions the entries still name are NOT reported: they are \
+         exactly what a cache trusting itself would have answered with"
     );
 }
 
@@ -626,9 +764,13 @@ fn field_scale_cold_against_warm_over_four_hundred_snapshots() {
     assert_eq!(plain.hits.len(), SESSIONS);
     assert_eq!(warm.hits.len(), SESSIONS);
     assert_eq!(
-        json(&warm),
-        json(&plain),
+        answer(&warm),
+        answer(&plain),
         "417 snapshots answered from the cache must equal 417 snapshots walked"
+    );
+    assert_eq!(
+        warm.snapshots_from_cache, SNAPSHOTS,
+        "every one of them is answered from the cache, and the report says so"
     );
     assert_eq!(
         cold_hits, 0,

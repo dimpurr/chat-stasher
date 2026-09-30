@@ -26,11 +26,21 @@
 //! The rules this cache is built on:
 //!
 //! * **It can never change an answer.** A hit is only ever accepted for a
-//!   snapshot the repository still lists, and it replaces a walk that would have
-//!   produced the same buckets. Every entry is length- and SHA-256-checked on
-//!   the way in; a file that fails either check is deleted and the snapshot is
-//!   walked again. A corrupt cache costs speed, never correctness — the same
-//!   contract [`crate::body_cache`] states for conversation bodies.
+//!   snapshot the repository still lists **and can still read**, and it replaces
+//!   a walk that would have produced the same buckets. Every entry is length-
+//!   and SHA-256-checked on the way in; a file that fails either check is
+//!   deleted and the snapshot is walked again. A corrupt cache costs speed,
+//!   never correctness — the same contract [`crate::body_cache`] states for
+//!   conversation bodies.
+//!
+//!   "Can still read" is a second question, and answering it is why an entry
+//!   carries [`SnapshotEntry::trees`]: a snapshot id proves its *contents*
+//!   cannot change, not that the packs holding them are still in the
+//!   destination. A hit whose trees are no longer in the repository's index, or
+//!   whose packs are no longer listed, is not used — the snapshot is walked,
+//!   exactly as it would have been without this cache, and the walk reports
+//!   whatever is really wrong in its own words. The check itself is metadata
+//!   only: no tree and no shard is downloaded to make it.
 //! * **It is disposable.** Losing the whole directory changes nothing but
 //!   timing. Nothing in the archive depends on it, and it is never inside the
 //!   archive.
@@ -83,8 +93,13 @@ const ID_HEX_LEN: usize = 64;
 ///
 /// A body carrying anything else is a miss, not a parse attempt: a future
 /// format must be free to change a field's meaning without this one silently
-/// reading the old bytes under the new rules.
-const BODY_VERSION: u32 = 1;
+/// reading the old bytes under the new rules. Version 2 added [`SnapshotEntry::trees`]
+/// — without it a hit could not be judged against the repository's own index,
+/// which is the whole of what makes a hit admissible (see [`SnapshotEntry`]).
+/// Entries written as version 1 are therefore rebuilt rather than upgraded:
+/// they carry no tree list, so nothing could prove them still readable, and a
+/// cache that cannot prove that is not allowed to answer at all.
+const BODY_VERSION: u32 = 2;
 
 /// Name of the marker file that says a directory is **this cache's** root.
 ///
@@ -143,6 +158,25 @@ pub struct SnapshotEntry {
     pub sessions: Vec<CachedSession>,
     /// Sorted by `(machine, path)`.
     pub index_files: Vec<CachedIndexFile>,
+    /// Every tree blob a walk of this snapshot reads, hex, sorted: the
+    /// snapshot's own tree root and the subtree of every directory below it.
+    ///
+    /// This is what makes a hit admissible rather than merely remembered. An
+    /// entry says what the snapshot **held**, and a snapshot's id says that can
+    /// never change — but neither says the repository can still *read* it. A
+    /// pack can be lost from a destination after the entry was written, and the
+    /// uncached path reports exactly that as an unreadable snapshot: a walk
+    /// fails on the first tree it cannot fetch, and the answer comes back
+    /// partial. A cache that answered from its own bytes alone would report the
+    /// same archive as complete, which is the one thing this cache may never do
+    /// (CLAUDE.md invariant 1: an unknown must never be recorded as empty).
+    ///
+    /// With the list here, a hit can be judged the way a walk would decide it,
+    /// from metadata only: every one of these ids must still be in the
+    /// repository's index, and the pack the index puts it in must still be in
+    /// the destination's pack listing. No tree, and no shard, is fetched to
+    /// ask — see `search::TreeAvailability`, which asks it.
+    pub trees: Vec<String>,
 }
 
 impl SnapshotEntry {
@@ -151,12 +185,14 @@ impl SnapshotEntry {
         snapshot: &str,
         sessions: Vec<CachedSession>,
         index_files: Vec<CachedIndexFile>,
+        trees: Vec<String>,
     ) -> Self {
         SnapshotEntry {
             v: BODY_VERSION,
             snapshot: snapshot.to_string(),
             sessions,
             index_files,
+            trees,
         }
     }
 }
@@ -282,10 +318,10 @@ impl SnapshotCache {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        create_dirs_private(parent).with_context(|| format!("create {}", parent.display()))?;
         let staging = parent.join(format!(".tmp-{}-{}", std::process::id(), next_temp_seq()));
-        fs::create_dir(&staging).with_context(|| format!("create {}", staging.display()))?;
-        fs::write(staging.join(MARKER_NAME), MARKER_CONTENTS)
+        create_dir_private(&staging).with_context(|| format!("create {}", staging.display()))?;
+        private_file(&staging.join(MARKER_NAME), MARKER_CONTENTS)
             .with_context(|| format!("write {MARKER_NAME} in {}", staging.display()))?;
         match fs::rename(&staging, &self.root) {
             Ok(()) => Ok(()),
@@ -475,8 +511,13 @@ fn write_entry(path: &Path, payload: &[u8]) -> std::io::Result<()> {
     // Dot-prefixed and pid-suffixed: dot-prefixed so a walk of the root cannot
     // mistake it for an entry, pid-suffixed so two processes never share one.
     let candidate = parent.join(format!(".tmp-{}-{}", std::process::id(), next_temp_seq()));
-    let mut file = File::create(&candidate)?;
+    let mut file = create_private_file(&candidate)?;
     file.write_all(payload)?;
+    // Set here and not only at creation: these bytes are a session list in
+    // plaintext, and a temp file this process inherited with looser bits would
+    // otherwise be the mode the entry ends up with, since the rename carries
+    // the inode across.
+    set_file_private(&candidate)?;
     drop(file);
     match fs::rename(&candidate, path) {
         Ok(()) => Ok(()),
@@ -513,13 +554,26 @@ fn encode(body: &[u8]) -> Vec<u8> {
 /// The digest is checked, not merely stored: this is the check that makes a
 /// damaged file a miss rather than a wrong answer, because the bytes that reach
 /// the parser are the bytes that were verified.
+///
+/// The declared length is a number **this file chose**, so it is arithmetic on
+/// untrusted input and is done with checked operations: a length that does not
+/// fit a `usize`, or that runs past the end of what was read, is a rejection —
+/// never a panic, and never a slice. The body must also end exactly at the end
+/// of the file: a file with bytes after the body is not the file this cache
+/// wrote, and the digest covers the body alone, so accepting one would let an
+/// unverified tail ride along inside a verified entry.
 fn decode(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < ENTRY_HEADER_LEN || raw[..8] != ENTRY_MAGIC {
         return None;
     }
-    let len = u64::from_le_bytes(raw[8..16].try_into().ok()?) as usize;
+    let declared = u64::from_le_bytes(raw[8..16].try_into().ok()?);
+    let len = usize::try_from(declared).ok()?;
+    let end = ENTRY_HEADER_LEN.checked_add(len)?;
+    if end != raw.len() {
+        return None;
+    }
     let expected = &raw[16..48];
-    let body = raw.get(ENTRY_HEADER_LEN..ENTRY_HEADER_LEN + len)?;
+    let body = raw.get(ENTRY_HEADER_LEN..end)?;
     if Sha256::digest(body).as_slice() != expected {
         return None;
     }
@@ -528,6 +582,112 @@ fn decode(raw: &[u8]) -> Option<Vec<u8>> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---- owner-only permissions -----------------------------------------------
+//
+// An entry is a **plaintext** list of session ids, machine ids and archived
+// stage paths — the same class of material the FTS index holds, and it is made
+// owner-only for the same reason. The mode is asked for explicitly at creation
+// and then set again, because a mode asked for at creation is filtered through
+// the process umask (so `0o600` under `umask 022` is `0o600` but under a umask
+// that strips owner bits is not what was asked for), and because a file that
+// already exists is not re-created by `create`.
+//
+// On a platform with no mode bits these are no-ops: the property does not exist
+// there, and the OS cache directory the root lives under is already the user's
+// own. See `crate::fts`, which states the same for the index database.
+
+#[cfg(unix)]
+fn set_file_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_file_private(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_dir_private(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Create one directory, owner-only.
+///
+/// `mode` is passed to `mkdir`, so the umask gets a say in it — which is why
+/// the mode is set on the result as well, exactly as for a file.
+#[cfg(unix)]
+fn create_dir_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    set_dir_private(path)
+}
+
+#[cfg(not(unix))]
+fn create_dir_private(path: &Path) -> std::io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// Create `path` and every missing directory above it, each owner-only.
+///
+/// `create_dir_all` cannot do this: it makes every component with the umask's
+/// mode, so the cache's own directories would be as readable as the machine's
+/// default. Only the components this call creates are given a mode — a
+/// directory that is already there (`~/.cache`, say) is left exactly as it is,
+/// because it is not this cache's to change.
+fn create_dirs_private(path: &Path) -> std::io::Result<()> {
+    let mut missing: Vec<&Path> = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        missing.push(dir);
+        cursor = dir.parent();
+    }
+    // Topmost first, so each level is created inside one that already exists.
+    for dir in missing.iter().rev() {
+        match create_dir_private(dir) {
+            Ok(()) => {}
+            // Another process created it between the check above and now: the
+            // same race `ensure_root`'s rename handles, and not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Create `path` for writing, owner-only from the first byte.
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    File::create(path)
+}
+
+/// Write `contents` to `path`, owner-only.
+fn private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut file = create_private_file(path)?;
+    file.write_all(contents)?;
+    set_file_private(path)
 }
 
 #[cfg(test)]
@@ -552,6 +712,11 @@ mod tests {
                 machine: "m".to_string(),
                 path: "/stage/meta/m/activity-v1.jsonl".to_string(),
             }],
+            // Two trees, because a snapshot's walk reads its root and at least
+            // one directory under it — the shape every entry this cache writes
+            // has, so the round-trip test above is a round trip of the real
+            // thing.
+            vec![id(0x01), id(0x02)],
         )
     }
 
@@ -682,5 +847,113 @@ mod tests {
         let mut wrong_len = good.clone();
         wrong_len[8] = wrong_len[8].wrapping_add(1);
         assert!(decode(&wrong_len).is_none());
+    }
+
+    /// A file with bytes after the declared body is not an entry, even though
+    /// its body alone verifies.
+    ///
+    /// The digest is over the body and the length says where the body ends, so
+    /// a tail is bytes nothing here verified — the exact-file integrity claim
+    /// is that an accepted file is one this cache wrote, from its first byte to
+    /// its last.
+    #[test]
+    fn decode_rejects_a_trailing_byte() {
+        let body = b"hello";
+        let mut raw = encode(body);
+        assert!(decode(&raw).as_deref() == Some(&body[..]));
+        raw.push(0x00);
+        assert!(
+            decode(&raw).is_none(),
+            "a body that verifies with bytes after it is not a file this cache wrote"
+        );
+        // The same tail, and a length that was grown to cover it: now the
+        // digest is the thing that fails, so neither route admits it.
+        let mut grown = encode(body);
+        grown[8] = 6;
+        grown.push(0x00);
+        assert!(decode(&grown).is_none());
+    }
+
+    /// A length that cannot be an address is rejected rather than added to the
+    /// header length.
+    ///
+    /// Nothing checks the declared length before it is used, so a file that
+    /// says it carries `u64::MAX` bytes must come back as a miss. On a 64-bit
+    /// machine the addition itself is what would wrap, which is the panic this
+    /// pins; on a 32-bit one the conversion refuses first. Either way the
+    /// caller sees a miss and rebuilds — never a crash, and never an entry
+    /// parsed from a body that was never there.
+    #[test]
+    fn decode_rejects_a_length_that_is_not_an_address() {
+        let body = b"hello";
+        let mut raw = encode(body);
+        raw[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(decode(&raw).is_none(), "an impossible length is a miss");
+        // The header length itself, so the sum is exactly one past the end of
+        // what `usize` can hold on any platform that can hold this file.
+        raw[8..16].copy_from_slice(&(usize::MAX as u64).to_le_bytes());
+        assert!(decode(&raw).is_none());
+        // And the largest length that can still be added to the header without
+        // wrapping, which is simply more bytes than are present.
+        raw[8..16].copy_from_slice(&((usize::MAX - ENTRY_HEADER_LEN) as u64).to_le_bytes());
+        assert!(decode(&raw).is_none());
+    }
+
+    /// The root, the marker and an entry file are owner-only.
+    ///
+    /// The entry file is checked after a rewrite too, which is the case a mode
+    /// asked for only at creation would miss: `create` does not re-mode a file
+    /// that is already there, and `write_entry` writes into a name this process
+    /// chose but a previous run may have left behind.
+    ///
+    /// The property is POSIX mode bits, so it exists on unix and does not exist
+    /// on Windows, where the OS cache directory is already the user's own and
+    /// the platform's ACLs come from there. That is stated rather than silently
+    /// skipped: there is nothing to assert on the other side, not a second
+    /// behaviour that is being left untested.
+    #[cfg(unix)]
+    #[test]
+    fn the_root_the_marker_and_entries_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // A directory that is already there with bits this cache did not choose
+        // — `~/.cache`, and everything above it — and, below it, the two
+        // levels this cache does create.
+        let existing = dir.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+        let cache = SnapshotCache::at(existing.join("a").join("snapshots"));
+        let snapshot = id(0x5a);
+        cache.store(&entry(&snapshot)).unwrap();
+
+        assert_eq!(mode(cache.root()), 0o700, "the cache root is owner-only");
+        assert_eq!(
+            mode(&cache.root().join(MARKER_NAME)),
+            0o600,
+            "the marker is owner-only"
+        );
+        let entry_file = cache.root().join(format!("{snapshot}{ENTRY_SUFFIX}"));
+        assert_eq!(mode(&entry_file), 0o600, "an entry is owner-only");
+
+        // A stale entry file with loose bits must be tightened by the rewrite
+        // rather than inherited: this is the `create` on an existing name.
+        fs::set_permissions(&entry_file, fs::Permissions::from_mode(0o644)).unwrap();
+        cache.store(&entry(&snapshot)).unwrap();
+        assert_eq!(
+            mode(&entry_file),
+            0o600,
+            "a rewrite must leave the entry owner-only"
+        );
+
+        // The intermediate directory the cache created is owner-only, and the
+        // one that was already there is exactly as it was left.
+        assert_eq!(mode(&existing.join("a")), 0o700);
+        assert_eq!(
+            mode(&existing),
+            0o755,
+            "a directory this cache did not create must not be changed"
+        );
     }
 }

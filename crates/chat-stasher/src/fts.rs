@@ -1494,10 +1494,31 @@ impl Index {
         connection
             .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
             .context("configure the FTS index database")?;
-        if existed {
-            validate_schema(&connection)?;
-        } else {
+        // `existed` is the wrong question to decide this on, and it is the one
+        // this used to ask. It is sampled *before* `Connection::open` below,
+        // and another process creating the same index makes the two disagree:
+        // the file is there as soon as the first creator opens it, and holds no
+        // `index_meta` until that creator's transaction commits. For the second
+        // creator `existed` is then true, and validating a schema that is still
+        // being written fails with `no such table: index_meta` — reported as a
+        // build that did not finish, over an index its sibling was building.
+        // `every_parallel_build_of_one_destination_finishes` reaches this on
+        // `ubuntu-latest` and `windows-latest` both.
+        //
+        // The database is asked instead, after it is open: an index with no
+        // `index_meta` table is one whose schema has not been created yet —
+        // whether by this process or by a sibling still inside its transaction.
+        // `create_schema` is idempotent and takes the write lock immediately,
+        // so it adopts a schema a sibling has since committed and waits for one
+        // still in flight. A file that is some *other* SQLite database has
+        // tables, so it takes the validating path and is refused exactly as
+        // before — as is a file that is not a database at all, which this
+        // reports as "not yet created" only so that `validate_schema` can name
+        // what is really wrong with it.
+        if !existed || schema_is_absent(&connection) {
             create_schema(&connection)?;
+        } else {
+            validate_schema(&connection)?;
         }
 
         // `BEGIN IMMEDIATE`, not the deferred default: this transaction reads
@@ -1827,6 +1848,28 @@ fn create_schema(connection: &Connection) -> Result<()> {
     .context("record the FTS index schema version")?;
     tx.commit().context("commit the FTS index schema")?;
     Ok(())
+}
+
+/// Whether an open database holds no `index_meta` table, i.e. no schema of
+/// ours has been created in it yet.
+///
+/// Asked of the database rather than of the filesystem because the two disagree
+/// exactly when it matters: a sibling process creating this index has the file
+/// open, and therefore present, while its `CREATE TABLE`s are still inside a
+/// transaction no other connection can see. A `false` here for a database that
+/// cannot be read as one — a file that is not SQLite, a page that will not
+/// parse — is deliberate: it sends that case to [`validate_schema`], which
+/// names it in as many words instead of reporting a schema that is merely late
+/// as an index that is corrupt.
+fn schema_is_absent(connection: &Connection) -> bool {
+    match connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'index_meta'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(tables) => tables == 0,
+        Err(_) => false,
+    }
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
@@ -2276,6 +2319,49 @@ mod tests {
             MARKER_CONTENT,
             "a marker that exists is a marker that holds its whole content"
         );
+    }
+
+    /// A build that meets an index file another process has created but not yet
+    /// filled in must adopt it and finish.
+    ///
+    /// This is the state `every_parallel_build_of_one_destination_finishes`
+    /// kept failing in, with `no such table: index_meta`: a second build sees
+    /// the database file the first one has just opened, and its `index_meta`
+    /// does not exist yet because the schema is still inside the first build's
+    /// transaction. The file's existence is therefore not the question — the
+    /// database's contents are — and a zero-length file is exactly what
+    /// `Connection::open` leaves behind for that first build, and a valid empty
+    /// database to anyone else.
+    #[test]
+    fn a_build_adopts_an_index_another_process_has_only_just_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc::fingerprinted(
+            "synthetic/session",
+            "synthetic-source",
+        )];
+        index
+            .build(&[], |_| Ok(the(DocText::default(), 0)))
+            .unwrap();
+        // The window: the root and its marker are published, the database file
+        // exists, and nothing has been written into it yet.
+        fs::remove_file(index.db_path()).unwrap();
+        fs::write(index.db_path(), b"").unwrap();
+
+        let stats = index
+            .build(&sources, |_| {
+                Ok(the(doc("synthetic title", "synthetic body"), 0))
+            })
+            .expect("a build must finish over an index its sibling has only just created");
+        assert_eq!(stats.indexed, 1, "and index what it was given");
+
+        // The index it left behind is usable, not just non-erroring.
+        let check = index.check().unwrap();
+        assert!(
+            matches!(check.status, CheckStatus::Valid { .. }),
+            "the adopted index must be a valid one: {check:?}"
+        );
+        assert_eq!(check.documents, 1);
     }
 
     #[test]
