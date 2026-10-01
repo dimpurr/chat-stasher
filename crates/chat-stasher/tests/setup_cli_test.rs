@@ -622,6 +622,48 @@ fn missing_masterkey_declaration_alone_bootstraps_the_key_and_stops() {
     );
 }
 
+/// A bootstrap that reaches an unreadable destination has not finished
+/// reading, even though the masterkey declaration is still owed. The unread
+/// result outranks that missing parameter under setup's shared exit-code rule.
+#[test]
+fn an_unreachable_destination_during_bootstrap_exits_unread() {
+    let sandbox = Sandbox::new(true);
+    sandbox.write_config(
+        "[destinations.gone]\n\
+         repo = 'opendal:sftp'\n\
+         key_file = '/nonexistent/key.json'\n\
+         [destinations.gone.options]\n\
+         endpoint = 'ssh://127.0.0.1:1'\n\
+         user = 'nobody'\n",
+    );
+
+    let output = sandbox.setup(&["--destination", "gone"]);
+    let value = json_of(&output);
+
+    assert_eq!(exit_code(&output), 3, "value={value}");
+    assert_eq!(value["exit_code"], 3);
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"]),
+        "the declaration remains owed even though the destination was unread: {value}"
+    );
+    assert_eq!(value["steps"]["destination"], "unread");
+    assert_eq!(value["destination"]["reach"]["kind"], "unreachable");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "not_run");
+    assert_eq!(value["unread"], serde_json::json!(["destination"]));
+    assert_eq!(value["incomplete"], serde_json::json!([]));
+    let keys = value["masterkey"]["keys"]
+        .as_array()
+        .expect("bootstrap reports the keys it found");
+    assert_eq!(
+        keys.len(),
+        1,
+        "unreached dest-init created no destination key"
+    );
+    assert_eq!(keys[0]["scope"], "local");
+    assert_eq!(keys[0]["declared"], false);
+}
+
 /// A bootstrap that could not run refuses without inventing a key to copy.
 ///
 /// The reason is deliberately silent about how far the attempt got: the key is

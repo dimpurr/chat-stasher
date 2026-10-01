@@ -685,19 +685,19 @@ crates/chat-stasher/src/main.rs:11990-11998  78f23654916e  lines=9
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
 crates/chat-stasher/src/main.rs:12008-12031  3f797bdc8c26  lines=24
   <- docs-dev/install.md:271  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:13160-13174  af69d09d53a2  lines=15
+crates/chat-stasher/src/main.rs:13168-13182  af69d09d53a2  lines=15
   <- docs-dev/install.md:591  :: fn setup_refused_awaiting_declaration_why(destination_step_…
-crates/chat-stasher/src/main.rs:13597-13604  e5a9c1eb5374  lines=8
+crates/chat-stasher/src/main.rs:13605-13612  e5a9c1eb5374  lines=8
   <- docs-dev/install.md:590  :: fn setup_create_repo_and_key(config: &Config) -> Result<std…
-crates/chat-stasher/src/main.rs:16127-16161  2b9ef8eaa940  lines=35
+crates/chat-stasher/src/main.rs:16135-16169  2b9ef8eaa940  lines=35
   <- docs-dev/install.md:986  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:16180-16208  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:16188-16216  563498443d71  lines=29
   <- docs-dev/install.md:947  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:16449-16454  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:16457-16462  00bb766bbeb7  lines=6
   <- docs-dev/install.md:976  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:16468-16470  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:16476-16478  28b586b3526e  lines=3
   <- docs-dev/install.md:942  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:16470-16603  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:16478-16611  9b25725da3b1  lines=134
   <- docs-dev/install.md:963  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:391, docs-dev/threat-model.md:622  :: //! ADR-022: content-addressed hash tracking for stage meta…

@@ -59,7 +59,7 @@ The wizard prints the path of the master key and explains why it matters.
 > [!WARNING]
 > The master key is the **only** way to read your archive. If you lose it, nobody can read the archive again, including you. Copy it somewhere that is not this disk now: a password manager, another disk, or a backup you already keep.
 
-**On this first run it stops there.** The wizard cannot record a declaration for a key it just created — at the moment the run started there was nothing to copy — so instead of asking, it names the file, says so, and leaves the step owed. Copy the file off this disk, then run `chat-stasher setup` again. The key exists on that second run, so the wizard now asks you to type **I saved it elsewhere**. This is a promise you make, not a check: chat-stasher cannot see your password manager, and it says so. If you skip it, the wizard still finishes, but it reports this step as not done.
+**On this first run it leaves the declaration owed, then continues through the destination and scheduler steps.** The wizard cannot record a declaration for a key it just created — at the moment the run started there was nothing to copy — so instead of asking, it names the file and says so. Copy the file off this disk, then run `chat-stasher setup` again. The key exists on that second run, so the wizard now asks you to type **I saved it elsewhere**. This is a promise you make, not a check: chat-stasher cannot see your password manager, and it says so. If you skip it, the wizard still finishes, but it reports this step as not done.
 
 Only the *first* setup of an archive needs that second run. Once the key is on the disk, a single `setup` shows it and asks in the same pass.
 

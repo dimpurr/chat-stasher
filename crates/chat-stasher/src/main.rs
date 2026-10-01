@@ -12387,6 +12387,14 @@ fn cmd_setup(
                 dest_init: SetupDestinationInit::NotRun { why: why.clone() },
                 credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
             });
+            // Bootstrap still owes the declaration, but the destination step
+            // may have discovered something the run could not read. Reuse the
+            // same gap classification and exit-code precedence as a completed
+            // setup: unread wins over the owed parameter, while the key list
+            // above continues to reflect only keys the step actually created.
+            let remote_gaps = destination_report.gaps();
+            let exit_code =
+                setup_exit_code(&premissing, &remote_gaps.incomplete, &remote_gaps.unread);
             println!(
                 "{}",
                 setup_json_payload(
@@ -12404,14 +12412,14 @@ fn cmd_setup(
                     &destination_report,
                     Err(&why),
                     &premissing,
-                    &[],
-                    &[],
-                    2,
+                    &remote_gaps.incomplete,
+                    &remote_gaps.unread,
+                    exit_code,
                     Some(&why),
                     &created_keys,
                 )
             );
-            return ExitCode::from(2);
+            return ExitCode::from(exit_code);
         }
     }
 

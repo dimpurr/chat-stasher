@@ -644,3 +644,61 @@ fn an_interactive_run_never_declares_the_key_it_just_created() {
         "a run must record no declaration for a key it created itself"
     );
 }
+
+/// W294: the same rule applies to a destination key created by this run.
+#[cfg(unix)]
+#[test]
+fn an_interactive_run_leaves_a_new_destination_key_undeclared() {
+    let sandbox = Sandbox::new();
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+            "--destination",
+            "backup",
+        ],
+    );
+
+    wizard.expect_within(
+        "destination key for `backup` was created by this run",
+        "the destination created-key notice",
+    );
+    assert!(
+        !wizard
+            .transcript
+            .contains("to declare you have your own copy"),
+        "the wizard must not ask for a declaration of a destination key it created; \
+         terminal transcript:\n{}",
+        wizard.transcript
+    );
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+
+    let (status, stderr, transcript) = wizard.finish();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a newly created destination key remains owed; stderr:\n{stderr}\n\
+         terminal transcript:\n{transcript}"
+    );
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    assert!(
+        destination_key.exists(),
+        "dest-init must leave the key to copy"
+    );
+    assert!(
+        !sandbox
+            .state_dir()
+            .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE)
+            .exists(),
+        "the run must not record a declaration for the key it just created"
+    );
+}
