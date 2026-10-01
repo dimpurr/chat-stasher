@@ -28,7 +28,7 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 | `rustic_cache_dir` | the platform cache folder, under `rustic` | Where archive **metadata** is cached. Never holds conversation data. |
 | `rustic_no_cache` | `false` | Turn that metadata cache off. Nothing is lost; each command re-reads metadata instead. |
 | `backup_interval_secs` | `3600` | How often the timer runs. Read when the timer is rendered, so run `schedule install` again after changing it. |
-| `push_only_if_changed` | `true` | Skip the push when nothing changed. A push with no change still writes a snapshot. |
+| `push_only_if_changed` | `true` | Skip the push when nothing changed, and tell `dest-init` not to publish a snapshot the destination already holds. With `false`, an hourly `run-once` and every `dest-init` write a snapshot even when nothing changed (each snapshot costs a little metadata). An explicit `push` always records the stage as it stands. |
 | `machine` | unset | Pin this machine's partition name in the archive. New installs leave it unset: a random identity is generated on the first run. Set it only to keep writing to a partition an older install created. |
 | `claude_projects_dir` | `~/.claude/projects` | Where Claude Code keeps sessions. |
 | `codex_sessions_dir` | `~/.codex/sessions` | Where Codex CLI keeps sessions. |

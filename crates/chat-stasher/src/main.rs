@@ -6146,7 +6146,30 @@ fn cmd_dest_init(
                     eprintln!("dest-init: cannot record writer version: {e:#}");
                     push_failed = true;
                 } else {
-                    match store.push(stage, &mk) {
+                    // Re-running `setup` re-runs this command, and the wizard's
+                    // own declaration step makes a re-run likely — so an
+                    // unguarded push appends one snapshot per invocation to a
+                    // destination that already holds everything, for nothing
+                    // (W291, OBS-5). `push_only_if_changed` (default true) is
+                    // the same knob `run-once` honours; here the comparison is
+                    // made against what the destination *holds*, because the
+                    // destination is the only thing that can tell "it already
+                    // has this" from "it has nothing yet" — a fresh destination
+                    // is also one where this pass wrote no shard and restored
+                    // none.
+                    let only_if_changed = config.push_only_if_changed.unwrap_or(true);
+                    let pushed = if only_if_changed {
+                        store.push_only_if_changed(stage, &mk)
+                    } else {
+                        store.push(stage, &mk)
+                    };
+                    match pushed {
+                        Ok(summary) if !summary.snapshot_written => {
+                            println!(
+                                "[dest-init] push skipped: the destination already holds what would be published (push_only_if_changed=true, stage_shards={})",
+                                summary.stage_shards,
+                            )
+                        }
                         Ok(summary) => {
                             // The two branches below are one line in two widths:
                             // the short one is exactly what this command

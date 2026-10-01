@@ -219,6 +219,14 @@ pub struct PushSummary {
     pub data_added: u64,
     pub data_added_packed: u64,
     pub snapshots_in_repo: usize,
+    /// Whether this push actually wrote a snapshot.
+    ///
+    /// `false` only when the caller asked for an unchanged tree not to be
+    /// published ([`BackupStore::push_only_if_changed`]) and the repository
+    /// already held one equal to what the stage would produce. The rest of the
+    /// summary is still filled in: it describes the comparison that was made,
+    /// not a snapshot that was written.
+    pub snapshot_written: bool,
     pub snapshot_host: String,
     pub repo_was_init: bool,
     /// Packs the backend held that no index file named, and what this push's
@@ -447,6 +455,40 @@ impl BackupStore {
     /// Push the whole stage tree (`sessions/<machine>/<id>/NNNNNN.jsonl`) into
     /// a fresh snapshot. The stage root must already hold only sealed shards.
     pub fn push(&self, stage_root: &Path, mk: &MasterKey) -> anyhow::Result<PushSummary> {
+        self.push_with(stage_root, mk, false)
+    }
+
+    /// Push, but let the repository decline to write the snapshot when its tree
+    /// is identical to the one this machine's newest snapshot there already
+    /// holds — "the destination already holds what would be published".
+    ///
+    /// This is the destination-side counterpart of the check `run-once` makes
+    /// before it calls [`BackupStore::push`]: `push_only_if_changed` decides
+    /// *whether a push is attempted*, and this decides whether one that was
+    /// attempted has anything to record. Only `dest-init` uses it, because only
+    /// `dest-init` can be re-run over a stage it already published: an explicit
+    /// `push` is a request to record the stage as it stands, and `run-once`'s
+    /// stage-side check cannot see that a *new* destination already holds the
+    /// content (a fresh destination is also one where the pass wrote nothing).
+    ///
+    /// The comparison is rustic's own — the same content-addressing that
+    /// decides "modified" everywhere else — so it covers every byte of the
+    /// stage, session shards and machine metadata alike, and it is made against
+    /// the snapshot group the parent search uses (this machine, the stage path).
+    pub fn push_only_if_changed(
+        &self,
+        stage_root: &Path,
+        mk: &MasterKey,
+    ) -> anyhow::Result<PushSummary> {
+        self.push_with(stage_root, mk, true)
+    }
+
+    fn push_with(
+        &self,
+        stage_root: &Path,
+        mk: &MasterKey,
+        skip_if_unchanged: bool,
+    ) -> anyhow::Result<PushSummary> {
         // This must run before opening or backing up the repository. A stage
         // assembled for machine A must never be snapshotted as machine B.
         validate_stage_machines(stage_root, &self.machine)?;
@@ -505,13 +547,19 @@ impl BackupStore {
             .parent_opts(
                 ParentOptions::default()
                     .ignore_ctime(true)
-                    .ignore_inode(true),
+                    .ignore_inode(true)
+                    .skip_if_unchanged(skip_if_unchanged),
             );
         let snap = r
             .backup(&build_opts, &source, snap)
             .context("run rustic backup")?;
 
         let snaps = r.get_all_snapshots().context("list snapshots")?;
+        // A skipped snapshot is never written, so it keeps the id `to_snapshot`
+        // gave it and appears in no listing. Asking the listing whether it
+        // holds the snapshot we were handed is a read of the repository's own
+        // answer, not a flag this function sets from its own intent.
+        let snapshot_written = snaps.iter().any(|stored| stored.id == snap.id);
         let summary = snap
             .summary
             .as_ref()
@@ -525,6 +573,7 @@ impl BackupStore {
             data_added: summary.data_added,
             data_added_packed: summary.data_added_packed,
             snapshots_in_repo: snaps.len(),
+            snapshot_written,
             snapshot_host: snap.hostname.clone(),
             repo_was_init: init,
             orphans,
@@ -2035,6 +2084,90 @@ mod tests {
             );
             assert_stage_writer_audited(registration.writer).unwrap();
         }
+    }
+
+    /// W292: `push_only_if_changed` is the push-level half of the no-op check
+    /// `dest-init` needs — `push_only_if_changed` the *config knob* decides
+    /// whether a push is attempted, and this decides whether an attempted one
+    /// has anything to write. The control is the first assertion: a plain push
+    /// has no such check, which is what makes the second push's absent snapshot
+    /// a property of this call and not of the repository.
+    #[test]
+    fn push_only_if_changed_leaves_an_identical_tree_unpublished() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let machine = "w292-fixture".to_string();
+        write_sealed_shard(
+            StageWriter::Collect,
+            &stage,
+            &machine,
+            "session-one",
+            &["synthetic".to_string()],
+        )
+        .unwrap();
+        let store_for = |name: &str| {
+            BackupStore::new(
+                StoreConfig {
+                    repo_root: dir.path().join(name).to_string_lossy().into_owned(),
+                    key_file: dir.path().join(format!("{name}-key.json")),
+                    connections: 1,
+                    options: BTreeMap::new(),
+                    // W289: the cache stays on, only its location moves.
+                    cache_dir: Some(dir.path().join("rustic-cache")),
+                    no_cache: false,
+                },
+                machine.clone(),
+            )
+        };
+        let mk = MasterKey::new();
+
+        // Control: two plain pushes of one unchanged stage, two snapshots —
+        // this call is a request to record the stage as it stands.
+        let plain = store_for("plain-repo");
+        assert!(plain.push(&stage, &mk).unwrap().snapshot_written);
+        let second_plain = plain.push(&stage, &mk).unwrap();
+        assert!(second_plain.snapshot_written, "{second_plain:?}");
+        assert_eq!(second_plain.snapshots_in_repo, 2, "{second_plain:?}");
+
+        // The same stage, through the check: the first seeds the destination,
+        // the second is compared against what it holds and left unpublished.
+        let checked = store_for("checked-repo");
+        let seeded = checked.push_only_if_changed(&stage, &mk).unwrap();
+        assert!(
+            seeded.snapshot_written,
+            "a fresh destination must be seeded"
+        );
+        let repeated = checked.push_only_if_changed(&stage, &mk).unwrap();
+        assert!(
+            !repeated.snapshot_written,
+            "an unchanged stage must not be published a second time: {repeated:?}"
+        );
+        assert_eq!(repeated.files_new, 0, "nothing was uploaded: {repeated:?}");
+        assert_eq!(repeated.data_added, 0, "no data was added: {repeated:?}");
+        assert_eq!(
+            repeated.snapshots_in_repo, seeded.snapshots_in_repo,
+            "the destination's snapshot count must not move: {repeated:?}"
+        );
+
+        // ...and a stage that changed is published again.
+        write_sealed_shard(
+            StageWriter::Collect,
+            &stage,
+            &machine,
+            "session-two",
+            &["synthetic".to_string()],
+        )
+        .unwrap();
+        let after_change = checked.push_only_if_changed(&stage, &mk).unwrap();
+        assert!(
+            after_change.snapshot_written,
+            "new content must still be published: {after_change:?}"
+        );
+        assert_eq!(
+            after_change.snapshots_in_repo,
+            seeded.snapshots_in_repo + 1,
+            "{after_change:?}"
+        );
     }
 
     #[test]

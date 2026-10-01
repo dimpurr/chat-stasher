@@ -171,6 +171,8 @@ A `[keys]` line is added for each **destination** whose key needs attention: one
 
 Seeds a new destination, once. It re-collects this machine's sessions from their sources, copies in what other destinations still hold for this machine that the machine no longer has, and pushes the result. It covers **this machine's** part of the archive only. See [destinations.md](destinations.md).
 
+Re-running it is safe: when the destination already holds a snapshot equal to what would be published, nothing is published and the run says so (`push skipped`). Set `push_only_if_changed = false` to write a snapshot on every run instead. This matters because `setup` runs `dest-init` each time it is invoked.
+
 | Flag | Meaning |
 |---|---|
 | `--destination <name>`, `--stage <dir>` | Required (or `--repo` instead of a name). |
