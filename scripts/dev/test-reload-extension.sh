@@ -15,13 +15,37 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELOAD="$here/reload-extension.sh"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-reload-ext.XXXXXX")"
-# The CDP mock server is the only child this test starts; kill only that pid.
-MOCK_PID=""
+# Every pid this test starts is recorded here, one per line. The CDP mock server
+# is the only child, and it is started in this shell rather than inside a command
+# substitution: a pid set in a subshell never reaches the parent, which is how a
+# `port="$(start_mock …)"` call once leaked a mock on every run — the parent's
+# pid stayed empty, so neither stop_mock nor this trap killed anything. A file is
+# used rather than a variable for the same reason: it is written by whichever
+# shell starts the child and read by the one that cleans up.
+MOCK_PIDS_FILE="$SCRATCH/mock-pids"
+: > "$MOCK_PIDS_FILE"
 cleanup() {
-  if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null || true; fi
+  # Kill every mock this run started, not just the most recent one.
+  if [ -s "$MOCK_PIDS_FILE" ]; then
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      kill "$pid" 2>/dev/null || true
+    done < "$MOCK_PIDS_FILE"
+  fi
+  # Backstop for a mock whose pid never reached the file — the failure this
+  # block exists for. It is still identifiable by the scratch path it was run
+  # from, which no other run of this test shares.
+  pkill -f "$SCRATCH/cdp-mock.mjs" 2>/dev/null || true
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
+# A signal has to clean up too, and then actually stop the script: exiting is
+# what fires the EXIT trap, so each handler only sets the status. Without this,
+# `trap cleanup TERM` would clean up and then carry on from where it was
+# interrupted, which is not what a killed run should do.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- a minimal committed repo so `git worktree add` has a ref to build ------
 REPO="$SCRATCH/repo"
@@ -366,30 +390,35 @@ server.listen(0, '127.0.0.1', () => {
 });
 EOF
 
-  # start_mock <mode> <old-version> <expected-version> — prints the port.
+  # start_mock <mode> <old-version> <expected-version> — starts the mock in THIS
+  # shell and prints nothing. The port is read afterwards with mock_port, never
+  # returned through a command substitution: `$(start_mock …)` runs the function
+  # in a subshell, so a pid it set there is invisible to the parent that has to
+  # kill it, and every mock this test started outlived the run because of it.
+  # The pid goes to MOCK_PIDS_FILE, which start_mock writes and cleanup reads.
   start_mock() {
-    mock_port_file="$SCRATCH/cdp-port"
-    rm -f "$mock_port_file"
+    rm -f "$SCRATCH/cdp-port"
     node "$SCRATCH/cdp-mock.mjs" --mode "$1" --old-version "$2" \
-      --expected-version "$3" --port-file "$mock_port_file" >"$SCRATCH/mock.log" 2>&1 &
-    MOCK_PID=$!
+      --expected-version "$3" --port-file "$SCRATCH/cdp-port" >"$SCRATCH/mock.log" 2>&1 &
+    echo "$!" >> "$MOCK_PIDS_FILE"
     for _ in $(seq 1 100); do
-      [ -s "$mock_port_file" ] && break
+      [ -s "$SCRATCH/cdp-port" ] && break
       sleep 0.05
     done
-    [ -s "$mock_port_file" ] || fail "the CDP mock did not report a port"
-    cat "$mock_port_file"
+    [ -s "$SCRATCH/cdp-port" ] || fail "the CDP mock did not report a port"
   }
+  mock_port() { cat "$SCRATCH/cdp-port"; }
   stop_mock() {
-    kill "$MOCK_PID" 2>/dev/null || true
-    wait "$MOCK_PID" 2>/dev/null || true
-    MOCK_PID=""
+    mock_pid="$(tail -n 1 "$MOCK_PIDS_FILE")"
+    kill "$mock_pid" 2>/dev/null || true
+    wait "$mock_pid" 2>/dev/null || true
   }
 
   # 16. --cdp-port reloads the worker and verifies the version. The mock starts
   #     on 0.1.0.89 and moves to the expected version only when it sees the
   #     reload call, so a pass means the call really arrived.
-  port="$(start_mock ok 0.1.0.89 0.1.0.90)"
+  start_mock ok 0.1.0.89 0.1.0.90
+  port="$(mock_port)"
   if ! bash "$RELOAD" --load-dir "$LOAD" --build-number 90 --cdp-port "$port" >"$SCRATCH/o16" 2>&1; then
     cat "$SCRATCH/o16" >&2
     fail "--cdp-port should reload and verify"
@@ -403,7 +432,8 @@ EOF
 
   # 17. a reachable CDP port with no chat-stasher worker fails, and the swap
   #     that already happened stays (it is not rolled back by a CDP failure).
-  port="$(start_mock notfound 0.1.0.90 0.1.0.91)"
+  start_mock notfound 0.1.0.90 0.1.0.91
+  port="$(mock_port)"
   if CS_CDP_TIMEOUT_MS=800 bash "$RELOAD" --load-dir "$LOAD" --build-number 91 --cdp-port "$port" >"$SCRATCH/o17" 2>&1; then
     fail "no matching worker should exit non-zero"
   fi
@@ -417,7 +447,8 @@ EOF
   #     new version. The helper must wait out its budget and fail, otherwise the
   #     version check would be decoration. CS_CDP_TIMEOUT_MS (test-only, see the
   #     helper header) keeps this under a second.
-  port="$(start_mock stuck 0.1.0.91 0.1.0.92)"
+  start_mock stuck 0.1.0.91 0.1.0.92
+  port="$(mock_port)"
   if CS_CDP_TIMEOUT_MS=800 bash "$RELOAD" --load-dir "$LOAD" --build-number 92 --cdp-port "$port" >"$SCRATCH/o18" 2>&1; then
     fail "a worker that never reaches the new version should exit non-zero"
   fi
@@ -450,6 +481,34 @@ EOF
   fi
   grep -q "reload over CDP on 127.0.0.1:" "$SCRATCH/o21" || fail "the dry run should plan the CDP reload"
   note "a dry run with --cdp-port plans the reload"
+fi
+
+# The run must not leave a mock behind. A leaked mock keeps listening on a port
+# and keeps a node process alive after the suite has already reported success,
+# which is how one run at a time accumulated hundreds of orphans. This is
+# asserted rather than assumed: the traps are the mechanism, and this is the
+# check that they worked, so an edit that drops one fails here loudly instead of
+# leaking quietly. It runs before the EXIT trap, so a mock still alive now is one
+# the traps did not account for.
+leftover=""
+if command -v pgrep >/dev/null 2>&1; then
+  # Matching on the scratch path is what catches a mock whose pid was never
+  # recorded — the exact shape of the bug this guards — which checking the
+  # recorded pids alone would miss. The pattern is not `-c`: macOS pgrep has no
+  # count flag, and a `-c` here would fail and read as "nothing left behind".
+  leftover="$(pgrep -f "$SCRATCH/cdp-mock.mjs" 2>/dev/null || true)"
+else
+  # Without pgrep the sweep cannot run, so fall back to the recorded pids and
+  # say so: a check that could not run must not look like one that passed.
+  echo "note: pgrep not found; the leftover check examined only this run's recorded pids"
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then leftover="$leftover $pid"; fi
+  done < "$MOCK_PIDS_FILE"
+fi
+if [ -n "${leftover// /}" ]; then
+  echo "FAIL: this run left cdp-mock processes running (pids: $(printf '%s' "$leftover" | tr '\n' ' '))" >&2
+  exit 1
 fi
 
 echo
