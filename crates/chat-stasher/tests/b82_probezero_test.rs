@@ -496,7 +496,11 @@ fn a5_unreadable_record_downgrades_never_built_to_unknown() {
                 key_file: sandbox.path().join("peer.key"),
                 connections: 1,
                 options: std::collections::BTreeMap::new(),
-                cache_dir: None,
+                // The peer repository does not exist, so nothing is ever
+                // written to a cache — but `None` here would also be the
+                // leaky spelling if a future fixture made this path exist,
+                // and the isolated spelling costs nothing to carry.
+                cache_dir: Some(sandbox.path().join("rustic-cache")),
                 no_cache: false,
             },
             record,

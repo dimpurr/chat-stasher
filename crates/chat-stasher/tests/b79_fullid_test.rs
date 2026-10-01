@@ -55,13 +55,19 @@ struct Fixture {
     key: PathBuf,
 }
 
-fn config(repo: &Path, key: &Path) -> StoreConfig {
+/// `cache_dir` is pinned into the fixture's own directory (W289) so opening
+/// the repository does not create a per-repository directory in the real
+/// user cache — every `cargo test` run of this file opened one before, and
+/// the bill of that reached 36,000+ directories on one machine. Unset only
+/// where the config would otherwise put it; the cache itself stays enabled,
+/// like the `read`/`verify` runs the children below perform.
+fn config(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: Default::default(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -71,7 +77,7 @@ fn make_fixture() -> Result<Fixture, Box<dyn Error>> {
     let stage = sandbox.path().join("stage");
     let repo = sandbox.path().join("repo");
     let key = sandbox.path().join("masterkey.json");
-    let cfg = config(&repo, &key);
+    let cfg = config(&repo, &key, sandbox.path());
     let masterkey = MasterKey::new();
 
     store::write_sealed_shard(

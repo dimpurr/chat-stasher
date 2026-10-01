@@ -191,7 +191,13 @@ fn make_repo_with(sandbox: &Path, extra: &[(&str, &[u8])]) -> (String, String) {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "[destinations.alpha]\nrepo = '{}'\nkey_file = '{}'\n",
+            // rustic_cache_dir (W289): the index/`search --destination`
+            // children keep their metadata cache in the sandbox. It goes in
+            // the config, not just the environment, because a Windows child
+            // picks its cache root from the Known Folder API, which the
+            // redirected HOME/XDG_CACHE_HOME cannot move.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\nrepo = '{}'\nkey_file = '{}'\n",
+            sandbox.join("rustic-cache").display(),
             repo.to_string_lossy(),
             key.to_string_lossy()
         ),

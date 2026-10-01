@@ -559,6 +559,9 @@ mod tests {
             // We have collected for it before — so its absence is loss, not
             // emptiness, and it still holds the union back.
             record: CollectRecord::Present,
+            // An absent repository cannot write a cache, but the isolated
+            // spelling is carried anyway (W289) so a fixture that ever makes
+            // this path exist inherits the isolation instead of a leak.
             cfg: StoreConfig {
                 repo_root: dir
                     .path()
@@ -568,7 +571,7 @@ mod tests {
                 key_file: dir.path().join("no-such-key.json"),
                 connections: 1,
                 options: BTreeMap::new(),
-                cache_dir: None,
+                cache_dir: Some(dir.path().join("rustic-cache")),
                 no_cache: false,
             },
         }];
@@ -590,6 +593,9 @@ mod tests {
         let sources = vec![SourceDestination {
             name: "never-made".to_string(),
             record: CollectRecord::Absent,
+            // An absent repository cannot write a cache, but the isolated
+            // spelling is carried anyway (W289) so a fixture that ever makes
+            // this path exist inherits the isolation instead of a leak.
             cfg: StoreConfig {
                 repo_root: dir
                     .path()
@@ -599,7 +605,7 @@ mod tests {
                 key_file: dir.path().join("no-such-key.json"),
                 connections: 1,
                 options: BTreeMap::new(),
-                cache_dir: None,
+                cache_dir: Some(dir.path().join("rustic-cache")),
                 no_cache: false,
             },
         }];

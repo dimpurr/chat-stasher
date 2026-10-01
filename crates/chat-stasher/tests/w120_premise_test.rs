@@ -68,13 +68,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache under the sandbox (W289), not the real user cache the two
+/// repositories would otherwise have populated; the reads below still open
+/// with the cache enabled, and only the explicit `Repository::new` comparison
+/// pass pins `no_cache` for its own reason.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -126,9 +130,15 @@ impl RepoIds {
 /// Write the same sealed stage into `repo`, then read back what the repository
 /// actually stored: every pack id, and every data blob id with the plaintext
 /// that id names.
-fn push_and_read_ids(repo: &Path, key: &Path, mk: &MasterKey, stage: &Path) -> RepoIds {
-    store::persist_key_file(&cfg(repo, key), mk).expect("persist key");
-    let store = BackupStore::new(cfg(repo, key), "w120-premise".to_string());
+fn push_and_read_ids(
+    repo: &Path,
+    key: &Path,
+    cache: &Path,
+    mk: &MasterKey,
+    stage: &Path,
+) -> RepoIds {
+    store::persist_key_file(&cfg(repo, key, cache), mk).expect("persist key");
+    let store = BackupStore::new(cfg(repo, key, cache), "w120-premise".to_string());
     let summary = store.push(stage, mk).expect("push fixture");
     assert!(
         summary.files_new > 0,
@@ -231,12 +241,14 @@ fn same_content_different_keys_plaintext_blob_ids_different_pack_ids() {
     let a = push_and_read_ids(
         &root.join("repo-a"),
         &root.join("key-a.json"),
+        root,
         &mk_a,
         &stage,
     );
     let b = push_and_read_ids(
         &root.join("repo-b"),
         &root.join("key-b.json"),
+        root,
         &mk_b,
         &stage,
     );

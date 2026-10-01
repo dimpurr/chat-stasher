@@ -58,13 +58,21 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// The repository's *metadata* cache, relocated under the fixture's own
+/// directory (W289). It stays enabled — a cache-disabled search would be a
+/// different search from the one users run, and the whole subject of this
+/// file is what a real repository answers — but its location must be the
+/// fixture's: with `cache_dir` unset, every open here created a
+/// per-repository directory in the machine's *real* user cache
+/// (`~/Library/Caches/rustic`; 36,000+ of them had accumulated on one machine
+/// before W289, and the `clear_rustic_cache` below had to walk them all).
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -86,7 +94,7 @@ fn push_machine(repo: &Path, root: &Path, machine: &str, sessions: &[&str], mk: 
             .unwrap();
         }
     }
-    let store = BackupStore::new(cfg(repo, &root.join("key.json")), machine.to_string());
+    let store = BackupStore::new(cfg(repo, &root.join("key.json"), root), machine.to_string());
     let summary = store.push(&stage, mk).unwrap();
     assert!(summary.files_new > 0, "fixture pushed nothing");
 }
@@ -227,7 +235,10 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     );
     push_machine(&repo, root, "m-beta", &["aa11session-three"], &mk);
 
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-alpha".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-alpha".to_string(),
+    );
 
     // ---- 1. unfiltered metadata search -------------------------------------
     let t0 = Instant::now();
@@ -460,14 +471,14 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
         "the two pack size classes must be unambiguous"
     );
 
-    // rustic keeps a local metadata cache (`<cache>/rustic/<repo-id>/…`).
-    // Clear it, or the next two steps would be testing that cache instead of
-    // the repository.
+    // rustic keeps a local metadata cache (this fixture pinned it under
+    // root/rustic-cache; see `cfg`). Clear it, or the next two steps would be
+    // testing that cache instead of the repository.
     let pack_names: Vec<String> = all_packs
         .iter()
         .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    let cleared = clear_rustic_cache(&pack_names);
+    let cleared = clear_rustic_cache(&root.join("rustic-cache"), &pack_names);
     println!(
         "[B48] rustic metadata cache cleared: {} dir(s)",
         cleared.len()
@@ -478,9 +489,9 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     assert_eq!(
         cleared.len(),
         1,
-        "rustic definitely created cache; cleared {} here = cache not found. roots={:?}",
+        "rustic definitely created cache; cleared {} here = cache not found. cache_root={:?}",
         cleared.len(),
-        store::rustic_cache_roots()
+        root.join("rustic-cache")
     );
 
     let quarantine = root.join("quarantine-data-packs");
@@ -524,7 +535,7 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     move_back(&quarantine, &repo);
 
     // ---- 6. UNKNOWN, not empty: break the metadata the search needs ---------
-    let cleared_again = clear_rustic_cache(&pack_names);
+    let cleared_again = clear_rustic_cache(&root.join("rustic-cache"), &pack_names);
     println!(
         "[B48] rustic metadata cache cleared again: {} dir(s)",
         cleared_again.len()
@@ -532,9 +543,9 @@ fn metadata_search_finds_sessions_without_reading_data_blobs() {
     assert_eq!(
         cleared_again.len(),
         1,
-        "as above: cleared {} cache dirs = assertion below would test cache instead of repository. roots={:?}",
+        "as above: cleared {} cache dirs = assertion below would test cache instead of repository. cache_root={:?}",
         cleared_again.len(),
-        store::rustic_cache_roots()
+        root.join("rustic-cache")
     );
     let meta_paths: Vec<PathBuf> = meta_packs.iter().map(|(p, _)| p.clone()).collect();
     let quarantine2 = root.join("quarantine-tree-packs");
@@ -587,7 +598,7 @@ fn no_content_activity_row_survives_real_search_index_read() {
     row.time_source = TimeSource::NoConversationContent;
     write_activity_index(&stage, machine, &[row]);
     let key_path = root.join("key.json");
-    let store_config = cfg(&repo, &key_path);
+    let store_config = cfg(&repo, &key_path, root);
     store::persist_key_file(&store_config, &mk).unwrap();
     let store = BackupStore::new(store_config, machine.to_string());
     assert!(store.push(&stage, &mk).unwrap().files_new > 0);
@@ -611,12 +622,24 @@ fn no_content_activity_row_survives_real_search_index_read() {
         "no_conversation_content"
     );
 
+    // The child opens the same repository, so it gets the same isolation the
+    // in-process open has (W289): a HOME and an XDG_CACHE_HOME inside this
+    // test's own directory, and the RUSTIC_* variables of any rustic install
+    // on the machine removed so the search cannot be started against a
+    // repository the test never named — this was the one spawn in the suite
+    // that inherited the harness environment wholesale, and on a developer
+    // machine it wrote the child's metadata cache straight into the real
+    // ~/Library/Caches.
     let cli = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(["search", "--repo"])
         .arg(&repo)
         .args(["--key-file"])
         .arg(&key_path)
         .args(["--machine", machine])
+        .env("HOME", root.join("child-home"))
+        .env("XDG_CACHE_HOME", root.join("child-cache"))
+        .env_remove("RUSTIC_REPO")
+        .env_remove("RUSTIC_KEY_FILE")
         .output()
         .unwrap();
     let stdout = String::from_utf8(cli.stdout).unwrap();
@@ -655,27 +678,26 @@ fn no_content_activity_row_survives_real_search_index_read() {
 /// by content: the cache dir that holds one of this repository's pack ids.
 /// Returns the directories that were actually removed.
 ///
-/// *Where* to look is not guessed here: `store::rustic_cache_roots` spells it
-/// the way each platform spells it. This used to be a hand-written
-/// `$HOME/Library/Caches` + `$HOME/.cache` pair, which is wrong on Windows
-/// (the cache lives under `%LOCALAPPDATA%`, not under `$HOME`) — the cache
-/// then survived, step 6 below read the tree packs out of it, and a repository
-/// that could not be read looked complete. See
-/// `search_cache_windows_shape_test.rs`.
-fn clear_rustic_cache(pack_names: &[String]) -> Vec<PathBuf> {
+/// *Where* to look is `cache_root` — the root this fixture pinned with
+/// [`cfg`]'s `cache_dir` (W289), not the machine's real user cache. Walking
+/// the real one, as this function did before W289, is what once made these
+/// tests sweep every leftover directory the suite had ever created (36,000+
+/// on one machine) to find the one directory it needed — and the clearing
+/// itself treads on data that is not the test's. The platform *spelling* of
+/// the real root, the thing that once broke on Windows, stays pinned in
+/// `search_cache_windows_shape_test.rs`; the spelling never mattered to a
+/// fixture that declares its own root.
+fn clear_rustic_cache(cache_root: &Path, pack_names: &[String]) -> Vec<PathBuf> {
     let mut removed = Vec::new();
-    for base in store::rustic_cache_roots() {
-        let Ok(entries) = fs::read_dir(&base) else {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            if dir_holds_any(&entry.path(), pack_names) && fs::remove_dir_all(entry.path()).is_ok()
-            {
-                removed.push(entry.path());
-            }
+        }
+        if dir_holds_any(&entry.path(), pack_names) && fs::remove_dir_all(entry.path()).is_ok() {
+            removed.push(entry.path());
         }
     }
     removed
@@ -755,14 +777,20 @@ fn conversation_time_filter_ignores_snapshot_time() {
             rows.push(index_row(m, session, *first, *last));
         }
         write_activity_index(&stage, machine, &rows);
-        let store = BackupStore::new(cfg(&repo, &root.join("key.json")), machine.to_string());
+        let store = BackupStore::new(
+            cfg(&repo, &root.join("key.json"), root),
+            machine.to_string(),
+        );
         assert!(
             store.push(&stage, &mk).unwrap().files_new > 0,
             "fixture pushed nothing"
         );
     }
 
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-alpha".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-alpha".to_string(),
+    );
 
     // ---- 1. the snapshots really are new, and the conversations really are not
     let all = search_sessions(&store, &mk, &Selector::default()).unwrap();
@@ -933,11 +961,17 @@ fn a_missing_or_unreadable_index_is_never_an_absence() {
         if with_index {
             write_activity_index(&stage, machine, &[index_row(machine, session, WHEN, WHEN)]);
         }
-        let store = BackupStore::new(cfg(&repo, &root.join("key.json")), machine.to_string());
+        let store = BackupStore::new(
+            cfg(&repo, &root.join("key.json"), root),
+            machine.to_string(),
+        );
         store.push(&stage, &mk).unwrap();
     }
 
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-indexed".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-indexed".to_string(),
+    );
 
     // A window on the indexed session's day: that one is a real match, and the
     // un-indexed machine's session is listed as unplaceable — never dropped,
@@ -1007,7 +1041,10 @@ fn a_missing_or_unreadable_index_is_never_an_absence() {
         .join("m-indexed")
         .join("activity-v1.jsonl");
     let push_again = || {
-        let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-indexed".to_string());
+        let store = BackupStore::new(
+            cfg(&repo, &root.join("key.json"), root),
+            "m-indexed".to_string(),
+        );
         store.push(&stage, &mk).unwrap();
     };
 
@@ -1019,7 +1056,10 @@ fn a_missing_or_unreadable_index_is_never_an_absence() {
     partially.push_str("{ this is not JSON }\n");
     fs::write(&index_path, &partially).unwrap();
     push_again();
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-indexed".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-indexed".to_string(),
+    );
 
     let partial = search_sessions(
         &store,
@@ -1051,7 +1091,10 @@ fn a_missing_or_unreadable_index_is_never_an_absence() {
     // reported as incompletely read — never as a machine with no sessions.
     fs::write(&index_path, "not jsonl at all\nneither is this\n").unwrap();
     push_again();
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-indexed".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-indexed".to_string(),
+    );
     let unusable = search_sessions(
         &store,
         &mk,

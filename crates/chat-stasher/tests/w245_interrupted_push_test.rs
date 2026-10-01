@@ -182,6 +182,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_CACHE_HOME", root.join("rh-cache"))
             .env("CHAT_STASHER_REGISTRY", &self.registry);
         cmd
     }

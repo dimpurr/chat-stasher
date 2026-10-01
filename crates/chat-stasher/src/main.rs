@@ -11054,7 +11054,12 @@ mod decision_surface_tests {
             key_file: dir.path().join("masterkey.json"),
             connections: 1,
             options: BTreeMap::new(),
-            cache_dir: None,
+            // This test really opens the repository it builds — pushes it,
+            // then rebuilds its index from it — so it must not be the one src
+            // test that writes a metadata cache into the machine's real user
+            // cache directory. The sandbox gets the cache (W289), enabled:
+            // `destination_rebuild` is a read path, and reads run cached.
+            cache_dir: Some(dir.path().join("rustic-cache")),
             no_cache: false,
         };
         let machine = "fixture-machine";

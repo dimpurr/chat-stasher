@@ -426,13 +426,23 @@ impl Drop for SftpServer {
 // The fixture and the measured runs
 // ---------------------------------------------------------------------------
 
-fn cfg(repo_root: &str, key: &Path, options: BTreeMap<String, String>) -> StoreConfig {
+/// Metadata cache rooted in the test's own directory (W289): the fixtures
+/// here open real repositories — over sftp for the measured runs, locally for
+/// the W271-scale build — and an unset `cache_dir` planted each remote's
+/// per-repository directory in the machine's real cache. Remote backends
+/// honour a local `cache_dir` exactly like a local open does.
+fn cfg(
+    repo_root: &str,
+    key: &Path,
+    options: BTreeMap<String, String>,
+    cache: &Path,
+) -> StoreConfig {
     StoreConfig {
         repo_root: repo_root.to_string(),
         key_file: key.to_path_buf(),
         connections: 1,
         options,
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -516,12 +526,13 @@ impl Sandbox {
 
         let key = root.join("key.json");
         let mk = rustic_core::repofile::MasterKey::new();
-        store::persist_key_file(&cfg("opendal:sftp", &key, BTreeMap::new()), &mk)
+        store::persist_key_file(&cfg("opendal:sftp", &key, BTreeMap::new(), root), &mk)
             .expect("persist key");
         let push_cfg = cfg(
             "opendal:sftp",
             &key,
             Self::backend_options(&proxy, &server.client_key(), &server.remote_root()),
+            root,
         );
         let store = BackupStore::new(push_cfg, MACHINE.to_string());
         assert!(
@@ -972,7 +983,7 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
     let remote = server.remote_root();
     let local = StoreConfig {
         no_cache: true,
-        ..cfg(&remote.to_string_lossy(), &key, BTreeMap::new())
+        ..cfg(&remote.to_string_lossy(), &key, BTreeMap::new(), &root)
     };
     store::persist_key_file(&local, &mk).expect("persist key");
 

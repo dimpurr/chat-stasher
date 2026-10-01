@@ -30,6 +30,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()

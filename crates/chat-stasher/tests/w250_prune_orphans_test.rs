@@ -568,7 +568,12 @@ fn a_destination_name_resolves_the_repository() {
     fs::write(
         &config,
         format!(
-            "[destinations.localbox]\nrepo = '{}'\nkey_file = '{}'\n",
+            // rustic_cache_dir (W289): prune-orphans opened through this
+            // destination must keep its metadata cache inside the sandbox —
+            // the config knob rather than only the env, so a Windows child
+            // (whose cache root the Known Folder API owns) is relocated too.
+            "rustic_cache_dir = '{}'\n\n[destinations.localbox]\nrepo = '{}'\nkey_file = '{}'\n",
+            sb.dir.path().join("rustic-cache").display(),
             sb.repo.display(),
             sb.key.display()
         ),

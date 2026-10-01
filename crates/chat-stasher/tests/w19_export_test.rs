@@ -93,13 +93,18 @@ fn tool_result_line(ts: &str) -> String {
 
 // ------------------------------------------------------------------ fixture
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache inside the fixture's own directory (W289): this fixture is
+/// pushed four times and every export/search below reopens the repository,
+/// and each open used to plant a per-repository directory in the real user
+/// cache. The cache stays enabled — warm metadata between the fixture's
+/// pushes and its exports is the flow being exercised, not an inconvenience.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -221,16 +226,16 @@ fn build_fixture_at(root: &Path) -> (PathBuf, PathBuf, MasterKey) {
         &[index_row("m-beta", CODEX, "codex", t_codex_a, t_codex_b)],
     );
 
-    store::persist_key_file(&cfg(&repo, &key), &mk).unwrap();
+    store::persist_key_file(&cfg(&repo, &key, &root), &mk).unwrap();
     for (machine, stage) in [("m-alpha", &stage_a), ("m-beta", &stage_b)] {
-        let store = BackupStore::new(cfg(&repo, &key), machine.to_string());
+        let store = BackupStore::new(cfg(&repo, &key, &root), machine.to_string());
         assert!(store.push(stage, &mk).unwrap().files_new > 0);
     }
 
     // Now remove m-beta's index and push again: the newest snapshot of that
     // machine has its sessions and no index, which is the state under test.
     fs::remove_dir_all(stage_b.join("meta")).unwrap();
-    let store = BackupStore::new(cfg(&repo, &key), "m-beta".to_string());
+    let store = BackupStore::new(cfg(&repo, &key, &root), "m-beta".to_string());
     store.push(&stage_b, &mk).unwrap();
     assert!(
         !stage_b.join("meta").exists(),
@@ -248,7 +253,7 @@ fn build_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, MasterKey) {
 }
 
 fn store_of(repo: &Path, root: &Path, machine: &str) -> BackupStore {
-    BackupStore::new(cfg(repo, &root.join("key.json")), machine.to_string())
+    BackupStore::new(cfg(repo, &root.join("key.json"), root), machine.to_string())
 }
 
 fn selector(args: SelectorArgs) -> Selector {

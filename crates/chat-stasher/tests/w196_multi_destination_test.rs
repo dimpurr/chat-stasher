@@ -157,7 +157,12 @@ fn two_destinations(sandbox: &Path) {
     write_config(
         sandbox,
         &format!(
-            "[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            // `rustic_cache_dir` first (W289): relays the ui/index children's
+            // metadata cache into this sandbox, including on Windows where
+            // the redirected HOME cannot — see the knob's own comment in
+            // w156_ui_default_test, which introduced the same line.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            sandbox.join("rustic-cache").display(),
             dest_config(&repo_a, &key_a),
             dest_config(&repo_b, &key_b),
         ),
@@ -173,7 +178,12 @@ fn two_destinations_with_differing_copies(sandbox: &Path) {
     write_config(
         sandbox,
         &format!(
-            "[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            // `rustic_cache_dir` first (W289): relays the ui/index children's
+            // metadata cache into this sandbox, including on Windows where
+            // the redirected HOME cannot — see the knob's own comment in
+            // w156_ui_default_test, which introduced the same line.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            sandbox.join("rustic-cache").display(),
             dest_config(&repo_a, &key_a),
             dest_config(&repo_b, &key_b),
         ),

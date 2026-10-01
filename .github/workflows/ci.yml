@@ -142,8 +142,27 @@ jobs:
       - name: Build
         run: cargo build
 
+      # W289 — the suite runs *through* the rustic-cache isolation guard: the
+      # script snapshots this machine's real user cache root
+      # ($HOME/Library/Caches/rustic on macOS, $XDG_CACHE_HOME or ~/.cache on
+      # Linux) before and after the run and fails the step if the run created,
+      # removed or renamed anything there. Before W289 every repository-opening
+      # test wrote a per-repository directory into that root; the fix pointed
+      # every test at a cache under its own temp directory, and this wrapper is
+      # what keeps the fix true — the "cache_dir: None" that creeps back into
+      # a helper shows up here on the very run that added it.
+      #
+      # On the Windows cell the guard cannot watch anything: `dirs::cache_dir()`
+      # there comes from the Known Folder API, which reads the user profile,
+      # not the environment, so a shell script can neither name nor redirect
+      # the cache root. The script says exactly that in its output and then
+      # runs the suite unguarded with its true exit code — a stated gap in the
+      # run log, not a green-by-suppression cell. The cross-platform half of
+      # the W289 fix (the product's own `rustic_cache_dir` config knob in every
+      # test-written destination config) still covers those children.
       - name: Test
-        run: cargo test
+        shell: bash
+        run: bash scripts/dev/check-test-cache-isolation.sh -- cargo test
 
       # ---------------------------------------------------------------------
       # COVERAGE HOLE (deliberate, not masked): scripts/release-gate.sh runs

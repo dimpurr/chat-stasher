@@ -15,6 +15,7 @@ fn run(binary: &Path, cwd: &Path, home: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", home.join("rh-cache"))
         // Simulate an installed binary: the runtime manifest hint must not
         // be needed when the cwd is outside the source checkout.
         .env_remove("CARGO_MANIFEST_DIR")

@@ -50,8 +50,34 @@ From the repository root, run:
 cargo fmt --check
 cargo clippy --all-targets -- -D clippy::let_underscore_must_use
 cargo clippy --lib --bins -- -D clippy::unwrap_used
-cargo test
+bash scripts/dev/check-test-cache-isolation.sh -- cargo test
 python3 scripts/check-semantic-defaults.py
+```
+
+The fourth line **is** the test suite, run through the rustic-cache isolation
+guard (W289). The guard snapshots this machine's real user cache root
+(`~/Library/Caches/rustic` on macOS, `$XDG_CACHE_HOME` or `~/.cache/rustic` on
+Linux) before and after the suite and exits non-zero if the run created,
+removed or renamed anything there. That invariant exists because the suite
+once opened its repositories with rustic's default cache settings, and every
+such open planted a per-repository directory in the user's cache — 36,174 had
+accumulated on one machine before W289, which the cache-walking tests then
+had to sweep and which only `scripts/dev/prune-test-rustic-cache.sh` can
+safely reclaim. So: every test that opens a repository points its cache
+(`StoreConfig::cache_dir`, or `rustic_cache_dir` in the config a spawned child
+reads) at a directory under its own temp fixture — the cache itself stays
+enabled, only its location moves — and this guard turns a regression back into
+a red run instead of a slow machine. On the first run after a large
+accumulation the two snapshots cost a directory walk each; the prune script
+is the way to make that cheap again. A Windows contributor runs plain
+`cargo test` instead, and that gap is stated rather than silent: on Windows
+the cache root comes from the Known Folder API, which neither this guard nor
+an environment override can redirect.
+
+The remaining checks — source-text gates, script self-tests, the release gate
+and the smoke — follow:
+
+```sh
 python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
 python3 scripts/output-inventory.py --check

@@ -15,7 +15,12 @@ readme = "../../README.md"
 # `cargo test` inside a published crate would fail rather than pass. Everything
 # a source build needs (`src`, the embedded `data` registry, the lock and the
 # readme) is present.
-include = ["/src/**", "/data/**", "/Cargo.toml", "/Cargo.lock", "/README.md"]
+#
+# `examples/` is packaged because cargo autodiscovers it: an example missing
+# from the archive while `Cargo.toml` still names its file makes the
+# `cargo publish` verification build fail on "file not found for example", so
+# excluding it here would only defer the failure to release time.
+include = ["/src/**", "/data/**", "/examples/**", "/Cargo.toml", "/Cargo.lock", "/README.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -86,6 +91,14 @@ sha2 = "0.11"
 # Same version as the normal dependency, so this adds no new package to the
 # build graph.
 toml = "0.8"
+# `search_cache_windows_shape_test` compares the cache root chat-stasher walks
+# (`store::rustic_cache_roots`, from `scanner::user_cache_dirs_on`) with the one
+# rustic itself resolves (`rustic_core`'s vendored `Cache::new` calls
+# `dirs::cache_dir()`). Asking rustic for it would mean opening a repository,
+# which is exactly what the test must not do outside a temp directory (W289), so
+# the test calls the same `dirs` instead. Same version `rustic_core` pins, so
+# this adds no package to the build graph — only the direct dev edge.
+dirs = "6"
 # `tests/setup_interactive_test.rs` drives the setup wizard through the real
 # interactive path, which demands a terminal (`is_terminal()` on both stdin
 # and stdout) — a pipe is not one on any platform, so the suite allocates a

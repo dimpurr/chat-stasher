@@ -41,6 +41,7 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()
@@ -64,13 +65,19 @@ fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
     fs::write(dir.join("000001.jsonl"), lines.join("\n") + "\n").unwrap();
 }
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache under the test's own sandbox (W289) — this file's
+/// repositories are opened in-process for the pushes, and its spawned
+/// `run-once`/`overview` children get the same isolation through
+/// `XDG_CACHE_HOME` and through the `rustic_cache_dir` in the destination
+/// config below. The cache itself remains on: index repair is exercised
+/// against the warm-cache reality it will run in.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -120,7 +127,7 @@ fn run_once_repairs_a_stale_archived_index_and_leaves_other_machines_alone() {
 
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let cfg = cfg(&repo, &key);
+    let cfg = cfg(&repo, &key, sandbox);
     let mk = MasterKey::new();
     store::persist_key_file(&cfg, &mk).unwrap();
     // Archived without a writer record: the ≤0.3.0 state.
@@ -251,7 +258,7 @@ fn doctor_names_the_exact_repair_command_for_a_stale_index() {
 
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let cfg = cfg(&repo, &key);
+    let cfg = cfg(&repo, &key, sandbox);
     let mk = MasterKey::new();
     store::persist_key_file(&cfg, &mk).unwrap();
     BackupStore::new(cfg.clone(), machine.to_string())
@@ -263,7 +270,12 @@ fn doctor_names_the_exact_repair_command_for_a_stale_index() {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
+            // rustic_cache_dir: keeps the child's metadata cache off the
+            // real user cache dir (W289) on platforms where the redirected
+            // HOME/XDG_CACHE_HOME cannot do that alone (Windows resolves the
+            // cache root from the Known Folder API, not the environment).
+            "rustic_cache_dir = \"{}\"\n\n[destinations.fixture]\nrepo = \"{}\"\nkey_file = \"{}\"\n",
+            sandbox.join("rustic-cache").display(),
             repo.display(),
             key.display()
         ),

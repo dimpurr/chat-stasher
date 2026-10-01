@@ -29,6 +29,7 @@ fn run(binary: &Path, cwd: &Path, home: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", home.join("rh-cache"))
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("CHAT_STASHER_REGISTRY")
         .output()
