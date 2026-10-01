@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8336-8647`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703`; `crates/chat-stasher/src/main.rs:8416-8727`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -945,7 +945,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:7557-7562`).
+(`crates/chat-stasher/src/main.rs:7637-7642`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
