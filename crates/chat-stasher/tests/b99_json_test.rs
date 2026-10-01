@@ -258,6 +258,10 @@ fn status_json_unreadable_run_state_is_unreadable() {
 
 /// Top-level field names of `status --json` are pinned. New additive fields
 /// are deliberate so tray apps can verify the CLI version they are reading.
+///
+/// `keys` (W281 BUG-2) is one of those additions: every archive copy has its own
+/// key file, so "which keys does this machine hold, and which has the user
+/// declared saved" is a question the existing fields cannot answer.
 #[test]
 fn status_json_top_level_schema_is_stable() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -275,6 +279,7 @@ fn status_json_top_level_schema_is_stable() {
             "exit_code",
             "exit_semantics",
             "healthy",
+            "keys",
             "local",
             "run_state",
             "scanner",

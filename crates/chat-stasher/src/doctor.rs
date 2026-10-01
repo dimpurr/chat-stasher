@@ -980,6 +980,13 @@ pub struct DoctorReport {
     /// [`run()`] entry point fills it in; the field is an `Option` so a caller
     /// can distinguish "checked and found nothing" from "not checked").
     pub native_host: Option<NativeHostCheck>,
+    /// Which archive keys this machine holds, per copy: the local repository's
+    /// and each declared destination's, with whether each file is here and
+    /// whether the user has declared they keep a copy. `None` when the config
+    /// could not be read — every path in the inventory is derived from it, so
+    /// there is no answer rather than an empty one (the same distinction
+    /// `fts_indexes` and `native_host` carry).
+    pub keys: Option<Vec<KeyInventoryRow>>,
 }
 
 /// D10 state for one destination's disposable full-text index.
@@ -1129,6 +1136,99 @@ pub enum DestinationOutcome {
     NotConfigured { detail: String },
 }
 
+/// One archive copy's key file, and whether it exists on this machine and has
+/// been declared saved — reported by `doctor`/`status` so the user can see
+/// which keys they hold a copy of (W281 BUG-2: every destination carries its
+/// own key, and a lost one loses that destination).
+#[derive(Debug, Clone)]
+pub struct KeyInventoryRow {
+    /// The destination this key belongs to, or `None` for the local
+    /// repository's key. The name is the discriminator rather than a separate
+    /// `scope` string, so a destination a user happens to call `local` cannot
+    /// be confused with the local copy.
+    pub name: Option<String>,
+    pub path: PathBuf,
+    /// Whether the key file exists on this machine.
+    pub exists: bool,
+    /// Whether the user has declared (never verified) they keep a copy of
+    /// *this file* — three states, not two: a key that cannot be read to
+    /// compare against the record is unknown, and must not be reported as
+    /// either declared-saved or plainly not declared (see
+    /// `keydecl::DeclaredFor`).
+    pub declared_saved: crate::keydecl::DeclaredFor,
+}
+
+impl KeyInventoryRow {
+    /// `"local"` or `"destination"` — the machine-readable kind, derived from
+    /// [`Self::name`] so the two can never disagree.
+    pub fn scope(&self) -> &'static str {
+        if self.name.is_some() {
+            "destination"
+        } else {
+            "local"
+        }
+    }
+}
+
+/// Which archive keys this machine holds, per copy: the local repository's and
+/// each declared destination's. A destination key is its own row unless it
+/// points at the local key (an override sharing the local archive's
+/// declaration), because then the local row already names it.
+///
+/// `declared_saved` is decided by `keydecl::declared_for` — a three-state
+/// comparison, carried through to the row — not by the scope alone: a
+/// declaration is a statement about a *file* — that path, holding those
+/// bytes — so a destination whose `key_file` moved, or whose key was re-created
+/// at the same path, must not read as backed up on the strength of a record
+/// made about a different file. A file that exists but cannot be read is
+/// `DeclaredFor::Unreadable`, never a "saved": something unreadable sits where
+/// the key was, and nobody has confirmed a copy of whatever it is.
+pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
+    let data_root = default_data_root();
+    let state_dir = crate::collect::default_state_dir();
+    let declarations = crate::keydecl::load(&state_dir);
+    let local_path = config
+        .rustic_key_file
+        .as_deref()
+        .map(expand_tilde)
+        .unwrap_or_else(|| data_root.join("masterkey.json"));
+
+    let mut out = Vec::new();
+    out.push(KeyInventoryRow {
+        name: None,
+        path: local_path.clone(),
+        exists: local_path.exists(),
+        declared_saved: crate::keydecl::declared_for(
+            &declarations,
+            crate::keydecl::LOCAL_SCOPE,
+            &local_path,
+        ),
+    });
+    let mut names: Vec<&String> = config.destinations.keys().collect();
+    names.sort_unstable();
+    for name in names {
+        let key_file = config.destinations[name]
+            .key_file
+            .clone()
+            .map(|raw| expand_tilde(&raw))
+            .unwrap_or_else(|| data_root.join(format!("masterkey-{name}.json")));
+        if key_file == local_path {
+            continue;
+        }
+        out.push(KeyInventoryRow {
+            name: Some(name.clone()),
+            path: key_file.clone(),
+            exists: key_file.exists(),
+            declared_saved: crate::keydecl::declared_for(
+                &declarations,
+                &crate::keydecl::destination_scope(name),
+                &key_file,
+            ),
+        });
+    }
+    out
+}
+
 /// Build the [`StoreConfig`] a declared destination connects with, or `None`
 /// when it names no repository.
 ///
@@ -1257,6 +1357,91 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
     }
 }
 
+/// JSON shape for one row of the key inventory.
+///
+/// `declared_saved` and `declaration_is_verified` are deliberately two fields:
+/// the second is always `false`, because nothing can check that a copy exists.
+/// A consumer must not read `declared_saved: true` as "this key is backed up".
+///
+/// `declared_state` carries the three states behind that boolean:
+/// `"declared"` (the record is about this file), `"not_declared"` (a known
+/// no — nothing recorded, another file, or bytes that changed since), and
+/// `"unreadable"` (the file could not be read to compare — an unknown, so the
+/// boolean reads `false` for the safe reason rather than a measured one).
+fn key_inventory_json(row: &KeyInventoryRow) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "scope": row.scope(),
+        "path": row.path.display().to_string(),
+        "exists": row.exists,
+        "declared_saved": row.declared_saved.is_declared(),
+        "declared_state": row.declared_saved,
+        "declaration_is_verified": false,
+    });
+    if let Some(name) = &row.name {
+        value["name"] = serde_json::json!(name);
+    }
+    value
+}
+
+/// The `keys` block of a JSON report, built from a config the caller already
+/// read. `status` and `doctor` both report this, so the two share one
+/// implementation rather than two readings of the same declaration file.
+pub fn keys_json(config: &Config) -> serde_json::Value {
+    let rows = key_inventory(config);
+    serde_json::json!({
+        "checked": true,
+        "copies": rows.iter().map(key_inventory_json).collect::<Vec<_>>(),
+    })
+}
+
+/// The `[keys]` lines `status` prints: one per **destination** whose key needs
+/// attention, and nothing at all otherwise.
+///
+/// `status`'s default body is a fixed handful of lines on purpose (see
+/// [`crate::doctor::print_report`]'s counterpart in `main.rs` and B78), so this
+/// follows the same rule as the activity-index line below: it speaks only when
+/// there is something to say. A machine with no destinations, or whose
+/// destination keys are all present and declared, prints no `[keys]` line. The
+/// full inventory — including the local copy — is `doctor`'s section, and
+/// [`keys_json`] carries it in `status --json` for scripts.
+///
+/// The local key is deliberately not a `status` alert: it is the wizard's step 3
+/// and `doctor`'s first row, and a machine that has simply not archived anything
+/// yet has no local key without anything being wrong.
+pub fn key_alert_lines(config: &Config) -> Vec<String> {
+    key_inventory(config)
+        .iter()
+        .filter_map(|row| {
+            let name = row.name.as_deref()?;
+            match (row.declared_saved, row.exists) {
+                // Something unreadable sits at the key's path: this is neither
+                // "not on this machine" (a path is there) nor "no copy was
+                // declared" (nobody could tell). Reported as unknown, in its
+                // own words, because being told "not declared" here would send
+                // the user looking for a declaration they may already have.
+                (crate::keydecl::DeclaredFor::Unreadable, _) => Some(format!(
+                    "[keys] destination={name} key={} unreadable — unknown whether it is still \
+                     the key that was declared saved; a key that cannot be read opens no copy",
+                    row.path.display()
+                )),
+                // This machine cannot open that copy at all, whatever the user
+                // has declared: the file is not here.
+                (_, false) => Some(format!(
+                    "[keys] destination={name} key={} is NOT on this machine — this machine \
+                     cannot read that copy until it is restored there",
+                    row.path.display()
+                )),
+                (crate::keydecl::DeclaredFor::NotDeclared, true) => Some(format!(
+                    "[keys] destination={name} key={} is here but no saved copy was ever \
+                     declared — back it up; a second machine opens that copy with this file",
+                    row.path.display()
+                )),
+                (crate::keydecl::DeclaredFor::Declared, true) => None,
+            }
+        })
+        .collect()
+}
+
 /// JSON shape for the activity-index freshness of one destination. `recorded`
 /// is `null` when no writer version was recorded at all (≤0.3.0) — an absent
 /// record, never an empty version string.
@@ -1338,6 +1523,10 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         scan_failed: true,
         destinations: Vec::new(),
         native_host: None,
+        // Every key path here is derived from the config (the local key's
+        // override and each destination's), so an unreadable config means the
+        // inventory was not computed — `None`, not an empty list.
+        keys: None,
     }
 }
 
@@ -1491,6 +1680,7 @@ pub fn run() -> DoctorReport {
         // action and this entry point is called directly by the test suite.
         destinations: Vec::new(),
         native_host: Some(native_host),
+        keys: Some(key_inventory(&config)),
     }
 }
 
@@ -2651,6 +2841,15 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
+        "keys": match &r.keys {
+            Some(rows) => serde_json::json!({
+                "checked": true,
+                "copies": rows.iter().map(key_inventory_json).collect::<Vec<_>>(),
+            }),
+            // Not "there are no keys": this run could not read the config the
+            // inventory is derived from, so it never looked.
+            None => serde_json::json!({"checked": false}),
+        },
         "native_host": match &r.native_host {
             Some(check) => native_host_json(check),
             // Not the same as "there is no registration": this run did not look.
@@ -3179,11 +3378,64 @@ pub fn print_report(r: &DoctorReport) {
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
 
+    // Every archive copy has its own key, so a backup that names only the
+    // local one leaves the off-site copies unreadable (W281 BUG-2). Reported
+    // per copy rather than as one "key" for that reason.
+    print_keys(&r.keys);
+
     // D8 — is the browser-side host actually usable?
     if let Some(check) = &r.native_host {
         eprintln!();
         print_native_host(check);
     }
+}
+
+/// Which key files this machine holds, per archive copy, and which of them the
+/// user has said they keep a copy of.
+///
+/// Silent for `None` (a report whose config could not be read): the inventory is
+/// derived from the config, so there is nothing to say rather than nothing to
+/// list. `not_checked` already names that check as skipped.
+fn print_keys(keys: &Option<Vec<KeyInventoryRow>>) {
+    let Some(rows) = keys else { return };
+    eprintln!();
+    eprintln!("Keys · one file per archive copy — each opens only its own copy");
+    eprintln!("     A second machine reads a copy with that copy's key. Back up every one.");
+    for row in rows {
+        // `present`/`not on this machine` rather than yes/no: the file belongs to
+        // a copy that may live elsewhere, so its absence here is a fact about
+        // *this* machine and not a claim that the key was never created.
+        let where_ = if row.exists {
+            "present on this machine"
+        } else {
+            "not on this machine"
+        };
+        // Three states, because the file's comparison against the recorded
+        // declaration has three answers and two of them must not be worded as
+        // each other: a key that exists but cannot be read is an *unknown*,
+        // not a "NOT declared" (which says the bytes were seen and did not
+        // match), and never a "declared saved".
+        let declared = match row.declared_saved {
+            crate::keydecl::DeclaredFor::Declared => "declared saved",
+            crate::keydecl::DeclaredFor::NotDeclared => "NOT declared saved",
+            crate::keydecl::DeclaredFor::Unreadable => {
+                "unreadable — unknown whether the declaration covers it"
+            }
+        };
+        let label = match &row.name {
+            Some(name) => format!("{name} (destination)"),
+            None => "local (this machine's archive)".to_string(),
+        };
+        eprintln!(
+            "  {:<28} {} — {where_}; {declared}",
+            label,
+            row.path.display()
+        );
+    }
+    eprintln!(
+        "     A declaration is a statement, not a check: doctor cannot see your backup, so \
+         `declared saved` never means the copy exists."
+    );
 }
 
 fn print_fts_indexes(indexes: &Option<Vec<FtsIndexCheck>>) {
@@ -4082,6 +4334,7 @@ mod json_tests {
             scan_failed: false,
             destinations: Vec::new(),
             native_host: None,
+            keys: Some(Vec::new()),
         }
     }
 
@@ -4104,6 +4357,10 @@ mod json_tests {
     ///
     /// D10 adds the local FTS inventory as a new field; its per-destination
     /// state does not require a destination connection or archive read.
+    ///
+    /// `keys` follows the same rule: every archive copy has its own key file
+    /// (ADR-013/ADR-039), so "which keys does this machine hold" has no answer
+    /// to fold into an existing field. New key, nothing renamed or removed.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -4122,6 +4379,7 @@ mod json_tests {
                 "footprints",
                 "fts_indexes",
                 "gemini",
+                "keys",
                 "native_host",
                 "not_checked",
                 "other_present",

@@ -317,6 +317,37 @@ fn push_not_started_exits_three() {
     );
 }
 
+/// `dest-init` is the non-wizard path to a destination, and it creates that
+/// destination's **own** key. It therefore has to name the file where the user
+/// can see it: a second machine reads this copy with `masterkey-<name>.json`
+/// (or the `key_file` this destination declares), never with the local
+/// `masterkey.json`, so a user who backs up the local key alone cannot recover
+/// this copy (W281 BUG-2). The wizard says this at step 4; the command a user
+/// runs instead of the wizard has to say it too.
+#[test]
+fn dest_init_names_the_destination_key_it_created() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = empty_registry(root.path());
+    let key = root.path().join("target-key.json");
+    let output = run_empty_dest_init(
+        root.path(),
+        &registry,
+        &synthetic_stage(root.path()),
+        &root.path().join("target-repo"),
+        &key,
+    );
+    let (stdout, stderr) = text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("[dest-init] key           : {}", key.display())),
+        "dest-init created the destination's key and must name it; stdout={stdout}"
+    );
+}
+
 #[test]
 fn normal_dest_init_stays_zero_and_keeps_completion_line() {
     let root = tempfile::tempdir().unwrap();

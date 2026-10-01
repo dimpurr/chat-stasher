@@ -20,7 +20,7 @@ This is the short version: what chat-stasher does with your conversations, who c
 | The stage folder on your disk | **No** | Anything running as your user |
 | The optional local full-text index, if you built one | **No** | Anything running as your user |
 | Your destination: local folder, SFTP or R2 | **Yes** | Only someone with the key file |
-| The master key file, on your disk | Written readable only by you (`0600`, on macOS and Linux) | Anything running as your user |
+| The master key files, on your disk — one per archive copy, `masterkey.json` for the local archive and `masterkey-<destination>.json` for each destination | Written readable only by you (`0600`, on macOS and Linux) | Anything running as your user |
 
 Your storage provider holds encrypted objects only. It can still see how much you store, and when you back up.
 
@@ -46,7 +46,7 @@ The **full-text index** is the one place conversation text is written outside th
 
 ## What chat-stasher does not protect you from
 
-- **Losing the key.** It is the only key. There is no recovery, escrow or reset, and no one can help.
+- **Losing a key.** Each archive copy has exactly one key and that key is the only thing that opens it. There is no recovery, escrow or reset, and no one can help. Losing one copy's key loses that copy, so keep a backup of every key file you have ([setup.md → The master key](setup.md#3-the-master-key)).
 - **A hostile program running as you.** It can read the outbox, the stage, your config and your key file. On a shared machine this is the main risk.
 - **Other browser extensions.** Whether a second extension with broad permissions on a chat site can observe ours has not been tested. Treat it as potentially exposed.
 - **Traffic analysis.** Your destination provider, and anyone watching your network, can see the size and timing of your backups.

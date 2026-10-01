@@ -18,6 +18,7 @@ pub mod id;
 pub mod identity;
 pub mod inbox;
 pub mod json_out;
+pub mod keydecl;
 pub mod manifest;
 pub mod metahash;
 pub mod models;

@@ -86,6 +86,9 @@ This time it ends with `result: NOOP snapshot=not-created`. Nothing changed, so 
 
 Copy `~/.local/share/chat-stasher/masterkey.json` somewhere that is not this disk. A password manager is a good place, and so is a USB drive kept elsewhere. Keep the copy private: anyone with the key file and access to your archive can read every conversation in it.
 
+> [!IMPORTANT]
+> **One key per archive copy.** The file above opens the archive on this disk. When you [add an off-site copy](destinations.md), that copy is a full archive of its own with a key file of its own — `~/.local/share/chat-stasher/masterkey-<destination>.json` — and another computer reads it with **that** file, not this one. Back up every key file you have, not just the first. `chat-stasher setup` names each of them as it creates them, and `chat-stasher doctor` lists the ones on this machine with whether you have declared a copy of each.
+
 ## 5. Switch on hourly archiving
 
 `run-once` does one pass and exits. To run it every hour, let chat-stasher write a timer file:

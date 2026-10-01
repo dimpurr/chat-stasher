@@ -219,6 +219,49 @@ under its own heading below.
   registry-driven table below it carries the same split. "Did not scan" is not
   "there is none", and the two numbers are now separate — the same distinction
   `status` already made in its own warning, from the same definition.
+- **A destination's key file is now named wherever a destination is created, and
+  the setup wizard asks for a backup of every key.** Each archive copy has its
+  own key, and a second machine reads a destination with `masterkey-<destination>.json`
+  and never with the local `masterkey.json` — so a user who followed the wizard
+  literally, backing up the one file it named, could not read their off-site
+  copy after losing a machine: measured on a real second machine as exit `3` and
+  `cannot read masterkey file … (lost key?)`. The wizard now reports every key
+  it asks about in `masterkey.keys[]`, each with its `scope`, `name`, `path` and
+  `declared` state; `dest-init` names the destination key it created on stdout;
+  and `doctor` (and `status --json`) report which key files this machine holds,
+  whether each is present here, and whether the user has declared a backup of
+  it. `status` adds a line per destination whose key is missing here or has no
+  declared backup, and stays silent otherwise, so its default body is unchanged
+  on a machine with nothing to report. One `--masterkey-saved-elsewhere`
+  declaration covers every key *already on this machine* when the run starts,
+  and is recorded per copy; a key the run itself creates — a destination's,
+  which `dest-init` makes — is not covered, because nobody can have copied a
+  file that did not exist when they answered. That run stops with `2`, names the
+  new file in `masterkey.keys[]` with `declared: false`, and the same command run
+  again records the declaration.
+- **A key file that cannot be read no longer reads as backed up.** A declared
+  backup is a statement about a file — that path, holding those bytes — and the
+  comparison that decides whether a declaration covers a key folded every read
+  error into the one error that means the file was deleted, which keeps the
+  statement standing. So a key replaced by something unreadable — a directory
+  at the key's path, a file with its read permission gone — was reported as
+  declared saved, on the strength of a record about bytes nobody could read
+  back. That is the one direction this file exists to prevent: an unchanged
+  path proves nothing when the file cannot be opened. `doctor` and `status`
+  now report the key as its own third state — unreadable, unknown whether it
+  is still the declared file — and never as a plain "not declared" either,
+  because a user whose declaration is on file must not be sent looking for a
+  step they already did. `status --json`/`doctor --json` carry it as
+  `declared_state: "unreadable"` next to the existing `declared_saved` field,
+  which reads `false`; the setup wizard counts an unreadable key as not
+  declared, so the step stays owed until the file can be read and compared.
+  A missing key file is unchanged: the statement was made about the copy the
+  user keeps, not about this machine's disk, so it still stands.
+
+  The interactive declined prompt is pinned by a test that drives the real
+  path — the binary on a terminal, an answer typed at the printed prompt,
+  judged on the exit code and the record — which fails on the code the fix
+  replaced, where a declined prompt was reported as a made declaration.
 - **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
   other OS it is refused up front, with the reason that the macOS keychain
   does not exist there, instead of trying to run a tool that cannot be

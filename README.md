@@ -125,7 +125,9 @@ The first run ends like this:
 Running it again when nothing changed prints `result: NOOP` and creates no new snapshot. That is the normal, healthy case.
 
 > [!WARNING]
-> **Back up `~/.local/share/chat-stasher/masterkey.json` now.** It is the only key to your archive. If you lose it, the archive can never be read again. There is no recovery code and no reset, and nobody can help. Keep a copy somewhere other than this disk, such as a password manager.
+> **Back up your key files now.** The one this run created is `~/.local/share/chat-stasher/masterkey.json`. If you lose it, the archive it opens can never be read again: there is no recovery code and no reset, and nobody can help. Keep a copy somewhere other than this disk, such as a password manager.
+>
+> **And there is one key per archive copy, not one key in total.** Every destination you add gets its own file — `~/.local/share/chat-stasher/masterkey-<destination>.json` — and another computer reads that copy with *that* file, never with the local one. Back up each of them; a backup holding only the key above recovers only this machine's local archive.
 
 **3. Keep it running.** `schedule` writes an hourly timer file:
 
@@ -267,7 +269,7 @@ chat-stasher is built to be driven by scripts and agents that act on its answers
 
 - **Nothing is sent to us.** There is no account, no telemetry and no server of ours. The CLI talks only to the destinations you configure. The extension talks only to the chat sites you already use and to the local host.
 - **Encrypted before it leaves your machine.** Your storage provider sees encrypted objects. It can still see how much you back up, and when.
-- **You hold the only key.** Nobody can recover it, and nobody can read the archive without it.
+- **You hold the only keys, and there is one per archive copy.** Nobody can recover one for you, and nobody can read a copy without its key. Back up every key file: the local archive's, and each destination's.
 - **Append-only.** Each run adds a snapshot. The only thing chat-stasher deletes is its own staged copy, and only after every destination proves it holds those bytes.
 - **Plaintext on your own disk.** Three things sit on your disk unencrypted: captures waiting in the extension, staged shards, and the key file. Other programs running as you can read them.
 - **The extension** has four permissions and no site host permissions. Backfill requests are made from inside your own open tabs.

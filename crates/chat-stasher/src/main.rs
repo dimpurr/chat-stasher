@@ -6130,6 +6130,17 @@ fn cmd_dest_init(
                 push_not_started = true;
             }
             Ok((mk, _)) => {
+                // Name the key at the moment it is on the disk. This command is
+                // the non-wizard way to create a destination, and the key it
+                // just created is the one a second machine reads *this* copy
+                // with — never the local `masterkey.json`. A user who learns
+                // that only from the wizard, and ran this instead, would back up
+                // the wrong file (W281 BUG-2).
+                println!(
+                    "[dest-init] key           : {}  (this destination's own key — a second \
+                     machine needs this file to read this copy; back it up)",
+                    target.key_file.display()
+                );
                 let store = BackupStore::new(target.clone(), machine.clone());
                 if let Err(e) = record_writer_version(stage, &machine) {
                     eprintln!("dest-init: cannot record writer version: {e:#}");
@@ -10089,7 +10100,7 @@ mod decision_surface_tests {
             &[],
             2,
             None,
-            None,
+            &[],
         ))
         .expect("the setup payload is one JSON object");
         assert_eq!(value["command"], "setup");
@@ -10158,7 +10169,7 @@ mod decision_surface_tests {
             &[],
             2,
             Some(&why),
-            None,
+            &[],
         ))
         .expect("the setup payload is one JSON object");
 
@@ -10208,6 +10219,88 @@ mod decision_surface_tests {
         assert!(!setup_declaration_given("y"));
         assert!(!setup_declaration_given("I saved it"));
         assert!(!setup_declaration_given(""));
+    }
+
+    /// A declined prompt is not a declaration, and the key must stay undeclared
+    /// — the state the wizard reports as an owed step and the exit code `2`
+    /// comes from.
+    ///
+    /// The prompt says "NOT declared" in so many words. A key that reads as
+    /// declared anyway would let a run finish with `missing_parameters` empty
+    /// and the archive readable only from this machine's copy of a key nobody
+    /// confirmed — the one direction this must never get wrong, and the reason
+    /// the record is written only when the user made the statement.
+    ///
+    /// This is the seam (answer + persistence) of the W284 fix; the prompt it
+    /// answers is pinned end-to-end — real binary, real terminal, real typed
+    /// answer, failing on the pre-fix commit — by `setup_interactive_test.rs`.
+    #[test]
+    fn a_declined_prompt_leaves_the_key_undeclared() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = dir.path().join("masterkey.json");
+        std::fs::write(&key, b"opaque fixture bytes, never read as a key\n")
+            .expect("plant the key");
+        assert!(
+            !setup_declaration_from_answer(
+                SetupDeclarationAnswer::Declined,
+                chat_stasher::keydecl::LOCAL_SCOPE,
+                &key,
+                "masterkey",
+                dir.path(),
+            ),
+            "a declined prompt is not a declaration"
+        );
+        assert!(
+            !chat_stasher::keydecl::load(dir.path())
+                .contains_key(chat_stasher::keydecl::LOCAL_SCOPE),
+            "a declined prompt must record nothing at all"
+        );
+    }
+
+    /// A declaration that could not reach the disk is not one either: the
+    /// record *is* the value of the answer, because `status`/`doctor` read it on
+    /// later runs. Reporting the step as done would be the false "saved" in a
+    /// different shape.
+    #[test]
+    fn a_declaration_that_cannot_be_recorded_is_not_a_declaration() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The key file is absent, so the declaration has no file to be about
+        // and cannot be fingerprinted — the record must not be written.
+        let key = dir.path().join("never-created.json");
+        assert!(
+            !setup_declaration_from_answer(
+                SetupDeclarationAnswer::Declared,
+                &chat_stasher::keydecl::destination_scope("backup"),
+                &key,
+                "destination key for `backup`",
+                dir.path(),
+            ),
+            "an unrecorded declaration is not a declaration"
+        );
+        assert!(chat_stasher::keydecl::load(dir.path()).is_empty());
+    }
+
+    /// And the one case that *is* a declaration: the user said it and the
+    /// record is on the disk.
+    #[test]
+    fn a_declaration_the_user_made_and_the_run_recorded_counts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = dir.path().join("masterkey-backup.json");
+        std::fs::write(&key, b"opaque fixture bytes, never read as a key\n")
+            .expect("plant the key");
+        assert!(setup_declaration_from_answer(
+            SetupDeclarationAnswer::Declared,
+            &chat_stasher::keydecl::destination_scope("backup"),
+            &key,
+            "destination key for `backup`",
+            dir.path(),
+        ));
+        assert!(chat_stasher::keydecl::declared_for(
+            &chat_stasher::keydecl::load(dir.path()),
+            &chat_stasher::keydecl::destination_scope("backup"),
+            &key,
+        )
+        .is_declared());
     }
 
     /// An empty answer takes the offered default; a typed path is expanded
@@ -12071,7 +12164,7 @@ fn cmd_setup(
                     // not the masterkey/remote pre-pass refusal this field
                     // renders specially.
                     None,
-                    None,
+                    &[],
                 )
             );
         }
@@ -12109,6 +12202,44 @@ fn cmd_setup(
                     premissing.push(name);
                 }
             }
+            // A destination's own key is owed just like the local one: a second
+            // machine reads that destination with `masterkey-<name>.json`, so
+            // creating or using one without the declaration reproduces BUG-2
+            // (W281). Owed unless the flag covers it, it is the local key (an
+            // override sharing the local declaration), it is already recorded
+            // declared *for this file*, or it is an adopted destination whose
+            // key was never created (nothing exists to back up).
+            //
+            // This block runs only when the flag is absent. With the flag given
+            // there is nothing to refuse here: the flag covers the local key,
+            // and a destination key this run has still to create is reported by
+            // the declaration block below — after `dest-init` has run and the
+            // file exists to be named — rather than refused here before there is
+            // a file for the person to copy.
+            if !masterkey_saved_elsewhere {
+                let name = destination.as_deref().expect("destination is some");
+                let dest_key = setup_destination_key_path(&config, name);
+                if dest_key != setup_local_store(&config).key_file {
+                    let will_configure = !setup_destination_declared(Some(name));
+                    if will_configure || dest_key.exists() {
+                        let state_dir = chat_stasher::collect::default_state_dir();
+                        // Unreadable reads as not declared here, deliberately:
+                        // this is the one-bit question "is the step owed?",
+                        // and an unreadable key is owed a readable one before
+                        // its declaration can count. The unknown wording is
+                        // `doctor`/`status`'s to carry.
+                        let already_declared = chat_stasher::keydecl::declared_for(
+                            &chat_stasher::keydecl::load(&state_dir),
+                            &chat_stasher::keydecl::destination_scope(name),
+                            &dest_key,
+                        )
+                        .is_declared();
+                        if !already_declared && !premissing.contains(&"masterkey_saved_elsewhere") {
+                            premissing.push("masterkey_saved_elsewhere");
+                        }
+                    }
+                }
+            }
         }
         if !premissing.is_empty() {
             // WIZ-1 has one deliberate exception to "exit 2 writes nothing":
@@ -12142,6 +12273,19 @@ fn cmd_setup(
                     Err(error) => (setup_refused_bootstrap_failed_why(&error), None),
                 },
             };
+            // The refusal names whatever key the bootstrap created so the human
+            // has a file to copy. Only the local key is created here — the
+            // destination step has not run, so no destination key exists yet.
+            let bootstrap_keys: Vec<SetupKey> = created_key
+                .as_ref()
+                .map(|path| SetupKey {
+                    scope: SetupKeyScope::Local,
+                    name: None,
+                    path: path.clone(),
+                    declared: false,
+                })
+                .into_iter()
+                .collect();
             println!(
                 "{}",
                 setup_json_payload(
@@ -12175,7 +12319,7 @@ fn cmd_setup(
                     &[],
                     2,
                     Some(&why),
-                    created_key.as_deref(),
+                    &bootstrap_keys,
                 )
             );
             return ExitCode::from(2);
@@ -12194,11 +12338,39 @@ fn cmd_setup(
     // says "unknown" is the failure this shape exists to prevent.
     let chain = setup_chain(&local, &readback);
 
-    let mut declared = masterkey_saved_elsewhere;
+    // A declaration covers every key this machine protects — the local
+    // repository's key and each destination's key. `masterkey_saved_elsewhere`
+    // (the flag, or the sentence `print_setup_*` asks for) is that declaration.
+    // It is recorded per scope when it is made, so `status`/`doctor` can report
+    // which keys the user has said they keep a copy of.
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let declarations = chat_stasher::keydecl::load(&state_dir);
+    // The single flag covers every key of this run. An existing, already
+    // recorded declaration also counts, so a non-interactive re-run that does
+    // not pass the flag does not demand a redundancy — and it counts only when
+    // it is about the file this run would protect, not merely about the scope:
+    // a record made about another path, or about key bytes that have since been
+    // replaced, is not a declaration about this key.
+    let declared = masterkey_saved_elsewhere;
+    let mut local_declared = declared
+        || chat_stasher::keydecl::declared_for(
+            &declarations,
+            chat_stasher::keydecl::LOCAL_SCOPE,
+            &local.key_file,
+        )
+        .is_declared();
     if interactive {
         print_setup_local_report(&local, &chain);
         if setup_has_key(&local.save) {
-            declared = print_setup_masterkey(&local);
+            // Asked only for a key this run does not already hold a declaration
+            // for — the same rule the destination's prompt follows — and the
+            // answer is the one the run acts on: the wizard has just told a
+            // user who declined that the step is unfinished, and it must not
+            // then report the key as declared, or record it, because a flag or
+            // an older record happens to be there.
+            if !local_declared {
+                local_declared = print_setup_masterkey(&local, &state_dir);
+            }
         } else {
             println!(
                 "setup: masterkey: none exists yet, so there is nothing to declare saved — the \
@@ -12206,11 +12378,37 @@ fn cmd_setup(
             );
         }
     }
+    // The flag records the local declaration once the key exists. Only when
+    // this key is not already recorded: re-writing the file on every run would
+    // be churn with no new fact in it — but a record made about another file,
+    // or about bytes that have since been replaced, is not a record about this
+    // one and is written over. A declaration that cannot be persisted is not a
+    // declaration — the record is the whole point of it, because
+    // `status`/`doctor` read it on later runs — so a failed write clears the
+    // flag the caller declared rather than reporting the step as done.
+    if declared
+        && setup_has_key(&local.save)
+        && !chat_stasher::keydecl::declared_for(
+            &declarations,
+            chat_stasher::keydecl::LOCAL_SCOPE,
+            &local.key_file,
+        )
+        .is_declared()
+    {
+        if !record_key_declaration(
+            &state_dir,
+            chat_stasher::keydecl::LOCAL_SCOPE,
+            &local.key_file,
+            "masterkey",
+        ) {
+            local_declared = false;
+        }
+    }
 
     // A declaration is owed only when there is a key to declare. With no
     // repository there is no key, and asking for the declaration anyway would
     // ask the user to confirm something that is not true.
-    let declaration_missing = setup_has_key(&local.save) && !declared;
+    let declaration_missing = setup_has_key(&local.save) && !local_declared;
     let mut missing = setup_missing_parameters(Some(stage));
     if declaration_missing {
         missing.push("masterkey_saved_elsewhere");
@@ -12279,6 +12477,20 @@ fn cmd_setup(
     // one value, so a non-TTY caller — who is shown nothing — reads the same
     // observation an interactive one gets on stderr.
     let credentials = setup_remote_credentials(&remote);
+
+    // Whether the destination's key file was on this disk **before the remote
+    // step**, which is the step that creates it.
+    //
+    // This is what decides whether `--masterkey-saved-elsewhere` may cover that
+    // key at all. The flag is a statement about files the user has already seen
+    // and copied; a key this run creates is not one of them, because at the
+    // moment the flag was given there was nothing to copy. A run that would
+    // declare such a key is declaring a backup nobody can have made, so it
+    // reports the declaration as still owed instead (see the destination
+    // declaration below).
+    let destination_key_existed_before = destination
+        .as_deref()
+        .map(|name| setup_destination_key_path(&config, name).exists());
 
     let remote_report = match destination.as_deref() {
         Some(name) => {
@@ -12356,6 +12568,130 @@ fn cmd_setup(
 
     if interactive {
         print_setup_remote(&remote_report);
+    }
+
+    // A destination configured at step 4 carries its own key, and a second
+    // machine reads that destination with *its* key — never with the local one
+    // (ADR-013/039). So step 4's key is owed too, and the wizard names it and
+    // asks for the same declaration. Interactive: ask now that the key exists.
+    // Non-interactive: the flag (or an already recorded declaration) covers it
+    // when it *may* — see `flag_covers_destination_key` — and `dest_declared`
+    // reflects that.
+    let dest_declared_key = setup_destination_has_key(&remote_report, &config);
+    // The flag is a statement about key files the user has already seen, so it
+    // cannot cover one this run created: at the moment it was given there was no
+    // file to copy. A key that was not on the disk before the remote step and is
+    // here now exists because `dest-init` just made it; the declaration stays
+    // owed, the run stops with `2`, and the file the person has to copy is named
+    // in `masterkey.keys` (`declared: false`) — the same shape as the WIZ-1
+    // bootstrap, one step later in the flow. A later run, on a machine where the
+    // file is already there, declares it.
+    //
+    // The local key is deliberately not held to this, and the asymmetry is
+    // written down rather than implied: it is the file the flag is named after,
+    // the flow creates and names it on a run *without* the flag before the flag
+    // is ever passed (the bootstrap above), and a destination's key has no such
+    // step — this rule is it. A caller who passes the flag on the very first run
+    // of a fresh machine is skipping the local bootstrap, and that is their
+    // statement to make about a file at a documented path.
+    let destination_key_created_this_run =
+        matches!(dest_declared_key, Some(_)) && destination_key_existed_before == Some(false);
+    let flag_covers_destination_key = declared && !destination_key_created_this_run;
+    let mut dest_declared = dest_declared_key
+        .as_ref()
+        .map(|key| {
+            flag_covers_destination_key
+                || remote_report
+                    .name
+                    .as_deref()
+                    .map(|name| {
+                        // A recorded declaration counts only if it is about the
+                        // file this run would declare — that path, holding
+                        // those bytes. A destination whose `key_file` moved, or
+                        // whose key was re-created since, has no declaration.
+                        // An unreadable key file is not declared either: the
+                        // step stays owed until the file there can be read and
+                        // compared.
+                        chat_stasher::keydecl::declared_for(
+                            &declarations,
+                            &chat_stasher::keydecl::destination_scope(name),
+                            key,
+                        )
+                        .is_declared()
+                    })
+                    // reason: `name` is present exactly when the report named a
+                    // destination; a report without one reaches this with no
+                    // name to look up, and "not declared" is the safe reading —
+                    // it asks for the declaration rather than assuming one.
+                    .unwrap_or(false)
+        })
+        // reason: no destination key exists (no destination named, an adopted
+        // destination, or a `dest-init` that did not run), so there is nothing
+        // this run could ask the user to declare, and `true` means "not owed".
+        // Erring the other way would demand a declaration for a file that is
+        // not there, which the wizard's own rule forbids.
+        .unwrap_or(true);
+    if interactive {
+        if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref())
+        {
+            if !dest_declared {
+                dest_declared = print_setup_key_declaration(
+                    key,
+                    &chat_stasher::keydecl::destination_scope(name),
+                    &format!("destination key for `{name}`"),
+                    &state_dir,
+                );
+            }
+        }
+    }
+    // The same for the destination's key, for the keys the flag may cover.
+    // Recorded once, and a failed write clears the declaration — including one
+    // the caller made with the flag — because an unrecorded declaration is
+    // exactly what `status` will keep reporting as missing, and claiming
+    // otherwise would be the false "saved" this file exists to prevent.
+    if declared && !destination_key_created_this_run {
+        if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref())
+        {
+            let scope = chat_stasher::keydecl::destination_scope(name);
+            if !chat_stasher::keydecl::declared_for(&declarations, &scope, key).is_declared()
+                && !record_key_declaration(
+                    &state_dir,
+                    &scope,
+                    key,
+                    &format!("destination key for `{name}`"),
+                )
+            {
+                dest_declared = false;
+            }
+        }
+    }
+    // `declared` is deliberately not an escape hatch here: the flag says the
+    // user promised, and a promise this run could not record is still an owed
+    // step. `dest_declared` is what says the record exists.
+    let dest_missing = matches!(dest_declared_key, Some(_)) && !dest_declared;
+    if dest_missing && !missing.contains(&"masterkey_saved_elsewhere") {
+        missing.push("masterkey_saved_elsewhere");
+    }
+
+    // The keys this run names for the user to back up: the local repository's
+    // key and each destination's key. Every one protects an archive copy a
+    // second machine must open with exactly that file.
+    let mut keys: Vec<SetupKey> = Vec::new();
+    if setup_has_key(&local.save) {
+        keys.push(SetupKey {
+            scope: SetupKeyScope::Local,
+            name: None,
+            path: local.key_file.clone(),
+            declared: local_declared,
+        });
+    }
+    if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref()) {
+        keys.push(SetupKey {
+            scope: SetupKeyScope::Destination,
+            name: Some(name.to_string()),
+            path: key.clone(),
+            declared: dest_declared,
+        });
     }
 
     let remote_gaps = remote_report.gaps();
@@ -12571,7 +12907,7 @@ fn cmd_setup(
             // its own failure in `local`, so the payload renders the observed
             // states rather than a pre-pass refusal.
             None,
-            None,
+            &keys,
         )
     );
     ExitCode::from(exit_code)
@@ -13702,25 +14038,54 @@ fn setup_outcome_word(state: &chat_stasher::runstate::RunState) -> &'static str 
         chat_stasher::runstate::RunOutcome::Error => "ERROR",
     }
 }
-/// Print the masterkey path and ask for the declaration; returns whether the
-/// user made it.
+/// Print a key's path, ask for the declaration, and record it when it is made;
+/// returns whether this key is now *declared saved*.
 ///
 /// The wording carries a safety duty no check can: this file cannot be
 /// recreated, so an archive whose key is lost is an archive nobody reads again.
 /// The question is therefore asked as a *declaration* and is labelled one,
 /// because the honest thing to tell the user is that this tool cannot tell
 /// whether a copy exists — not to imply that answering "yes" proved anything.
-fn print_setup_masterkey(local: &SetupLocalSaveReport) -> bool {
-    let key_file = &local.key_file;
-    println!("setup: masterkey: {}", key_file.display());
+///
+/// `scope` is the declaration record's scope id (`keydecl::LOCAL_SCOPE` or
+/// `keydecl::destination_scope`); a made declaration is persisted there so
+/// `status`/`doctor` can say this key has been declared saved. A declined
+/// answer is *not* a declaration, however the caller goes on to report it — see
+/// [`setup_declaration_from_answer`].
+fn print_setup_key_declaration(
+    key_file: &std::path::Path,
+    scope: &str,
+    label: &str,
+    state_dir: &std::path::Path,
+) -> bool {
+    let answer = ask_setup_key_declaration(key_file, label);
+    setup_declaration_from_answer(answer, scope, key_file, label, state_dir)
+}
+
+/// What the declaration prompt came back with.
+///
+/// Three states, never two: the user made the statement, the user did not, or
+/// the answer could not be read at all. The last one is not a "no" — nothing
+/// was asked-and-answered — and it must not be reported as a declaration
+/// either way.
+enum SetupDeclarationAnswer {
+    Declared,
+    Declined,
+    Unread(String),
+}
+
+/// Print a key's path and ask for the declaration. Pure I/O: what the answer
+/// *means* is [`setup_declaration_from_answer`]'s job.
+fn ask_setup_key_declaration(key_file: &std::path::Path, label: &str) -> SetupDeclarationAnswer {
+    println!("setup: {label}: {}", key_file.display());
     println!(
-        "setup: That file is the only thing that can decrypt the archive. If it is lost the \
-         archive can never be read again — not by this tool and not by anyone else. Copy it \
+        "setup: That file is the only thing that can decrypt this archive copy. If it is lost \
+         that copy can never be read again — not by this tool and not by anyone else. Copy it \
          somewhere else now: another disk, a password manager, a backup you already keep."
     );
     println!(
-        "setup: To use the archive on another machine, put the copy back at that exact path and \
-         name — nothing else is needed to read it there."
+        "setup: To use this archive copy on another machine, put the copy back at that exact \
+         path and name — nothing else is needed to read it there."
     );
     println!(
         "setup: chat-stasher cannot check that a copy exists. The next answer is a declaration, \
@@ -13730,21 +14095,139 @@ fn print_setup_masterkey(local: &SetupLocalSaveReport) -> bool {
         format!("Type `{SETUP_MASTERKEY_DECLARATION}` to declare you have your own copy: ");
     let mut input = String::new();
     match prompt_setup_value(&prompt, &mut input) {
-        Ok(()) if setup_declaration_given(&input) => {
-            println!("setup: masterkey declaration: declared (unverified)");
-            true
+        Ok(()) if setup_declaration_given(&input) => SetupDeclarationAnswer::Declared,
+        Ok(()) => SetupDeclarationAnswer::Declined,
+        Err(error) => SetupDeclarationAnswer::Unread(error.to_string()),
+    }
+}
+
+/// Turn an answer into a declaration, recording it when it is one.
+///
+/// Separated from the prompt so the part that decides can be tested without a
+/// terminal. Two facts are required and this is where they meet: the user made
+/// the statement, **and** the record reached the disk.
+///
+/// Both directions of getting this wrong are the same failure: a key that reads
+/// as declared when nobody confirmed a copy lets a run finish with
+/// `missing_parameters` empty and the archive readable only from this machine's
+/// file. A decline is therefore answered `false` without touching the record —
+/// the wizard has just told the user the step is unfinished, and it must not
+/// report it as done to `status`/`doctor` in the same breath.
+fn setup_declaration_from_answer(
+    answer: SetupDeclarationAnswer,
+    scope: &str,
+    key_file: &std::path::Path,
+    label: &str,
+    state_dir: &std::path::Path,
+) -> bool {
+    match answer {
+        SetupDeclarationAnswer::Declared => {
+            println!("setup: {label}: declared (unverified)");
+            // A made declaration is recorded so status/doctor can report it. A
+            // failed persist means the scope is *not* recorded — the caller
+            // treats it as not declared, never as saved.
+            record_key_declaration(state_dir, scope, key_file, label)
         }
-        Ok(()) => {
+        SetupDeclarationAnswer::Declined => {
             eprintln!(
-                "setup: masterkey declaration: NOT declared — this step is unfinished, and the \
-                 archive is still readable only from this machine's copy of that file"
+                "setup: {label}: NOT declared — this step is unfinished, and this archive copy \
+                 is still readable only from this machine's file"
             );
             false
         }
-        Err(error) => {
-            eprintln!("setup: could not read the masterkey declaration: {error}");
+        SetupDeclarationAnswer::Unread(error) => {
+            eprintln!("setup: could not read the {label} declaration: {error}");
             false
         }
+    }
+}
+
+/// Persist a declaration the user made, returning whether it is now on the disk.
+///
+/// The record is the whole value of the answer: it is what lets `status` and
+/// `doctor` say later that this key has a declared backup. A declaration that
+/// could not be written is therefore **not** a declaration, and the caller must
+/// treat the step as still owed rather than report it done — the one direction
+/// this must never fail in is claiming a backup nobody confirmed.
+///
+/// Reported on stderr, never stdout: on the non-interactive path stdout is
+/// exactly one JSON object and a stray sentence would break the contract.
+fn record_key_declaration(
+    state_dir: &std::path::Path,
+    scope: &str,
+    key_file: &std::path::Path,
+    label: &str,
+) -> bool {
+    match chat_stasher::keydecl::mark_declared(state_dir, scope, key_file) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "setup: could not record the {label} declaration ({error}); treating it as not \
+                 declared"
+            );
+            false
+        }
+    }
+}
+
+/// The local repository's key declaration (step 3). Its own wrapper keeps the
+/// step's reporting to one scope and one label.
+fn print_setup_masterkey(local: &SetupLocalSaveReport, state_dir: &std::path::Path) -> bool {
+    print_setup_key_declaration(
+        &local.key_file,
+        chat_stasher::keydecl::LOCAL_SCOPE,
+        "masterkey",
+        state_dir,
+    )
+}
+
+/// Whether `setup` should ask for a destination key's declaration.
+///
+/// A destination that was initialised this run (`dest-init` ran and reported 0)
+/// has a key on the disk — the key the wizard created at step 4 — and a second
+/// machine reads that destination with it, not with the local key. That key is
+/// owed unless it is the local key (an override pointing at `masterkey.json`),
+/// because then the local declaration already covers it.
+fn setup_destination_has_key(report: &SetupRemoteReport, config: &Config) -> Option<PathBuf> {
+    let name = report.name.as_deref()?;
+    // `dest-init` ran and reported 0; only then was the destination's key
+    // created. An unreachable or failed destination has no key to declare.
+    if !matches!(
+        report.dest_init,
+        SetupDestinationInit::Ran { exit_code: Some(0) }
+    ) {
+        return None;
+    }
+    let key = setup_destination_key_path(config, name);
+    // A destination that deliberately shares the local key (`key_file` pointing
+    // at `masterkey.json`) has no distinct key to declare.
+    let local = setup_local_store(config).key_file;
+    if key == local {
+        return None;
+    }
+    // `masterkey` creates the key before the repository, so after a successful
+    // dest-init the file is on the disk.
+    if !key.exists() {
+        return None;
+    }
+    Some(key)
+}
+
+/// The resolved path of a destination's key file: its `key_file` override in the
+/// config, or the per-destination default `masterkey-<name>.json`. This is the
+/// same default the destination's store resolves (see `resolve_store_config_checked`),
+/// so a second machine has to place the backup at exactly this path.
+fn setup_destination_key_path(config: &Config, name: &str) -> PathBuf {
+    match config
+        .destinations
+        .get(name)
+        .and_then(|d| d.key_file.clone())
+    {
+        Some(raw) => PathBuf::from(expand_path_arg(
+            &format!("destinations.{name}.key_file"),
+            &raw,
+        )),
+        None => data_root().join(format!("masterkey-{name}.json")),
     }
 }
 
@@ -14998,6 +15481,61 @@ fn setup_schedule_json(
     value
 }
 
+/// One key file the wizard names for the user to back up, and whether the user
+/// has declared they keep a copy of it. Every archive copy — the local
+/// repository and each destination — is opened by exactly one such file.
+struct SetupKey {
+    /// Which archive copy this key protects.
+    scope: SetupKeyScope,
+    /// The destination name for a `Destination` key.
+    name: Option<String>,
+    path: PathBuf,
+    declared: bool,
+}
+
+/// Which kind of archive copy a [`SetupKey`] protects.
+#[derive(Clone, Copy)]
+enum SetupKeyScope {
+    /// The local repository's `masterkey.json`.
+    Local,
+    /// A destination's `masterkey-<name>.json`.
+    Destination,
+}
+
+impl SetupKeyScope {
+    fn slug(self) -> &'static str {
+        match self {
+            SetupKeyScope::Local => "local",
+            SetupKeyScope::Destination => "destination",
+        }
+    }
+
+    fn is_destination(self) -> bool {
+        matches!(self, SetupKeyScope::Destination)
+    }
+}
+
+/// The `masterkey.keys` array: every key the wizard asks the user to back up,
+/// each with its path and declaration state. A declaration is a statement never
+/// verified, so `declaration_is_verified` is always `false`.
+fn setup_keys_json(keys: &[SetupKey]) -> serde_json::Value {
+    serde_json::json!(keys
+        .iter()
+        .map(|key| {
+            let mut value = serde_json::json!({
+                "scope": key.scope.slug(),
+                "path": key.path.display().to_string(),
+                "declared": key.declared,
+                "declaration_is_verified": false,
+            });
+            if let Some(name) = &key.name {
+                value["name"] = serde_json::json!(name);
+            }
+            value
+        })
+        .collect::<Vec<_>>())
+}
+
 /// The `setup --json` object. `exit_code` is passed in rather than recomputed
 /// here, so the number in the object and the process exit status are the same
 /// decision.
@@ -15010,13 +15548,14 @@ fn setup_schedule_json(
 /// "no stage was given" or "absent" claims, which would read as measurements a
 /// refused run never made.
 ///
-/// `masterkey_created_path` is `Some` only for the one exception to "exit 2
-/// writes nothing": the WIZ-1 masterkey bootstrap, where the *sole* owed
-/// parameter was `--masterkey-saved-elsewhere`. The wizard created the key so
-/// the human can copy it, so the masterkey object carries its real `path` even
-/// though the run is still a refusal and no archive pass happened. It is `None`
-/// for every ordinary refusal (and every non-refusal), which renders the master
-/// key as never-attempted with no path to offer.
+/// `keys` names every key file this run asks the user to back up — the local
+/// repository's key and each destination's key — with its path and declaration
+/// state. For the one exception to "exit 2 writes nothing", the WIZ-1 masterkey
+/// bootstrap where the *sole* owed parameter was `--masterkey-saved-elsewhere`,
+/// `keys` carries the key (or keys) the wizard created so the human can copy
+/// them even though the run is still a refusal and no archive pass happened;
+/// for an ordinary refusal it is empty, which renders the master key as
+/// never-attempted with no path to offer.
 #[allow(clippy::too_many_arguments)]
 fn setup_json_payload(
     scan: serde_json::Value,
@@ -15033,7 +15572,7 @@ fn setup_json_payload(
     unread: &[&'static str],
     exit_code: u8,
     local_refused_why: Option<&str>,
-    masterkey_created_path: Option<&Path>,
+    keys: &[SetupKey],
 ) -> String {
     let save = local.map(|local| &local.save);
     let declared = !missing.contains(&"masterkey_saved_elsewhere");
@@ -15078,6 +15617,20 @@ fn setup_json_payload(
             ),
         }),
     };
+    // The destination object, augmented with the destination's own key file and
+    // whether the user has declared it saved — the key a second machine opens
+    // that destination with.
+    let mut destination_json = setup_remote_json(remote);
+    if let Some(key) = keys.iter().find(|key| key.scope.is_destination()) {
+        let object = destination_json
+            .as_object_mut()
+            .expect("the destination object is a json object");
+        object.insert(
+            "key_file".to_string(),
+            serde_json::json!(key.path.display().to_string()),
+        );
+        object.insert("key_declared".to_string(), serde_json::json!(key.declared));
+    }
     let value = serde_json::json!({
         "schema_version": 1,
         "command": "setup",
@@ -15120,24 +15673,12 @@ fn setup_json_payload(
         // decision rather than two.
         "incomplete": incomplete,
         "unread": unread,
-        "destination": setup_remote_json(remote),
+        "destination": destination_json,
         "native_host": host_json,
         "chain": chain,
         "runs": runs,
         "masterkey": if refused {
-            if let Some(path) = masterkey_created_path {
-                // Only the WIZ-1 masterkey bootstrap gets here: the wizard
-                // created the key for the human to copy, so it has a real path
-                // to offer even though the run is still a refusal and the
-                // declaration is still owed. The declaration is a report of the
-                // flag — `declaration_is_verified: false` — never a claim that
-                // a copy exists.
-                serde_json::json!({
-                    "path": path.display().to_string(),
-                    "declaration": if declared { "declared" } else { "not_declared" },
-                    "declaration_is_verified": false,
-                })
-            } else {
+            if keys.is_empty() {
                 // An ordinary refusal. The declaration state is a report of the
                 // flag, and the `why` carries the reason. The run never created
                 // or opened an archive, so there is no `path` and no `absent`
@@ -15147,6 +15688,19 @@ fn setup_json_payload(
                     "why": local_refused_why,
                     "declaration": if declared { "declared" } else { "not_declared" },
                     "declaration_is_verified": false,
+                })
+            } else {
+                // Only the WIZ-1 masterkey bootstrap gets here: the wizard
+                // created the key (or keys) for the human to copy, so it has a
+                // real path to offer even though the run is still a refusal and
+                // the declaration is still owed. The declaration is a report of
+                // the flag — `declaration_is_verified: false` — never a claim
+                // that a copy exists.
+                serde_json::json!({
+                    "path": keys[0].path.display().to_string(),
+                    "declaration": if declared { "declared" } else { "not_declared" },
+                    "declaration_is_verified": false,
+                    "keys": setup_keys_json(keys),
                 })
             }
         } else {
@@ -15160,12 +15714,14 @@ fn setup_json_payload(
                         // reader of this object cannot mistake one for a
                         // verification.
                         "declaration_is_verified": false,
+                        "keys": setup_keys_json(keys),
                     })
                 }
                 _ => serde_json::json!({
                     "kind": "absent",
                     "why": "no repository and no masterkey exist, so there is nothing to declare \
                             saved",
+                    "keys": setup_keys_json(keys),
                 }),
             }
         },
@@ -15338,6 +15894,9 @@ fn cmd_status(
 
     if json {
         let local = local_layer_json(&config, &info);
+        // Built once: the same declaration file and the same config back both
+        // the human lines above and this object.
+        let keys_value = chat_stasher::doctor::keys_json(&config);
         match &scan {
             Ok(report) => {
                 println!(
@@ -15350,6 +15909,7 @@ fn cmd_status(
                         exit_code,
                         writer_versions.as_deref(),
                         writer_version_error.as_deref(),
+                        &keys_value,
                     )
                 )
             }
@@ -15363,6 +15923,7 @@ fn cmd_status(
                     exit_code,
                     writer_versions.as_deref(),
                     writer_version_error.as_deref(),
+                    &keys_value,
                 )
             ),
         }
@@ -15371,6 +15932,15 @@ fn cmd_status(
 
     if let Ok(report) = &scan {
         eprint!("{}", render_status(report, sessions));
+    }
+    // A destination needs its own key backed up: a second machine reads that
+    // copy with `masterkey-<name>.json`, never with the local key (W281 BUG-2).
+    // Silent when every destination key is present and declared, so the default
+    // body stays the fixed handful of lines B78 pinned. Informational only — it
+    // does not move the exit code, which stays "is the timer healthy" (see the
+    // comment on `exit_code` above).
+    for line in chat_stasher::doctor::key_alert_lines(&config) {
+        eprintln!("{line}");
     }
     if let Some(error) = &writer_version_error {
         eprintln!("[status] writer versions unavailable: {error}");
@@ -15646,6 +16216,7 @@ fn status_json(
     exit_code: u8,
     writer_versions: Option<&[sidecar::MachineWriterStatus]>,
     writer_version_error: Option<&str>,
+    keys_value: &serde_json::Value,
 ) -> String {
     let mut scanner_value = match scan {
         Ok(report) => scanner::scan_report_json(report),
@@ -15674,6 +16245,7 @@ fn status_json(
         ),
         "local": local,
         "scanner": scanner_value,
+        "keys": keys_value,
     });
     json_string(&value)
 }

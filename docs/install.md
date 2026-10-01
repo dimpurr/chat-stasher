@@ -240,7 +240,7 @@ Exporting does not remove anything from the extension, so a conversation that wa
 |---|---|---|
 | Config | `~/.config/chat-stasher/config.toml` | `XDG_CONFIG_HOME` |
 | Local archive | `~/.local/share/chat-stasher/repo` | `rustic_repo` in the config, or per destination |
-| Master key | `~/.local/share/chat-stasher/masterkey.json` | `rustic_key_file`, or `key_file` per destination |
+| Master key | `~/.local/share/chat-stasher/masterkey.json` for the local archive, and `~/.local/share/chat-stasher/masterkey-<destination>.json` for each declared destination | `rustic_key_file`, or `key_file` per destination. **One file per archive copy** — the key that opens a destination is not the local one ([setup.md](setup.md#3-the-master-key)) |
 | Machine identity | `~/.local/share/chat-stasher/machine-identity` | `machine = "…"` in the config |
 | Stage | the folder you pass to `--stage` | - |
 | Browser host registration | one manifest per installed browser, inside that browser's own configuration folder | `--browser` at `install-native-host` |

@@ -77,15 +77,26 @@ aes256ctr_poly1305aes = "0.2.1"
 # The protocol tests have to compute the SHA-256 the extension would send, from
 # outside the crate: a test that reused an internal helper would be asserting
 # the implementation against itself. Same version as the normal dependency, so
-# this adds no package to the build graph.
+# this adds no new package to the build graph.
 sha2 = "0.11"
 # The stage tests assert that the config records the path *as TOML spells it*.
 # Rust's `{:?}` is a different spelling that coincides with TOML's on every
 # Unix path and on no Windows one, so building the expectation with it is what
 # let this file pass on macOS and Linux while failing on Windows.
-# Same version as the normal dependency, so this adds no package to the build
-# graph.
+# Same version as the normal dependency, so this adds no new package to the
+# build graph.
 toml = "0.8"
+# `tests/setup_interactive_test.rs` drives the setup wizard through the real
+# interactive path, which demands a terminal (`is_terminal()` on both stdin
+# and stdout) — a pipe is not one on any platform, so the suite allocates a
+# pseudo-terminal with `posix_openpt`. std has no pty API, hence this crate.
+# Held to `cfg(unix)`: the Windows counterpart is ConPTY, which this repo has
+# no bindings for, and the test states that gap in its own file rather than
+# compiling a driver it cannot drive. Already in this workspace's lock file as
+# a normal dependency of several crates, so adding it here adds no new package
+# to the build graph — only the direct edge.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = true

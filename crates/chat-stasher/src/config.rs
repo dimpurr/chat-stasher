@@ -1797,6 +1797,11 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # *full copy*, not a shard: `dest-init` gives a new destination the union of
 # your local sources and what your existing destinations already hold.
 #
+# Each destination also has its **own** key file, and a second machine reads it
+# with that file alone — never with `rustic_key_file`, which opens only the local
+# archive. Back up every key file, and treat `key_file` below as the path a
+# restored copy has to be put back at.
+#
 # Once this table is non-empty, commands that reach a repository require
 # `--destination <name>` (or an explicit `--repo`). Retrieval commands (`search`,
 # `export`, `overview`) have no default destination: naming the copy is their

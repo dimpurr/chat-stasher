@@ -174,6 +174,8 @@ Some sessions could not be read, or could not be placed in time (their conversat
 
 The archive it opens cannot be read again. There is no recovery, reset or backdoor, and nobody can help. If you have another destination with its own key, that copy is still readable. Keep a copy of every key file somewhere other than the disk it protects.
 
+**Find out which one you lost, because they are different files.** Each archive copy has its own key: `masterkey.json` opens the local archive and nothing else, and each destination has `masterkey-<destination>.json`. Losing one does not lose the others, and a copy of one does not restore another. On any machine that still has them, `chat-stasher doctor` lists every key file by path and says which of them you have declared a copy of, so the ones without a declared backup are the ones to copy now.
+
 ### I want to read my archive on another machine
 
 Copy the destination's key file to the same path on the other machine (or set `key_file` in that machine's config), declare the same destination, and use `ui`, `search` or `export` as usual.

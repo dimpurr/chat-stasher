@@ -90,7 +90,7 @@ The first-run wizard: [setup.md](setup.md).
 | Flag | Meaning |
 |---|---|
 | `--stage <dir>` | Stage folder. Required when not interactive. |
-| `--masterkey-saved-elsewhere` | The person declares they have a copy of the key. Not verified. |
+| `--masterkey-saved-elsewhere` | The person declares they have a copy of **every key the run names that is already on this machine** — the local archive's and each destination's. Not verified. A key this run creates is not covered: it did not exist when the flag was given, so the run stops with exit `2` and names the file instead. |
 | `--destination <name>` | Configure or verify this destination. Omit to skip the remote step. |
 | `--remote sftp\|s3` | Which recipe to write for a new destination. |
 | `--remote-endpoint`, `--remote-user`, `--remote-ssh-key`, `--remote-bucket`, `--remote-region`, `--remote-root` | The destination's values. `--remote-region` defaults to `auto`. |
@@ -99,11 +99,11 @@ The first-run wizard: [setup.md](setup.md).
 | `--install-schedule` / `--uninstall-schedule` | Install or remove the timers after setup. |
 | `--json` | One JSON object. Always on when not attached to a terminal. |
 
-Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. [setup.md](setup.md#for-scripts-and-agents) has the details.
+Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or malformed flag, refused before anything was written · `3` something could not be read. One `2` is different: when the only thing owed is `--masterkey-saved-elsewhere`, the run creates the local repository and the key first, so there is a file to copy, and stops there. The same rule reaches a destination's key one step later — a key `dest-init` created during the run cannot be covered by a flag given before it existed, so that run names the new file and stops with `2` as well. [setup.md](setup.md#for-scripts-and-agents) has the details.
 
 ### `doctor`
 
-Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), the browser host registration, and local cache sizes. Prints paths, counts, sizes and dates, never conversation text.
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text.
 
 | Flag | Meaning |
 |---|---|
@@ -159,10 +159,12 @@ Is the scheduled archive working? The first line is the verdict, read from the r
 
 `3` means the scan itself did not complete.
 
+A `[keys]` line is added for each **destination** whose key needs attention: one that is not on this machine, or one that is here with no declared backup. Each archive copy has its own key and another machine reads it with that one, so an off-site copy whose key nobody backed up is a copy that a lost machine loses. A machine whose destination keys are all present and declared prints no such line, and the local key is never one of them — it is the wizard's step and `doctor`'s first key row.
+
 | Flag | Meaning |
 |---|---|
 | `--sessions` | Add one line per session found (tool, size, date, short id). Can be hundreds of lines. |
-| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. |
+| `--json` | One JSON object, including a `local` section: whether the timer is installed (`installed` needs the units present *and*, on Linux, systemd confirming each timer active — otherwise `unconfirmed`), the next run and why, and the sessions still staged and waiting to upload. The last pass is its own field, `run_state`. A `keys` section carries the full inventory — the local key and every destination's, with each file's path, whether it is on this machine, and whether you have declared a copy. |
 | `--destination <name>` | Also list the chat-stasher version each machine last archived with, and flag machines behind the newest. |
 
 ### `dest-init`

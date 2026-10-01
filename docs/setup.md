@@ -7,7 +7,7 @@
 1. it scans this machine for AI tools, read-only;
 2. it makes your first encrypted archive on this disk, and proves it can read a session back out of it;
 3. it shows you the master key and asks you to confirm you have a copy somewhere else;
-4. optionally, it sets up an off-site copy (R2 or another S3-compatible service, or SFTP);
+4. optionally, it sets up an off-site copy (R2 or another S3-compatible service, or SFTP), **which has a key file of its own** — the wizard shows you that one too and asks for the same confirmation;
 5. optionally, it installs the hourly timer.
 
 At the end it also reports whether the browser host is registered on this machine. It only looks: registering the host is still `install-native-host`, as in [install.md](install.md#the-browser-extension).
@@ -61,6 +61,9 @@ Then it asks you to type **I saved it elsewhere**. This is a promise you make, n
 
 To use the archive on another machine later, put your copy of the key back at the same path there.
 
+> [!IMPORTANT]
+> **There is one key per archive copy, not one key for the machine.** The file this step names is the key to the archive **on this disk**. If you set up an off-site copy in step 4, that copy gets a key file of its own — `~/.local/share/chat-stasher/masterkey-<destination>.json`, for example `masterkey-r2.json` — and a second machine reads it with **that** file. A backup that copies only the key named here cannot read the off-site copy: it fails with `cannot read masterkey file … (lost key?)` and exit `3`, which is the tool saying it could not read anything, not that the archive is empty. Step 4 names the second file when it creates it; back up both.
+
 ### 4. An off-site copy (optional)
 
 The wizard asks for a destination name. Leave it blank to skip. The wizard then tells you plainly that the archive and its key are on one disk, and that losing this machine loses both. You can come back to this step any time.
@@ -73,6 +76,8 @@ To add one, type a name, for example `r2`. If that name is already declared in y
 | `sftp` | `ssh://<host>:<port>`, the ssh user, an optional private key (leave it out to use your ssh agent), and an optional folder |
 
 It writes one `[destinations.<name>]` block into your config, connects to the destination read-only, and then runs `dest-init` to seed it with this machine's history. The credentials are written as `env:NAME` references, so the secret itself never lands in the config file. [destinations.md](destinations.md#keeping-the-secret-out-of-the-config-file-env) explains what that means for timers.
+
+**The destination gets its own key.** `dest-init` creates `~/.local/share/chat-stasher/masterkey-<name>.json` — for the example above, `masterkey-r2.json` — and the wizard prints that path and asks you to confirm a copy of it, exactly as step 3 does for the local key. This is not a spare copy of the local key: it is a different file, and it is the only thing that opens the off-site copy. A second machine restored from your backups needs **this** file to read the destination; the local key from step 3 is not used at all by a machine that only reads a destination. Back up every path the wizard prints.
 
 **SFTP, first connection.** If the server is one you have never connected to, the wizard stops, prints the fingerprints the server presented, and writes nothing. Compare them with the ones your provider publishes, in the provider's own documentation, not over this connection. If they match, type the sentence the wizard asks for (**I compared the fingerprint with my provider's published one**), or re-run with `--trust-host`. If they do not match, stop. [destinations.md → SFTP](destinations.md#2-trust-the-server-once-yourself) has the details.
 
@@ -94,7 +99,7 @@ The wizard ends with one summary: the local archive, the destination, the timer 
 |---|---|
 | `INCOMPLETE` | A step ran and did not finish, for example the second pass or the read-back. The local archive is not proven readable yet. |
 | `UNREAD` | Something could not be read, usually the destination. Nothing about it is proven, so do **not** read it as "the destination is empty". |
-| `the masterkey declaration was not made` | You skipped step 3. |
+| `the masterkey declaration was not made` | You skipped step 3, or step 4's destination key. Each archive copy has its own key, and the declaration covers all of them. |
 
 ## Run it again at any time
 
@@ -130,7 +135,8 @@ What to read in the object:
 | `unread` | Parts that could not be read. Their absence proves nothing. |
 | `steps` | One entry per step: `stage`, `local_save`, `masterkey`, `destination`, `schedule`, `native_host`. |
 | `chain` | The three proofs from step 2: `init`, `noop`, `readback`. |
-| `destination` | `config`, `reach`, `trust`, `dest_init`, `credentials`, and `recommended_remote_kind`. `credentials` names each variable and whether it is set, never its value. |
+| `masterkey.keys` | Every key file this run asks you to back up, one entry per archive copy. See below. |
+| `destination` | `config`, `reach`, `trust`, `dest_init`, `credentials`, and `recommended_remote_kind`. `credentials` names each variable and whether it is set, never its value. `key_file` and `key_declared` name the destination's own key and whether you have declared a copy of it, once `dest-init` has created it. |
 | `exit_code` | The same value the process exits with. |
 
 Exit codes:
@@ -139,12 +145,30 @@ Exit codes:
 |---|---|
 | `0` | Everything it was asked to do finished. |
 | `1` | A step did not finish (`incomplete` is not empty). |
-| `2` | A required parameter is missing, or a flag is malformed. Nothing was written — with the single exception below. |
+| `2` | A required parameter is missing, or a flag is malformed — and the masterkey declaration is a required parameter the person, not the command line, can supply. Nothing was written, with the two exceptions below. |
 | `3` | Something could not be read (`unread` is not empty), or the scan could not run. |
 
 When several apply, `3` wins over `1`, and `1` wins over `2`.
 
-**The one refusal that writes something.** A person cannot confirm they have copied a file that does not exist yet. So when a run with no terminal owes exactly one thing — `missing_parameters` is `["masterkey_saved_elsewhere"]`, and nothing else is missing — it creates the local repository and the master key, reports the key's path in `masterkey.path`, and *then* exits `2`. Nothing else happens on that run: no archive pass, no remote step, no timer. Read the location to copy from `masterkey.path` rather than assuming the usual one, because your config can put the key somewhere else. Tell the user to copy that file somewhere off this disk, wait for their answer, and run the same command again with `--masterkey-saved-elsewhere`; it continues from the key that is already there. If anything else is missing as well, this does not happen, and that run writes nothing at all.
+**The one refusal that writes something.** A person cannot confirm they have copied a file that does not exist yet. So when a run with no terminal owes exactly one thing — `missing_parameters` is `["masterkey_saved_elsewhere"]`, and nothing else is missing — it creates the local repository and the master key, reports the key's path in `masterkey.path`, and *then* exits `2`. Nothing else happens on that run: no archive pass, no remote step, no timer. `masterkey.keys` carries exactly the `local` entry here, because step 4 has not run and no destination key exists yet. Read the location to copy from `masterkey.path` rather than assuming the usual one, because your config can put the key somewhere else. Tell the user to copy that file somewhere off this disk, wait for their answer, and run the same command again with `--masterkey-saved-elsewhere`; it continues from the key that is already there. If anything else is missing as well, this does not happen, and that run writes nothing at all.
+
+**A destination key the run creates cannot be declared by a flag given before it existed.** The same rule, one step later in the flow. `--masterkey-saved-elsewhere` is a statement about key files the user has already seen, and a destination's key is created by `dest-init`, *during* the run — so on that run the declaration cannot be made: a first run with an off-site copy stops with `exit_code` `2` *even though the flag was on the command line*, with `missing_parameters` `["masterkey_saved_elsewhere"]` again and the `destination` entry of `masterkey.keys` carrying `declared: false` and the path of the file that was just created. Nothing is wrong with the command line and there is nothing to re-supply: the user copies that file, and the same command run again records the declaration, because the file is on the disk by then. Hand over every path in `masterkey.keys` whose `declared` is `false` — that is the entry still owed.
+
+**Every key, not the first one.** A completed run with a destination names **two** key files, and they open different copies:
+
+```json
+"masterkey": {
+  "path": "/home/you/.local/share/chat-stasher/masterkey.json",
+  "declaration": "declared",
+  "declaration_is_verified": false,
+  "keys": [
+    {"scope": "local", "path": "…/masterkey.json", "declared": true, "declaration_is_verified": false},
+    {"scope": "destination", "name": "r2", "path": "…/masterkey-r2.json", "declared": true, "declaration_is_verified": false}
+  ]
+}
+```
+
+`masterkey.path` is the `local` entry's path, kept for callers written before `keys` existed. Hand the user **every** path in `keys`, and treat `declared` as a report of what they said, never as a check: `declaration_is_verified` is `false` for the same reason on every entry. A second machine needs the `destination` entry's file to read that destination — the `local` one will not do it. An entry whose `declared` is `false` is one nobody has confirmed: the run either asked and was not answered, or created that file itself and stopped — copy it and run again, as above.
 
 Three rules the wizard keeps, and your script should too:
 

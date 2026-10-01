@@ -81,9 +81,15 @@ HOME_DIR="$WORK/home"
 STAGE="$WORK/stage"
 DESK_STAGE="$WORK/desk-stage"
 REPO="$WORK/offsite"
-KEYS="$WORK/keys"
+# The destination's key is deliberately left to its **default** path rather than
+# declared with `key_file`. The use-case pages say a destination is opened by
+# its own `masterkey-<destination>.json` and never by the local archive's
+# `masterkey.json`, and this fixture is what a reader runs to check that — so it
+# has to be the shape they are told to expect, not an override that looks like
+# one. The default lands under XDG_DATA_HOME, which `run` pins per invocation.
+KEY_FILE="$WORK/data/chat-stasher/masterkey-offsite.json"
 
-mkdir -p "$HOME_DIR" "$STAGE" "$DESK_STAGE" "$REPO" "$KEYS" \
+mkdir -p "$HOME_DIR" "$STAGE" "$DESK_STAGE" "$REPO" \
          "$WORK/config/chat-stasher"
 
 cat > "$WORK/config/chat-stasher/config.toml" <<EOF
@@ -93,7 +99,6 @@ machine = "$LOST"
 
 [destinations.offsite]
 repo = "$REPO"
-key_file = "$KEYS/masterkey.json"
 EOF
 
 run() {
@@ -177,7 +182,6 @@ machine = "$HERE"
 
 [destinations.offsite]
 repo = "$REPO"
-key_file = "$KEYS/masterkey.json"
 EOF
 
 run machine-label --stage "$DESK_STAGE" --target "$LOST" --label "attic-laptop" > /dev/null
@@ -193,6 +197,7 @@ use-case-fixture: built
 
   work tree     $WORK
   destination   offsite  (repo $REPO)
+  its key       $KEY_FILE
   lost machine  $LOST   labelled attic-laptop
   this machine  $HERE
 
