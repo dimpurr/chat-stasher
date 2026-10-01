@@ -106,7 +106,7 @@ marketing (`apps/extension/lib/backfill/enumerate.ts:4826-4857`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2949-2952`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:3168-3170`, `:3250-3311`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:3053-3064`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2392-2436`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3335-3397`; `apps/extension/lib/platform-auth.ts:268-305`; `apps/extension/lib/backfill/engine.ts:3099-3133`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3774-3902`; `apps/extension/lib/backfill/engine.ts:2899-2962`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:679-779`). |
+| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2924-2925`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:3320-3331`, `:3250-3311`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:3071-3072,3101-3107`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2392-2436`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3335-3397`; `apps/extension/lib/platform-auth.ts:268-305`; `apps/extension/lib/backfill/engine.ts:3099-3133`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3774-3902`; `apps/extension/lib/backfill/engine.ts:2899-2962`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:679-779`). |
 
 
 🔴 **The one precondition, before any tier applies: this leg fetches through a
@@ -144,7 +144,7 @@ looking at, and every message names its `parent_id`. The extension walks that
 chain and archives the body **only when the walk closes at a root**; a response
 that came back short is **not archived** — it is recorded as a failure with its
 own reason code and the leg carries on, rather than being stored as a complete
-conversation (`apps/extension/lib/backfill/enumerate.ts:2892-2919`). The evidence
+conversation (`apps/extension/lib/backfill/enumerate.ts:2940-2967`). The evidence
 for the endpoint itself is solid — it is the route DeepSeek's own page calls over
 XHR when a user opens a past conversation in a real logged-in session, and several
 mutually independent open-source exporters request the same route
@@ -159,7 +159,7 @@ completeness question is still called open rather than answered.
 used to be the exception for.** Passive capture names and delivers the
 conversation you have open; backfill now lists your past conversations **and**
 fetches their content, one `GET /rest/thread/<slug>` per conversation
-(`apps/extension/lib/backfill/enumerate.ts:3053-3064`). What W84 observed, and
+(`apps/extension/lib/backfill/enumerate.ts:3071-3072`). What W84 observed, and
 what the earlier refusals were waiting for, is a **completeness signal at the top
 level of the body**: a 2026-09-23 logged-in probe of one thread returned
 `has_next_page` (boolean) and `next_cursor` (string or null), present under both
@@ -258,7 +258,7 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:165-166`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:23,859-870`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1478-1499`).
 
 🔴 **A config file that exists has to be valid, and the tool will not pretend
 otherwise.** If it does not parse, if a value has the wrong type, or if a path in
@@ -561,9 +561,9 @@ read the repository and key file you select in config or arguments
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
 source's own words are "The masterkey is the repository's only key — losing it
-means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1608-1610`).
+means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1699-1701`).
 The key file is written with owner-only-readable permissions, on platforms that
-can express them (`crates/chat-stasher/src/store.rs:1708-1716`).
+can express them (`crates/chat-stasher/src/store.rs:1741-1748`).
 
 🔴 **And there is one key file per repository, not one per machine.** The local
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
@@ -900,7 +900,7 @@ loads a launchd agent on macOS or writes and enables a systemd user timer on
 Linux; `schedule uninstall` stops and removes the matching job. Both operations
 are idempotent. Installation targets every configured destination by default;
 repeating `--destination` selects a subset. The embedded binary must be an
-installed path outside `target/` (`crates/chat-stasher/src/schedule.rs:508-929`).
+installed path outside `target/` (`crates/chat-stasher/src/schedule.rs:128-163`).
 The generated template wraps a `run-once` command
 (`crates/chat-stasher/src/schedule.rs:197-301`).
 
@@ -1067,7 +1067,7 @@ confirmed in the code, not a temporary disclaimer.
   opens.** There is no recovery process, no recovery code, no customer service.
   There is one file per repository, so losing one loses that copy and no other;
   back up every one of them (section 4.3). The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1608-1615`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1699-1701`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

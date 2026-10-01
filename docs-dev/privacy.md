@@ -67,7 +67,7 @@ that document is the honest one.
   decrypted byte is stored, the root and its files are owner-only (0700 and
   0600, the same as the index), and deleting the directory costs nothing but the
   next search's speed: no part of the archive depends on it
-  (`crates/chat-stasher/src/snapshot_cache.rs:1-66`).
+  (`crates/chat-stasher/src/snapshot_cache.rs:1-66,587-621`).
 - **There is a known plaintext window.** A captured conversation sits
   *unencrypted* in the extension's own outbox storage until the `chat-stasher`
   host acknowledges it, and an export you trigger from the popup contains the
@@ -406,14 +406,14 @@ records it beside the bytes on the sealed shard and compares it as a string
 
 A ChatGPT bundle also carries **project provenance**: the workspace the
 conversation was fetched under and the project it belongs to, as the capture leg
-recorded them (`contracts/inbox.schema.json:183-207`). 🔴 A capture taken before
+recorded them (`contracts/inbox.schema.json:176-194`). 🔴 A capture taken before
 the project was known records the literal `unknown` rather than leaving the field
 out — "not learned yet" and "this conversation belongs to no project" are
 different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`crates/chat-stasher/src/activity.rs:2153-2203`). A project name is a label from
+(`contracts/inbox.schema.json:195-207`; `crates/chat-stasher/src/activity.rs:2153-2203`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -500,7 +500,7 @@ Three things in that table deserve to be called out rather than buried:
 - For platforms that use response-body identity extraction, the `<scope>` part
   of that key is your **account identifier on that platform** when the extension
   could find one (a user id, an email address, or a handle), and the literal
-  string `default` when it could not (`apps/extension/entrypoints/background.ts:1955-1998`;
+  string `default` when it could not (`apps/extension/entrypoints/background.ts:1955-2003`;
   the identity itself is read by `apps/extension/lib/contract.ts:1396-1412`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
@@ -605,7 +605,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:295-395,1483-1568`).
+kept on your machine (`crates/chat-stasher/src/store.rs:295-395,1699-1701,1741-1751`; `crates/chat-stasher/src/main.rs:7768-7769`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -665,14 +665,14 @@ DeepSeek it produces list traffic *and* one body request per conversation, and o
 Grok two (a skeleton call and a content call — a request pattern the platform is
 more likely to notice, although both are the same two calls grok.com's own page
 makes when you open a conversation, separated by a 2-5 second pause,
-`apps/extension/lib/backfill/enumerate.ts:3187`), and on Kimi one body request —
+`apps/extension/lib/backfill/enumerate.ts:3320-3331`), and on Kimi one body request —
 the same call its own page makes when you open a conversation, carrying the page's
 own token as described above (`apps/extension/lib/backfill/enumerate.ts:3335-3397`).
 On Claude it is a conversation list and one body request per conversation — the
 same call claude.ai's own page makes when you open a past conversation — plus, at
 most once for as long as the organization stays unresolved, the organization-list
 request described above
-(`apps/extension/lib/backfill/enumerate.ts:3915-3927`).
+(`apps/extension/lib/backfill/enumerate.ts:4414-4423`).
 On Gemini, one conversation costs as many requests as it has pages: the leg
 follows the continuation token until the response says there is no more, waiting
 1-3 seconds between pages, and it refuses (and lists as a failure) a conversation
@@ -786,7 +786,7 @@ tier of that list is easy to misread:
 |---|---|
 | **ChatGPT** | Main conversations, archived conversations, project discovery, and each project's conversations use separate cursors inside a workspace-scoped ledger; each page is requested through the current tab (`apps/extension/lib/backfill/types.ts:1717-1734`; `apps/extension/lib/backfill/enumerate.ts:313-383`; `apps/extension/lib/backfill/engine.ts:2480-2507`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. Workspace attribution comes from the page's outgoing request header; if the workspace is unknown or ambiguous, enumeration stops with a named refusal and no list request (`apps/extension/entrypoints/background.ts:2025-2037`; `apps/extension/lib/backfill/engine.ts:1841-1856`). |
 | **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Lists your conversations **and fetches their content**, one conversation at a time, handing it to the host (`apps/extension/lib/backfill/enumerate.ts:4878-4902`). All five are **implemented, not yet observed completing a backfill in a real browser**. For **DeepSeek** we have **not verified** whether a long conversation comes back complete either, and it does not page the endpoint (`apps/extension/lib/backfill/enumerate.ts:2940-2967`) — but the response is a tree, the extension walks it from its newest message back to a root, and a walk that reaches a message the response does not carry means that conversation is **not archived**; it is recorded as a failure with its own reason code and the leg carries on. For **Grok and Kimi** the same question is unverified with no such check. **Gemini does page**, so for it the completeness question is answered by following the token to the end; what bounds it instead is the 20-page cap, past which the conversation is refused rather than archived in part (`apps/extension/lib/backfill/engine.ts:2899-2939`). Kimi's routes, by contrast, **were** measured in a logged-in session (2026-09-14) and its one body request carries your page's own login token (`apps/extension/lib/platform-auth.ts:268-305`); whether a **long** Kimi conversation comes back complete is **not verified**, and a response that says it holds only part of a conversation is recorded as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:3099-3133`). Grok is the least verified: its routes were read from public open-source implementations rather than measured in a logged-in session, and **each conversation costs two requests** — a skeleton call, then a content call built only from the ids that skeleton named (`apps/extension/lib/backfill/enumerate.ts:3298-3359`). |
-| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:3053-3064`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2392-2436`). Implemented, **not yet observed completing a backfill in a real browser**. |
+| **Perplexity** | Lists your conversations **and fetches their content**, one `GET /rest/thread/<slug>` per conversation (`apps/extension/lib/backfill/enumerate.ts:3071-3072`). Each conversation is **checked for completeness before it is stored**: the 2026-09-23 probe found the body carries a stated `has_next_page` / `next_cursor` signal, so a response that declares there is more of the conversation is **not archived** — it is recorded as a failure with its own reason code and the leg carries on, never storing a truncated conversation as a whole one (`apps/extension/lib/backfill/enumerate.ts:2392-2436`). Implemented, **not yet observed completing a backfill in a real browser**. |
 | **Claude** | Lists your conversations **and fetches their content**, addressed by the organization resolved as above. Its routes were read from public open-source implementations, **not** measured in a logged-in claude.ai session — nobody has opened claude.ai with this code — so the route shapes are source-backed rather than observed (`apps/extension/lib/backfill/enumerate.ts:3953-3959`). **Each conversation's body is checked for completeness before it is stored**: the response is a tree, and the extension walks the active branch from its newest message back to the branch root. A parent the response does not carry (the shared tree-root id every real body omits, measured 2026-09-24) is accepted as that root only when the body's own shape corroborates it — one shared absent parent, and a root at the foot of the message `index` counter; a body with a missing middle or a dropped prefix, a body whose newest message is absent, or one whose parent links form a cycle is **not archived** — it is recorded as a failure with its own reason code and the leg carries on (`apps/extension/lib/backfill/enumerate.ts:4200-4278`; `apps/extension/lib/backfill/engine.ts:3176-3196`). Whether a **long** conversation is capped server-side is not established by any source; a body so capped is refused unless it also rewrote the survivor to index 0 and the shared id, which no measurement shows. |
 
 We state this in a privacy policy because the failure mode is a privacy
@@ -934,10 +934,10 @@ dominant risk.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1608-1615,1570-1574`). The key file
+archive (`crates/chat-stasher/src/store.rs:1699-1701`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1650-1735`).
+(`crates/chat-stasher/src/store.rs:1741-1811`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
