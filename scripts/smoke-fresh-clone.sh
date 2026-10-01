@@ -12,6 +12,12 @@
 set -u
 REMOTE="${SMOKE_REMOTE:-https://github.com/dimpurr/chat-stasher.git}"
 WORK="$(mktemp -d)"
+# Pin the rustic metadata cache of the CLI this smoke runs under $WORK (W289).
+# `doctor` (below) opens no repository, but it does load the config, and a CLI
+# whose cache root still resolves to the operator's real one is the leak this
+# pin exists to close — on Windows rustic ignores `HOME`/`XDG_CACHE_HOME` and
+# uses `%LOCALAPPDATA%`. Exported once, so every CLI run here inherits it.
+export CHAT_STASHER_RUSTIC_CACHE_DIR="$WORK/rustic-cache"
 WITH_EXT=0
 [ "${1:-}" = "--with-extension" ] && WITH_EXT=1
 FAILED=0
