@@ -1223,6 +1223,77 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
     );
 }
 
+/// How many snapshots a destination repository holds. `get_all_snapshots`
+/// loads every snapshot file, so this counts what is really there.
+fn destination_snapshots_with(sandbox: &Sandbox, repo: &Path, key: &Path) -> usize {
+    let cfg = chat_stasher::store::StoreConfig {
+        repo_root: repo.to_string_lossy().into_owned(),
+        key_file: key.to_path_buf(),
+        connections: 1,
+        options: std::collections::BTreeMap::new(),
+        // W289: the cache stays on — a configured destination read is a cached
+        // read — but it lives under this sandbox, never in the user's cache.
+        cache_dir: Some(sandbox.root.path().join("destination-cache")),
+        no_cache: false,
+    };
+    let mk = chat_stasher::store::load_key_file(&cfg).expect("read the destination key");
+    let backends = chat_stasher::store::BackupStore::for_metadata_query(cfg.clone())
+        .backends()
+        .expect("destination backends");
+    let (repo, _adoption) = chat_stasher::orphans::open_adopting(&cfg, &backends, &mk)
+        .expect("open the destination repository");
+    repo.get_all_snapshots()
+        .expect("list destination snapshots")
+        .len()
+}
+
+/// W292 (OBS-5): re-running the wizard must not grow the destination.
+///
+/// The wizard runs `dest-init` on every invocation that names a destination,
+/// and its own declaration step makes a re-run likely — so before the fix each
+/// run appended a snapshot to a destination that already held everything.
+/// W291 measured it on two machines (three runs, three snapshots) and this is
+/// its local replay. The first run is the one that seeds the destination, so
+/// the count is anchored to it rather than to a hard-coded 1.
+#[test]
+fn re_running_the_wizard_does_not_grow_the_destination() {
+    let sandbox = Sandbox::new(true);
+    let remote = sandbox.fake_remote();
+    sandbox.write_config(&format!(
+        "[destinations.fake]\nrepo = '{}'\nkey_file = '{}'\n",
+        remote.display(),
+        sandbox.masterkey().display()
+    ));
+
+    // The first run seeds the destination. The destination reuses this
+    // machine's key file, so no fresh key is created and no declaration is
+    // owed: both runs complete.
+    let first = sandbox.setup(&["--destination", "fake", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&first);
+    assert_eq!(exit_code(&first), 0, "value={value}");
+    assert_eq!(value["steps"]["destination"], "reachable");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "ran");
+    let after_first = destination_snapshots_with(&sandbox, &remote, &sandbox.masterkey());
+    assert_eq!(
+        after_first, 1,
+        "the first setup must seed the destination exactly once"
+    );
+
+    // The re-run has nothing new to archive: the collector found the same one
+    // session, the stage already holds its shard, and the destination already
+    // holds what would be published.
+    let second = sandbox.setup(&["--destination", "fake", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&second);
+    assert_eq!(exit_code(&second), 0, "value={value}");
+    assert_eq!(value["destination"]["dest_init"]["kind"], "ran");
+    assert_eq!(
+        destination_snapshots_with(&sandbox, &remote, &sandbox.masterkey()),
+        after_first,
+        "a second setup over an unchanged stage grew the destination; it already holds \
+         what would be published, so nothing may be published: {value}"
+    );
+}
+
 /// The key files the wizard names for the user to back up: every entry of the
 /// `masterkey.keys` array, falling back to `masterkey.path` (the local key)
 /// when the array is absent — the pre-fix shape that named only the local key

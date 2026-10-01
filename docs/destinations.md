@@ -23,7 +23,7 @@ Read this once. It applies to every kind.
   repo = "~/.local/share/chat-stasher/repo"
   key_file = "~/.local/share/chat-stasher/masterkey.json"
   ```
-- **`dest-init` sets up a new destination, once.** It first re-collects this machine's sessions from their source files. Then it copies in whatever your other destinations still hold **for this machine** that the machine itself no longer has, and pushes the result. It seeds this machine's part of the archive only. Other machines' history arrives when those machines push to the same destination.
+- **`dest-init` sets up a new destination, once.** It first re-collects this machine's sessions from their source files. Then it copies in whatever your other destinations still hold **for this machine** that the machine itself no longer has, and pushes the result. It seeds this machine's part of the archive only. Other machines' history arrives when those machines push to the same destination. Run it again and it is a no-op when the destination already holds what would be published, so re-running `setup` does not accumulate snapshots.
 - **`run-once --destination <name>`** keeps a destination current. `schedule install` gives **every declared destination its own timer**, each running `run-once --destination <name>`; pass `--destination` yourself to narrow it to one, and repeat the flag to pick several. See [schedule.md → With destinations declared](schedule.md#with-destinations-declared).
 - **`doctor` dials each declared destination once, read-only.** It reports each one as reached, not reached (with the reason), or not configured. It creates nothing.
 - **Unknown is not empty.** A destination that cannot be read makes a command exit `3`, meaning "did not finish". It never reports the destination as empty.
