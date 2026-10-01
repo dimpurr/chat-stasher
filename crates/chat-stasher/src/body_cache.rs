@@ -399,8 +399,8 @@ pub fn for_operation(config: &crate::config::Config, policy: Policy) -> Availabi
 ///
 /// ADR-034 names the *data blob id* as the key, and the premise experiment
 /// (`crates/chat-stasher/tests/w120_premise_test.rs`) confirms why that would
-/// be attractive: data blob ids are plaintext content hashes, so the same
-/// conversation content has the same id in two repositories that use different
+/// be attractive: a data blob id is the plaintext hash of the chunk it names, so
+/// two repositories that cut it the same way give it the same id under different
 /// keys. That key is not reachable from here. The only seam this crate can
 /// install below `rustic_core`'s decryption layer is `ReadBackend`, where a body
 /// read arrives as `read_partial(FileType::Pack, pack_id, false, offset,
