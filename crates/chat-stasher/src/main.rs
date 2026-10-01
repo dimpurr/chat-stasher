@@ -12199,6 +12199,14 @@ fn cmd_setup(
         return ExitCode::from(2);
     };
 
+    // The state directory every key-declaration decision in this function reads
+    // and writes, resolved once. It is needed before the refusal block below,
+    // because the WIZ-1 bootstrap inside it reports the *real* declaration state
+    // of the keys it names (a key already declared on this machine is not one
+    // the run is asking the user to copy again) rather than assuming they are
+    // all undeclared.
+    let state_dir = chat_stasher::collect::default_state_dir();
+
     // WIZ-1, kept on the *before the first write* side (ADR-039 decision 1:
     // the non-TTY run reports missing parameters by name): in a non-interactive
     // run every required parameter is validated before the local archive pass
@@ -12239,18 +12247,18 @@ fn cmd_setup(
             // key was never created (nothing exists to back up).
             //
             // This block runs only when the flag is absent. With the flag given
-            // there is nothing to refuse here: the flag covers the local key,
-            // and a destination key this run has still to create is reported by
-            // the declaration block below — after `dest-init` has run and the
-            // file exists to be named — rather than refused here before there is
-            // a file for the person to copy.
+            // there is nothing to refuse here: the run proceeds, and any key it
+            // creates — the local repository's or a destination's — is reported
+            // by the declaration block below, after the step that makes it has
+            // run and the file exists to be named. That is also where "the flag
+            // cannot cover a key this run created" is decided, so neither key is
+            // refused here before there is a file for the person to copy.
             if !masterkey_saved_elsewhere {
                 let name = destination.as_deref().expect("destination is some");
                 let dest_key = setup_destination_key_path(&config, name);
                 if dest_key != setup_local_store(&config).key_file {
                     let will_configure = !setup_destination_declared(Some(name));
                     if will_configure || dest_key.exists() {
-                        let state_dir = chat_stasher::collect::default_state_dir();
                         // Unreadable reads as not declared here, deliberately:
                         // this is the one-bit question "is the step owed?",
                         // and an unreadable key is owed a readable one before
@@ -12275,15 +12283,22 @@ fn cmd_setup(
             // wizard still refuses the run, but it first creates the local
             // repository and its masterkey — the minimum a human needs in front
             // of them to copy the key off this disk — and stops before the
-            // archive pass, the remote step and the scheduler. Re-running with
-            // the declaration then continues. If anything else is missing too,
-            // rule 1 wins and nothing is written at all.
+            // archive pass and the scheduler. Re-running with the declaration
+            // then continues. If anything else is missing too, rule 1 wins and
+            // nothing is written at all.
             let only_masterkey_declaration_owed =
                 premissing.len() == 1 && premissing[0] == "masterkey_saved_elsewhere";
-            // The key path to offer, when the bootstrap actually put one on the
-            // disk. It is `None` for rule 1 (nothing was written) and for a
-            // bootstrap that failed, and in both cases the refusal falls back to
-            // the masterkey object's ordinary never-attempted shape.
+            // W294 (OBS-6): the bootstrap's job is to put *every* key the user
+            // has to copy in front of them, and with a destination there are
+            // two — the local repository's key and the destination's own. The
+            // destination's key cannot exist without its step, because
+            // `dest-init` is what creates it, so the step runs here inside the
+            // refusal and the destination key joins `keys`. That is what lets
+            // the *next* run — the one that carries the declaration — find every
+            // key already on the disk and record them all at once, instead of
+            // needing one more create-then-declare pass per key. This run still
+            // declares none of them: a key it has just made is one nobody has
+            // had the chance to copy, which is exactly why it stops.
             //
             // A failed bootstrap is reported through the refusal's own reason
             // rather than on stderr: this path prints nothing but its JSON, so
@@ -12292,28 +12307,94 @@ fn cmd_setup(
             // landed — the key is persisted before the repository is
             // initialized, so a failure in the second half leaves a key on the
             // disk, and "nothing was written" would be a guess. What it does
-            // claim is that no snapshot was archived, which is true of every
-            // path that reaches here.
-            let (why, created_key) = match only_masterkey_declaration_owed {
-                false => (setup_refused_before_save_why(&premissing), None),
-                true => match setup_create_repo_and_key(&config) {
-                    Ok(path) => (setup_refused_awaiting_declaration_why(), Some(path)),
-                    Err(error) => (setup_refused_bootstrap_failed_why(&error), None),
-                },
+            // claim is that no local snapshot was archived, which is true of
+            // every path that reaches here.
+            let mut created_keys: Vec<SetupKey> = Vec::new();
+            let mut destination_report: Option<SetupRemoteReport> = None;
+            let why = if !only_masterkey_declaration_owed {
+                setup_refused_before_save_why(&premissing)
+            } else {
+                // The declaration state each key is reported with is the *real*
+                // one, read from the very record `status` and `doctor` read — not
+                // a hard-coded `false`. A key this run creates has no record that
+                // matches it, so it reads undeclared; a key that was already on
+                // this disk and already declared keeps its `true`. The bootstrap
+                // runs because *a* declaration is owed, and when a destination
+                // key is the one owed the local key beside it may already be
+                // declared — reporting that one as `false` would tell a caller to
+                // copy and declare a key it is done with.
+                let declarations = chat_stasher::keydecl::load(&state_dir);
+                match setup_create_repo_and_key(&config) {
+                    Ok(path) => {
+                        let local_declared = chat_stasher::keydecl::declared_for(
+                            &declarations,
+                            chat_stasher::keydecl::LOCAL_SCOPE,
+                            &path,
+                        )
+                        .is_declared();
+                        created_keys.push(SetupKey {
+                            scope: SetupKeyScope::Local,
+                            name: None,
+                            path,
+                            declared: local_declared,
+                        });
+                        if let Some(name) = destination.as_deref() {
+                            let credentials = setup_remote_credentials(&remote);
+                            let report = setup_remote_step(
+                                stage,
+                                name,
+                                &remote,
+                                false,
+                                remote.trust_host,
+                                credentials,
+                            );
+                            // The step just wrote the block that names the
+                            // destination's key file, so the key is looked up
+                            // against the config as it now reads, not the copy
+                            // this run loaded before the step ran.
+                            let written = Config::load().unwrap_or_else(|_| config.clone());
+                            if let Some(key) = setup_destination_has_key(&report, &written) {
+                                let destination_declared = chat_stasher::keydecl::declared_for(
+                                    &declarations,
+                                    &chat_stasher::keydecl::destination_scope(name),
+                                    &key,
+                                )
+                                .is_declared();
+                                created_keys.push(SetupKey {
+                                    scope: SetupKeyScope::Destination,
+                                    name: Some(name.to_string()),
+                                    path: key,
+                                    declared: destination_declared,
+                                });
+                            }
+                            destination_report = Some(report);
+                        }
+                        setup_refused_awaiting_declaration_why(destination_report.is_some())
+                    }
+                    Err(error) => setup_refused_bootstrap_failed_why(&error),
+                }
             };
-            // The refusal names whatever key the bootstrap created so the human
-            // has a file to copy. Only the local key is created here — the
-            // destination step has not run, so no destination key exists yet.
-            let bootstrap_keys: Vec<SetupKey> = created_key
-                .as_ref()
-                .map(|path| SetupKey {
-                    scope: SetupKeyScope::Local,
-                    name: None,
-                    path: path.clone(),
-                    declared: false,
-                })
-                .into_iter()
-                .collect();
+            // The destination object for a run that never reached the step — and
+            // for rule 1, which wrote nothing: "not attempted", a never-started
+            // step named by `missing_parameters`, never a verdict about the
+            // destination.
+            let destination_report = destination_report.unwrap_or_else(|| SetupRemoteReport {
+                name: destination.clone(),
+                kind: None,
+                config: SetupDestinationConfig::NotWritten { why: why.clone() },
+                reach: SetupReach::NotAttempted { why: why.clone() },
+                trust: SetupTrust::NotRequired,
+                dest_init: SetupDestinationInit::NotRun { why: why.clone() },
+                credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
+            });
+            // Bootstrap still owes the declaration, but the destination step
+            // may have discovered something the run could not read. Reuse the
+            // same gap classification and exit-code precedence as a completed
+            // setup: unread wins over the owed parameter, while the key list
+            // above continues to reflect only keys the step actually created.
+            let remote_gaps = destination_report.gaps();
+            let exit_code =
+                setup_exit_code(&premissing, &remote_gaps.incomplete, &remote_gaps.unread);
             println!(
                 "{}",
                 setup_json_payload(
@@ -12328,29 +12409,17 @@ fn cmd_setup(
                     ),
                     None,
                     None,
-                    // The wizard stopped before the remote step, so the object
-                    // is "not attempted" (a never-started step named by
-                    // `missing_parameters`), never a verdict about the
-                    // destination.
-                    &SetupRemoteReport {
-                        name: destination.clone(),
-                        kind: None,
-                        config: SetupDestinationConfig::NotWritten { why: why.clone() },
-                        reach: SetupReach::NotAttempted { why: why.clone() },
-                        trust: SetupTrust::NotRequired,
-                        dest_init: SetupDestinationInit::NotRun { why: why.clone() },
-                        credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
-                    },
+                    &destination_report,
                     Err(&why),
                     &premissing,
-                    &[],
-                    &[],
-                    2,
+                    &remote_gaps.incomplete,
+                    &remote_gaps.unread,
+                    exit_code,
                     Some(&why),
-                    &bootstrap_keys,
+                    &created_keys,
                 )
             );
-            return ExitCode::from(2);
+            return ExitCode::from(exit_code);
         }
     }
 
@@ -12358,6 +12427,16 @@ fn cmd_setup(
     // destination question. What is on offer locally is available now; the
     // remote is where the account and credential friction lives, and it is the
     // step a user is allowed to skip.
+    //
+    // Whether the local key file was on this disk **before** that save is
+    // captured first, because the save is the step that creates it. This is the
+    // same question the destination's key is asked further down, and for the
+    // same reason: `--masterkey-saved-elsewhere` is a statement about files the
+    // user has already seen and copied, so a key this run creates is not one of
+    // them — at the moment the flag was given, there was nothing to copy. A run
+    // that would declare such a key would be declaring a backup nobody can have
+    // made.
+    let local_key_existed_before = setup_local_store(&config).key_file.exists();
     let local = setup_local_first_save(&config, stage, interactive);
     let readback = setup_read_back(&config, &local);
     // Built once, from the observations, and then used for the terminal, for
@@ -12365,13 +12444,17 @@ fn cmd_setup(
     // opinions, and a wizard that says "observed" on stdout while its own JSON
     // says "unknown" is the failure this shape exists to prevent.
     let chain = setup_chain(&local, &readback);
+    // The local key exists now and did not before the save: this run created it.
+    // The flag may not cover it (see `local_key_existed_before`), and the
+    // interactive prompt must not ask about it — the declaration is owed to a
+    // later run, after the user has had the chance to copy it.
+    let local_key_created_this_run = setup_has_key(&local.save) && !local_key_existed_before;
 
     // A declaration covers every key this machine protects — the local
     // repository's key and each destination's key. `masterkey_saved_elsewhere`
     // (the flag, or the sentence `print_setup_*` asks for) is that declaration.
     // It is recorded per scope when it is made, so `status`/`doctor` can report
     // which keys the user has said they keep a copy of.
-    let state_dir = chat_stasher::collect::default_state_dir();
     let declarations = chat_stasher::keydecl::load(&state_dir);
     // The single flag covers every key of this run. An existing, already
     // recorded declaration also counts, so a non-interactive re-run that does
@@ -12380,7 +12463,11 @@ fn cmd_setup(
     // a record made about another path, or about key bytes that have since been
     // replaced, is not a declaration about this key.
     let declared = masterkey_saved_elsewhere;
-    let mut local_declared = declared
+    // The flag cannot cover the local key when this run created it: it did not
+    // exist when the flag was given, so nobody can have copied it. This is the
+    // same rule the destination key is held to below.
+    let flag_covers_local_key = declared && !local_key_created_this_run;
+    let mut local_declared = flag_covers_local_key
         || chat_stasher::keydecl::declared_for(
             &declarations,
             chat_stasher::keydecl::LOCAL_SCOPE,
@@ -12396,7 +12483,14 @@ fn cmd_setup(
             // user who declined that the step is unfinished, and it must not
             // then report the key as declared, or record it, because a flag or
             // an older record happens to be there.
-            if !local_declared {
+            //
+            // A key this run created is not asked about at all: the user has
+            // not had the chance to copy it, so a "yes" would record a backup
+            // nobody can have made. Name the file and the step that is still
+            // owed instead, and let a later run record the declaration.
+            if local_key_created_this_run {
+                setup_report_key_created_this_run(interactive, "masterkey", &local.key_file);
+            } else if !local_declared {
                 local_declared = print_setup_masterkey(&local, &state_dir);
             }
         } else {
@@ -12413,8 +12507,10 @@ fn cmd_setup(
     // one and is written over. A declaration that cannot be persisted is not a
     // declaration — the record is the whole point of it, because
     // `status`/`doctor` read it on later runs — so a failed write clears the
-    // flag the caller declared rather than reporting the step as done.
-    if declared
+    // flag the caller declared rather than reporting the step as done. Gated on
+    // `flag_covers_local_key`, not the bare flag: a key this run created is one
+    // the flag cannot cover, and recording it here would be that false backup.
+    if flag_covers_local_key
         && setup_has_key(&local.save)
         && !chat_stasher::keydecl::declared_for(
             &declarations,
@@ -12615,13 +12711,10 @@ fn cmd_setup(
     // bootstrap, one step later in the flow. A later run, on a machine where the
     // file is already there, declares it.
     //
-    // The local key is deliberately not held to this, and the asymmetry is
-    // written down rather than implied: it is the file the flag is named after,
-    // the flow creates and names it on a run *without* the flag before the flag
-    // is ever passed (the bootstrap above), and a destination's key has no such
-    // step — this rule is it. A caller who passes the flag on the very first run
-    // of a fresh machine is skipping the local bootstrap, and that is their
-    // statement to make about a file at a documented path.
+    // The local key is held to exactly the same rule, in `flag_covers_local_key`
+    // above: a key this run created is not covered, whichever copy it protects.
+    // Both lands in `masterkey.keys` as `declared: false`, which is always the
+    // entry still owed.
     let destination_key_created_this_run =
         matches!(dest_declared_key, Some(_)) && destination_key_existed_before == Some(false);
     let flag_covers_destination_key = declared && !destination_key_created_this_run;
@@ -12662,7 +12755,17 @@ fn cmd_setup(
     if interactive {
         if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref())
         {
-            if !dest_declared {
+            // A destination key `dest-init` created during this run is not asked
+            // about either, for the same reason as the local key above: there was
+            // no copy to confirm when the run started, so the declaration is owed
+            // to a later run and the user is told which file to save.
+            if destination_key_created_this_run {
+                setup_report_key_created_this_run(
+                    interactive,
+                    &format!("the destination key for `{name}`"),
+                    key,
+                );
+            } else if !dest_declared {
                 dest_declared = print_setup_key_declaration(
                     key,
                     &chat_stasher::keydecl::destination_scope(name),
@@ -12720,6 +12823,27 @@ fn cmd_setup(
             path: key.clone(),
             declared: dest_declared,
         });
+    }
+
+    // Every key this run created is one it cannot declare, and the user has to
+    // be told which file to save before a later run can record the declaration.
+    // The interactive path has already said so in the wizard's own voice; a
+    // non-interactive run prints exactly one JSON object on stdout, so the same
+    // words go to stderr, where the command's other diagnostics already are.
+    if !interactive {
+        for key in &keys {
+            let created_this_run = match key.scope {
+                SetupKeyScope::Local => local_key_created_this_run,
+                SetupKeyScope::Destination => destination_key_created_this_run,
+            };
+            if created_this_run {
+                let label = match key.name.as_deref() {
+                    Some(name) => format!("the destination key for `{name}`"),
+                    None => "masterkey".to_string(),
+                };
+                setup_report_key_created_this_run(interactive, &label, &key.path);
+            }
+        }
     }
 
     let remote_gaps = remote_report.gaps();
@@ -13030,15 +13154,31 @@ fn setup_refused_before_save_why(missing: &[&'static str]) -> String {
 /// WIZ-1 masterkey bootstrap. Here the *only* owed parameter was
 /// `--masterkey-saved-elsewhere`, so the wizard created the local repository
 /// and its masterkey — the minimum for the user to copy the key — and then
-/// stopped before the archive pass, the remote step and the scheduler. The
-/// payload that carries this reason offers the key file's `path`, which is the
-/// whole point of the run.
-fn setup_refused_awaiting_declaration_why() -> String {
-    "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
-     the local repository and its masterkey for you to copy elsewhere, then stopped \
-     before the archive pass, the remote step and the scheduler; re-run the same command \
-     with --masterkey-saved-elsewhere to continue"
-        .to_string()
+/// stopped before the archive pass and the scheduler. The payload that carries
+/// this reason offers the key files' `paths`, which is the whole point of the
+/// run.
+///
+/// `destination_step_ran` is true when a destination was named, so the step ran
+/// and the destination's own key is one of the keys to copy (W294/OBS-6). The
+/// name is deliberately about the *keys this run names* rather than about
+/// whether the step left a key: a step that could not reach its destination
+/// creates none, and the `destination` object beside this reason says which of
+/// the two happened. The local sentence is kept for the no-destination case,
+/// where the remote step genuinely did not run.
+fn setup_refused_awaiting_declaration_why(destination_step_ran: bool) -> String {
+    if destination_step_ran {
+        "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+         the local repository and its masterkey and ran the destination step — copy every \
+         key this run names — then stopped before the local archive pass and the scheduler; \
+         re-run the same command with --masterkey-saved-elsewhere to continue"
+            .to_string()
+    } else {
+        "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+         the local repository and its masterkey for you to copy elsewhere, then stopped \
+         before the archive pass, the remote step and the scheduler; re-run the same command \
+         with --masterkey-saved-elsewhere to continue"
+            .to_string()
+    }
 }
 
 /// The same refusal when the bootstrap itself could not run.
@@ -14207,6 +14347,40 @@ fn print_setup_masterkey(local: &SetupLocalSaveReport, state_dir: &std::path::Pa
         "masterkey",
         state_dir,
     )
+}
+
+/// Say that a key this run created cannot be declared by this run, and name the
+/// file the user has to save before a later run can record it.
+///
+/// The rule the whole declaration flow rests on: `--masterkey-saved-elsewhere`
+/// is a statement about files the user has already seen and copied, and a key
+/// created moments ago is not one of them — at the moment the statement would be
+/// made there was nothing to copy. So the run does not ask and does not record;
+/// it names the file, and the declaration belongs to the next run, once the copy
+/// exists. `interactive` picks the stream: the wizard talks to its terminal on
+/// stdout, while a non-interactive run keeps stdout to its single JSON object
+/// and says this on stderr, alongside the command's other diagnostics.
+fn setup_report_key_created_this_run(interactive: bool, label: &str, key_file: &Path) {
+    // The sentence is written out in both arms rather than built once and
+    // printed twice, because `docs-dev/output-inventory.txt` records each
+    // output macro's first string literal and does not follow a value passed
+    // in: a shared `format!` would leave this sentence, the one a user has to
+    // act on, out of the inventory the gate checks.
+    if interactive {
+        println!(
+            "setup: {label} was created by this run: {}, so this run cannot record the \
+             declaration for it — there was no copy to confirm when it started. Copy it \
+             somewhere off this disk now, then run `setup` again to record the declaration.",
+            key_file.display()
+        );
+    } else {
+        eprintln!(
+            "setup: {label} was created by this run: {}, so this run cannot record the \
+             declaration for it — there was no copy to confirm when it started. Copy it \
+             somewhere off this disk now, then run `setup` again to record the declaration.",
+            key_file.display()
+        );
+    }
 }
 
 /// Whether `setup` should ask for a destination key's declaration.

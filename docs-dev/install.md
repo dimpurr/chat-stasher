@@ -583,13 +583,25 @@ for you, and one copy does not restore another.
 case where that command writes anything while exiting `2`. A declaration that a
 copy exists is a human step, and a human cannot attest to a copy of a file that
 does not exist yet — so a headless run that owes nothing but
-`--masterkey-saved-elsewhere` creates the local repository and the key, reports
-the key's path as `masterkey.path`, and stops before the archive pass, the
-remote step and the timer (`crates/chat-stasher/src/main.rs:13465-13472`; the
-refusal's own wording is `crates/chat-stasher/src/main.rs:13036-13042`).
-Re-running it with the declaration continues from the key just created. Nothing
-is archived on that run, and every other missing parameter still refuses before
-the first write.
+`--masterkey-saved-elsewhere` **and refused before the local archive pass**
+(`steps.local_save` is `not_attempted`) creates every key it will ask about,
+reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
+before the local archive pass and the timer
+(`crates/chat-stasher/src/main.rs:13605-13612`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:13168-13182`). Nothing is archived on that run,
+and every other missing parameter still refuses before the first write.
+
+The `steps.local_save` half is what tells that bootstrap apart from a run that
+*was* given the flag on a machine where the local key did not exist yet. That run
+has the same `missing_parameters`, but it ran the archive pass and created the
+key, so it stops after the pass rather than before it, owing the declaration for
+the key — and for any destination key `dest-init` created — it just made. A first
+setup therefore takes **two** runs: one to create the keys, one to declare them
+all, whether or not the flag is given on the first of them. Re-running with the
+declaration continues from the keys that are already there. A destination named
+on the bootstrap runs its step there too, because `dest-init` is what creates
+that destination's own key — a second machine reads that copy with
+`masterkey-<name>.json`.
 
 ### 4.4 🔴 A remote destination: the first connection needs a human
 
@@ -927,12 +939,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:16302-16304`). This is the
+does not (`crates/chat-stasher/src/main.rs:16476-16478`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:16014-16042`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:16188-16216`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -948,7 +960,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:16304-16437`):
+(`crates/chat-stasher/src/main.rs:16478-16611`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -961,7 +973,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:16283-16288`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:16457-16462`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -971,7 +983,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:15961-15995`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:16135-16169`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,

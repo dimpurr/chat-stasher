@@ -144,6 +144,59 @@ impl Sandbox {
         self.data_root().join("state")
     }
 
+    fn config_file(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("config")
+            .join("chat-stasher")
+            .join("config.toml")
+    }
+
+    /// Declare a destination by hand, the way a user who already has one does.
+    /// An ordinary local-path repository, so the destination step runs in the
+    /// same process with no network.
+    fn write_config(&self, text: &str) {
+        let path = self.config_file();
+        fs::create_dir_all(path.parent().expect("a config directory")).expect("create config dir");
+        fs::write(&path, text).expect("write the sandbox config");
+    }
+
+    /// Run the documented first `setup` non-interactively, so the keys it names
+    /// are on the disk before an interactive run.
+    ///
+    /// A key a run creates is never declared by that run, so an interactive run
+    /// that has to reach a declaration *prompt* needs the key to pre-date it: a
+    /// key it created itself is not asked about, it is named and left owed. With
+    /// no `extra`, this creates the local repository and its key; naming a
+    /// destination also creates that destination's own key, because the
+    /// destination step runs inside the same bootstrap.
+    fn bootstrap_keys(&self, extra: &[&str]) {
+        let stage = self.stage();
+        let mut args = vec![
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+        ];
+        args.extend_from_slice(extra);
+        let output = self
+            .command(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run the non-interactive bootstrap");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "the bootstrap owes the masterkey declaration; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            self.data_root().join("masterkey.json").exists(),
+            "the bootstrap must leave the local key on the disk"
+        );
+    }
+
     /// The command, environment and all, with stdio left to the caller: the
     /// interactive runs here put a terminal where the wizard's detection looks
     /// for one, which `Stdio::piped` never is.
@@ -369,6 +422,11 @@ impl InteractiveWizard {
 #[test]
 fn a_declined_prompt_leaves_the_step_owed_and_records_nothing() {
     let sandbox = Sandbox::new();
+    // The key has to pre-date this run, or the wizard would not ask about it at
+    // all: a key a run creates is named and left owed, never prompted for. The
+    // decline this test is about is only reachable for a key that already
+    // exists, so the documented first run puts it there.
+    sandbox.bootstrap_keys(&[]);
     let stage = sandbox.stage();
     let mut wizard = InteractiveWizard::run(
         &sandbox,
@@ -433,5 +491,214 @@ fn a_declined_prompt_leaves_the_step_owed_and_records_nothing() {
         transcript.contains("The next answer is a declaration"),
         "the run took the interactive path, which explains the declaration before asking for \
          it; terminal transcript:\n{transcript}"
+    );
+}
+
+/// W294: with several keys in play, an interactive "no" is still a "no".
+///
+/// The wizard asks once per archive copy, so a machine with a destination poses
+/// two questions. Declining the destination's must leave *that* copy undeclared
+/// while the local copy — answered with the sentence in the same run — is
+/// recorded. A single-scope implementation could pass the decline test by
+/// refusing everything or nothing; this pins the per-copy behaviour, and pins it
+/// on the destination key, which is the one the run itself creates and so the
+/// one a "the copy is old, of course it is declared" shortcut would get wrong.
+#[cfg(unix)]
+#[test]
+fn an_interactive_no_on_one_of_several_keys_leaves_that_key_undeclared() {
+    let sandbox = Sandbox::new();
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    // Both keys are on the disk before the interactive run: a key this run
+    // creates is named and left owed, never prompted for, so the prompts — and
+    // the per-key decline this test is about — are only reachable when the keys
+    // already exist. The bootstrap names the destination, so it creates the
+    // destination's own key as well as the local one.
+    sandbox.bootstrap_keys(&["--destination", "backup"]);
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+            "--destination",
+            "backup",
+        ],
+    );
+
+    // The local key's prompt: answer with the sentence, so that copy *is*
+    // declared and the test is about a decline for one key rather than about
+    // declines in general.
+    wizard.expect_within(
+        "to declare you have your own copy",
+        "the masterkey declaration prompt",
+    );
+    wizard.answer("I saved it elsewhere");
+
+    // The destination's key already exists, so it gets its own prompt naming
+    // that file. Decline it — the declaration must not be recorded for that
+    // copy.
+    wizard.expect_within(
+        "destination key for `backup`",
+        "the destination key declaration prompt",
+    );
+    wizard.answer("no");
+
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+
+    let (status, stderr, transcript) = wizard.finish();
+
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "the declined destination key leaves its step owed, so the run must exit 2; \
+         stderr:\n{stderr}\nterminal transcript:\n{transcript}"
+    );
+    assert!(
+        stderr.contains("NOT declared"),
+        "the wizard must say the declined step is unfinished; stderr:\n{stderr}"
+    );
+
+    // The record is what `status`/`doctor` read, so "declined" has to mean
+    // nothing was written for that scope — while the answered scope is there.
+    let recorded = fs::read_to_string(
+        sandbox
+            .state_dir()
+            .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE),
+    )
+    .expect("the local declaration, which was answered, must be recorded");
+    assert!(
+        recorded.contains(chat_stasher::keydecl::LOCAL_SCOPE),
+        "the answered local declaration must be recorded: {recorded}"
+    );
+    assert!(
+        !recorded.contains(&chat_stasher::keydecl::destination_scope("backup")),
+        "a declined prompt must record nothing for its scope: {recorded}"
+    );
+}
+
+/// W294: an interactive run never declares a key it just created.
+///
+/// The rule is the same one the headless path follows — a key created moments
+/// ago is one nobody has had the chance to copy, so a "yes" recorded for it
+/// would be a declaration about a backup that cannot exist. On a fresh machine
+/// the wizard therefore does *not* print the declaration prompt for the local
+/// key it mints during the run; it names the file, says the run cannot record
+/// the declaration for it, and leaves the step owed for a later run. This is the
+/// interactive half of the fix the headless suite pins from the other side.
+#[cfg(unix)]
+#[test]
+fn an_interactive_run_never_declares_the_key_it_just_created() {
+    let sandbox = Sandbox::new();
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+        ],
+    );
+
+    // The created-key notice, in the wizard's own words, and — the property
+    // under test — no declaration prompt for that key.
+    wizard.expect_within("was created by this run", "the created-key notice");
+    assert!(
+        !wizard
+            .transcript
+            .contains("to declare you have your own copy"),
+        "an interactive run must not ask for the declaration of a key it created; \
+         terminal transcript:\n{}",
+        wizard.transcript
+    );
+
+    // The rest of the wizard still runs: the destination question and the
+    // scheduler question, both answered with their defaults.
+    wizard.expect_within(
+        "Destination name (blank to skip",
+        "the destination-name prompt",
+    );
+    wizard.answer("");
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+
+    let (status, stderr, transcript) = wizard.finish();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "the local key was created by this run, so its declaration is still owed; \
+         stderr:\n{stderr}\nterminal transcript:\n{transcript}"
+    );
+    // The record is what `status`/`doctor` read, so "not declared" has to mean
+    // nothing was written, not merely that the transcript said so.
+    assert!(
+        !sandbox
+            .state_dir()
+            .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE)
+            .exists(),
+        "a run must record no declaration for a key it created itself"
+    );
+}
+
+/// W294: the same rule applies to a destination key created by this run.
+#[cfg(unix)]
+#[test]
+fn an_interactive_run_leaves_a_new_destination_key_undeclared() {
+    let sandbox = Sandbox::new();
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+            "--destination",
+            "backup",
+        ],
+    );
+
+    wizard.expect_within(
+        "destination key for `backup` was created by this run",
+        "the destination created-key notice",
+    );
+    assert!(
+        !wizard
+            .transcript
+            .contains("to declare you have your own copy"),
+        "the wizard must not ask for a declaration of a destination key it created; \
+         terminal transcript:\n{}",
+        wizard.transcript
+    );
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+
+    let (status, stderr, transcript) = wizard.finish();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a newly created destination key remains owed; stderr:\n{stderr}\n\
+         terminal transcript:\n{transcript}"
+    );
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    assert!(
+        destination_key.exists(),
+        "dest-init must leave the key to copy"
+    );
+    assert!(
+        !sandbox
+            .state_dir()
+            .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE)
+            .exists(),
+        "the run must not record a declaration for the key it just created"
     );
 }
