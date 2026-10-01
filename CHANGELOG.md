@@ -239,6 +239,29 @@ under its own heading below.
   file that did not exist when they answered. That run stops with `2`, names the
   new file in `masterkey.keys[]` with `declared: false`, and the same command run
   again records the declaration.
+- **A key file that cannot be read no longer reads as backed up.** A declared
+  backup is a statement about a file — that path, holding those bytes — and the
+  comparison that decides whether a declaration covers a key folded every read
+  error into the one error that means the file was deleted, which keeps the
+  statement standing. So a key replaced by something unreadable — a directory
+  at the key's path, a file with its read permission gone — was reported as
+  declared saved, on the strength of a record about bytes nobody could read
+  back. That is the one direction this file exists to prevent: an unchanged
+  path proves nothing when the file cannot be opened. `doctor` and `status`
+  now report the key as its own third state — unreadable, unknown whether it
+  is still the declared file — and never as a plain "not declared" either,
+  because a user whose declaration is on file must not be sent looking for a
+  step they already did. `status --json`/`doctor --json` carry it as
+  `declared_state: "unreadable"` next to the existing `declared_saved` field,
+  which reads `false`; the setup wizard counts an unreadable key as not
+  declared, so the step stays owed until the file can be read and compared.
+  A missing key file is unchanged: the statement was made about the copy the
+  user keeps, not about this machine's disk, so it still stands.
+
+  The interactive declined prompt is pinned by a test that drives the real
+  path — the binary on a terminal, an answer typed at the printed prompt,
+  judged on the exit code and the record — which fails on the code the fix
+  replaced, where a declined prompt was reported as a made declaration.
 - **The `keychain:ACCOUNT` credential reference is macOS-only now.** On every
   other OS it is refused up front, with the reason that the macOS keychain
   does not exist there, instead of trying to run a tool that cannot be

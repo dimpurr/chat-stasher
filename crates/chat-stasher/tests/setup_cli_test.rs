@@ -1568,6 +1568,80 @@ fn a_declaration_does_not_cover_a_key_re_created_at_the_same_path() {
     );
 }
 
+/// A key that exists but cannot be read — the W284 review's replaced key: a
+/// directory sitting at the key's path — must not be reported as declared
+/// saved.
+///
+/// Before this fix the declaration comparison folded every read error into the
+/// "file was deleted" branch, which keeps the declaration standing: a
+/// destination whose key file was replaced by something unreadable read as
+/// backed up on the strength of a record made about bytes nobody can read
+/// back. That is unknown, and the point of the three-state rule is that it is
+/// not worded as "no declaration" either — a user with the declaration on file
+/// must not be sent looking for a step they already did.
+#[test]
+fn a_key_replaced_by_an_unreadable_file_is_unknown_not_declared_saved() {
+    let sandbox = Sandbox::new(false);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    fs::create_dir_all(sandbox.data_root()).expect("the data root the key lives in");
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::write(&destination_key, b"the key the user copied elsewhere\n")
+        .expect("plant the destination key");
+    chat_stasher::keydecl::mark_declared(
+        &state_dir(&sandbox),
+        &chat_stasher::keydecl::destination_scope("backup"),
+        &destination_key,
+    )
+    .expect("record the declaration about the file that is there");
+
+    // Something unreadable replaces the key at the exact path the declaration
+    // names. The path still leads somewhere, so absence is not the finding.
+    fs::remove_file(&destination_key).expect("remove the key file");
+    fs::create_dir(&destination_key).expect("something unreadable now sits at that path");
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let reported = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(
+        reported["exists"], true,
+        "a path exists — the finding is that it cannot be read, not that it is gone: {dvalue}"
+    );
+    assert_eq!(
+        reported["declared_saved"], false,
+        "an unreadable file cannot be confirmed as the declared key, so it must not read as \
+         declared saved: {dvalue}"
+    );
+    assert_eq!(
+        reported["declared_state"], "unreadable",
+        "the unknown is its own state, not a plain 'not declared': {dvalue}"
+    );
+
+    // `status` words it as an unknown of its own, for the same reason: the
+    // "here but no saved copy was ever declared" line would be false — a copy
+    // may well have been declared, and this machine cannot say.
+    let status = sandbox.command(&["status"]);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("[keys] destination=backup"),
+        "status must name the destination whose key cannot be read; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unreadable") && stderr.contains("unknown whether"),
+        "status must word the unreadable key as unknown rather than as an undeclared one; \
+         stderr:\n{stderr}"
+    );
+}
+
 /// A destination declared by hand with no `repo` is a config-content problem
 /// this run *read* — so it is reported, not treated as a usage error.
 ///

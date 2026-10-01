@@ -16,7 +16,10 @@
 //! was shown and the fingerprint of the bytes that were there (see
 //! [`declared_for`]). A key re-created at the same path is a different key, and
 //! the declaration made about the old one must not be read as a statement about
-//! it.
+//! it. A file that *cannot be read* — something else sitting at that path, or
+//! permission to read it gone — is a third case, and it is reported as
+//! [`DeclaredFor::Unreadable`]: an unknown, never a "saved" and never a plain
+//! "not declared".
 //!
 //! `status`/`doctor` read this file to say which destination keys exist locally
 //! and which the user has declared saved.
@@ -117,39 +120,100 @@ pub fn load(state_dir: &Path) -> Declarations {
 /// only ever compared with another digest the same way.
 pub fn fingerprint_of(path: &Path) -> Option<String> {
     let bytes = fs::read(path).ok()?;
-    Some(
-        Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    )
+    Some(fingerprint_bytes(&bytes))
+}
+
+/// The comparison half of [`fingerprint_of`], on bytes the caller already read.
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The answer to [`declared_for`], in three states because the reporting rules
+/// split them: "the bytes matched", "we looked and they differed" and "we
+/// could not look" are three different facts, and the user must never be shown
+/// one of them as another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredFor {
+    /// The recorded declaration is about this file: the path is the recorded
+    /// one and the bytes there fingerprint to the recorded fingerprint.
+    Declared,
+    /// A *known* "no": nothing is recorded for the scope, the record is about
+    /// another path, or the bytes at the recorded path changed since the
+    /// statement was made. A key deleted and re-created at the same path is a
+    /// different key, and the commonest way to get one — re-running the wizard
+    /// after losing the last copy — is exactly when a false "saved" costs the
+    /// most.
+    NotDeclared,
+    /// The recorded path matches, but the file could not be read to compare
+    /// fingerprints — something unreadable sits at that path (a directory
+    /// where the key was, permission to read it gone, corruption). This is an
+    /// *unknown*: the file may or may not be the declared one, and reporting
+    /// it as [`DeclaredFor::Declared`] would claim a confirmed backup of a
+    /// file nobody has opened. It must not be worded as
+    /// [`DeclaredFor::NotDeclared`] either — a "no" says the bytes were seen
+    /// and did not match, and here nothing was seen at all.
+    Unreadable,
+}
+
+impl DeclaredFor {
+    /// Whether a declaration covers the file asked about — `true` only for a
+    /// known match.
+    ///
+    /// For the callers that need one bit ("is the step owed?", "may the run
+    /// proceed?") every other state reads as `false`, because owing the user a
+    /// repeat question on an unreadable key errs safely, while reading it as
+    /// saved errs in the one direction this module exists to prevent.
+    /// Reporting surfaces should carry the three states instead, so an
+    /// unreadable key is never shown as a plain "not declared".
+    pub fn is_declared(self) -> bool {
+        matches!(self, DeclaredFor::Declared)
+    }
 }
 
 /// Whether these declarations say the user keeps a copy of **`path` as it is
-/// now**.
+/// now**, as a [`DeclaredFor`].
 ///
-/// Both halves are required, and each catches a different false "saved":
+/// Both halves of a "yes" are required, and each catches a different false
+/// "saved":
 /// * the recorded path must be the path being asked about, because a
 ///   destination's `key_file` can change in the config and a declaration about
 ///   the old file says nothing about the new one;
 /// * the bytes there must fingerprint to what was recorded, because a key file
-///   deleted and re-created at the same path is a *different key*, and the
-///   commonest way to get one is to re-run the wizard after losing the last
-///   copy — exactly when a false "saved" is most costly.
+///   deleted and re-created at the same path is a *different key*.
 ///
-/// A file that is not there leaves the path match standing: the statement is
-/// about the user's copy, and deleting this machine's file does not unmake it.
-/// Whether the file is here is reported separately, so nothing is conflated.
-pub fn declared_for(declarations: &Declarations, scope: &str, path: &Path) -> bool {
+/// A **missing** file is [`DeclaredFor::Declared`]: `NotFound` is the one read
+/// error that is an absence rather than a failure, and the statement survives
+/// it — it was made about the copy the user keeps, and deleting this machine's
+/// file does not unmake it. Whether the file is here is reported separately,
+/// so nothing is conflated. Every other read failure is
+/// [`DeclaredFor::Unreadable`] and never a "yes": a file that exists but
+/// cannot be read is not the confirmed file the user's declaration describes.
+pub fn declared_for(declarations: &Declarations, scope: &str, path: &Path) -> DeclaredFor {
     let Some(entry) = declarations.get(scope) else {
-        return false;
+        return DeclaredFor::NotDeclared;
     };
     if entry.path != path {
-        return false;
+        return DeclaredFor::NotDeclared;
     }
-    match fingerprint_of(path) {
-        Some(now) => now == entry.fingerprint,
-        None => true,
+    match fs::read(path) {
+        Ok(bytes) => {
+            if fingerprint_bytes(&bytes) == entry.fingerprint {
+                DeclaredFor::Declared
+            } else {
+                DeclaredFor::NotDeclared
+            }
+        }
+        // The one read error that means absence, not failure: the statement is
+        // about the copy the user keeps off this disk, so it stands.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DeclaredFor::Declared,
+        // Everything else is an unreadable something at the recorded path —
+        // the file's identity is unknown, so the declaration cannot be said
+        // to match or to miss. Reported as unknown, never as saved.
+        Err(_) => DeclaredFor::Unreadable,
     }
 }
 
@@ -223,7 +287,7 @@ mod tests {
         let entry = decls.get("backup").expect("the scope is recorded");
         assert_eq!(entry.path, key);
         assert!(!entry.declaration_is_verified, "never verified");
-        assert!(declared_for(&decls, "backup", &key));
+        assert_eq!(declared_for(&decls, "backup", &key), DeclaredFor::Declared);
     }
 
     /// A key file that cannot be read cannot be declared: the fingerprint is
@@ -253,9 +317,53 @@ mod tests {
         let key = plant_key(&dir.path().join("masterkey-backup.json"));
         mark_declared(dir.path(), "backup", &key).expect("persist");
         fs::write(&key, b"a different key, created after the copy was made\n").expect("replace it");
-        assert!(
-            !declared_for(&load(dir.path()), "backup", &key),
+        assert_eq!(
+            declared_for(&load(dir.path()), "backup", &key),
+            DeclaredFor::NotDeclared,
             "the bytes changed, so the declaration is about a key that is no longer here"
+        );
+    }
+
+    /// The read-failure half of the same rule: a key file that exists but
+    /// cannot be read — a directory where the key was, a file this process has
+    /// no permission to open — is *not* the confirmed file the declaration
+    /// describes, and must not be reported as declared-saved. Before the
+    /// W284 review this case read as `true`, because every read error was
+    /// folded into the "file was deleted" branch.
+    #[test]
+    fn a_key_replaced_by_a_directory_is_unreadable_not_declared_saved() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "backup", &key).expect("persist");
+        fs::remove_file(&key).expect("remove the key file");
+        fs::create_dir(&key).expect("something unreadable now sits at that path");
+        let state = declared_for(&load(dir.path()), "backup", &key);
+        assert_eq!(
+            state,
+            DeclaredFor::Unreadable,
+            "a file that cannot be read cannot be said to be the declared one"
+        );
+        assert!(
+            !state.is_declared(),
+            "the one-bit readers (the wizard's owed step) must see it as not declared"
+        );
+    }
+
+    /// `NotFound` is the one read error that means absence rather than failure,
+    /// and absence is what keeps the declaration standing: it was made about
+    /// the copy the user keeps, not about this disk. The unreadable case —
+    /// a file that exists but cannot be read — is the test above, and is the
+    /// other half of the same split.
+    #[test]
+    fn a_declaration_survives_the_local_key_file_being_deleted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = plant_key(&dir.path().join("masterkey-backup.json"));
+        mark_declared(dir.path(), "backup", &key).expect("persist");
+        fs::remove_file(&key).expect("remove the local copy");
+        assert_eq!(
+            declared_for(&load(dir.path()), "backup", &key),
+            DeclaredFor::Declared,
+            "the declaration is about the copy the user keeps, not about this disk"
         );
     }
 
@@ -267,24 +375,10 @@ mod tests {
         let older = plant_key(&dir.path().join("masterkey-backup-old.json"));
         let current = plant_key(&dir.path().join("masterkey-backup.json"));
         mark_declared(dir.path(), "backup", &older).expect("persist");
-        assert!(
-            !declared_for(&load(dir.path()), "backup", &current),
+        assert_eq!(
+            declared_for(&load(dir.path()), "backup", &current),
+            DeclaredFor::NotDeclared,
             "the declaration was made about another file"
-        );
-    }
-
-    /// A key file deleted after the declaration leaves the statement standing:
-    /// it was made about the user's copy, and this machine's file going away
-    /// does not unmake it. Whether the file is *here* is reported separately.
-    #[test]
-    fn a_declaration_survives_the_local_key_file_being_deleted() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let key = plant_key(&dir.path().join("masterkey-backup.json"));
-        mark_declared(dir.path(), "backup", &key).expect("persist");
-        fs::remove_file(&key).expect("remove the local copy");
-        assert!(
-            declared_for(&load(dir.path()), "backup", &key),
-            "the declaration is about the copy the user keeps, not about this disk"
         );
     }
 

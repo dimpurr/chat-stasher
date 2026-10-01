@@ -10230,6 +10230,10 @@ mod decision_surface_tests {
     /// and the archive readable only from this machine's copy of a key nobody
     /// confirmed — the one direction this must never get wrong, and the reason
     /// the record is written only when the user made the statement.
+    ///
+    /// This is the seam (answer + persistence) of the W284 fix; the prompt it
+    /// answers is pinned end-to-end — real binary, real terminal, real typed
+    /// answer, failing on the pre-fix commit — by `setup_interactive_test.rs`.
     #[test]
     fn a_declined_prompt_leaves_the_key_undeclared() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -10295,7 +10299,8 @@ mod decision_surface_tests {
             &chat_stasher::keydecl::load(dir.path()),
             &chat_stasher::keydecl::destination_scope("backup"),
             &key,
-        ));
+        )
+        .is_declared());
     }
 
     /// An empty answer takes the offered default; a typed path is expanded
@@ -12218,11 +12223,17 @@ fn cmd_setup(
                     let will_configure = !setup_destination_declared(Some(name));
                     if will_configure || dest_key.exists() {
                         let state_dir = chat_stasher::collect::default_state_dir();
+                        // Unreadable reads as not declared here, deliberately:
+                        // this is the one-bit question "is the step owed?",
+                        // and an unreadable key is owed a readable one before
+                        // its declaration can count. The unknown wording is
+                        // `doctor`/`status`'s to carry.
                         let already_declared = chat_stasher::keydecl::declared_for(
                             &chat_stasher::keydecl::load(&state_dir),
                             &chat_stasher::keydecl::destination_scope(name),
                             &dest_key,
-                        );
+                        )
+                        .is_declared();
                         if !already_declared && !premissing.contains(&"masterkey_saved_elsewhere") {
                             premissing.push("masterkey_saved_elsewhere");
                         }
@@ -12346,7 +12357,8 @@ fn cmd_setup(
             &declarations,
             chat_stasher::keydecl::LOCAL_SCOPE,
             &local.key_file,
-        );
+        )
+        .is_declared();
     if interactive {
         print_setup_local_report(&local, &chain);
         if setup_has_key(&local.save) {
@@ -12381,6 +12393,7 @@ fn cmd_setup(
             chat_stasher::keydecl::LOCAL_SCOPE,
             &local.key_file,
         )
+        .is_declared()
     {
         if !record_key_declaration(
             &state_dir,
@@ -12596,11 +12609,15 @@ fn cmd_setup(
                         // file this run would declare — that path, holding
                         // those bytes. A destination whose `key_file` moved, or
                         // whose key was re-created since, has no declaration.
+                        // An unreadable key file is not declared either: the
+                        // step stays owed until the file there can be read and
+                        // compared.
                         chat_stasher::keydecl::declared_for(
                             &declarations,
                             &chat_stasher::keydecl::destination_scope(name),
                             key,
                         )
+                        .is_declared()
                     })
                     // reason: `name` is present exactly when the report named a
                     // destination; a report without one reaches this with no
@@ -12636,7 +12653,7 @@ fn cmd_setup(
         if let (Some(name), Some(key)) = (remote_report.name.as_deref(), dest_declared_key.as_ref())
         {
             let scope = chat_stasher::keydecl::destination_scope(name);
-            if !chat_stasher::keydecl::declared_for(&declarations, &scope, key)
+            if !chat_stasher::keydecl::declared_for(&declarations, &scope, key).is_declared()
                 && !record_key_declaration(
                     &state_dir,
                     &scope,

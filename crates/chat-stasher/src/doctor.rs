@@ -1150,8 +1150,12 @@ pub struct KeyInventoryRow {
     pub path: PathBuf,
     /// Whether the key file exists on this machine.
     pub exists: bool,
-    /// Whether the user has declared (never verified) they keep a copy of it.
-    pub declared_saved: bool,
+    /// Whether the user has declared (never verified) they keep a copy of
+    /// *this file* — three states, not two: a key that cannot be read to
+    /// compare against the record is unknown, and must not be reported as
+    /// either declared-saved or plainly not declared (see
+    /// `keydecl::DeclaredFor`).
+    pub declared_saved: crate::keydecl::DeclaredFor,
 }
 
 impl KeyInventoryRow {
@@ -1171,11 +1175,14 @@ impl KeyInventoryRow {
 /// points at the local key (an override sharing the local archive's
 /// declaration), because then the local row already names it.
 ///
-/// `declared_saved` is decided by `keydecl::declared_for`, not by the scope
-/// alone: a declaration is a statement about a *file* — that path, holding those
+/// `declared_saved` is decided by `keydecl::declared_for` — a three-state
+/// comparison, carried through to the row — not by the scope alone: a
+/// declaration is a statement about a *file* — that path, holding those
 /// bytes — so a destination whose `key_file` moved, or whose key was re-created
 /// at the same path, must not read as backed up on the strength of a record
-/// made about a different file.
+/// made about a different file. A file that exists but cannot be read is
+/// `DeclaredFor::Unreadable`, never a "saved": something unreadable sits where
+/// the key was, and nobody has confirmed a copy of whatever it is.
 pub fn key_inventory(config: &Config) -> Vec<KeyInventoryRow> {
     let data_root = default_data_root();
     let state_dir = crate::collect::default_state_dir();
@@ -1355,12 +1362,19 @@ fn destination_probe_json(p: &DestinationProbe) -> serde_json::Value {
 /// `declared_saved` and `declaration_is_verified` are deliberately two fields:
 /// the second is always `false`, because nothing can check that a copy exists.
 /// A consumer must not read `declared_saved: true` as "this key is backed up".
+///
+/// `declared_state` carries the three states behind that boolean:
+/// `"declared"` (the record is about this file), `"not_declared"` (a known
+/// no — nothing recorded, another file, or bytes that changed since), and
+/// `"unreadable"` (the file could not be read to compare — an unknown, so the
+/// boolean reads `false` for the safe reason rather than a measured one).
 fn key_inventory_json(row: &KeyInventoryRow) -> serde_json::Value {
     let mut value = serde_json::json!({
         "scope": row.scope(),
         "path": row.path.display().to_string(),
         "exists": row.exists,
-        "declared_saved": row.declared_saved,
+        "declared_saved": row.declared_saved.is_declared(),
+        "declared_state": row.declared_saved,
         "declaration_is_verified": false,
     });
     if let Some(name) = &row.name {
@@ -1399,22 +1413,30 @@ pub fn key_alert_lines(config: &Config) -> Vec<String> {
         .iter()
         .filter_map(|row| {
             let name = row.name.as_deref()?;
-            if !row.exists {
+            match (row.declared_saved, row.exists) {
+                // Something unreadable sits at the key's path: this is neither
+                // "not on this machine" (a path is there) nor "no copy was
+                // declared" (nobody could tell). Reported as unknown, in its
+                // own words, because being told "not declared" here would send
+                // the user looking for a declaration they may already have.
+                (crate::keydecl::DeclaredFor::Unreadable, _) => Some(format!(
+                    "[keys] destination={name} key={} unreadable — unknown whether it is still \
+                     the key that was declared saved; a key that cannot be read opens no copy",
+                    row.path.display()
+                )),
                 // This machine cannot open that copy at all, whatever the user
                 // has declared: the file is not here.
-                Some(format!(
+                (_, false) => Some(format!(
                     "[keys] destination={name} key={} is NOT on this machine — this machine \
                      cannot read that copy until it is restored there",
                     row.path.display()
-                ))
-            } else if !row.declared_saved {
-                Some(format!(
+                )),
+                (crate::keydecl::DeclaredFor::NotDeclared, true) => Some(format!(
                     "[keys] destination={name} key={} is here but no saved copy was ever \
                      declared — back it up; a second machine opens that copy with this file",
                     row.path.display()
-                ))
-            } else {
-                None
+                )),
+                (crate::keydecl::DeclaredFor::Declared, true) => None,
             }
         })
         .collect()
@@ -3388,10 +3410,17 @@ fn print_keys(keys: &Option<Vec<KeyInventoryRow>>) {
         } else {
             "not on this machine"
         };
-        let declared = if row.declared_saved {
-            "declared saved"
-        } else {
-            "NOT declared saved"
+        // Three states, because the file's comparison against the recorded
+        // declaration has three answers and two of them must not be worded as
+        // each other: a key that exists but cannot be read is an *unknown*,
+        // not a "NOT declared" (which says the bytes were seen and did not
+        // match), and never a "declared saved".
+        let declared = match row.declared_saved {
+            crate::keydecl::DeclaredFor::Declared => "declared saved",
+            crate::keydecl::DeclaredFor::NotDeclared => "NOT declared saved",
+            crate::keydecl::DeclaredFor::Unreadable => {
+                "unreadable — unknown whether the declaration covers it"
+            }
         };
         let label = match &row.name {
             Some(name) => format!("{name} (destination)"),
