@@ -1475,6 +1475,63 @@ describe('W49 · Claude target scope must be an organization and must be the onl
 });
 
 // ---------------------------------------------------------------------------
+// 6 · W296b · a 429 on organization discovery arms the same day brake
+//
+// 🔴 The defect this pins: organization discovery reports its refusal through
+//    `reportClaudeOrganizationRateLimit`, which used to reach only the machine-wide
+//    arbiter. The rest-of-day brake was armed on the request gateway alone, so a 429
+//    seen on either discovery path armed no brake at all — requirement (c) held on
+//    every path but these two.
+// ---------------------------------------------------------------------------
+describe('W296b · a 429 on Claude organization discovery arms the day brake', () => {
+  it('🔴 the popup\'s registration path arms it, not only the machine-wide report', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    const { DAY_SLOW_KEY, isPlatformDaySlowed } = await import('../lib/backfill/day-slow');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal', retryAfter: '120' });
+
+    await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    const localStore = browserLocalStore();
+    expect(store[DAY_SLOW_KEY]).toBeDefined();
+    expect(await isPlatformDaySlowed(localStore, 'claude', runtimeNow)).toBe(true);
+  });
+
+  it('🔴 the alarm path arms it too', async () => {
+    const mod = await bootBackground();
+    const { DAY_SLOW_KEY, isPlatformDaySlowed } = await import('../lib/backfill/day-slow');
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const { rememberTarget } = await import('../lib/backfill/alarm');
+    await enableBackfill();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 429, text: 'synthetic endpoint refusal', retryAfter: '120' });
+    await rememberTarget(browserLocalStore(), { platform: 'claude', origin: CLAUDE_ORIGIN, scope: 'default', at: 1 });
+
+    await mod.runAlarmTick();
+
+    const localStore = browserLocalStore();
+    expect(store[DAY_SLOW_KEY]).toBeDefined();
+    expect(await isPlatformDaySlowed(localStore, 'claude', runtimeNow)).toBe(true);
+  });
+
+  it('🔴 a 403 on organization discovery does not arm it — only 429 does', async () => {
+    const { POPUP_START_BACKFILL_MESSAGE } = await import('../lib/popup-view');
+    const { DAY_SLOW_KEY } = await import('../lib/backfill/day-slow');
+    await enableBackfill();
+    await bootBackground();
+    await tabHello(7);
+    routes[RESOLVE_PATH] = () => ({ status: 403, text: 'synthetic endpoint refusal' });
+
+    await dispatch({ type: POPUP_START_BACKFILL_MESSAGE });
+
+    expect(store[DAY_SLOW_KEY]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5 · The wiring guard — the production glue really does these things
 // ---------------------------------------------------------------------------
 describe('W31c-5 · the content script really asks, really remembers, and really scopes', () => {

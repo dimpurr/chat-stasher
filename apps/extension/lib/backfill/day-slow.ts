@@ -209,12 +209,39 @@ export async function isPlatformDaySlowed(
 }
 
 /**
+ * 🔴 W296b · **The one writer lock.**
+ *
+ * `recordPlatformRateLimit` is a read-modify-write of a single storage value, and two
+ * 429s on two platforms can arrive from two concurrent ticks — each platform's lease
+ * is separate, and the live, alarm, retry, resume and popup paths all run in the same
+ * worker. Two interleaved calls would each read the old record and the second save
+ * would drop the first platform's entry: a brake that was armed and then silently
+ * erased. The per-platform test (sequential) cannot catch that.
+ *
+ * `storage.local` offers no compare-and-swap, so the only way to make the pair atomic
+ * is to let one caller finish before the next reads. The chain does that; a rejected
+ * task must not poison it for the next caller, so the tail swallows the outcome the
+ * caller has already seen. The chain is module state, which is correct here: a worker
+ * restart has no in-flight writer to serialize against, and two profiles never share
+ * this module.
+ */
+let writeChain: Promise<unknown> = Promise.resolve();
+
+function withWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(task, task);
+  writeChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/**
  * Arm the brake for `platform` until the next local midnight.
  *
  * 🔴 The read-modify-write is deliberate and its failure mode is chosen: if the record
  *    cannot be read, this **throws** rather than writing a fresh one-platform record.
  *    Writing anyway would be a write that silently deletes every other platform's
  *    brake — the one way this function could make things worse than doing nothing.
+ *    The whole pair runs under `withWriteLock`, so a concurrent arm for another
+ *    platform is applied to the record this one wrote rather than lost to it.
  *
  * Returns the instant the brake now ends, so a caller can log or show it without a
  * second read.
@@ -225,19 +252,21 @@ export async function recordPlatformRateLimit(
   now: number,
 ): Promise<number> {
   if (!store) throw new Error('[chat-stasher] no storage to record a platform rate limit in');
-  const until = localMidnightAfter(now);
-  const raw = await store.load(DAY_SLOW_KEY);
-  const existing = isDaySlowRecord(raw) ? raw.platforms : {};
-  // Entries that have already expired are dropped here and nowhere else, so the record
-  // cannot grow one platform-key per platform per day forever. Dropping them loses
-  // nothing: an expired entry is already ignored by `readDaySlowUntil`.
-  const platforms: Record<string, DaySlowEntry> = {};
-  for (const [id, entry] of Object.entries(existing)) {
-    if (isDaySlowEntry(entry) && entry.until > now) platforms[id] = entry;
-  }
-  platforms[platform] = { until, at: now };
-  await store.save(DAY_SLOW_KEY, { v: DAY_SLOW_VERSION, platforms } satisfies DaySlowRecord);
-  return until;
+  return withWriteLock(async () => {
+    const until = localMidnightAfter(now);
+    const raw = await store.load(DAY_SLOW_KEY);
+    const existing = isDaySlowRecord(raw) ? raw.platforms : {};
+    // Entries that have already expired are dropped here and nowhere else, so the record
+    // cannot grow one platform-key per platform per day forever. Dropping them loses
+    // nothing: an expired entry is already ignored by `readDaySlowUntil`.
+    const platforms: Record<string, DaySlowEntry> = {};
+    for (const [id, entry] of Object.entries(existing)) {
+      if (isDaySlowEntry(entry) && entry.until > now) platforms[id] = entry;
+    }
+    platforms[platform] = { until, at: now };
+    await store.save(DAY_SLOW_KEY, { v: DAY_SLOW_VERSION, platforms } satisfies DaySlowRecord);
+    return until;
+  });
 }
 
 /**

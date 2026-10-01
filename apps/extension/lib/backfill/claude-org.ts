@@ -43,6 +43,8 @@
  * request goes through (`ScopeInPathSpec.resolvePath`).
  */
 
+import { carryableRetryAfter } from './types';
+
 /** The cookie the sources read the active organization from. */
 export const CLAUDE_ORG_COOKIE = 'lastActiveOrg';
 
@@ -283,12 +285,15 @@ export async function resolveClaudeOrgOnPage(
     const status = (err as Error & { status?: unknown }).status;
     const rateLimitStatus = status === 403 || status === 429 ? status : undefined;
     const retryAfter = (err as Error & { retryAfter?: unknown }).retryAfter;
+    // 🔴 W296b · The one carry rule (types.ts), so the page-side bound and this
+    //    reading of it cannot disagree about an over-long delta-seconds header.
+    const carriedRetryAfter = carryableRetryAfter(retryAfter);
     return {
       ok: false,
       halt: 'transport-error',
       detail: (err as Error).message,
       ...(rateLimitStatus ? { rateLimitStatus } : {}),
-      ...(typeof retryAfter === 'string' && retryAfter.length <= 64 ? { retryAfter } : {}),
+      ...(carriedRetryAfter !== null ? { retryAfter: carriedRetryAfter } : {}),
     };
   }
   return resolveClaudeOrg({ ...input, endpoint: { kind: 'text', text } });

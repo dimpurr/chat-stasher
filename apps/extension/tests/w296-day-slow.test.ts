@@ -98,6 +98,41 @@ describe('W296-B · recordPlatformRateLimit writes one platform, and readDaySlow
     expect(Object.keys(record.platforms).sort()).toEqual(['chatgpt', 'claude']);
   });
 
+  it('🔴 two platforms armed at once both survive — the write is serialized, not raced', async () => {
+    const store = memoryStore();
+    // The real shape of the race: the gateway can observe two platforms' 429s from two
+    // concurrent ticks, each calling `recordPlatformRateLimit` without awaiting the
+    // other. Under a bare read-modify-write the second save is built from the record the
+    // first call read *before* the first saved, so its write erases the other platform.
+    await Promise.all([
+      recordPlatformRateLimit(store, 'chatgpt', T0),
+      recordPlatformRateLimit(store, 'claude', T0),
+    ]);
+    const record = store.data[DAY_SLOW_KEY] as { platforms: Record<string, unknown> };
+    expect(Object.keys(record.platforms).sort()).toEqual(['chatgpt', 'claude']);
+    expect(await isPlatformDaySlowed(store, 'chatgpt', T0)).toBe(true);
+    expect(await isPlatformDaySlowed(store, 'claude', T0)).toBe(true);
+  });
+
+  it('🔴 a refused write does not jam the lock for the next arm', async () => {
+    const store = memoryStore();
+    let allowSave = false;
+    const flaky = {
+      load: store.load.bind(store),
+      save: async (key: string, value: unknown) => {
+        if (!allowSave) throw new Error('storage busy');
+        await store.save(key, value);
+      },
+      remove: store.remove.bind(store),
+      keys: store.keys.bind(store),
+    };
+    await expect(recordPlatformRateLimit(flaky, 'chatgpt', T0)).rejects.toThrow('storage busy');
+    allowSave = true;
+    // The rejection must not have poisoned the chain: the next call still runs.
+    await recordPlatformRateLimit(flaky, 'chatgpt', T0);
+    expect(await isPlatformDaySlowed(store, 'chatgpt', T0)).toBe(true);
+  });
+
   it('🔴 it ends at the stored instant, and an expired entry is simply not a brake', async () => {
     const store = memoryStore();
     const until = await recordPlatformRateLimit(store, 'chatgpt', T0);

@@ -896,6 +896,8 @@ async function pauseForCoordinationFailure(reason: string): Promise<void> {
 }
 
 type BackfillLease = {
+  /** The platform this lease governs — carried so a rate-limit report can name it. */
+  platform: string;
   request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T>;
   rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean>;
   release(): Promise<void>;
@@ -921,6 +923,7 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
     if (!claim.granted) return null;
     let held = true;
     return {
+      platform,
       gentle: claim.gentle,
       async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
         if (!held) throw new Error('backfill lease is not held');
@@ -954,9 +957,46 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
   });
 }
 
+/**
+ * 🔴 W296 · **Report a platform refusal in one place, so no path can do half of it.**
+ *
+ * A 429 has two consequences: this install slows every request to that platform for
+ * the rest of the local day (`recordPlatformRateLimit`, day-slow.ts), and the
+ * machine-wide arbiter is told so the other installs on this machine back off too
+ * (`lease.rateLimit`). The second was reported from three places (the request
+ * gateway and both Claude organization-discovery paths) while the first was armed
+ * only in the gateway — so a 429 seen by organization discovery armed no brake and
+ * requirement (c) was met on every path but that one.
+ *
+ * The order is deliberate and it is why this is one function rather than two calls
+ * scattered at the call sites: the local brake is armed **first**, and its write is
+ * wrapped so it cannot fail the run, because the machine-wide report below *can* fail
+ * the tick and a coordination outage must never cost the local brake. `tickNow()`
+ * rather than `Date.now()` so a test with an injected clock sees its own day boundary.
+ *
+ * `403` passes through to the arbiter only: it is a credential refusal the engine also
+ * classifies `rate-limited`, but the day-long brake is the response to a platform
+ * saying "you are over your request budget", which is what 429 means
+ * (`daySlowTriggeredBy`).
+ */
+async function reportPlatformRateLimit(
+  lease: BackfillLease,
+  status: 403 | 429,
+  retryAfter?: string,
+): Promise<boolean> {
+  if (daySlowTriggeredBy(status)) {
+    try {
+      await recordPlatformRateLimit(browserLocalStore(), lease.platform, tickNow());
+    } catch (err) {
+      console.warn('[chat-stasher] the platform day-slow brake could not be recorded', (err as Error).message);
+    }
+  }
+  return lease.rateLimit(status, retryAfter);
+}
+
 /** Share Claude organization-discovery refusals before the last holder releases. */
 async function reportClaudeOrganizationRateLimit(lease: BackfillLease, status: 403 | 429, retryAfter?: string): Promise<boolean> {
-  const shared = await lease.rateLimit(status, retryAfter);
+  const shared = await reportPlatformRateLimit(lease, status, retryAfter);
   if (shared) return true;
   console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared');
   return false;
@@ -1033,31 +1073,16 @@ async function coordinatedTick(
     const segment = coordinationSegmentForRequest(platform, url);
     const response = await lease.request(segment, () => http(url, init));
     /**
-     * 🔴 W296 · **A 429 also arms this install's own rest-of-day brake, before the
-     *    machine-wide report below is allowed to fail the tick.**
+     * 🔴 W296 · **A 429 seen by any request arms the same brake, from the one report.**
      *
-     * This is the one place "every request to that platform" is literally true: the
-     * port every backfill run sends through (the comment above `acquireBackfillLease`
-     * calls it the sole gateway for live, alarm, retry, resume and popup discovery).
-     * The engine sees one run's responses; this sees all of them.
-     *
-     * The order is deliberate. `recordPlatformRateLimit` cannot fail the tick — it is
-     * wrapped, and a refused write is a warning, because the halt record the engine is
-     * about to write is the run's own account of why it stopped and must not be lost
-     * to a second, longer-lived consequence of the same observation. The host report
-     * below *can* fail the tick, so doing this first means a coordination outage never
-     * costs the local brake. `tickNow()` rather than `Date.now()` so a test with an
-     * injected clock sees its own day boundary.
+     * This is the gateway, so it is where "every request to that platform" is
+     * literally true: the engine sees one run's responses, this sees all of them.
+     * `reportPlatformRateLimit` arms the local rest-of-day brake first (and its write
+     * cannot fail the tick) and reports to the machine-wide arbiter second (which can,
+     * and does, when the host is unreachable).
      */
-    if (daySlowTriggeredBy(response.status)) {
-      try {
-        await recordPlatformRateLimit(browserLocalStore(), platform, tickNow());
-      } catch (err) {
-        console.warn('[chat-stasher] the platform day-slow brake could not be recorded', (err as Error).message);
-      }
-    }
     if (response.status === 403 || response.status === 429) {
-      if (!(await lease.rateLimit(response.status, response.retryAfter)))
+      if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter)))
         throw new Error('machine-wide rate-limit coordination unavailable');
     }
     return response;
