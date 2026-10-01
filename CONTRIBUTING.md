@@ -57,22 +57,24 @@ python3 scripts/check-semantic-defaults.py
 The fourth line **is** the test suite, run through the rustic-cache isolation
 guard (W289). The guard snapshots this machine's real user cache root
 (`~/Library/Caches/rustic` on macOS, `$XDG_CACHE_HOME` or `~/.cache/rustic` on
-Linux) before and after the suite and exits non-zero if the run created,
-removed or renamed anything there. That invariant exists because the suite
-once opened its repositories with rustic's default cache settings, and every
-such open planted a per-repository directory in the user's cache — 36,174 had
-accumulated on one machine before W289, which the cache-walking tests then
-had to sweep and which only `scripts/dev/prune-test-rustic-cache.sh` can
-safely reclaim. So: every test that opens a repository points its cache
-(`StoreConfig::cache_dir`, or `rustic_cache_dir` in the config a spawned child
-reads) at a directory under its own temp fixture — the cache itself stays
-enabled, only its location moves — and this guard turns a regression back into
-a red run instead of a slow machine. On the first run after a large
-accumulation the two snapshots cost a directory walk each; the prune script
-is the way to make that cheap again. A Windows contributor runs plain
-`cargo test` instead, and that gap is stated rather than silent: on Windows
-the cache root comes from the Known Folder API, which neither this guard nor
-an environment override can redirect.
+Linux, `%LOCALAPPDATA%\rustic` on Windows) before and after the suite and exits
+non-zero if the run created, removed or renamed anything there. That invariant
+exists because the suite once opened its repositories with rustic's default
+cache settings, and every such open planted a per-repository directory in the
+user's cache — 36,174 had accumulated on one machine before W289, which the
+cache-walking tests then had to sweep and which only
+`scripts/dev/prune-test-rustic-cache.sh` can safely reclaim. So: every test
+that opens a repository points its cache (`StoreConfig::cache_dir`, or
+`rustic_cache_dir` in the config a spawned child reads) at a directory under
+its own temp fixture — the cache itself stays enabled, only its location moves
+— and this guard turns a regression back into a red run instead of a slow
+machine. On the first run after a large accumulation the two snapshots cost a
+directory walk each; the prune script is the way to make that cheap again. On
+Windows the guard watches `%LOCALAPPDATA%\rustic` (the Known Folder, which no
+environment variable redirects, which is why the relocation travels through the
+product's own `rustic_cache_dir` knob there rather than through
+`XDG_CACHE_HOME`), and refuses rather than running unguarded when the root
+cannot be named.
 
 The remaining checks — source-text gates, script self-tests, the release gate
 and the smoke — follow:
@@ -97,6 +99,8 @@ bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
 bash scripts/dev/test-rebase-onto-main.sh
 bash scripts/dev/test-merge-drivers.sh
+bash scripts/dev/test-cache-isolation-guard.sh
+bash scripts/dev/test-prune-rustic-cache.sh
 python3 scripts/dev/scoreboard.py --selftest
 bash scripts/selftest-relocate-citations.sh
 bash scripts/self-test-install.sh

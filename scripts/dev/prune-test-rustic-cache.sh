@@ -37,9 +37,10 @@
 #     no keep-set → nothing is deletable, and --apply is refused;
 #   * a declared repository could not be opened (remote backend unreachable
 #     in this shell, a missing credential) → its id is unknown → it cannot be
-#     proved not to own one of the listed directories → --apply is refused
-#     unless `--allow-unresolved` is passed too, which shifts the decision to
-#     a human who has just read which repositories were unreadable;
+#     proved not to own one of the listed directories → --apply is refused,
+#     with no override: the keep guarantee is absolute, and a flag that let a
+#     human wave the hole through would delete the cache of a repository the
+#     config still declares. Bring the repository back online and re-run;
 #   * every deletion is by exact 64-hex directory name directly under the
 #     cache root — never a glob, never a pattern that could match a path
 #     outside it, never anything that is not a directory (CACHEDIR.TAG at
@@ -52,32 +53,28 @@
 # dry-run list before --apply; the default is the dry run precisely so that
 # the list is the thing that gets reviewed.
 #
-# Dry-run only report first appeared in nm/W289-OUT.md; nothing in
-# chat-stasher's archive is ever touched by this script — the metadata cache
-# is disposable by design (deleting it costs a re-download of metadata, never
-# any data), and no repository is ever opened for writing.
+# Nothing in chat-stasher's archive is ever touched by this script — the
+# metadata cache is disposable by design (deleting it costs a re-download of
+# metadata, never any data), and no repository is ever opened for writing.
 
 set -uo pipefail
 
 TAG="[prune-test-rustic-cache]"
 
 usage() {
-  echo "Usage: bash scripts/dev/prune-test-rustic-cache.sh [--apply] [--allow-unresolved]" >&2
+  echo "Usage: bash scripts/dev/prune-test-rustic-cache.sh [--apply]" >&2
   echo "Reports the rustic cache directories that belong to no repository the" >&2
   echo "user's real chat-stasher config declares. --apply deletes exactly those;" >&2
-  echo "the default is a dry run that deletes nothing. --allow-unresolved lets" >&2
-  echo "--apply proceed even when a declared repository could not be opened (its" >&2
-  echo "cache cannot be identified then, so its cache directories would be pruned" >&2
-  echo "too and rebuilt from that repository on its next open)." >&2
+  echo "the default is a dry run that deletes nothing. --apply refuses while any" >&2
+  echo "declared repository could not be opened — its id is unknown then, so its" >&2
+  echo "cache cannot be told apart from a leftover. There is no override." >&2
   exit 2
 }
 
 APPLY=0
-ALLOW_UNRESOLVED=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
-    --allow-unresolved) ALLOW_UNRESOLVED=1 ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
@@ -286,13 +283,13 @@ if [ "$removable_count" -gt 0 ]; then
   [ "$removable_count" -gt 20 ] && echo "  … ($(( removable_count - 20 )) more)"
 fi
 
-if [ "$ALLOW_UNRESOLVED" -eq 0 ] && [ "$unresolved" -gt 0 ]; then
+if [ "$unresolved" -gt 0 ]; then
   echo
   echo "$TAG --apply REFUSED: $unresolved configured repositories could not be" \
     "opened, so their cache directories cannot be identified and could be in the" \
-    "removable set. Fix the reason (bring a remote online / export its credential)" \
-    "and re-run, or pass --allow-unresolved to accept pruning them too (their" \
-    "caches rebuild from the repositories on next open; no data is ever lost)." >&2
+    "removable set. The keep-set must be complete before anything may be deleted," \
+    "and there is no override: fix the reason (bring a remote online / export its" \
+    "credential) and re-run." >&2
   [ "$APPLY" -eq 1 ] && exit 1
 fi
 

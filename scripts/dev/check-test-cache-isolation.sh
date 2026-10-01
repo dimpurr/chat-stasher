@@ -27,36 +27,44 @@
 #
 #   * macOS:   $HOME/Library/Caches/rustic            (dirs-6.0.0 src/mac.rs:9)
 #   * Linux:   $XDG_CACHE_HOME/rustic, else ~/.cache  (dirs-6.0.0 src/lin.rs:8)
+#   * Windows: %LOCALAPPDATA%\rustic, else
+#              %USERPROFILE%\AppData\Local\rustic    (dirs-6.0.0 src/win.rs:10)
 #
 # the same spellings `scanner::user_cache_dirs_on` writes down, which is the
 # same function `store::rustic_cache_roots` uses to say where the cache
 # lives — so the guard watches what the product would walk, not a second
 # spelling that could drift.
 #
+# Windows, guarded rather than skipped: `dirs::cache_dir()` there comes from
+# the Known Folder API (`SHGetKnownFolderPath`), which reads the user profile
+# rather than the environment, so no shell can *redirect* that root and an
+# `XDG_CACHE_HOME` override is a no-op — that is why every spawned test child
+# is relocated through the product's own `rustic_cache_dir` config knob
+# (W289), which rustic honours on Windows because the *product* resolves the
+# path, not `dirs`. The guard cannot redirect the root either, but it can
+# *read* it: `%LOCALAPPDATA%` is the documented spelling of that Known Folder
+# and the second candidate `user_cache_dirs_on` keeps for it, so the Windows
+# cells watch `%LOCALAPPDATA%\rustic` (and `%USERPROFILE%\AppData\Local
+# \rustic`) and fail a leaking run exactly as the other platforms do. When
+# neither variable is set the guard refuses (exit 1) rather than running
+# unguarded: a guard that cannot see is red, never absent.
+#
 # Three changes are each a failure: entries that appeared, entries that
 # vanished (a test that deletes from the real cache is worse than one that
-# writes to it), and — the subtle one — an unchanged entry set with a
-# changed directory mtime, which is what a create-then-remove leaves behind.
-# The last one is why the mtime is compared at all: the pre-W289 tests
-# created their cache directory and then deleted it in the same run, so a
-# plain name diff would have called that run clean.
+# writes to it), and — the subtle one — a change that left the entry set
+# identical, which is what a create-then-remove leaves behind. That last one
+# is caught with a run-boundary marker: the guard records the watched
+# directory's own modification time against a marker file taken the instant
+# before the run, compared with `find -newer`, which uses the filesystem's
+# full timestamp precision and never truncates it. Comparing whole seconds was
+# the earlier spelling, and it false-passed a create-then-delete that happened
+# inside one second — which is exactly what a fast test does.
 #
 # The guard cannot see a run that only writes files *inside* a per-repo
 # directory that already existed before the run. That needs the same
 # repository to be opened twice, once before and once during the run; test
 # repositories are created with a fresh random repository id per run, so no
 # test can have a pre-existing directory here. Stated, not hidden.
-#
-# Windows (stated gap, not a silent skip): `dirs::cache_dir()` on Windows
-# comes from the Known Folder API (`SHGetKnownFolderPath`), which reads the
-# user profile, not the environment — a shell script cannot name that
-# directory portably and cannot redirect it either. On a Windows host the
-# run is therefore NOT guarded: the script says so in one loud line and then
-# runs the command unguarded, with its true exit code. The CI Windows cell
-# inherits that same one-line statement. A real Windows guard needs a
-# product-level cache-dir override (a config knob or argument every spawned
-# test can be given), which is why the in-process and config-knob half of
-# W289 was applied cross-platform while the environment half could not be.
 #
 # Exit codes: 0 = the run left the real cache untouched; 1 = it did not (or
 # the snapshot itself failed — a guard that errors is red, never absent);
@@ -75,6 +83,11 @@ usage() {
   exit 2
 }
 
+refuse() {
+  echo "$TAG refusing: $*" >&2
+  exit 1
+}
+
 COMMAND=("cargo" "test" "-p" "chat-stasher")
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -91,93 +104,112 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$(uname -s)" in
-  Darwin*) ;;
-  Linux*) ;;
-  MINGW*|MSYS*|CYGWIN*)
-    echo "$TAG NOT GUARDED: Windows dir names come from the Known Folder API," \
-      "which a shell cannot redirect or portably read; see the header of this" \
-      "script for what that covers and what the fix would be. Running unguarded."
-    "${COMMAND[@]}"
-    exit $?
-    ;;
-  *)
-    echo "$TAG refusing: unsupported platform $(uname -s)" >&2
-    exit 1
-    ;;
+  Darwin*) PLATFORM=macos ;;
+  Linux*) PLATFORM=linux ;;
+  MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
+  *) refuse "unsupported platform $(uname -s)" ;;
 esac
 
-if [ -z "${HOME:-}" ]; then
-  echo "$TAG refusing: no \$HOME, so the real cache root cannot be named" >&2
-  exit 1
-fi
+# A native Windows path (`C:\Users\x`) names nothing to the MSYS shell's
+# tools; cygpath converts it when it is present. `cygpath` ships with the
+# MSYS2 runtime, but the fallback keeps the guard working without it: MSYS
+# tools also accept a drive-letter path with forward slashes, so `C:\Users\x`
+# becomes `C:/Users/x`. On the other platforms neither variable is set.
+to_unix_path() {
+  local converted=""
+  if command -v cygpath >/dev/null 2>&1 &&
+    converted=$(cygpath -u "$1" 2>/dev/null) && [ -n "$converted" ]; then
+    printf '%s' "$converted"
+  else
+    printf '%s' "$1" | tr '\\' '/'
+  fi
+}
 
-# The cache root this platform really uses, mirroring `user_cache_dirs_on`:
-# Linux reads $XDG_CACHE_HOME first (only when absolute — `dirs` ignores a
-# relative value), every other *nix pins $HOME/Library/Caches. The watched
-# directory is `<root>/rustic`, i.e. `store::rustic_cache_roots()`'s first
-# entry on this platform.
-case "$(uname -s)" in
-  Darwin*) ROOT=$HOME/Library/Caches ;;
-  *)
-    if [ -n "${XDG_CACHE_HOME:-}" ] && [ "${XDG_CACHE_HOME#\/}" != "$XDG_CACHE_HOME" ]; then
-      ROOT=$XDG_CACHE_HOME
-    else
-      ROOT=$HOME/.cache
-    fi
-    ;;
-esac
-WATCH="$ROOT/rustic"
-
-# Snapshot: sorted entry names plus the directory's own (mtime, size). Both
-# halves of the pre/post comparison are textual, taken with the same tool on
-# the same machine, so no span of formats is assumed — only stability.
 SNAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cs-cache-isolation.XXXXXX") || exit 1
 cleanup() { rm -rf "$SNAP_DIR"; }
 trap cleanup EXIT
 
-snapshot() {
-  # $1: output file. Absent WATCH directory is recorded as the literal
-  # "ABSENT" line so a run that creates the root is a diff, not a surprise.
-  : >"$1"
-  if [ -e "$WATCH" ]; then
+# The rustic cache root(s) this platform really uses, mirroring
+# `user_cache_dirs_on`: Linux reads $XDG_CACHE_HOME first (only when absolute
+# — `dirs` ignores a relative value), macOS pins $HOME/Library/Caches, Windows
+# is %LOCALAPPDATA% with %USERPROFILE%\AppData\Local as the documented second
+# candidate.
+ROOTS_FILE="$SNAP_DIR/roots"
+: >"$ROOTS_FILE"
+add_root() {
+  if ! grep -qxF "$1" "$ROOTS_FILE"; then
+    printf '%s\n' "$1" >>"$ROOTS_FILE"
+  fi
+}
+
+case "$PLATFORM" in
+  macos)
+    [ -n "${HOME:-}" ] || refuse "no \$HOME, so the real cache root cannot be named"
+    add_root "$HOME/Library/Caches/rustic"
+    ;;
+  linux)
+    if [ -n "${XDG_CACHE_HOME:-}" ] && [ "${XDG_CACHE_HOME#\/}" != "$XDG_CACHE_HOME" ]; then
+      add_root "$XDG_CACHE_HOME/rustic"
+    elif [ -n "${HOME:-}" ]; then
+      add_root "$HOME/.cache/rustic"
+    else
+      refuse "no absolute \$XDG_CACHE_HOME and no \$HOME, so the real cache root cannot be named"
+    fi
+    ;;
+  windows)
+    if [ -n "${LOCALAPPDATA:-}" ]; then
+      add_root "$(to_unix_path "$LOCALAPPDATA")/rustic"
+    fi
+    if [ -n "${USERPROFILE:-}" ]; then
+      add_root "$(to_unix_path "$USERPROFILE")/AppData/Local/rustic"
+    fi
+    [ -s "$ROOTS_FILE" ] || refuse \
+      "neither %LOCALAPPDATA% nor %USERPROFILE% is set, so the Known Folder" \
+      "cache root cannot be named; the run would be unguarded"
+    ;;
+esac
+
+# Snapshot: the sorted entry names directly under one root. Textual, taken
+# with the same tools on the same machine for both halves, so no span of
+# formats is assumed — only stability.
+snapshot_root() {
+  # $1: root directory. $2: output file. An absent root is recorded as the
+  # literal "ABSENT" line so a run that creates the root is a diff, not a
+  # surprise.
+  : >"$2"
+  if [ -e "$1" ]; then
     # -print0/sort -z keep names with spaces intact, and the sort is not
     # cosmetic: readdir order is not guaranteed to match between two
     # snapshots, and a reorder would read as a spurious diff on a directory
     # with tens of thousands of entries. find's -mindepth/-maxdepth are
-    # BSD-find compatible for the macOS half. A find that fails is a guard
+    # portable across the BSD and GNU halves. A find that fails is a guard
     # that cannot see, which is a red guard, never a green one.
-    if ! find "$WATCH" -mindepth 1 -maxdepth 1 -print0 2>"$SNAP_DIR/find.err" |
+    if ! find "$1" -mindepth 1 -maxdepth 1 -print0 2>"$SNAP_DIR/find.err" |
       LC_ALL=C sort -z >"$SNAP_DIR/names.raw"; then
-      echo "$TAG refusing: could not list $WATCH" >&2
+      echo "$TAG refusing: could not list $1" >&2
       cat "$SNAP_DIR/find.err" >&2
       exit 1
     fi
     while IFS= read -r -d '' entry; do
-      printf '%s\n' "entry ${entry#"$WATCH"/}"
-    done <"$SNAP_DIR/names.raw" >>"$1"
-    if ! stat_meta >>"$1" 2>"$SNAP_DIR/stat.err" || [ -s "$SNAP_DIR/stat.err" ]; then
-      echo "$TAG refusing: could not stat $WATCH" >&2
-      cat "$SNAP_DIR/stat.err" >&2
-      exit 1
-    fi
+      printf 'entry %s\n' "${entry#"$1"/}"
+    done <"$SNAP_DIR/names.raw" >>"$2"
   else
-    printf 'ABSENT\n' >>"$1"
+    printf 'ABSENT\n' >>"$2"
   fi
 }
 
-# mtime and size of the watched directory in one line. Deliberately not
-# normalised across `stat` dialects: both snapshots are taken by the same
-# call on the same machine, so only stability matters, and probing for a
-# "portable" format (the trap release-gate.sh once fell into with `stat -f
-# %z`) would add a second way to be wrong.
-stat_meta() {
-  stat -f 'meta mtime=%m size=%z' "$WATCH" 2>/dev/null ||
-    stat -c 'meta mtime=%Y size=%s' "$WATCH" 2>/dev/null
-}
+idx=0
+while IFS= read -r root; do
+  snapshot_root "$root" "$SNAP_DIR/before.$idx"
+  idx=$((idx + 1))
+done <"$ROOTS_FILE"
 
-before=$SNAP_DIR/before
-after=$SNAP_DIR/after
-snapshot "$before"
+# The run boundary. Everything the run does to a watched directory happens
+# after this marker's timestamp, so `find -newer` on the directory itself
+# catches a create-then-delete the entry names cannot. `: >` creates it with
+# the current time at whatever precision the filesystem keeps.
+MARKER="$SNAP_DIR/boundary"
+: >"$MARKER"
 
 # The run itself. Everything is timed so the report can say what the guard
 # cost next to it — on a machine whose cache root still holds tens of
@@ -189,14 +221,39 @@ started=$(date +%s)
 cmd_status=$?
 elapsed=$(( $(date +%s) - started ))
 
-snapshot "$after"
+failed=0
+idx=0
+while IFS= read -r root; do
+  after="$SNAP_DIR/after.$idx"
+  before="$SNAP_DIR/before.$idx"
+  snapshot_root "$root" "$after"
 
-if ! diff -q "$before" "$after" >/dev/null; then
-  echo "$TAG FAIL: this run changed the real user cache root $WATCH" 1>&2
-  diff "$before" "$after" 1>&2 | head -40 || true
+  set_changed=0
+  if ! diff -q "$before" "$after" >/dev/null; then
+    set_changed=1
+    failed=1
+    echo "$TAG FAIL: this run changed the real user cache root $root" >&2
+    diff "$before" "$after" 2>&1 | head -40 || true
+  fi
+
+  # Unchanged entry set, but the directory itself was touched during the run:
+  # a create-then-delete within the run window, which the name diff alone
+  # cannot see. Reported only when the name diff was clean, so one change is
+  # never announced twice.
+  if [ "$set_changed" -eq 0 ] && [ -e "$root" ] &&
+    [ -n "$(find "$root" -maxdepth 0 -newer "$MARKER" -print 2>/dev/null)" ]; then
+    failed=1
+    echo "$TAG FAIL: this run modified the real user cache root $root during the" \
+      "run (its own timestamp is newer than the run boundary) while leaving the" \
+      "entry set unchanged — a create-then-delete an entry-name diff cannot see" >&2
+  fi
+  idx=$((idx + 1))
+done <"$ROOTS_FILE"
+
+if [ "$failed" -ne 0 ]; then
   echo "$TAG FAIL: exit code of the wrapped command was $cmd_status — the guard" \
     "fails on the cache change regardless; fix the test that opened a repository" \
-    "without an isolated cache_dir (W289)" 1>&2
+    "without an isolated cache_dir (W289)" >&2
   exit 1
 fi
 
@@ -205,4 +262,5 @@ if [ "$cmd_status" -ne 0 ]; then
   exit 1
 fi
 
-echo "$TAG PASS: ${COMMAND[*]} left the real user cache root untouched (root=$WATCH, wrapped runtime=${elapsed}s)"
+roots_shown=$(paste -sd ', ' "$ROOTS_FILE")
+echo "$TAG PASS: ${COMMAND[*]} left the real user cache root untouched (root=$roots_shown, wrapped runtime=${elapsed}s)"

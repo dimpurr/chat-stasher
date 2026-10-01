@@ -152,14 +152,17 @@ jobs:
       # what keeps the fix true — the "cache_dir: None" that creeps back into
       # a helper shows up here on the very run that added it.
       #
-      # On the Windows cell the guard cannot watch anything: `dirs::cache_dir()`
-      # there comes from the Known Folder API, which reads the user profile,
-      # not the environment, so a shell script can neither name nor redirect
-      # the cache root. The script says exactly that in its output and then
-      # runs the suite unguarded with its true exit code — a stated gap in the
-      # run log, not a green-by-suppression cell. The cross-platform half of
-      # the W289 fix (the product's own `rustic_cache_dir` config knob in every
-      # test-written destination config) still covers those children.
+      # On the Windows cell the guard watches `%LOCALAPPDATA%\rustic` (and
+      # `%USERPROFILE%\AppData\Local\rustic`, the documented second spelling).
+      # `dirs::cache_dir()` there comes from the Known Folder API, which reads
+      # the user profile rather than the environment, so no shell can *redirect*
+      # that root and an `XDG_CACHE_HOME` override is a no-op — which is why the
+      # W289 relocation travels through the product's own `rustic_cache_dir`
+      # config knob in every test-written destination config, honoured because
+      # the product resolves the path. The guard cannot redirect the root, but
+      # it can read it, so a Windows leak fails this step exactly as it does on
+      # the other cells; when neither variable is set it refuses before running
+      # anything rather than going unguarded.
       - name: Test
         shell: bash
         run: bash scripts/dev/check-test-cache-isolation.sh -- cargo test
@@ -468,6 +471,21 @@ jobs:
       # anything for real.
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
+
+      # The two W289 guard self-tests. Each drives its script against a
+      # throwaway cache root with the parts it cannot own (a real repository or
+      # the user's config) shimmed on PATH, so they need no repository, no
+      # network and no cargo build — seconds in this job. The isolation guard's
+      # self-test shims `uname -s` to report a Windows platform, which is the
+      # only way the Windows branch is exercised from this Linux runner; the
+      # prune script's self-test shims the `cargo` id helper with canned
+      # keep-set reports, including one with an unresolved repository, which is
+      # the case the review found could delete a configured repository's cache.
+      # CONTRIBUTING.md lists both as local checks, so CI has to run them too.
+      - name: Cache-isolation guard self-test
+        run: bash scripts/dev/test-cache-isolation-guard.sh
+      - name: Prune script self-test
+        run: bash scripts/dev/test-prune-rustic-cache.sh
 
       # The scoreboard generator (SB-2) is the reproducible answer to "is the
       # platform board fresh, and was a number invented for a missing input".
