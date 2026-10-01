@@ -169,6 +169,30 @@ impl Sandbox {
         args.extend_from_slice(extra);
         self.command(&args)
     }
+
+    /// Put this machine's local key on the disk, so a later run's declaration
+    /// can be about a file that already existed when that run started.
+    ///
+    /// This is the documented first run — `setup` owing only the masterkey
+    /// declaration, which creates the local repository and its key and stops at
+    /// exit `2` (WIZ-1). It is a precondition, not a shortcut: a key a run
+    /// creates is never declared by that same run, so a test that wants a
+    /// *completed* run needs the key to pre-date it. Naming the step once keeps
+    /// that reason out of every caller.
+    fn bootstrap_local_key(&self) -> Output {
+        let output = self.setup(&[]);
+        let value = json_of(&output);
+        assert_eq!(
+            exit_code(&output),
+            2,
+            "the bootstrap owes the masterkey declaration: {value}"
+        );
+        assert!(
+            self.masterkey().exists(),
+            "the bootstrap must leave the local key on the disk: {value}"
+        );
+        output
+    }
 }
 
 fn json_of(output: &Output) -> serde_json::Value {
@@ -218,14 +242,48 @@ fn exit_code(output: &Output) -> i32 {
 #[test]
 fn local_first_save_creates_the_repository_and_observes_the_whole_chain() {
     let sandbox = Sandbox::new(true);
+
+    // Run 1 is also the run that creates the local key, and a key a run creates
+    // is never declared by that run: at the moment `--masterkey-saved-elsewhere`
+    // was given there was nothing to copy. The run still does all its work — it
+    // creates the repository and observes the whole chain — and then stops with
+    // the declaration still owed, naming the key for the user to save.
     let output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
     let value = json_of(&output);
-
-    assert_eq!(exit_code(&output), 0, "value={value}");
-    assert_eq!(value["healthy"], true);
-    assert_eq!(value["exit_code"], 0);
+    assert_eq!(
+        exit_code(&output),
+        2,
+        "the local key did not exist when the flag was given, so its declaration is still \
+         owed: {value}"
+    );
+    assert_eq!(value["healthy"], false);
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"]),
+        "the declaration is the one thing owed: {value}"
+    );
     assert_eq!(value["steps"]["local_save"], "created");
-    assert_eq!(value["steps"]["masterkey"], "declared");
+    assert_eq!(value["steps"]["masterkey"], "not_declared");
+    // The key this run created is named with `declared: false`, and the run says
+    // in its own words that the user has to save it and run again — that
+    // sentence is the whole reason the run stops instead of asking.
+    let created_key = wizard_key(&value, "local");
+    assert_eq!(created_key["declared"], false, "{value}");
+    assert_eq!(
+        Path::new(
+            created_key["path"]
+                .as_str()
+                .expect("the key path is a string")
+        ),
+        sandbox.masterkey(),
+        "the path the wizard tells the user to copy must be the file it wrote"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("created by this run") && stderr.contains("run `setup` again"),
+        "the run must tell the user a key it just created has to be saved and declared by a \
+         later run: {stderr}"
+    );
 
     assert_eq!(value["chain"]["init"]["kind"], "observed");
     assert_eq!(value["chain"]["noop"]["kind"], "observed");
@@ -252,11 +310,16 @@ fn local_first_save_creates_the_repository_and_observes_the_whole_chain() {
         "the wizard showed a masterkey path; {} must exist",
         sandbox.masterkey().display()
     );
-    assert_eq!(
-        Path::new(value["masterkey"]["path"].as_str().expect("a path string")),
-        sandbox.masterkey(),
-        "the path the wizard tells the user to copy must be the file it wrote"
-    );
+
+    // Run 2 — the confirm run. The key is on the disk now, so the same command
+    // records the declaration and finishes the wizard.
+    let output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 0, "value={value}");
+    assert_eq!(value["healthy"], true);
+    assert_eq!(value["steps"]["local_save"], "existed");
+    assert_eq!(value["steps"]["masterkey"], "declared");
+    assert_eq!(wizard_key(&value, "local")["declared"], true, "{value}");
 }
 
 /// Running `setup` twice must not archive twice, and the second run has to say
@@ -336,7 +399,17 @@ fn a_machine_with_nothing_to_archive_reports_no_repository_not_an_empty_archive(
 /// that nothing verified it, and refuses to call the step finished without it.
 #[test]
 fn the_masterkey_declaration_is_required_and_recorded_as_unverified() {
+    // The first run creates the key and so cannot declare it — a key created in
+    // a run is never declared by it. The *second* run is the one that records
+    // the declaration, because by then the file exists to be declared.
     let declared = Sandbox::new(true);
+    let created = declared.setup(&["--masterkey-saved-elsewhere"]);
+    assert_eq!(
+        exit_code(&created),
+        2,
+        "the creating run owes the declaration: {}",
+        json_of(&created)
+    );
     let output = declared.setup(&["--masterkey-saved-elsewhere"]);
     let value = json_of(&output);
     assert_eq!(exit_code(&output), 0, "value={value}");
@@ -798,6 +871,23 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             .expect("run setup with fake scheduler")
     };
 
+    // The local key has to be on the disk before the runs below, because a key a
+    // run creates is never declared by that run — and these runs are declared
+    // runs, not creating ones. This is the documented first run: it owes the
+    // masterkey declaration, creates the key, and stops, touching no scheduler.
+    let bootstrap = run(&[
+        "setup",
+        "--stage",
+        stage.to_str().expect("stage path"),
+        "--json",
+    ]);
+    assert_eq!(
+        exit_code(&bootstrap),
+        2,
+        "the bootstrap owes the masterkey declaration: {}",
+        json_of(&bootstrap)
+    );
+
     for _ in 0..2 {
         let output = run(&args);
         let value = json_of(&output);
@@ -1098,6 +1188,10 @@ fn non_tty_setup_refuses_invalid_config_instead_of_scanning_defaults() {
 #[test]
 fn setup_and_status_commands_emit_the_same_scan_json() {
     let sandbox = Sandbox::new(true);
+    // A completed run, with the key on the disk before it: the comparison below
+    // is about the scan object, and it must come from a run the wizard took all
+    // the way through rather than one stopped by an owed declaration.
+    sandbox.bootstrap_local_key();
     let setup_output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
     let setup = json_of(&setup_output);
     assert_eq!(exit_code(&setup_output), 0, "value={setup}");
@@ -1142,6 +1236,9 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
         remote.display(),
         sandbox.masterkey().display()
     ));
+    // The key has to exist before the measured run: this destination reuses the
+    // local key file, and a run that creates that key cannot also declare it.
+    sandbox.bootstrap_local_key();
     let output = sandbox.setup(&["--destination", "fake", "--masterkey-saved-elsewhere"]);
     let value = json_of(&output);
 
@@ -1209,8 +1306,10 @@ fn a_reachable_destination_is_verified_and_an_unreachable_one_is_unread() {
     );
 
     // (3) The same two runs, but the whole remote step skipped. Exit 0 — the
-    // archive really does exist — with the cost stated rather than implied.
+    // archive really does exist — with the cost stated rather than implied. The
+    // key is created first, because a run that creates it owes its declaration.
     let skipped = Sandbox::new(true);
+    skipped.bootstrap_local_key();
     let output = skipped.setup(&["--masterkey-saved-elsewhere"]);
     let value = json_of(&output);
     assert_eq!(exit_code(&output), 0, "value={value}");
@@ -1264,6 +1363,12 @@ fn re_running_the_wizard_does_not_grow_the_destination() {
         remote.display(),
         sandbox.masterkey().display()
     ));
+
+    // The local key has to exist before either measured run: a key created in a
+    // run is never declared by it, so the creating run stops with the
+    // declaration owed and neither measured run would be the completed run this
+    // test is about.
+    sandbox.bootstrap_local_key();
 
     // The first run seeds the destination. The destination reuses this
     // machine's key file, so no fresh key is created and no declaration is
@@ -1998,6 +2103,227 @@ fn an_unreadable_key_among_several_is_unknown_and_leaves_the_others_declared() {
     );
 }
 
+/// The bootstrap reports the *real* declaration state of every key it names,
+/// never a blanket `false`.
+///
+/// The bootstrap runs because the run as a whole owes a declaration, and a
+/// destination's key can be the one that is missing while the local key was
+/// declared on an earlier run. Reporting that already-declared local key as
+/// `declared: false` would tell a caller to copy and declare a key it is
+/// finished with; the local entry has to keep its `true`, and only the key this
+/// run created is `false`.
+#[test]
+fn the_bootstrap_reports_an_already_declared_local_key_as_declared() {
+    let sandbox = Sandbox::new(true);
+    let first_remote = sandbox.root.path().join("first-archive");
+    let second_remote = sandbox.root.path().join("second-archive");
+    sandbox.write_config(&format!(
+        "[destinations.first]\nrepo = '{}'\n\n[destinations.second]\nrepo = '{}'\n",
+        first_remote.display(),
+        second_remote.display()
+    ));
+
+    // The documented two runs for the first destination: create both keys, then
+    // declare them.
+    let created = sandbox.setup(&["--destination", "first"]);
+    assert_eq!(exit_code(&created), 2, "value={}", json_of(&created));
+    let confirmed = sandbox.setup(&["--destination", "first", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&confirmed);
+    assert_eq!(exit_code(&confirmed), 0, "value={value}");
+    assert_eq!(
+        wizard_key(&value, "local")["declared"],
+        true,
+        "the local key is declared now: {value}"
+    );
+
+    // A *new* destination is owed, so the bootstrap runs again to create its
+    // key. The local key it also names is already declared, and the report has
+    // to say so rather than sending the user back to copy it a second time.
+    let output = sandbox.setup(&["--destination", "second"]);
+    let value = json_of(&output);
+    assert_eq!(exit_code(&output), 2, "value={value}");
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"]),
+        "the second destination's key still needs its declaration: {value}"
+    );
+    assert_eq!(
+        wizard_key(&value, "local")["declared"],
+        true,
+        "the local key was declared on an earlier run, so the bootstrap must report it as \
+         declared, not as one still to copy: {value}"
+    );
+    let second = value["masterkey"]["keys"]
+        .as_array()
+        .expect("the wizard names its keys as an array")
+        .iter()
+        .find(|key| key["name"] == "second")
+        .unwrap_or_else(|| panic!("the second destination's key must be named: {value}"));
+    assert_eq!(
+        second["declared"], false,
+        "the key this run just created is the one still owed: {value}"
+    );
+}
+
+/// A declaration is about a path **and** the bytes there, and a key path that
+/// moves takes the declaration with neither.
+///
+/// The fingerprint half of this rule is pinned by
+/// `a_declaration_matches_each_key_separately_when_several_are_declared`. This is
+/// the path half, in the multi-key setting: the destination's `key_file` moves
+/// to a new path holding **byte-identical** contents, so a pass here cannot be
+/// explained by a fingerprint check quietly doing all the work. The local key's
+/// declaration must survive the move, because the move is one destination's
+/// config and not the other copy's.
+#[test]
+fn a_destination_key_that_moved_is_not_covered_by_its_old_declaration() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    let first_path = sandbox.root.path().join("key-at-first-path.json");
+    let moved_path = sandbox.root.path().join("key-at-second-path.json");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\nkey_file = '{}'\n",
+        shared.display(),
+        first_path.display()
+    ));
+
+    sandbox.setup(&["--destination", "backup"]);
+    let done = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&done);
+    assert_eq!(exit_code(&done), 0, "value={value}");
+    assert_eq!(
+        wizard_key(&value, "destination")["path"],
+        serde_json::json!(first_path.display().to_string()),
+        "the declared key is the one the config named: {value}"
+    );
+
+    // The config now names a different key path, and the *same bytes* are put
+    // there, so only the path differs from what was declared.
+    fs::copy(&first_path, &moved_path).expect("put identical key bytes at the new path");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\nkey_file = '{}'\n",
+        shared.display(),
+        moved_path.display()
+    ));
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let destination = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(
+        destination["path"],
+        serde_json::json!(moved_path.display().to_string()),
+        "the row is about the path the config names now: {dvalue}"
+    );
+    assert_eq!(
+        destination["declared_saved"], false,
+        "the declaration named a different path, so it cannot cover this one: {dvalue}"
+    );
+    assert_eq!(
+        destination["declared_state"], "not_declared",
+        "a moved path is a known 'no', not an unknown: {dvalue}"
+    );
+    let local = copies
+        .iter()
+        .find(|row| row["scope"] == "local")
+        .unwrap_or_else(|| panic!("doctor must report the local key: {dvalue}"));
+    assert_eq!(
+        local["declared_saved"], true,
+        "one destination's path changed; the local key's declaration must be untouched: {dvalue}"
+    );
+}
+
+/// A run that cannot read one key's file records no declaration for it, and the
+/// declaration of the other key is untouched.
+///
+/// This is "an unreadable key is unknown, never saved" seen from the write side
+/// with several keys in play, and the merge is the half that matters: whatever
+/// stops the unreadable key from being recorded must not take the readable key's
+/// declaration down with it. The local key is left readable and already declared;
+/// the destination's file becomes something that cannot be read, and the run is
+/// asked — flag given — to declare it anyway.
+///
+/// The declaration write itself is never reached for that key, and the reason is
+/// worth stating rather than hiding: `dest-init` opens the destination with its
+/// key, so an unreadable key file fails the destination step before the
+/// declaration step runs. That is the destination reported `unread` with exit
+/// `3`, and the key left out of `masterkey.keys` — a file nobody could read is
+/// not a file this run can ask anyone to copy. The refusal of the declaration
+/// *write* for an unreadable key is `keydecl`'s own
+/// `declaring_a_key_file_that_cannot_be_read_is_refused`, one layer down.
+#[test]
+fn an_unreadable_key_is_left_undeclared_and_another_key_stays_declared() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+
+    sandbox.setup(&["--destination", "backup"]);
+    let done = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    assert_eq!(exit_code(&done), 0, "value={}", json_of(&done));
+
+    // The destination's key becomes something unreadable at its exact path,
+    // while the local key is left alone.
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::remove_file(&destination_key).expect("remove the destination key");
+    fs::create_dir(&destination_key).expect("something unreadable now sits at that path");
+
+    // The flag asks for every key to be declared; the unreadable one cannot be.
+    // 3, not 2 — something could not be *read*, so what was not read proves
+    // nothing, and that outranks a step being owed.
+    let attempt = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&attempt);
+    assert_eq!(exit_code(&attempt), 3, "value={value}");
+    assert_eq!(value["steps"]["destination"], "unread", "{value}");
+    assert_eq!(
+        value["unread"],
+        serde_json::json!(["destination_init"]),
+        "the unreadable key is named as what could not be read: {value}"
+    );
+    // An unreadable file is not a key this run can ask anyone to copy.
+    assert!(
+        !value["masterkey"]["keys"]
+            .as_array()
+            .expect("the wizard names its keys as an array")
+            .iter()
+            .any(|key| key["scope"] == "destination"),
+        "a key that cannot be read must not be named for the user to copy: {value}"
+    );
+    // The readable key's declaration is untouched — the whole point of the merge.
+    assert_eq!(
+        wizard_key(&value, "local")["declared"],
+        true,
+        "one key's unreadable file must not cost the other key its declaration: {value}"
+    );
+    let recorded =
+        fs::read_to_string(state_dir(&sandbox).join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE))
+            .expect("the local declaration must still be recorded");
+    assert!(
+        recorded.contains(chat_stasher::keydecl::LOCAL_SCOPE),
+        "the local scope must survive: {recorded}"
+    );
+    // The destination's *earlier* record is still on disk — nothing this run did
+    // removed it — but it no longer declares what sits at that path: an
+    // unreadable file is the unknown state, so the key is not saved.
+    let declarations = chat_stasher::keydecl::load(&state_dir(&sandbox));
+    assert_eq!(
+        chat_stasher::keydecl::declared_for(
+            &declarations,
+            &chat_stasher::keydecl::destination_scope("backup"),
+            &destination_key,
+        ),
+        chat_stasher::keydecl::DeclaredFor::Unreadable,
+        "an unreadable file is unknown, never a declaration: {recorded}"
+    );
+}
+
 /// A destination declared by hand with no `repo` is a config-content problem
 /// this run *read* — so it is reported, not treated as a usage error.
 ///
@@ -2058,6 +2384,10 @@ fn a_declared_destination_without_a_repo_is_reported_rather_than_exiting() {
 #[test]
 fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
     let sandbox = Sandbox::new(true);
+    // The local key is created first: a run that creates it also owes its
+    // declaration, and this run's `missing_parameters` must be about the
+    // credential variable alone.
+    sandbox.bootstrap_local_key();
     let unset = "CHAT_STASHER_W177_NOT_SET_ANYWHERE";
     let empty = "CHAT_STASHER_W177_SET_BUT_EMPTY";
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
@@ -2410,6 +2740,10 @@ const HOST_STEPS: [&str; 3] = ["registered", "none_registered", "nothing_to_look
 #[test]
 fn setup_reports_the_browser_host_inventory_doctor_reports() {
     let sandbox = Sandbox::new(true);
+    // The inventory is read by a run that got all the way through, so the key
+    // has to exist before it — a run that creates the key stops with the
+    // declaration owed.
+    sandbox.bootstrap_local_key();
     let setup_output = sandbox.setup(&["--masterkey-saved-elsewhere"]);
     let setup = json_of(&setup_output);
     assert_eq!(exit_code(&setup_output), 0, "value={setup}");
