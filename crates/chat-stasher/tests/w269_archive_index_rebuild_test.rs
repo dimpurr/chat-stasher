@@ -24,6 +24,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// Run the real binary with every ambient path redirected into `sandbox`.
 ///
 /// `%LOCALAPPDATA%` is set beside `HOME` for the reason `w267` spells out: on
@@ -47,6 +50,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
@@ -92,7 +99,13 @@ fn write_sandbox_config(sandbox: &Path, machine: &str, repo: &Path, key: &Path) 
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "machine = '{machine}'\n\n[destinations.fixture]\nrepo = '{}'\nkey_file = '{}'\n",
+            // `rustic_cache_dir` relocates the children's metadata cache
+            // into the sandbox (W289) — deliberately in the config rather
+            // than only in the environment, because on Windows the cache
+            // root comes from the Known Folder API and no env var moves it;
+            // the config's own knob is the one spelling that works there.
+            "machine = '{machine}'\nrustic_cache_dir = '{}'\n\n[destinations.fixture]\nrepo = '{}'\nkey_file = '{}'\n",
+            sandbox.join("rustic-cache").display(),
             repo.display(),
             key.display()
         ),
@@ -100,13 +113,19 @@ fn write_sandbox_config(sandbox: &Path, machine: &str, repo: &Path, key: &Path) 
     .unwrap();
 }
 
-fn store_config(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache under the sandbox (W289): the in-process pushes here and
+/// the spawned `activity-index --rebuild` children must both keep their
+/// caches off the real user cache, and on this file's own territory the
+/// config the children read carries the same relocation explicitly
+/// (`rustic_cache_dir` below). Rebuilds are read paths through and through;
+/// they run with the cache on, as configured rebuilds do.
+fn store_config(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -223,7 +242,7 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
     let stage = sandbox.join("stage");
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let cfg = store_config(&repo, &key);
+    let cfg = store_config(&repo, &key, sandbox);
     let mk = MasterKey::new();
     chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
 
@@ -338,7 +357,7 @@ fn own_machine_archive(sandbox: &Path) -> (PathBuf, PathBuf, String) {
     let stage = sandbox.join("stage");
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let cfg = store_config(&repo, &key);
+    let cfg = store_config(&repo, &key, sandbox);
     let mk = MasterKey::new();
     chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
 
@@ -369,7 +388,7 @@ fn the_current_machine_with_no_stage_rebuilds_read_only() {
     let sb = tempfile::tempdir().unwrap();
     let sandbox = sb.path();
     let (repo, key, session) = own_machine_archive(sandbox);
-    let cfg = store_config(&repo, &key);
+    let cfg = store_config(&repo, &key, sandbox);
     let mk = chat_stasher::store::load_key_file(&cfg).unwrap();
 
     let before = snapshots_per_host(&cfg, &mk);
@@ -431,7 +450,7 @@ fn the_current_machine_with_a_missing_stage_rebuilds_read_only() {
     let sb = tempfile::tempdir().unwrap();
     let sandbox = sb.path();
     let (repo, key, session) = own_machine_archive(sandbox);
-    let cfg = store_config(&repo, &key);
+    let cfg = store_config(&repo, &key, sandbox);
     let mk = chat_stasher::store::load_key_file(&cfg).unwrap();
     let before = snapshots_per_host(&cfg, &mk);
     let repo_before = tree_digest(&repo);
@@ -491,7 +510,7 @@ fn a_machine_the_destination_does_not_hold_is_an_error_not_an_empty_index() {
     let stage = sandbox.join("stage");
     let repo = sandbox.join("repo");
     let key = sandbox.join("keys").join("masterkey.json");
-    let cfg = store_config(&repo, &key);
+    let cfg = store_config(&repo, &key, sandbox);
     let mk = MasterKey::new();
     chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
     write_shard(

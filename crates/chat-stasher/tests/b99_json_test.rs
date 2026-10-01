@@ -24,6 +24,9 @@ use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The process environment is process-global and `cargo test` runs these tests
 /// as threads of one process. Same lock the B85 suite needs: readers race
 /// writers on `PATH`/`HOME`, and the spawned child snapshots the parent's
@@ -51,6 +54,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .env("PATH", &no_tools)
         .env("HOSTNAME", "b99-fixture")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
@@ -337,6 +344,10 @@ fn run_unreadable_registry(sandbox: &Path, args: &[&str]) -> Output {
         .env("PATH", &no_tools)
         .env("HOSTNAME", "b99-fixture")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

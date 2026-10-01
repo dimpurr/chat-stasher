@@ -26,6 +26,9 @@ use std::process::{Command, Output};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The process environment is process-global, and `cargo test` runs the tests
 /// in this file as threads of one process. Two fixtures here *write* it
 /// (`d4` blanks `PATH`, `d6` unsets `HOME`), and every fixture *reads* it —
@@ -87,6 +90,10 @@ fn isolated_command(sandbox: &Path, args: &[&str], registry: &Path) -> Command {
         .env("PATH", &no_tools)
         .env("HOSTNAME", "b85-fixture")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

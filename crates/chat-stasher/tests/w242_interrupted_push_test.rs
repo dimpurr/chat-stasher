@@ -68,6 +68,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// A deterministic, poorly-compressible payload so a push takes measurable
 /// time without the test needing a random-number dependency.
 fn filler(bytes: usize, seed: u64) -> String {
@@ -147,10 +150,19 @@ impl Sandbox {
         let root = self.dir.path();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         cmd.env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("USERPROFILE", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))
+            // Explicit, not inherited: XDG_CACHE_HOME decides where the
+            // child's rustic metadata cache goes on Linux, and a developer
+            // shell that exports it would otherwise leak the cache into
+            // a directory the test never chose (W289).
+            .env("XDG_CACHE_HOME", root.join("rh-cache"))
             .env("CHAT_STASHER_REGISTRY", &self.registry);
         cmd
     }
@@ -210,6 +222,11 @@ impl Sandbox {
         let cfg = chat_stasher::store::StoreConfig {
             repo_root: self.repo.to_string_lossy().into_owned(),
             key_file: self.key.clone(),
+            // Diagnostics get the same cache isolation (W289) as everything
+            // else: this opens the repository for real, and even a path that
+            // is only walked when an assertion already failed must not write
+            // into the machine's real cache directory.
+            cache_dir: Some(self.dir.path().join("rustic-cache")),
             ..Default::default()
         };
         let store = chat_stasher::store::BackupStore::new(cfg, "mbp-interrupted".to_string());

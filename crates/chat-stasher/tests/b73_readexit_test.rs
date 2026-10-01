@@ -17,13 +17,21 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn config(repo: &Path, key: &Path) -> StoreConfig {
+#[path = "../src/test_support.rs"]
+mod test_support;
+
+/// The repo's metadata cache, relocated into this test's own directory
+/// (W289): left unset, rustic puts it in the *real* user cache, where this
+/// suite has accumulated tens of thousands of throwaway per-repository
+/// directories. The cache stays ON — a read-exit test against a
+/// cache-disabled repository covers a configuration `read` never runs with.
+fn config(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -39,6 +47,10 @@ fn isolated_read_command(sandbox: &Path, repo: &Path, key: &Path) -> Command {
         .arg(key)
         .args(["--keep-ssh-masters"])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
@@ -55,9 +67,9 @@ fn run_read(sandbox: &Path, repo: &Path, key: &Path, extra: &[&str]) -> Output {
     command.output().unwrap()
 }
 
-fn write_key(repo: &Path, key: &Path) -> MasterKey {
+fn write_key(repo: &Path, key: &Path, cache: &Path) -> MasterKey {
     let mk = MasterKey::new();
-    store::persist_key_file(&config(repo, key), &mk).unwrap();
+    store::persist_key_file(&config(repo, key, cache), &mk).unwrap();
     mk
 }
 
@@ -80,7 +92,7 @@ fn missing_stage_is_usage_error() {
     let sandbox = tempfile::tempdir().unwrap();
     let repo = sandbox.path().join("repo");
     let key = sandbox.path().join("key.json");
-    write_key(&repo, &key);
+    write_key(&repo, &key, sandbox.path());
     let output = run_read(sandbox.path(), &repo, &key, &["--machine", "b73-machine"]);
     assert_eq!(output.status.code(), Some(2));
 }
@@ -90,7 +102,7 @@ fn missing_session_is_usage_error() {
     let sandbox = tempfile::tempdir().unwrap();
     let repo = sandbox.path().join("repo");
     let key = sandbox.path().join("key.json");
-    write_key(&repo, &key);
+    write_key(&repo, &key, sandbox.path());
     let stage = sandbox.path().join("stage");
     let output = run_read(
         sandbox.path(),
@@ -111,7 +123,7 @@ fn session_readback_failure_is_not_finished_read_failure() {
     let sandbox = tempfile::tempdir().unwrap();
     let repo = sandbox.path().join("repo-not-created");
     let key = sandbox.path().join("key.json");
-    write_key(&repo, &key);
+    write_key(&repo, &key, sandbox.path());
     let output = run_read(
         sandbox.path(),
         &repo,
@@ -133,7 +145,7 @@ fn all_machines_repository_failure_is_not_finished_read_failure() {
     let sandbox = tempfile::tempdir().unwrap();
     let repo = sandbox.path().join("repo-not-created");
     let key = sandbox.path().join("key.json");
-    write_key(&repo, &key);
+    write_key(&repo, &key, sandbox.path());
     let output = run_read(sandbox.path(), &repo, &key, &["--all-machines"]);
     assert_eq!(output.status.code(), Some(3));
 }
@@ -143,7 +155,7 @@ fn successful_all_machines_read_still_exits_zero() {
     let sandbox = tempfile::tempdir().unwrap();
     let repo = sandbox.path().join("repo");
     let key = sandbox.path().join("key.json");
-    let mk = write_key(&repo, &key);
+    let mk = write_key(&repo, &key, sandbox.path());
     let stage = sandbox.path().join("stage");
     store::write_sealed_shard(
         StageWriter::Collect,
@@ -153,9 +165,12 @@ fn successful_all_machines_read_still_exits_zero() {
         &["{\"synthetic\":true}".to_string()],
     )
     .unwrap();
-    BackupStore::new(config(&repo, &key), "b73-machine".to_string())
-        .push(&stage, &mk)
-        .unwrap();
+    BackupStore::new(
+        config(&repo, &key, sandbox.path()),
+        "b73-machine".to_string(),
+    )
+    .push(&stage, &mk)
+    .unwrap();
 
     let output = run_read(sandbox.path(), &repo, &key, &["--all-machines"]);
     assert_eq!(output.status.code(), Some(0));

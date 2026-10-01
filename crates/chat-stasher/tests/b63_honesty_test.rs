@@ -7,6 +7,9 @@
 use std::fs;
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 #[test]
 fn push_does_not_call_an_unresolved_scan_empty() {
     let sandbox = tempfile::tempdir().unwrap();
@@ -58,6 +61,10 @@ fn push_does_not_call_an_unresolved_scan_empty() {
             "--keep-ssh-masters",
         ])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.path().join("config"))
         .env("XDG_DATA_HOME", sandbox.path().join("data"))
         .env("XDG_STATE_HOME", sandbox.path().join("state"))

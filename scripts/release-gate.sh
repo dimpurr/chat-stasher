@@ -58,6 +58,17 @@ STAGE="$TMP/stage"        # sealed staging tree (fed to push)
 REPO="$TMP/repo"          # brand-new local rustic repository
 KEY="$TMP/masterkey.json" # fresh masterkey (persisted on repo init)
 
+# Pin the rustic metadata cache of every `$BIN` run under $TMP (W289). The runs
+# below that touch a repository — push into $REPO, read, verify — each make a
+# default-option open create `<cache root>/rustic/<repository id>/…` on the
+# machine that ran it, and `doctor` loads the config even when it opens nothing.
+# rustic resolves that root with `dirs::cache_dir()` — `%LOCALAPPDATA%` on
+# Windows — which `HOME` and `XDG_CACHE_HOME` do not move, so the product-level
+# knob is the only pin that holds on every platform. It is exported (not passed
+# per call) so the `--selftest` re-push and the isolated-HOME `doctor` step
+# inherit it too; $TMP is removed by the cleanup trap.
+export CHAT_STASHER_RUSTIC_CACHE_DIR="$TMP/rustic-cache"
+
 gate()   { echo "[gate] $*"; }
 elapsed(){ echo "$(( $(date +%s) - START ))s"; }
 

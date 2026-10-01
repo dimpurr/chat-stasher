@@ -41,6 +41,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The exit codes this file is about, named so the assertions read as the
 /// contract rather than as magic numbers.
 const DID_NOT_FINISH: i32 = 3;
@@ -58,6 +61,10 @@ fn run(sandbox: &Path, args: &[&str], registry: Option<&Path>) -> std::process::
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     cmd.args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

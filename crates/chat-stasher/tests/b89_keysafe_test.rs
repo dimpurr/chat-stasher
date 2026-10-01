@@ -6,6 +6,9 @@
 use std::fs;
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 #[test]
 fn seal_does_not_create_an_unknown_session_partition() {
     let dir = tempfile::tempdir().unwrap();
@@ -28,6 +31,10 @@ fn seal_does_not_create_an_unknown_session_partition() {
             "--machine",
             "synthetic-machine",
         ])
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(dir.path()),
+        )
         .output()
         .unwrap();
 

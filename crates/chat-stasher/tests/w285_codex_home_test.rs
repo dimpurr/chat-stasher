@@ -25,6 +25,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// Env mutation is process-global and cargo runs tests in parallel threads.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -287,6 +290,10 @@ fn the_coverage_header_counts_probed_and_never_probed_separately() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("doctor")
         .env("HOME", home.path())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home.path()),
+        )
         .env("USERPROFILE", home.path())
         .env_remove(scanner::REGISTRY_ENV)
         .output()
@@ -373,6 +380,10 @@ fn the_d3_session_line_names_the_clock_behind_its_timestamps() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("doctor")
         .env("HOME", home.path())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home.path()),
+        )
         .env("USERPROFILE", home.path())
         .env_remove(scanner::REGISTRY_ENV)
         .output()

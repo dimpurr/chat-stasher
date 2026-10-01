@@ -12,16 +12,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "b75-fixture";
 const SESSION: &str = "b75.synthetic-session";
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// The source repository's metadata cache lives under this test's own
+/// directory (W289), part of the same isolation the spawned `dest-init`
+/// children below get through their config's `rustic_cache_dir` and their
+/// sandbox HOME. The cache itself stays enabled — dest-init's difference
+/// counts are read paths, and a real destination read is a cached one.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -61,7 +69,12 @@ fn write_config(
     fs::write(
         config,
         format!(
-            "[destinations.target]\nrepo = '{}'\nkey_file = '{}'\n\n[destinations.source]\nrepo = '{}'\nkey_file = '{}'\n",
+            // `rustic_cache_dir` is what keeps the spawned dest-init from
+            // writing its metadata cache into the real user cache dir
+            // (W289). It is a relocation, not a feature flag: the cache stays
+            // on, exactly as a configured destination read has it.
+            "rustic_cache_dir = '{}'\n\n[destinations.target]\nrepo = '{}'\nkey_file = '{}'\n\n[destinations.source]\nrepo = '{}'\nkey_file = '{}'\n",
+            root.join("rustic-cache").display(),
             target_repo.display(),
             target_key.display(),
             source_repo.display(),
@@ -76,7 +89,11 @@ fn command(root: &Path, registry: &Path) -> Command {
     fs::create_dir_all(&home).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
-        .env("HOME", home)
+        .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
@@ -185,7 +202,7 @@ fn unread_difference_source_exits_three() {
     let registry = empty_registry(root.path());
     let source_repo = root.path().join("source-repo");
     let source_key = root.path().join("source-key.json");
-    let source_cfg = cfg(&source_repo, &source_key);
+    let source_cfg = cfg(&source_repo, &source_key, root.path());
     let source_stage = synthetic_stage(root.path());
     let key = MasterKey::new();
     store::persist_key_file(&source_cfg, &key).unwrap();

@@ -26,6 +26,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The state directory `push` derives from `XDG_DATA_HOME`.
 fn state_dir(sandbox: &Path) -> PathBuf {
     sandbox.join("data").join("chat-stasher").join("state")
@@ -73,6 +76,10 @@ fn run_push(sandbox: &Path, stage: &Path, machine: &str) -> Output {
         .arg(sandbox.join("keys").join("masterkey.json"))
         .args(["--machine", machine, "--keep-ssh-masters"])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

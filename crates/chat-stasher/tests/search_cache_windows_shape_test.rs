@@ -126,7 +126,7 @@ fn the_per_user_cache_dir_is_spelled_the_way_each_platform_spells_it() {
 }
 
 // ---------------------------------------------------------------------------
-// 2 + 3. the live cross-check and the mechanism, on whatever platform runs this
+// 2. the live cross-check, 3 + 4. the mechanism, on whatever platform runs this
 // ---------------------------------------------------------------------------
 
 const SHARD_BYTES: usize = 8 * 1024;
@@ -144,13 +144,18 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// The fixture's metadata cache, rooted inside the fixture's own directory
+/// (W289) — deliberately *set*, not turned off: these tests exist because the
+/// cache is real and can mask a repository, and a repository opened without
+/// one would prove nothing about how the masking behaves. See the file header
+/// for how the *default-root* spelling is kept under test instead.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -189,22 +194,22 @@ fn dir_holds_any(dir: &Path, names: &[String]) -> bool {
     false
 }
 
-/// Cache directories for *this* repository, found by content under the roots
-/// `store::rustic_cache_roots` names. Nothing outside those roots is touched,
-/// and a directory is only a candidate if it demonstrably holds one of this
-/// fixture's pack ids.
-fn cache_dirs_for(pack_names: &[String]) -> Vec<PathBuf> {
+/// Cache directories for *this* repository, found by content under
+/// `cache_base` — the root the fixture's [`cfg`] pinned, i.e. exactly where
+/// rustic was told (and where the default cache root resolution would have
+/// put it if `cache_dir` had been left unset). Nothing outside those roots is
+/// touched, and a directory is only a candidate if it demonstrably holds one
+/// of this fixture's pack ids.
+fn cache_dirs_for(cache_base: &Path, pack_names: &[String]) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    for base in store::rustic_cache_roots() {
-        let Ok(entries) = fs::read_dir(&base) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                && dir_holds_any(&entry.path(), pack_names)
-            {
-                found.push(entry.path());
-            }
+    let Ok(entries) = fs::read_dir(cache_base) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            && dir_holds_any(&entry.path(), pack_names)
+        {
+            found.push(entry.path());
         }
     }
     found
@@ -226,7 +231,10 @@ fn fixture(root: &Path) -> (BackupStore, MasterKey, PathBuf, Vec<String>) {
         )
         .unwrap();
     }
-    let store = BackupStore::new(cfg(&repo, &root.join("key.json")), "m-alpha".to_string());
+    let store = BackupStore::new(
+        cfg(&repo, &root.join("key.json"), root),
+        "m-alpha".to_string(),
+    );
     assert!(
         store.push(&stage, &mk).unwrap().files_new > 0,
         "fixture pushed nothing"
@@ -239,28 +247,78 @@ fn fixture(root: &Path) -> (BackupStore, MasterKey, PathBuf, Vec<String>) {
 }
 
 /// The resolution is not fiction: on the platform actually running this test,
-/// `store::rustic_cache_roots` must contain the directory rustic just created.
+/// the roots `store::rustic_cache_roots` names must coincide with where
+/// `dirs` — and therefore rustic's `Cache::new`, which is
+/// `dirs::cache_dir()` + `rustic` (rustic_core-0.12.0 `src/backend/cache.rs:261-267`)
+/// — actually puts an *unset* cache.
 ///
-/// This is the half that goes red on `windows-latest` and only there — which is
-/// exactly why the pure test above exists as well.
+/// This is the half that goes red on `windows-latest` and only there — which
+/// is exactly why the pure test above exists as well. Until W289 it was
+/// proven by really creating a cache in the real user cache directory and
+/// finding it again by content; that write is what accumulated 36,000+ suite
+/// directories into one machine's ~/Library/Caches. Comparing the two
+/// resolutions directly proves the same fact with no repository open at all:
+/// the two spellings are either the same directory or they are not, and
+/// every open below this line pins where its cache lies explicitly.
 #[test]
-fn rustic_cache_roots_finds_the_cache_rustic_actually_wrote() {
+fn rustic_default_cache_root_is_the_one_rustic_cache_roots_spells() {
+    let ours = store::rustic_cache_roots();
+    let platform = chat_stasher::scanner::current_platform();
+    println!(
+        "windows-shape self-check: platform={platform} our_roots={ours:?} \
+         dirs_cache_dir={:?}",
+        dirs::cache_dir()
+    );
+    match dirs::cache_dir() {
+        // `dirs` refusing to name a cache directory (no $HOME on a Unix box,
+        // no Known Folder on Windows) leaves rustic's `Cache::new` with only
+        // an error — `open_raw` maps that to "no cache", repository.rs:549 —
+        // so our own list may not then claim a location to walk either: a
+        // root nothing can write to is a claim, not a location.
+        Some(dirs_root) => {
+            let rustic_root = dirs_root.join("rustic");
+            assert!(
+                ours.contains(&rustic_root),
+                "rustic writes unset caches under {rustic_root:?}, but rustic_cache_roots() = \
+                 {ours:?}; clearing by our roots would clear nothing while reporting success"
+            );
+        }
+        None => {
+            assert!(
+                ours.is_empty(),
+                "dirs names no cache directory on this platform, yet rustic_cache_roots() = \
+                 {ours:?}; a root nothing can write to is a claim, not a location"
+            );
+        }
+    }
+}
+
+/// Opening a repository really does create exactly one cache directory for
+/// it — the live half of the old cross-check, on a root this test owns.
+///
+/// rustic's `open_raw` creates the cache whenever `no_cache` is off
+/// (rustic_core-0.12.0 `src/repository.rs:549-551`), so this also wires the
+/// fixture below: whatever `tree_packs…` later quarantines, the cache that
+/// can still serve it is the one created here, in this sandbox.
+#[test]
+fn rustic_creates_one_cache_dir_per_repository_on_open_under_the_configured_root() {
     let dir = tempfile::TempDir::new().unwrap();
     let (store, mk, _repo, pack_names) = fixture(dir.path());
     search_sessions(&store, &mk, &Selector::default()).unwrap();
 
-    let found = cache_dirs_for(&pack_names);
+    let cache_base = dir.path().join("rustic-cache");
+    let found = cache_dirs_for(&cache_base, &pack_names);
     println!(
-        "windows-shape self-check: platform={} roots={:?} cache_dirs_found={}",
+        "windows-shape self-check: platform={} cache_base={:?} cache_dirs_found={}",
         chat_stasher::scanner::current_platform(),
-        store::rustic_cache_roots(),
+        cache_base,
         found.len()
     );
     assert_eq!(
         found.len(),
         1,
         "rustic always creates a cache when opening a repo (rustic_core src/repository.rs:549); \
-         rustic_cache_roots() must point at it; found {}",
+         exactly one per-repository directory must sit under the configured root; found {}",
         found.len()
     );
     for d in found {
@@ -274,7 +332,10 @@ fn rustic_cache_roots_finds_the_cache_rustic_actually_wrote() {
 ///
 /// This is the load-bearing premise of `search_test`'s step 6, stated as its own
 /// test so that "the cache clearing silently did nothing" can never again show
-/// up as "the search is broken".
+/// up as "the search is broken". W289 moved the cache from the machine's real
+/// user cache directory to this test's own `rustic-cache` root — the warm
+/// cache here is the same real metadata cache rustic wrote on open, found by
+/// the same content signature, only where this test put it.
 #[test]
 fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -313,7 +374,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
 
     // Now clear it the way the fixture is supposed to, and the same repository
     // state answers UNKNOWN.
-    let cleared = cache_dirs_for(&pack_names);
+    let cleared = cache_dirs_for(&dir.path().join("rustic-cache"), &pack_names);
     println!(
         "windows-shape self-check: cache dirs cleared = {}",
         cleared.len()
@@ -350,7 +411,7 @@ fn tree_packs_are_only_really_gone_once_the_metadata_cache_is_gone() {
         ),
     }
 
-    for d in cache_dirs_for(&pack_names) {
+    for d in cache_dirs_for(&dir.path().join("rustic-cache"), &pack_names) {
         #[allow(
             clippy::let_underscore_must_use,
             reason = "The integration test removes its temporary cache directories on a best-effort basis after assertions."

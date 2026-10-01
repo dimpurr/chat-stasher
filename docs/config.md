@@ -15,6 +15,7 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 | No silent substitution | A path that cannot be resolved stops the command and names the setting. It is never replaced with a default, and a folder named `~` is never created. |
 | Windows paths | Write them in single quotes (`'C:\Users\me\…'`), because `\` is an escape character inside double quotes. A path pasted into double quotes still loads, with a warning. |
 | Command line wins | A flag such as `--repo`, `--key-file` or `--connections` overrides the matching setting for that one command. |
+| Environment override for the metadata cache | `CHAT_STASHER_RUSTIC_CACHE_DIR` names the metadata cache root for this run and wins over the file's `rustic_cache_dir` (a destination's own `cache_dir` still wins over it). It exists for a run whose cache must not land in the user's cache directory — a CI job, or a sandbox with a read-only home — and it is the only spelling that works on Windows, where rustic's default root comes from the Known Folder API and no environment variable moves it. An empty value counts as unset. |
 
 ## Top-level settings
 

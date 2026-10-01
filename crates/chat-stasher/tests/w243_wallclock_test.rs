@@ -27,19 +27,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "m-alpha";
 /// Plaintext bytes of the measured session, spread over this many shards.
 const SHARD_BYTES: usize = 2_048_000;
 const SHARD_COUNT: u32 = 50; // ~97.7 MiB ≈ 100 MB of plaintext
 const SAMPLES: u32 = 5;
 
-fn cfg(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache rooted in the sandbox (W289), so the ~100 MB fixture push
+/// and the timed reads below never touch the real user cache; a wall-clock
+/// measurement that also grows the machine's cache directory would be timing
+/// something nobody asked it to time.
+fn cfg(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -98,8 +105,8 @@ impl Sandbox {
         let repo = root.join("repo");
         let key = root.join("key.json");
         let mk = rustic_core::repofile::MasterKey::new();
-        store::persist_key_file(&cfg(&repo, &key), &mk).expect("persist key");
-        let store = BackupStore::new(cfg(&repo, &key), MACHINE.to_string());
+        store::persist_key_file(&cfg(&repo, &key, root), &mk).expect("persist key");
+        let store = BackupStore::new(cfg(&repo, &key, root), MACHINE.to_string());
         assert!(
             store.push(&stage, &mk).expect("push").files_new > 0,
             "the fixture must actually archive something"
@@ -146,6 +153,10 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         command
             .env("HOME", self.path().join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.path().join("home")),
+            )
             .env("XDG_CONFIG_HOME", self.path().join("config"))
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))

@@ -166,6 +166,14 @@ export XDG_DATA_HOME="$HOME_DIR/.local/share"
 export XDG_CONFIG_HOME="$HOME_DIR/.config"
 export XDG_STATE_HOME="$HOME_DIR/.local/state"
 export XDG_CACHE_HOME="$HOME_DIR/.cache"
+# The rustic metadata cache of every $INSTALLED run is pinned under $WORK too
+# (W289). `push`/`read`/`overview` below open a repository, and each open makes
+# rustic create `<cache root>/rustic/<repository id>/…`. `XDG_CACHE_HOME`
+# above moves that root on Linux, but rustic resolves its default through
+# `dirs::cache_dir()` — `%LOCALAPPDATA%` on Windows — which the XDG variables do
+# not reach, so the product-level knob is set explicitly and exported: step 0/8
+# copies the binary to $INSTALLED and every later step inherits this.
+export CHAT_STASHER_RUSTIC_CACHE_DIR="$WORK/rustic-cache"
 # ... and every per-harness override this build knows about is cleared, so the
 # registry templates (plus the one configured line below) are the only thing
 # deciding where anything is. A leftover OPENCODE_DB or KIMI_CODE_HOME on the

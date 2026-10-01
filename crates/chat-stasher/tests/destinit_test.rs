@@ -29,13 +29,19 @@ const MACHINE: &str = "fixture-machine";
 const SESSION_KEPT: &str = "019bf00d-0000-7eb2-9bf8-000000000001";
 const SESSION_LOST: &str = "019bf00d-0000-7eb2-9bf8-000000000002";
 
-fn cfg_for(repo: &Path, key: &Path) -> StoreConfig {
+/// Metadata cache rooted inside the calling test's temp directory (W289): the
+/// destinations here are opened, pushed and read back, and each unset
+/// `cache_dir` used to leave a per-repository directory in the real user
+/// cache — including for the deliberately missing repositories, whose
+/// absence paths must not be what spares the disk. The cache stays on because
+/// dest-init's reads are the reads a configured user gets.
+fn cfg_for(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -84,7 +90,7 @@ fn new_destination_gets_the_union_of_local_and_existing_destination() {
     let stage_a = dir.path().join("stage-a");
     let repo_a = dir.path().join("repo-a");
     let key_a = dir.path().join("key-a.json");
-    let cfg_a = cfg_for(&repo_a, &key_a);
+    let cfg_a = cfg_for(&repo_a, &key_a, dir.path());
 
     // Destination A: initialised while both sessions were still local.
     stage_session(&stage_a, SESSION_KEPT, &["{\"k\":1}"]);
@@ -122,7 +128,7 @@ fn new_destination_gets_the_union_of_local_and_existing_destination() {
 
     let repo_b = dir.path().join("repo-b");
     let key_b = dir.path().join("key-b.json");
-    let cfg_b = cfg_for(&repo_b, &key_b);
+    let cfg_b = cfg_for(&repo_b, &key_b, dir.path());
     push(&cfg_b, &stage_b);
     let in_b = archived(&cfg_b);
     assert_eq!(in_b.len(), 2, "B holds the union, not just the local half");
@@ -135,7 +141,11 @@ fn new_destination_gets_the_union_of_local_and_existing_destination() {
 fn an_intact_local_source_copies_nothing_from_the_existing_destination() {
     let dir = tempfile::TempDir::new().unwrap();
     let stage_a = dir.path().join("stage-a");
-    let cfg_a = cfg_for(&dir.path().join("repo-a"), &dir.path().join("key-a.json"));
+    let cfg_a = cfg_for(
+        &dir.path().join("repo-a"),
+        &dir.path().join("key-a.json"),
+        dir.path(),
+    );
     stage_session(&stage_a, SESSION_KEPT, &["{\"k\":1}"]);
     stage_session(&stage_a, SESSION_LOST, &["{\"l\":1}", "{\"l\":2}"]);
     push(&cfg_a, &stage_a);
@@ -179,7 +189,7 @@ fn an_unconsultable_destination_is_reported_not_treated_as_empty() {
     let stage_a = dir.path().join("stage-a");
     let repo_a = dir.path().join("repo-a");
     let key_a = dir.path().join("key-a.json");
-    let cfg_a = cfg_for(&repo_a, &key_a);
+    let cfg_a = cfg_for(&repo_a, &key_a, dir.path());
     stage_session(&stage_a, SESSION_KEPT, &["{\"k\":1}"]);
     stage_session(&stage_a, SESSION_LOST, &["{\"l\":1}"]);
     push(&cfg_a, &stage_a);
@@ -226,6 +236,7 @@ fn a_missing_repository_is_never_built_or_suspected_loss_depending_on_our_record
     let missing = cfg_for(
         &dir.path().join("no-such-repo"),
         &dir.path().join("no-such-key.json"),
+        dir.path(),
     );
 
     // Never recorded: it was never built. Known to be empty, so the union is
@@ -298,7 +309,7 @@ fn a_location_we_cannot_read_is_unknown_not_empty_and_not_loss() {
         &[SourceDestination {
             name: "opaque".to_string(),
             record: destinit::CollectRecord::Absent,
-            cfg: cfg_for(&repo, &dir.path().join("no-such-key.json")),
+            cfg: cfg_for(&repo, &dir.path().join("no-such-key.json"), dir.path()),
         }],
     );
     // Restore before asserting, so a failure still leaves a removable tempdir.
@@ -340,7 +351,7 @@ fn a_local_prefixed_unreadable_destination_is_unknown_not_empty() {
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-    let mut cfg = cfg_for(&repo, &dir.path().join("no-such-key.json"));
+    let mut cfg = cfg_for(&repo, &dir.path().join("no-such-key.json"), dir.path());
     cfg.repo_root = format!("local:{}", cfg.repo_root);
 
     let diff = destinit::fill_difference(
@@ -382,6 +393,7 @@ fn a_local_prefixed_destination_that_was_never_built_is_still_known_empty() {
     let mut cfg = cfg_for(
         &dir.path().join("never-built"),
         &dir.path().join("no-such-key.json"),
+        dir.path(),
     );
     cfg.repo_root = format!("local:{}", cfg.repo_root);
 
@@ -417,7 +429,7 @@ fn an_unreachable_remote_destination_is_unknown_not_empty() {
     let stage_b = dir.path().join("stage-b");
     stage_session(&stage_b, SESSION_KEPT, &["{\"k\":1}"]);
 
-    let mut cfg = cfg_for(dir.path(), &dir.path().join("no-such-key.json"));
+    let mut cfg = cfg_for(dir.path(), &dir.path().join("no-such-key.json"), dir.path());
     cfg.repo_root = "opendal:sftp".to_string();
     cfg.options.insert(
         "endpoint".to_string(),

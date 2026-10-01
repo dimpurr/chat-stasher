@@ -7,14 +7,22 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn run(binary: &Path, cwd: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(binary)
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home),
+        )
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", home.join("rh-cache"))
         // Simulate an installed binary: the runtime manifest hint must not
         // be needed when the cwd is outside the source checkout.
         .env_remove("CARGO_MANIFEST_DIR")

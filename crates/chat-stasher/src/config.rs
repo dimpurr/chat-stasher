@@ -23,6 +23,21 @@ use std::path::{Path, PathBuf};
 /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
 pub const CONFIG_RELATIVE_PATH: &str = "chat-stasher/config.toml";
 
+/// Runtime override for [`Config::rustic_cache_dir`], read when the config
+/// loads.
+///
+/// Set to a non-empty path to point this process's rustic metadata cache
+/// somewhere else without editing the user's file — a CI job or a sandbox with
+/// a read-only home. It is deliberately the *product's* knob and not the
+/// platform's: rustic's own default root comes from `dirs::cache_dir()`, which
+/// on Windows is the Known Folder API (`dirs-6.0.0` `src/win.rs:10` →
+/// `known_folder_local_app_data`), so `XDG_CACHE_HOME` and `HOME` cannot move
+/// it there. A path named here reaches rustic as `cache_dir`, which rustic
+/// honours on every platform because the product resolves it. A
+/// per-destination `cache_dir` still wins over this, being the more specific
+/// setting.
+pub const RUSTIC_CACHE_DIR_ENV: &str = "CHAT_STASHER_RUSTIC_CACHE_DIR";
+
 /// Where the effective configuration came from.
 ///
 /// A missing file is the normal first-run default. `Unreadable` is a different
@@ -370,13 +385,34 @@ impl Config {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // First run — no config yet. That is explicitly fine.
-                return Ok(Config::default());
+                let mut cfg = Config::default();
+                cfg.apply_rustic_cache_dir_env();
+                return Ok(cfg);
             }
             Err(e) => {
                 return Err(unusable_config(&path, format!("it could not be read: {e}")));
             }
         };
-        Self::from_text(&raw)
+        let mut cfg = Self::from_text(&raw)?;
+        cfg.apply_rustic_cache_dir_env();
+        Ok(cfg)
+    }
+
+    /// Pin [`rustic_cache_dir`](Self::rustic_cache_dir) from
+    /// [`RUSTIC_CACHE_DIR_ENV`], when the environment names one.
+    ///
+    /// Applied after the file is read, because the environment is the more
+    /// specific intent for *this* run: a wrapper (CI, a sandbox, the test
+    /// harness) has to be able to relocate the metadata cache without editing
+    /// the user's config. Only an explicitly named, non-empty value counts — an
+    /// empty variable stays "unset", and the file's own setting (or rustic's
+    /// per-platform default) is left alone.
+    fn apply_rustic_cache_dir_env(&mut self) {
+        if let Some(dir) = std::env::var_os(RUSTIC_CACHE_DIR_ENV) {
+            if !dir.is_empty() {
+                self.rustic_cache_dir = Some(dir.to_string_lossy().into_owned());
+            }
+        }
     }
 
     /// The text of a config file, as a config, degrading as far as the file
@@ -2819,6 +2855,97 @@ key_file = "~/dest/key.json"
         let cfg = Config::load().expect("an absent config file is the normal first-run state");
         assert_eq!(cfg.source, ConfigSource::DefaultsMissing);
         assert!(cfg.destinations.is_empty());
+    }
+
+    /// The integration suites name the override through their shared fixture
+    /// (`crate::test_support`), which cannot import it (the fixture is compiled
+    /// both as a library module and inside a test crate, and the two do not
+    /// share a path to it). That copy is a drift risk, so it is asserted here
+    /// rather than trusted.
+    #[test]
+    fn test_support_restates_the_cache_dir_env_name() {
+        assert_eq!(
+            RUSTIC_CACHE_DIR_ENV,
+            crate::test_support::RUSTIC_CACHE_DIR_ENV,
+            "the shared test fixture must spell the override exactly as the product does"
+        );
+    }
+
+    /// [`RUSTIC_CACHE_DIR_ENV`] pins the metadata cache even when no config file
+    /// names one. This is the relocation a spawned child needs on Windows,
+    /// where rustic's own default root is the Known Folder API and `HOME` /
+    /// `XDG_CACHE_HOME` do not move it (W289).
+    #[test]
+    fn rustic_cache_dir_env_pins_the_cache_with_no_config_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        let cache = tempfile::TempDir::new().unwrap();
+        let old_xdg = env::var_os("XDG_CONFIG_HOME");
+        let old_cache = env::var_os(RUSTIC_CACHE_DIR_ENV);
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        env::set_var(RUSTIC_CACHE_DIR_ENV, cache.path());
+
+        let cfg = Config::load().expect("an absent config file is the normal first-run state");
+        assert_eq!(
+            cfg.rustic_cache_dir.as_deref(),
+            cache.path().to_str(),
+            "the environment must supply the cache dir when the file is silent"
+        );
+
+        match old_xdg {
+            Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+            None => env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_cache {
+            Some(v) => env::set_var(RUSTIC_CACHE_DIR_ENV, v),
+            None => env::remove_var(RUSTIC_CACHE_DIR_ENV),
+        }
+    }
+
+    /// The environment is applied after the file, so a wrapper can relocate the
+    /// cache for one run without editing the user's config; and an *empty*
+    /// variable is "unset", never a cache dir of "" that would resolve to the
+    /// current directory.
+    #[test]
+    fn rustic_cache_dir_env_wins_over_the_file_but_an_empty_one_is_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let xdg = tempfile::TempDir::new().unwrap();
+        let cache = tempfile::TempDir::new().unwrap();
+        let old_xdg = env::var_os("XDG_CONFIG_HOME");
+        let old_cache = env::var_os(RUSTIC_CACHE_DIR_ENV);
+        env::set_var("XDG_CONFIG_HOME", xdg.path());
+        let cfg_dir = xdg.path().join("chat-stasher");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            "rustic_cache_dir = '/from-file'\n",
+        )
+        .unwrap();
+
+        env::set_var(RUSTIC_CACHE_DIR_ENV, cache.path());
+        let cfg = Config::load().expect("this fixture is a valid config");
+        assert_eq!(
+            cfg.rustic_cache_dir.as_deref(),
+            cache.path().to_str(),
+            "a named variable must win over the file's value"
+        );
+
+        env::set_var(RUSTIC_CACHE_DIR_ENV, "");
+        let cfg = Config::load().expect("this fixture is a valid config");
+        assert_eq!(
+            cfg.rustic_cache_dir.as_deref(),
+            Some("/from-file"),
+            "an empty variable is unset, so the file's value stays in force"
+        );
+
+        match old_xdg {
+            Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+            None => env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_cache {
+            Some(v) => env::set_var(RUSTIC_CACHE_DIR_ENV, v),
+            None => env::remove_var(RUSTIC_CACHE_DIR_ENV),
+        }
     }
 
     /// A file that exists and is not TOML is an error naming the file and the

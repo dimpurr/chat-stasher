@@ -29,6 +29,9 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const CHROME_ORIGIN: &str = "chrome-extension://gihmdkkmmmkeiagjjiimacmgkdilofhi/";
 const FIREFOX_ID: &str = "chat-stasher@team.iopho.com";
 const FOREIGN_ORIGIN: &str = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/";
@@ -299,6 +302,10 @@ impl Fixture {
         let mut child = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
             .args(args)
             .env("HOME", &self.home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.home),
+            )
             .env("XDG_CONFIG_HOME", self.home.join("config"))
             .env("XDG_DATA_HOME", self.home.join("data"))
             .env("XDG_STATE_HOME", self.home.join("state"))
@@ -1418,6 +1425,10 @@ fn eight_concurrent_hosts_for_one_session_seal_eight_distinct_shards() {
         let mut child = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
             .arg(CHROME_ORIGIN)
             .env("HOME", &fixture.home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&fixture.home),
+            )
             .env("XDG_CONFIG_HOME", fixture.home.join("config"))
             .env("XDG_DATA_HOME", fixture.home.join("data"))
             .env("XDG_STATE_HOME", fixture.home.join("state"))

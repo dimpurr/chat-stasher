@@ -33,6 +33,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// A deterministic, poorly-compressible payload, so a push writes real packs
 /// without the test needing a random-number dependency.
 fn filler(bytes: usize, seed: u64) -> String {
@@ -108,6 +111,10 @@ impl Sandbox {
         let root = self.dir.path();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         cmd.env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("USERPROFILE", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
@@ -568,7 +575,12 @@ fn a_destination_name_resolves_the_repository() {
     fs::write(
         &config,
         format!(
-            "[destinations.localbox]\nrepo = '{}'\nkey_file = '{}'\n",
+            // rustic_cache_dir (W289): prune-orphans opened through this
+            // destination must keep its metadata cache inside the sandbox —
+            // the config knob rather than only the env, so a Windows child
+            // (whose cache root the Known Folder API owns) is relocated too.
+            "rustic_cache_dir = '{}'\n\n[destinations.localbox]\nrepo = '{}'\nkey_file = '{}'\n",
+            sb.dir.path().join("rustic-cache").display(),
             sb.repo.display(),
             sb.key.display()
         ),

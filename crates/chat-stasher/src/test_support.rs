@@ -29,6 +29,38 @@
 //! long another thread's child takes to reach its own `execve`.
 #![allow(dead_code)] // the integration suites also use `copy_executable`
 
+/// The product's runtime override for its rustic metadata cache
+/// (`chat_stasher::config::rustic_cache_dir`), re-stated here so an
+/// integration suite can name it through the one fixture it already imports.
+///
+/// This file is compiled twice — once as a private module of the library and
+/// once, via `#[path]`, inside an integration-test crate — and the two do not
+/// share a path to the constant (the test crate knows the library only as
+/// `chat_stasher`, and the library cannot name itself that way inside its own
+/// `--test` build). The copy is kept honest by
+/// `config::tests::test_support_restates_the_cache_dir_env_name`, which fails
+/// the moment the two spell the variable differently.
+pub const RUSTIC_CACHE_DIR_ENV: &str = "CHAT_STASHER_RUSTIC_CACHE_DIR";
+
+/// The rustic metadata-cache **root** a spawned child should use, rooted in
+/// the test's own sandbox: `<sandbox>/cache/rustic`.
+///
+/// Every test that spawns `chat-stasher` sets
+/// [`RUSTIC_CACHE_DIR_ENV`] to this. It has to travel through the product's
+/// config knob rather than `XDG_CACHE_HOME`/`HOME`, because on Windows rustic
+/// resolves its cache root through the Known Folder API
+/// (`dirs-6.0.0` `src/win.rs:10` → `known_folder_local_app_data`) and no
+/// environment variable redirects that; `HOME` and `XDG_CACHE_HOME` are still
+/// set by the callers for the *other* paths they isolate.
+///
+/// The trailing `rustic` component is not decoration: the suite's
+/// tree-snapshot comparisons recognise "the library's incidental cache" by a
+/// `rustic` path component, and keeping that name here is what lets those
+/// comparisons stay a single spelling on every platform (W289).
+pub fn rustic_cache_root(sandbox: &std::path::Path) -> std::path::PathBuf {
+    sandbox.join("cache").join("rustic")
+}
+
 /// Writes `body` to `path` as an executable script, without this process ever
 /// holding a descriptor open on `path`.
 ///

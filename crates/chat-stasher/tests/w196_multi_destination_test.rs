@@ -30,6 +30,9 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- sandbox
 
 fn sandbox() -> tempfile::TempDir {
@@ -54,6 +57,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     bin()
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
@@ -157,7 +164,12 @@ fn two_destinations(sandbox: &Path) {
     write_config(
         sandbox,
         &format!(
-            "[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            // `rustic_cache_dir` first (W289): relays the ui/index children's
+            // metadata cache into this sandbox, including on Windows where
+            // the redirected HOME cannot — see the knob's own comment in
+            // w156_ui_default_test, which introduced the same line.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            sandbox.join("rustic-cache").display(),
             dest_config(&repo_a, &key_a),
             dest_config(&repo_b, &key_b),
         ),
@@ -173,7 +185,12 @@ fn two_destinations_with_differing_copies(sandbox: &Path) {
     write_config(
         sandbox,
         &format!(
-            "[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            // `rustic_cache_dir` first (W289): relays the ui/index children's
+            // metadata cache into this sandbox, including on Windows where
+            // the redirected HOME cannot — see the knob's own comment in
+            // w156_ui_default_test, which introduced the same line.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\n{}\n[destinations.beta]\n{}\n",
+            sandbox.join("rustic-cache").display(),
             dest_config(&repo_a, &key_a),
             dest_config(&repo_b, &key_b),
         ),
@@ -270,6 +287,10 @@ impl Ui {
         let mut child = bin()
             .args(&args)
             .env("HOME", &home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&home),
+            )
             .env("XDG_CONFIG_HOME", sandbox.join("config"))
             .env("XDG_DATA_HOME", sandbox.join("data"))
             .env("XDG_STATE_HOME", sandbox.join("state"))

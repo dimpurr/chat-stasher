@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn store_config(dir: &Path, repo_name: &str) -> StoreConfig {
     StoreConfig {
         repo_root: dir.join(repo_name).to_string_lossy().into_owned(),
@@ -95,6 +98,10 @@ fn isolated_command(sandbox: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

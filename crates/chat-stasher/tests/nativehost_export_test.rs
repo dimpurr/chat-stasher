@@ -24,6 +24,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const CHROME_ORIGIN: &str = "chrome-extension://gihmdkkmmmkeiagjjiimacmgkdilofhi/";
 
 struct Fixture {
@@ -75,6 +78,10 @@ impl Fixture {
         let mut child = Command::new(program)
             .args(args)
             .env("HOME", &self.home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.home),
+            )
             .env("XDG_CONFIG_HOME", self.home.join("config"))
             .env("XDG_DATA_HOME", self.home.join("data"))
             .env("XDG_STATE_HOME", self.home.join("state"))

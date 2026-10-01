@@ -152,6 +152,13 @@ def _isolated_env(work: str) -> dict:
     The registry is an empty one written here: without it, a `push` stage check
     counts the sessions on the machine it happens to be running on, which would
     make the fixture depend on whose laptop it ran on.
+
+    The rustic metadata cache is pinned the same way (W289): `activity-index`
+    and `push` open a repository per size, and a default-option open makes
+    rustic create `<cache root>/rustic/<repository id>/…` on this machine.
+    `HOME` moves that root on Unix, but rustic resolves its default with
+    `dirs::cache_dir()` — `%LOCALAPPDATA%` on Windows — which `HOME` does not
+    reach, so the product-level knob is set explicitly.
     """
     root = os.path.join(work, "env")
     for sub in ("home", "config", "data", "state"):
@@ -169,6 +176,7 @@ def _isolated_env(work: str) -> dict:
             "XDG_CONFIG_HOME": os.path.join(root, "config"),
             "XDG_DATA_HOME": os.path.join(root, "data"),
             "XDG_STATE_HOME": os.path.join(root, "state"),
+            "CHAT_STASHER_RUSTIC_CACHE_DIR": os.path.join(root, "rustic-cache"),
             "CHAT_STASHER_REGISTRY": registry,
         }
     )

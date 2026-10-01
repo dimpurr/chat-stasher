@@ -13,6 +13,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// Run the real binary with every ambient path redirected into `sandbox`.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
     let home = sandbox.join("home");
@@ -26,10 +29,15 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()

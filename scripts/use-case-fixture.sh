@@ -89,6 +89,16 @@ REPO="$WORK/offsite"
 # one. The default lands under XDG_DATA_HOME, which `run` pins per invocation.
 KEY_FILE="$WORK/data/chat-stasher/masterkey-offsite.json"
 
+# The rustic metadata cache every `push` / `overview` below would otherwise
+# create is pinned under $WORK (W289). Each of those commands opens a
+# repository, and a default-option open makes rustic create
+# `<cache root>/rustic/<repository id>/…` on the machine that ran it. `HOME`
+# and `XDG_CACHE_HOME` (both set in `run`) move that root on Unix, but on
+# Windows rustic resolves it through the Known Folder API (`%LOCALAPPDATA%`),
+# which neither variable reaches — so the product-level knob is the only pin
+# that holds on every platform.
+CACHE_DIR="$WORK/cache/rustic"
+
 mkdir -p "$HOME_DIR" "$STAGE" "$DESK_STAGE" "$REPO" \
          "$WORK/config/chat-stasher"
 
@@ -108,6 +118,7 @@ run() {
   XDG_DATA_HOME="$WORK/data" \
   XDG_STATE_HOME="$WORK/state" \
   XDG_CACHE_HOME="$WORK/cache" \
+  CHAT_STASHER_RUSTIC_CACHE_DIR="$CACHE_DIR" \
   "$BINARY" "$@"
 }
 
@@ -205,6 +216,7 @@ Run a page's commands with the environment above, for example:
 
   HOME=$HOME_DIR XDG_CONFIG_HOME=$WORK/config XDG_DATA_HOME=$WORK/data \\
   XDG_STATE_HOME=$WORK/state XDG_CACHE_HOME=$WORK/cache \\
+  CHAT_STASHER_RUSTIC_CACHE_DIR=$CACHE_DIR \\
   $BINARY overview --destination offsite
 
   rm -rf $WORK   # when you are done

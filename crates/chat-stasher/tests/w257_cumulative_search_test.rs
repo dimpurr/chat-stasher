@@ -40,6 +40,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "m-cumulative";
 /// Reclaimed before the second push: its only body is in snapshot A.
 const RECLAIMED: &str = "s-reclaimed-only";
@@ -139,6 +142,10 @@ fn isolated_command(sandbox: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

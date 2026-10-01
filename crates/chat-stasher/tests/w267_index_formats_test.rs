@@ -17,6 +17,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- sandbox
 
 fn bin() -> Command {
@@ -55,6 +58,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     bin()
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
@@ -191,7 +198,13 @@ fn make_repo_with(sandbox: &Path, extra: &[(&str, &[u8])]) -> (String, String) {
     fs::write(
         config_dir.join("config.toml"),
         format!(
-            "[destinations.alpha]\nrepo = '{}'\nkey_file = '{}'\n",
+            // rustic_cache_dir (W289): the index/`search --destination`
+            // children keep their metadata cache in the sandbox. It goes in
+            // the config, not just the environment, because a Windows child
+            // picks its cache root from the Known Folder API, which the
+            // redirected HOME/XDG_CACHE_HOME cannot move.
+            "rustic_cache_dir = '{}'\n\n[destinations.alpha]\nrepo = '{}'\nkey_file = '{}'\n",
+            sandbox.join("rustic-cache").display(),
             repo.to_string_lossy(),
             key.to_string_lossy()
         ),

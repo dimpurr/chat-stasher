@@ -27,6 +27,9 @@
 
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// Well under the 1 MiB Windows main thread, and far under the ~944 KiB the
 /// unfixed debug binary needed. Not lower than this: the limit also caps the
 /// spawning thread, and the OS needs room to create the worker thread at all.
@@ -36,10 +39,18 @@ const TINY_STACK_KIB: u32 = 256;
 #[test]
 fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
     let bin = env!("CARGO_BIN_EXE_chat-stasher");
+    // `--version` reads no config and opens no repository, but every spawn in
+    // this suite carries the cache pin anyway (W289): one rule for the whole
+    // suite leaves no spawn for a later change to start leaking through.
+    let cache = tempfile::tempdir().unwrap();
     let output = Command::new("sh")
         .arg("-c")
         .arg(format!("ulimit -s {TINY_STACK_KIB}; exec \"$0\" --version",))
         .arg(bin)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(cache.path()),
+        )
         .output()
         .expect("spawn sh");
 
@@ -69,8 +80,14 @@ fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
 #[test]
 fn argument_parsing_survives_the_windows_main_thread_stack() {
     let bin = env!("CARGO_BIN_EXE_chat-stasher");
+    // Same rule as the unix arm: pin the cache on every spawn (W289).
+    let cache = tempfile::tempdir().unwrap();
     let output = Command::new(bin)
         .arg("--version")
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(cache.path()),
+        )
         .output()
         .expect("spawn binary");
 

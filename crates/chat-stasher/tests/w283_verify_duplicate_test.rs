@@ -26,6 +26,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "w283-machine";
 const SESSION: &str = "claude-code.w283-machine.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
 
@@ -41,10 +44,15 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()

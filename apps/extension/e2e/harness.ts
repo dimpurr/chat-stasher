@@ -994,6 +994,13 @@ export function startNativeHost(options: { machine?: string } = {}): NativeHost 
     HOME: home,
     XDG_CONFIG_HOME: join(home, '.config'),
     XDG_DATA_HOME: dataDir,
+    // The host reads this config file, so its rustic metadata cache is pinned
+    // through the product's own knob (W289): rustic resolves the default root
+    // with `dirs::cache_dir()` — `%LOCALAPPDATA%` on Windows — which `HOME` does
+    // not move. The `sessions` request reads the stage rather than a
+    // repository, so nothing leaks today; the pin is here so a spec that adds a
+    // repository-opening frame cannot start writing into the machine's cache.
+    CHAT_STASHER_RUSTIC_CACHE_DIR: join(root, 'cache', 'rustic'),
   };
   return new NativeHost(root, stage, machine, env);
 }

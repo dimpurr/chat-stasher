@@ -8,6 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn write_registry(sandbox: &Path, template: &str) -> PathBuf {
     let cell = format!(
         r#"{{
@@ -45,6 +48,10 @@ fn run_doctor(home: &Path, registry: &Path, codex_home: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("doctor")
         .env("HOME", home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home),
+        )
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))

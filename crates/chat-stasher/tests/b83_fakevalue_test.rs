@@ -21,6 +21,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "b83-fixture";
 const SESSION: &str = "b83.synthetic-session";
 
@@ -207,13 +210,19 @@ fn d9_missing_sqlite_time_is_not_a_zero_cursor_or_epoch() {
     );
 }
 
-fn cfg_for(repo: &Path, key: &Path) -> StoreConfig {
+/// The source repository's metadata cache is rooted inside the fixture's own
+/// directory (W289): the D10 fixture is pushed and read back through a real
+/// open, and an unset `cache_dir` would create that open's per-repository
+/// directory in the real user cache. The cache itself stays enabled —
+/// `fill_difference` reads the destination exactly the way a real dest-init
+/// run does.
+fn cfg_for(repo: &Path, key: &Path, cache: &Path) -> StoreConfig {
     StoreConfig {
         repo_root: repo.to_string_lossy().into_owned(),
         key_file: key.to_path_buf(),
         connections: 1,
         options: BTreeMap::new(),
-        cache_dir: None,
+        cache_dir: Some(cache.join("rustic-cache")),
         no_cache: false,
     }
 }
@@ -227,7 +236,7 @@ fn d10_unreadable_stage_shard_check_is_unknown_not_false() {
     let source_stage = root.path().join("source-stage");
     let source_repo = root.path().join("source-repo");
     let source_key = root.path().join("source-key.json");
-    let source_cfg = cfg_for(&source_repo, &source_key);
+    let source_cfg = cfg_for(&source_repo, &source_key, root.path());
     store::write_sealed_shard(
         StageWriter::Collect,
         &source_stage,
@@ -293,6 +302,10 @@ fn run_clean_ingest(root: &Path) -> Output {
         .arg(&stage)
         .args(["--machine", MACHINE])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)

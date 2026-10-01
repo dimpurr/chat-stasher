@@ -23,6 +23,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- sandbox
 
 fn sandbox() -> tempfile::TempDir {
@@ -47,9 +50,14 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     bin()
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
+        .env("XDG_CACHE_HOME", sandbox.join("rh-cache"))
         .env("CHAT_STASHER_REGISTRY", &registry)
         .output()
         .unwrap()
@@ -119,9 +127,16 @@ fn one_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// `[destinations.<name>]` rows pointing at a repository and its key.
-fn dest_config(name: &str, repo: &Path, key: &Path) -> String {
+///
+/// The leading `rustic_cache_dir` relocates the spawned ui/index runs'
+/// metadata cache into the sandbox (W289). It sits in the config because a
+/// Windows child resolves its cache root from the Known Folder API, which
+/// the redirected HOME/`XDG_CACHE_HOME` of the `run` helper cannot move —
+/// the product's own knob is the only spelling that relocates it there.
+fn dest_config(name: &str, repo: &Path, key: &Path, cache: &Path) -> String {
     format!(
-        "[destinations.{name}]\nrepo = '{repo}'\nkey_file = '{key}'\n",
+        "rustic_cache_dir = '{cache}'\n\n[destinations.{name}]\nrepo = '{repo}'\nkey_file = '{key}'\n",
+        cache = cache.display(),
         repo = repo.display(),
         key = key.display(),
     )
@@ -135,7 +150,7 @@ fn dest_config(name: &str, repo: &Path, key: &Path) -> String {
 fn ui_opens_the_only_declared_destination() {
     let sb = sandbox();
     let (repo, key) = one_repo(sb.path());
-    write_config(sb.path(), &dest_config("solo", &repo, &key));
+    write_config(sb.path(), &dest_config("solo", &repo, &key, sb.path()));
     let out = run(sb.path(), &["ui", "--no-open", "--idle-timeout", "1"]);
     assert!(
         out.status.success(),
@@ -167,7 +182,7 @@ fn ui_lists_and_asks_when_several_destinations_are_declared() {
         sb.path(),
         &format!(
             "{}[destinations.unbuilt]\nrepo = '{}'\n",
-            dest_config("alpha", &repo, &key),
+            dest_config("alpha", &repo, &key, sb.path()),
             sb.path().join("no-such-repo").display(),
         ),
     );
@@ -213,7 +228,7 @@ fn ui_uses_the_native_host_default_when_several_are_declared() {
         &format!(
             "{tail}[native_host]\ndestination = \"alpha\"\n[destinations.unbuilt]\nrepo = '{}'\n",
             sb.path().join("no-such-repo").display(),
-            tail = dest_config("alpha", &repo, &key),
+            tail = dest_config("alpha", &repo, &key, sb.path()),
         ),
     );
     let out = run(sb.path(), &["ui", "--no-open", "--idle-timeout", "1"]);
@@ -243,7 +258,7 @@ fn ui_refuses_a_native_host_default_that_is_not_declared() {
         sb.path(),
         &format!(
             "{tail}[native_host]\ndestination = \"ghost\"\n",
-            tail = dest_config("solo", &repo, &key),
+            tail = dest_config("solo", &repo, &key, sb.path()),
         ),
     );
     let out = run(sb.path(), &["ui", "--no-open", "--idle-timeout", "1"]);
@@ -314,7 +329,7 @@ fn an_explicit_destination_beats_the_default() {
         &format!(
             "{tail}[destinations.unbuilt]\nrepo = '{}'\n[native_host]\ndestination = \"unbuilt\"\n",
             sb.path().join("no-such-repo").display(),
-            tail = dest_config("solo", &repo, &key),
+            tail = dest_config("solo", &repo, &key, sb.path()),
         ),
     );
     // `--repo` wins over a config default that would otherwise answer
@@ -369,7 +384,7 @@ fn retrieval_commands_keep_refusing_a_default_destination() {
         sb.path(),
         &format!(
             "{}[destinations.unbuilt]\nrepo = '{}'\n",
-            dest_config("alpha", &repo, &key),
+            dest_config("alpha", &repo, &key, sb.path()),
             sb.path().join("no-such-repo").display(),
         ),
     );

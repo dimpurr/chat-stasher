@@ -48,6 +48,9 @@ use chat_stasher::ui::{
     handle, split_target, Content, ContentSource, DestinationState, NoIndex, UiData, UiSession,
 };
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- fixtures
 
 /// The ChatGPT detail body: four nodes on the active branch (`n1`…`n4`) and one
@@ -436,6 +439,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

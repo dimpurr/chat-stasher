@@ -43,6 +43,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -205,6 +208,10 @@ impl Fixture {
         fs::write(config_dir.join("config.toml"), "rustic_no_cache = true\n").unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         cmd.env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("USERPROFILE", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data-xdg"))

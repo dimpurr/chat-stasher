@@ -603,7 +603,7 @@ Three things in that table deserve to be called out rather than buried:
 
 **c. Your archive destination.** Whatever you configured: a directory on your
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
-hold (`crates/chat-stasher/src/config.rs:101`). Content is encrypted
+hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
 kept on your machine (`crates/chat-stasher/src/store.rs:287-387,1434-1519`).
 A directory written by `export --out` is **not** this: it is a separate,

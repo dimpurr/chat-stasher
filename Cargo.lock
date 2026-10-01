@@ -564,6 +564,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "dirs",
  "libc",
  "rayon",
  "rusqlite",

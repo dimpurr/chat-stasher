@@ -109,9 +109,14 @@ impl Sandbox {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("HOME", self.home())
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.home()),
+            )
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))
+            .env("XDG_CACHE_HOME", self.root.path().join("rh-cache"))
             .env(
                 "CHAT_STASHER_REGISTRY",
                 self.root.path().join("registry.json"),
@@ -775,9 +780,14 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("HOME", sandbox.home())
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&sandbox.home()),
+            )
             .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
             .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
             .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+            .env("XDG_CACHE_HOME", sandbox.root.path().join("rh-cache"))
             .env(
                 "CHAT_STASHER_REGISTRY",
                 sandbox.root.path().join("registry.json"),
@@ -975,9 +985,14 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("HOME", sandbox.home())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&sandbox.home()),
+        )
         .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
         .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
         .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env("XDG_CACHE_HOME", sandbox.root.path().join("rh-cache"))
         .env(
             "CHAT_STASHER_REGISTRY",
             sandbox.root.path().join("registry.json"),
@@ -1021,6 +1036,10 @@ fn non_tty_setup_emits_json_missing_parameters_and_does_not_echo_stdin() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("HOME", home.path())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home.path()),
+        )
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .spawn()
         .unwrap();
@@ -1053,6 +1072,10 @@ fn non_tty_setup_refuses_invalid_config_instead_of_scanning_defaults() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("HOME", home.path())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(home.path()),
+        )
         .env("XDG_CONFIG_HOME", &config_home)
         .output()
         .unwrap();
@@ -1727,9 +1750,14 @@ fn an_unusable_credential_variable_is_reported_to_a_non_tty_caller() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("HOME", sandbox.home())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&sandbox.home()),
+        )
         .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
         .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
         .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env("XDG_CACHE_HOME", sandbox.root.path().join("rh-cache"))
         .env(
             "CHAT_STASHER_REGISTRY",
             sandbox.root.path().join("registry.json"),
@@ -1798,9 +1826,14 @@ fn the_written_destination_carries_credential_references_and_never_the_secret() 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("HOME", sandbox.home())
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&sandbox.home()),
+        )
         .env("XDG_CONFIG_HOME", sandbox.root.path().join("config"))
         .env("XDG_DATA_HOME", sandbox.root.path().join("data"))
         .env("XDG_STATE_HOME", sandbox.root.path().join("state"))
+        .env("XDG_CACHE_HOME", sandbox.root.path().join("rh-cache"))
         .env(
             "CHAT_STASHER_REGISTRY",
             sandbox.root.path().join("registry.json"),

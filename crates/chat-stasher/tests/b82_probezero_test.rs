@@ -18,6 +18,9 @@
 //! never touched, and no session body is ever read.
 
 use std::fs;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -121,6 +124,10 @@ fn run_cli_args(sandbox: &Path, registry: &Path, args: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))
@@ -496,7 +503,11 @@ fn a5_unreadable_record_downgrades_never_built_to_unknown() {
                 key_file: sandbox.path().join("peer.key"),
                 connections: 1,
                 options: std::collections::BTreeMap::new(),
-                cache_dir: None,
+                // The peer repository does not exist, so nothing is ever
+                // written to a cache — but `None` here would also be the
+                // leaky spelling if a future fixture made this path exist,
+                // and the isolated spelling costs nothing to carry.
+                cache_dir: Some(sandbox.path().join("rustic-cache")),
                 no_cache: false,
             },
             record,
