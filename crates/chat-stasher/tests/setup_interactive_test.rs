@@ -144,6 +144,23 @@ impl Sandbox {
         self.data_root().join("state")
     }
 
+    fn config_file(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("config")
+            .join("chat-stasher")
+            .join("config.toml")
+    }
+
+    /// Declare a destination by hand, the way a user who already has one does.
+    /// An ordinary local-path repository, so the destination step runs in the
+    /// same process with no network.
+    fn write_config(&self, text: &str) {
+        let path = self.config_file();
+        fs::create_dir_all(path.parent().expect("a config directory")).expect("create config dir");
+        fs::write(&path, text).expect("write the sandbox config");
+    }
+
     /// The command, environment and all, with stdio left to the caller: the
     /// interactive runs here put a terminal where the wizard's detection looks
     /// for one, which `Stdio::piped` never is.
@@ -433,5 +450,87 @@ fn a_declined_prompt_leaves_the_step_owed_and_records_nothing() {
         transcript.contains("The next answer is a declaration"),
         "the run took the interactive path, which explains the declaration before asking for \
          it; terminal transcript:\n{transcript}"
+    );
+}
+
+/// W294: with several keys in play, an interactive "no" is still a "no".
+///
+/// The wizard asks once per archive copy, so a machine with a destination poses
+/// two questions. Declining the destination's must leave *that* copy undeclared
+/// while the local copy — answered with the sentence in the same run — is
+/// recorded. A single-scope implementation could pass the decline test by
+/// refusing everything or nothing; this pins the per-copy behaviour, and pins it
+/// on the destination key, which is the one the run itself creates and so the
+/// one a "the copy is old, of course it is declared" shortcut would get wrong.
+#[cfg(unix)]
+#[test]
+fn an_interactive_no_on_one_of_several_keys_leaves_that_key_undeclared() {
+    let sandbox = Sandbox::new();
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    let stage = sandbox.stage();
+    let mut wizard = InteractiveWizard::run(
+        &sandbox,
+        &[
+            "setup",
+            "--stage",
+            stage.to_str().expect("a utf-8 stage path"),
+            "--destination",
+            "backup",
+        ],
+    );
+
+    // The local key's prompt: answer with the sentence, so that copy *is*
+    // declared and the test is about a decline for one key rather than about
+    // declines in general.
+    wizard.expect_within(
+        "to declare you have your own copy",
+        "the masterkey declaration prompt",
+    );
+    wizard.answer("I saved it elsewhere");
+
+    // The destination's key is created by the destination step in this very run;
+    // its prompt names that file. Decline it — the declaration must not be
+    // recorded for that copy.
+    wizard.expect_within(
+        "destination key for `backup`",
+        "the destination key declaration prompt",
+    );
+    wizard.answer("no");
+
+    wizard.expect_within("Install the scheduler now?", "the scheduler prompt");
+    wizard.answer("");
+
+    let (status, stderr, transcript) = wizard.finish();
+
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "the declined destination key leaves its step owed, so the run must exit 2; \
+         stderr:\n{stderr}\nterminal transcript:\n{transcript}"
+    );
+    assert!(
+        stderr.contains("NOT declared"),
+        "the wizard must say the declined step is unfinished; stderr:\n{stderr}"
+    );
+
+    // The record is what `status`/`doctor` read, so "declined" has to mean
+    // nothing was written for that scope — while the answered scope is there.
+    let recorded = fs::read_to_string(
+        sandbox
+            .state_dir()
+            .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE),
+    )
+    .expect("the local declaration, which was answered, must be recorded");
+    assert!(
+        recorded.contains(chat_stasher::keydecl::LOCAL_SCOPE),
+        "the answered local declaration must be recorded: {recorded}"
+    );
+    assert!(
+        !recorded.contains(&chat_stasher::keydecl::destination_scope("backup")),
+        "a declined prompt must record nothing for its scope: {recorded}"
     );
 }

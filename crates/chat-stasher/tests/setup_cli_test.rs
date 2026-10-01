@@ -1294,6 +1294,146 @@ fn re_running_the_wizard_does_not_grow_the_destination() {
     );
 }
 
+/// The wizard's `masterkey.keys` entry for one scope, or a panic naming what it
+/// found instead.
+fn wizard_key(value: &serde_json::Value, scope: &str) -> serde_json::Value {
+    value["masterkey"]["keys"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the wizard must name its keys as an array: {value}"))
+        .iter()
+        .find(|key| key["scope"] == scope)
+        .unwrap_or_else(|| panic!("the wizard must name a `{scope}` key: {value}"))
+        .clone()
+}
+
+/// W294 (OBS-6): a first setup with a destination completes in **two** runs.
+///
+/// A first-time user has no key to copy until the wizard creates one, and every
+/// archive copy has its own key — so the run that creates the keys and the run
+/// that declares them are necessarily different runs (a key that did not exist
+/// when the declaration was made cannot be covered by it). Before this change
+/// the first run created only the local key, and the destination's own key was
+/// not created until the *second* run created it — which meant that run could
+/// not declare it either, and a third run was needed to finish. The fix is that
+/// the first run creates **every** key it will ask about: the destination step
+/// runs inside the declaration-only bootstrap, so the second run finds both keys
+/// already on the disk and one declaration covers them both.
+#[test]
+fn a_first_setup_with_a_destination_completes_in_two_runs() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+
+    // Run 1 — the create run. No declaration is given, so the run stops with the
+    // declaration owed, but it must leave both keys on the disk for the user to
+    // copy: the local repository's and the destination's own.
+    let first = sandbox.setup(&["--destination", "backup"]);
+    let value = json_of(&first);
+    assert_eq!(
+        exit_code(&first),
+        2,
+        "the declaration is owed, so the create run refuses: {value}"
+    );
+    assert_eq!(
+        value["missing_parameters"],
+        serde_json::json!(["masterkey_saved_elsewhere"]),
+        "the declaration is the one thing owed: {value}"
+    );
+    let local = wizard_key(&value, "local");
+    let destination = wizard_key(&value, "destination");
+    assert_eq!(destination["name"], "backup");
+    assert_eq!(
+        destination["declared"], false,
+        "a key the create run just made cannot be declared by that run: nobody has had \
+         it to copy: {value}"
+    );
+    let destination_key = PathBuf::from(
+        destination["path"]
+            .as_str()
+            .expect("the destination key's path is a string"),
+    );
+    assert_eq!(
+        destination_key,
+        sandbox.data_root().join("masterkey-backup.json"),
+        "the destination's own key, not the local one: {value}"
+    );
+    assert!(
+        destination_key.exists(),
+        "the create run must leave the destination's key on the disk for the user to copy: {}",
+        destination_key.display()
+    );
+    assert!(
+        Path::new(local["path"].as_str().expect("a path")).exists(),
+        "the create run must still leave the local key on the disk: {value}"
+    );
+
+    // Run 2 — the confirm run. Every key already exists, so one declaration
+    // covers them all and the run finishes.
+    let second = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&second);
+    assert_eq!(
+        exit_code(&second),
+        0,
+        "every key already exists on the disk, so the declaration covers them and the run \
+         finishes: {value}"
+    );
+    assert_eq!(value["missing_parameters"], serde_json::json!([]));
+    for scope in ["local", "destination"] {
+        assert_eq!(
+            wizard_key(&value, scope)["declared"],
+            true,
+            "the confirm run must record the `{scope}` declaration: {value}"
+        );
+    }
+    // The confirm run also finished the rest of the wizard: it archived the
+    // session and read it back. The repository itself already existed — the
+    // create run made it along with the key — so the pass adopts it.
+    assert_eq!(value["steps"]["local_save"], "existed");
+    assert_eq!(value["chain"]["readback"]["kind"], "known");
+    assert_eq!(value["chain"]["readback"]["sessions"], 1);
+}
+
+/// W294: the create run (the declaration-only bootstrap) must not *declare*
+/// anything, however many keys it creates — the rule the whole flow rests on.
+///
+/// The keys are created moments before the run stops, so at the moment the
+/// declaration would be made there was nothing to copy. The run reports each
+/// key with `declared: false`, and no declaration record is written for either
+/// scope; the next run is what records them.
+#[test]
+fn the_create_run_declares_none_of_the_keys_it_makes() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+
+    let first = sandbox.setup(&["--destination", "backup"]);
+    let value = json_of(&first);
+    assert_eq!(exit_code(&first), 2, "value={value}");
+    for scope in ["local", "destination"] {
+        assert_eq!(
+            wizard_key(&value, scope)["declared"],
+            false,
+            "a key this run created cannot be declared by this run: {value}"
+        );
+    }
+    // The record is the whole value of a declaration, so "not declared" has to
+    // mean *nothing was recorded*, not merely "the JSON says so".
+    assert!(
+        !sandbox
+            .root
+            .path()
+            .join("data/chat-stasher/state/key-declarations.json")
+            .exists(),
+        "the create run must record no declaration at all"
+    );
+}
+
 /// The key files the wizard names for the user to back up: every entry of the
 /// `masterkey.keys` array, falling back to `masterkey.path` (the local key)
 /// when the array is absent — the pre-fix shape that named only the local key
@@ -1733,6 +1873,128 @@ fn a_key_replaced_by_an_unreadable_file_is_unknown_not_declared_saved() {
         stderr.contains("unreadable") && stderr.contains("unknown whether"),
         "status must word the unreadable key as unknown rather than as an undeclared one; \
          stderr:\n{stderr}"
+    );
+}
+
+/// W294: a declaration is a statement about **one** key file, and the rule has
+/// to hold when several keys are in play at once.
+///
+/// This walks the two-run flow — which now leaves one declaration per copy — and
+/// then replaces the destination's key file alone with different bytes. The
+/// changed file is a different key, so the declaration about the old one no
+/// longer covers it; the untouched local file's declaration must stand. A
+/// single-key implementation could pass by having one shared "declared" bit, and
+/// the point of this test is that it does not.
+#[test]
+fn a_declaration_matches_each_key_separately_when_several_are_declared() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    sandbox.setup(&["--destination", "backup"]);
+    let done = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    let value = json_of(&done);
+    assert_eq!(exit_code(&done), 0, "value={value}");
+    for scope in ["local", "destination"] {
+        assert_eq!(
+            wizard_key(&value, scope)["declared"],
+            true,
+            "both keys exist, so the run declares both: {value}"
+        );
+    }
+
+    // The destination's key is replaced at the same path with different bytes: a
+    // different key, made after the declaration, with the local key untouched.
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::write(
+        &destination_key,
+        b"a different key, created after the copy was made\n",
+    )
+    .expect("replace the destination key");
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let destination = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(
+        destination["declared_saved"], false,
+        "the bytes changed, so the declaration is about a key that is no longer there: {dvalue}"
+    );
+    assert_eq!(destination["declared_state"], "not_declared");
+    let local = copies
+        .iter()
+        .find(|row| row["scope"] == "local")
+        .unwrap_or_else(|| panic!("doctor must report the local key: {dvalue}"));
+    assert_eq!(
+        local["declared_saved"], true,
+        "the local key did not change, so its declaration must still cover it: {dvalue}"
+    );
+}
+
+/// The unreadable half of the same rule, with several keys declared: a key file
+/// that exists but cannot be read is *unknown*, never "declared saved" — and it
+/// is a fact about that one file, so the other key's declaration is untouched.
+#[test]
+fn an_unreadable_key_among_several_is_unknown_and_leaves_the_others_declared() {
+    let sandbox = Sandbox::new(true);
+    let shared = sandbox.root.path().join("shared-archive");
+    sandbox.write_config(&format!(
+        "[destinations.backup]\nrepo = '{}'\n",
+        shared.display()
+    ));
+    sandbox.setup(&["--destination", "backup"]);
+    let done = sandbox.setup(&["--destination", "backup", "--masterkey-saved-elsewhere"]);
+    assert_eq!(exit_code(&done), 0, "value={}", json_of(&done));
+
+    // Something unreadable replaces the destination's key at the exact path the
+    // declaration names, while the local key is left alone.
+    let destination_key = sandbox.data_root().join("masterkey-backup.json");
+    fs::remove_file(&destination_key).expect("remove the destination key");
+    fs::create_dir(&destination_key).expect("something unreadable now sits at that path");
+
+    let doctor = sandbox.command(&["doctor", "--json"]);
+    let dvalue = json_of(&doctor);
+    let copies = dvalue["keys"]["copies"]
+        .as_array()
+        .expect("doctor reports the key inventory");
+    let destination = copies
+        .iter()
+        .find(|row| row["name"] == "backup")
+        .unwrap_or_else(|| panic!("doctor must report the destination's key: {dvalue}"));
+    assert_eq!(destination["exists"], true);
+    assert_eq!(
+        destination["declared_saved"], false,
+        "a file that cannot be read cannot be the key the declaration was about: {dvalue}"
+    );
+    assert_eq!(
+        destination["declared_state"], "unreadable",
+        "the unknown is its own state, not a plain 'not declared': {dvalue}"
+    );
+    let local = copies
+        .iter()
+        .find(|row| row["scope"] == "local")
+        .unwrap_or_else(|| panic!("doctor must report the local key: {dvalue}"));
+    assert_eq!(
+        local["declared_saved"], true,
+        "the unreadable file is the destination's; the local declaration must stand: {dvalue}"
+    );
+
+    // `status` words the unreadable key as an unknown of its own, rather than
+    // sending a user who did declare it looking for a step they already did.
+    let status = sandbox.command(&["status"]);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("[keys] destination=backup")
+            && stderr.contains("unreadable")
+            && stderr.contains("unknown whether"),
+        "status must word the unreadable key as unknown: {stderr}"
     );
 }
 

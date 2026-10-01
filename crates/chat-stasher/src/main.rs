@@ -12275,15 +12275,22 @@ fn cmd_setup(
             // wizard still refuses the run, but it first creates the local
             // repository and its masterkey — the minimum a human needs in front
             // of them to copy the key off this disk — and stops before the
-            // archive pass, the remote step and the scheduler. Re-running with
-            // the declaration then continues. If anything else is missing too,
-            // rule 1 wins and nothing is written at all.
+            // archive pass and the scheduler. Re-running with the declaration
+            // then continues. If anything else is missing too, rule 1 wins and
+            // nothing is written at all.
             let only_masterkey_declaration_owed =
                 premissing.len() == 1 && premissing[0] == "masterkey_saved_elsewhere";
-            // The key path to offer, when the bootstrap actually put one on the
-            // disk. It is `None` for rule 1 (nothing was written) and for a
-            // bootstrap that failed, and in both cases the refusal falls back to
-            // the masterkey object's ordinary never-attempted shape.
+            // W294 (OBS-6): the bootstrap's job is to put *every* key the user
+            // has to copy in front of them, and with a destination there are
+            // two — the local repository's key and the destination's own. The
+            // destination's key cannot exist without its step, because
+            // `dest-init` is what creates it, so the step runs here inside the
+            // refusal and the destination key joins `keys`. That is what lets
+            // the *next* run — the one that carries the declaration — find every
+            // key already on the disk and record them all at once, instead of
+            // needing one more create-then-declare pass per key. This run still
+            // declares none of them: a key it has just made is one nobody has
+            // had the chance to copy, which is exactly why it stops.
             //
             // A failed bootstrap is reported through the refusal's own reason
             // rather than on stderr: this path prints nothing but its JSON, so
@@ -12292,28 +12299,64 @@ fn cmd_setup(
             // landed — the key is persisted before the repository is
             // initialized, so a failure in the second half leaves a key on the
             // disk, and "nothing was written" would be a guess. What it does
-            // claim is that no snapshot was archived, which is true of every
-            // path that reaches here.
-            let (why, created_key) = match only_masterkey_declaration_owed {
-                false => (setup_refused_before_save_why(&premissing), None),
-                true => match setup_create_repo_and_key(&config) {
-                    Ok(path) => (setup_refused_awaiting_declaration_why(), Some(path)),
-                    Err(error) => (setup_refused_bootstrap_failed_why(&error), None),
-                },
+            // claim is that no local snapshot was archived, which is true of
+            // every path that reaches here.
+            let mut created_keys: Vec<SetupKey> = Vec::new();
+            let mut destination_report: Option<SetupRemoteReport> = None;
+            let why = if !only_masterkey_declaration_owed {
+                setup_refused_before_save_why(&premissing)
+            } else {
+                match setup_create_repo_and_key(&config) {
+                    Ok(path) => {
+                        created_keys.push(SetupKey {
+                            scope: SetupKeyScope::Local,
+                            name: None,
+                            path,
+                            declared: false,
+                        });
+                        if let Some(name) = destination.as_deref() {
+                            let credentials = setup_remote_credentials(&remote);
+                            let report = setup_remote_step(
+                                stage,
+                                name,
+                                &remote,
+                                false,
+                                remote.trust_host,
+                                credentials,
+                            );
+                            // The step just wrote the block that names the
+                            // destination's key file, so the key is looked up
+                            // against the config as it now reads, not the copy
+                            // this run loaded before the step ran.
+                            let written = Config::load().unwrap_or_else(|_| config.clone());
+                            if let Some(key) = setup_destination_has_key(&report, &written) {
+                                created_keys.push(SetupKey {
+                                    scope: SetupKeyScope::Destination,
+                                    name: Some(name.to_string()),
+                                    path: key,
+                                    declared: false,
+                                });
+                            }
+                            destination_report = Some(report);
+                        }
+                        setup_refused_awaiting_declaration_why(destination_report.is_some())
+                    }
+                    Err(error) => setup_refused_bootstrap_failed_why(&error),
+                }
             };
-            // The refusal names whatever key the bootstrap created so the human
-            // has a file to copy. Only the local key is created here — the
-            // destination step has not run, so no destination key exists yet.
-            let bootstrap_keys: Vec<SetupKey> = created_key
-                .as_ref()
-                .map(|path| SetupKey {
-                    scope: SetupKeyScope::Local,
-                    name: None,
-                    path: path.clone(),
-                    declared: false,
-                })
-                .into_iter()
-                .collect();
+            // The destination object for a run that never reached the step — and
+            // for rule 1, which wrote nothing: "not attempted", a never-started
+            // step named by `missing_parameters`, never a verdict about the
+            // destination.
+            let destination_report = destination_report.unwrap_or_else(|| SetupRemoteReport {
+                name: destination.clone(),
+                kind: None,
+                config: SetupDestinationConfig::NotWritten { why: why.clone() },
+                reach: SetupReach::NotAttempted { why: why.clone() },
+                trust: SetupTrust::NotRequired,
+                dest_init: SetupDestinationInit::NotRun { why: why.clone() },
+                credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
+            });
             println!(
                 "{}",
                 setup_json_payload(
@@ -12328,26 +12371,14 @@ fn cmd_setup(
                     ),
                     None,
                     None,
-                    // The wizard stopped before the remote step, so the object
-                    // is "not attempted" (a never-started step named by
-                    // `missing_parameters`), never a verdict about the
-                    // destination.
-                    &SetupRemoteReport {
-                        name: destination.clone(),
-                        kind: None,
-                        config: SetupDestinationConfig::NotWritten { why: why.clone() },
-                        reach: SetupReach::NotAttempted { why: why.clone() },
-                        trust: SetupTrust::NotRequired,
-                        dest_init: SetupDestinationInit::NotRun { why: why.clone() },
-                        credentials: SetupRemoteCredentials::NotChecked { why: why.clone() },
-                    },
+                    &destination_report,
                     Err(&why),
                     &premissing,
                     &[],
                     &[],
                     2,
                     Some(&why),
-                    &bootstrap_keys,
+                    &created_keys,
                 )
             );
             return ExitCode::from(2);
@@ -13030,15 +13061,31 @@ fn setup_refused_before_save_why(missing: &[&'static str]) -> String {
 /// WIZ-1 masterkey bootstrap. Here the *only* owed parameter was
 /// `--masterkey-saved-elsewhere`, so the wizard created the local repository
 /// and its masterkey — the minimum for the user to copy the key — and then
-/// stopped before the archive pass, the remote step and the scheduler. The
-/// payload that carries this reason offers the key file's `path`, which is the
-/// whole point of the run.
-fn setup_refused_awaiting_declaration_why() -> String {
-    "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
-     the local repository and its masterkey for you to copy elsewhere, then stopped \
-     before the archive pass, the remote step and the scheduler; re-run the same command \
-     with --masterkey-saved-elsewhere to continue"
-        .to_string()
+/// stopped before the archive pass and the scheduler. The payload that carries
+/// this reason offers the key files' `paths`, which is the whole point of the
+/// run.
+///
+/// `destination_step_ran` is true when a destination was named, so the step ran
+/// and the destination's own key is one of the keys to copy (W294/OBS-6). The
+/// name is deliberately about the *keys this run names* rather than about
+/// whether the step left a key: a step that could not reach its destination
+/// creates none, and the `destination` object beside this reason says which of
+/// the two happened. The local sentence is kept for the no-destination case,
+/// where the remote step genuinely did not run.
+fn setup_refused_awaiting_declaration_why(destination_step_ran: bool) -> String {
+    if destination_step_ran {
+        "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+         the local repository and its masterkey and ran the destination step — copy every \
+         key this run names — then stopped before the local archive pass and the scheduler; \
+         re-run the same command with --masterkey-saved-elsewhere to continue"
+            .to_string()
+    } else {
+        "the only missing parameter was --masterkey-saved-elsewhere, so the wizard created \
+         the local repository and its masterkey for you to copy elsewhere, then stopped \
+         before the archive pass, the remote step and the scheduler; re-run the same command \
+         with --masterkey-saved-elsewhere to continue"
+            .to_string()
+    }
 }
 
 /// The same refusal when the bootstrap itself could not run.
