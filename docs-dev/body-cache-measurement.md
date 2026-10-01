@@ -10,12 +10,19 @@ archive** (criterion ①). Both were measured; neither is assumed.
 ADR-034 predicted a body cache keyed by the **data blob id**, and its premise
 experiment asked whether those ids are the same across keys. The premise test
 (`crates/chat-stasher/tests/w120_premise_test.rs`) measures the answer with two
-local repositories, same content, two keys: **data blob ids are plaintext content
-hashes — identical under different keys; pack ids are hashes of the *encrypted*
-pack — disjoint under different keys.**
+local repositories, same content, two keys: **a data blob id is the plaintext
+content hash of the chunk it names — free of the key; pack ids are hashes of the
+*encrypted* pack — disjoint under different keys.** What is *not* identical across
+keys is the **set** of ids: the Rabin polynomial that picks the chunk boundaries is
+drawn at random by `init` and stored in that repository's own config, so two
+separately-initialised repositories cut the same content in different places as soon
+as a file passes the chunker's minimum size. One failing run reported, in one
+repository only, the two SHA-256s of a single shard body's halves.
 
 That makes ADR-034's preferred, cross-destination-sharing branch *true at the blob
-level* — but the cache cannot key by it. The only seam this crate can install below
+level* only where two destinations cut the content identically — which two
+independently-initialised destinations generally do not — and the cache cannot key
+by it anyway. The only seam this crate can install below
 `rustic_core`'s decryption layer is `ReadBackend`, where a body read arrives as
 `read_partial(Pack, pack_id, offset, length)` — ciphertext coordinates, with no
 plaintext id in sight. So the implemented key is `CacheKey { pack, offset, length }`
