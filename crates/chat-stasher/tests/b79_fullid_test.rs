@@ -13,6 +13,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "b79-fixture-machine";
 const SESSION: &str = "opencode.b79-fixture.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
 
@@ -104,6 +107,10 @@ fn isolated_command(sandbox: &Path) -> Result<Command, Box<dyn Error>> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

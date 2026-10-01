@@ -38,6 +38,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn registry() -> HarnessRegistry {
     let cell = json!({
         "template": "~/.claude/projects",
@@ -352,6 +355,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))

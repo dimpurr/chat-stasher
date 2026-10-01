@@ -17,6 +17,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The repo's metadata cache, relocated into this test's own directory
 /// (W289): left unset, rustic puts it in the *real* user cache, where this
 /// suite has accumulated tens of thousands of throwaway per-repository
@@ -44,6 +47,10 @@ fn isolated_read_command(sandbox: &Path, repo: &Path, key: &Path) -> Command {
         .arg(key)
         .args(["--keep-ssh-masters"])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

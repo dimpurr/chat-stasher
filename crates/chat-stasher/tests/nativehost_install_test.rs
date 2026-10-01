@@ -16,6 +16,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const HOST_FILE: &str = "com.chat_stasher.host.json";
 
 struct Fixture {
@@ -66,6 +69,10 @@ impl Fixture {
             .arg(&self.root)
             .args(extra)
             .env("HOME", &self.home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.home),
+            )
             .env("XDG_CONFIG_HOME", self.home.join("config"))
             .env("XDG_DATA_HOME", self.home.join("data"))
             .env("XDG_STATE_HOME", self.home.join("state"))
@@ -531,6 +538,10 @@ fn the_recorded_stage_is_what_the_host_then_reports() {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("native-host")
         .env("HOME", &fixture.home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&fixture.home),
+        )
         .env("XDG_CONFIG_HOME", fixture.home.join("config"))
         .env("XDG_DATA_HOME", fixture.home.join("data"))
         .env("XDG_STATE_HOME", fixture.home.join("state"))

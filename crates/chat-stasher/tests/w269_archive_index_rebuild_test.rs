@@ -24,6 +24,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// Run the real binary with every ambient path redirected into `sandbox`.
 ///
 /// `%LOCALAPPDATA%` is set beside `HOME` for the reason `w267` spells out: on
@@ -47,6 +50,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", sandbox.join("config"))

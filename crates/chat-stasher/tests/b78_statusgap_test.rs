@@ -36,6 +36,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The pre-B78 sha256 of the "nothing unreadable" status body, recorded from
 /// the binary built at commit fbc2281 (before this change). The point of
 /// pinning the digest rather than the line count: the guard has to fail on a
@@ -154,6 +157,10 @@ fn run_status(sandbox: &Path, plant: fn(&Path)) -> StatusRun {
     let output = Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("status")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

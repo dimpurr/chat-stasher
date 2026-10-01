@@ -507,27 +507,27 @@ crates/chat-stasher/src/activity.rs:2153-2203  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:416  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
 crates/chat-stasher/src/config.rs:23  219b41f02316  lines=1
   <- docs-dev/install.md:261  :: /// (`$XDG_CONFIG_HOME`, falling back to `~/.config`).
-crates/chat-stasher/src/config.rs:100-105  0c4fcb3ab27a  lines=6
+crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
   <- docs-dev/threat-model.md:62  :: pub harness_roots: BTreeMap<String, String>,
-crates/chat-stasher/src/config.rs:101  cf52ab144fd4  lines=1
+crates/chat-stasher/src/config.rs:116  cf52ab144fd4  lines=1
   <- docs-dev/privacy.md:606  :: /// Local rustic repository that `push`/`read` operate on.
-crates/chat-stasher/src/config.rs:151-167  ed3020d28acc  lines=17
+crates/chat-stasher/src/config.rs:166-182  ed3020d28acc  lines=17
   <- docs-dev/threat-model.md:62, docs-dev/threat-model.md:80  :: /// snapshot re-writes the tree of every touched session di…
-crates/chat-stasher/src/config.rs:268-269  1d4917fb6eda  lines=2
+crates/chat-stasher/src/config.rs:283-284  1d4917fb6eda  lines=2
   <- docs-dev/install.md:600, docs-dev/install.md:690  :: /// Backend options forwarded verbatim (e.g. `endpoint` for…
-crates/chat-stasher/src/config.rs:367-379  f8c997ee7702  lines=13
+crates/chat-stasher/src/config.rs:382-398  d5891e21fb3e  lines=17
   <- docs-dev/install.md:267  :: pub fn load() -> anyhow::Result<Self> {
-crates/chat-stasher/src/config.rs:367-374  b411c52507b6  lines=8
+crates/chat-stasher/src/config.rs:382-391  c32d09f8366a  lines=10
   <- docs-dev/install.md:278  :: pub fn load() -> anyhow::Result<Self> {
-crates/chat-stasher/src/config.rs:823-834  96eee33c567e  lines=12
+crates/chat-stasher/src/config.rs:859-870  96eee33c567e  lines=12
   <- docs-dev/install.md:261  :: }
-crates/chat-stasher/src/config.rs:901  7b104ed5e9f5  lines=1
+crates/chat-stasher/src/config.rs:937  7b104ed5e9f5  lines=1
   <- docs-dev/install.md:776  :: eprintln!("warning: backend option environment reference wa…
-crates/chat-stasher/src/config.rs:923-930  14514872d0a4  lines=8
+crates/chat-stasher/src/config.rs:959-966  14514872d0a4  lines=8
   <- docs-dev/install.md:267  :: fn unusable_config(path: &Path, reason: String) -> anyhow::…
-crates/chat-stasher/src/config.rs:980-997  854dc4cb8667  lines=18
+crates/chat-stasher/src/config.rs:1016-1033  854dc4cb8667  lines=18
   <- docs-dev/install.md:776  :: fn classify_env_reference(
-crates/chat-stasher/src/config.rs:1061  21dc77f8cddb  lines=1
+crates/chat-stasher/src/config.rs:1097  21dc77f8cddb  lines=1
   <- docs-dev/install.md:772  :: fn resolve_option_env_refs(cfg: &mut Config, problems: &mut…
 crates/chat-stasher/src/credentials.rs:1-25  f658620bebf3  lines=25
   <- docs-dev/install.md:784  :: //! Persistent credential references for backend option val…
@@ -875,9 +875,9 @@ crates/chat-stasher/src/view.rs:246  5ac58701d728  lines=1
   <- docs-dev/threat-model.md:163  :: fn ct_eq(a: &str, b: &str) -> bool {
 crates/chat-stasher/src/view.rs:343-376  22c308f15652  lines=34
   <- docs-dev/threat-model.md:163  :: if method != "GET" {
-crates/chat-stasher/tests/w242_interrupted_push_test.rs:528  7ebbd9feab5f  lines=1
+crates/chat-stasher/tests/w242_interrupted_push_test.rs:535  7ebbd9feab5f  lines=1
   <- docs-dev/node-metadata.md:167  :: assert_no_tree_bytes(
-crates/chat-stasher/tests/w245_interrupted_push_test.rs:614-617  39de3f3ac88f  lines=4
+crates/chat-stasher/tests/w245_interrupted_push_test.rs:621-624  39de3f3ac88f  lines=4
   <- docs-dev/orphan-packs.md:92  :: "a second push of an unchanged stage must report every stag…
 vendor/rustic_core/src/archiver/tree_archiver.rs:195-197  68988662a972  lines=3
   <- docs-dev/node-metadata.md:12  :: if !self.index.has_tree(&id) {

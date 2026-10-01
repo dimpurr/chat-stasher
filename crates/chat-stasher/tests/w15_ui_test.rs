@@ -51,6 +51,10 @@ fn bin() -> Command {
 fn apply_sandbox_env(command: &mut Command, sandbox: &Path) {
     command
         .env("HOME", sandbox.join("home"))
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&sandbox.join("home")),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_CACHE_HOME", sandbox.join("cache"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
@@ -2877,6 +2881,10 @@ fn the_footer_command_pastes_into_a_posix_shell_as_one_command() {
             ),
         )
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .output()
         .unwrap();
     assert!(

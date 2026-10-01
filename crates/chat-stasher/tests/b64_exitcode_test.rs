@@ -17,6 +17,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// One registry harness, `opencode`, whose store is a single SQLite file taken
 /// straight from `$OPENCODE_DB` (`scanner::root_from_env_override`).
 fn write_registry(path: &Path) {
@@ -63,6 +66,10 @@ fn run_collect(sandbox: &Path, opencode_db: &Path) -> Output {
             "b64-fixture",
         ])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

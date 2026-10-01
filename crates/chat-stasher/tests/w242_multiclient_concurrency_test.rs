@@ -100,6 +100,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The start gate, as `(program, script)`, where the platform has one.
 ///
 /// The script blocks on a line from stdin *before* exec'ing the CLI, and passes
@@ -235,6 +238,10 @@ impl Client {
     fn command_of(&self, program: &str) -> Command {
         let mut cmd = Command::new(program);
         cmd.env("HOME", self.dir.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.dir.join("home")),
+            )
             .env("USERPROFILE", self.dir.join("home"))
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
             .env("XDG_DATA_HOME", self.dir.join("data"))

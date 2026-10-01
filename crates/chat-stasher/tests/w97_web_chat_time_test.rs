@@ -16,6 +16,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// 2025-01-15T12:34:56Z and 2025-01-15T13:45:07Z (same local day in every
 /// plausible test time zone).
 const T1: i64 = 1_736_944_496;
@@ -37,6 +40,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

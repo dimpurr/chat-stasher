@@ -69,6 +69,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "m-alpha";
 /// Plaintext bytes of the measured session, spread over this many shards.
 const SHARD_BYTES: usize = 2_048_000;
@@ -609,6 +612,10 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         command
             .env("HOME", self.path().join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.path().join("home")),
+            )
             .env("XDG_CONFIG_HOME", self.path().join("config"))
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))
@@ -1036,6 +1043,10 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         command
             .env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))

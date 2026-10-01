@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// The stage only has to be non-empty: `cmd_push` reaches the masterkey step
 /// once `sealed_shard_count(stage) > 0`, and with an empty registry no harness
 /// is scanned. The shard body is synthetic text, never a real session.
@@ -55,6 +58,10 @@ fn run_push(sandbox: &Path, stage: &Path, repo: &Path, key_file: &Path, machine:
         .arg(key_file)
         .args(["--machine", machine, "--keep-ssh-masters"])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

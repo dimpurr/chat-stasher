@@ -51,6 +51,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// How long a reader may take before the test calls it a stall. Generous: the
 /// green path reads this repository in well under a second.
 const READER_LIMIT: Duration = Duration::from_secs(60);
@@ -186,6 +189,10 @@ impl Fixture {
         .unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         cmd.env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("USERPROFILE", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data-xdg"))

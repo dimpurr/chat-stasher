@@ -46,6 +46,9 @@
 
 #[cfg(unix)]
 use std::ffi::CStr;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
@@ -149,6 +152,10 @@ impl Sandbox {
         command
             .args(args)
             .env("HOME", self.home())
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.home()),
+            )
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))

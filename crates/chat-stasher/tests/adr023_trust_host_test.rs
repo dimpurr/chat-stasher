@@ -18,6 +18,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "adr023-fixture";
 
 fn empty_registry(root: &Path) -> PathBuf {
@@ -67,6 +70,10 @@ fn command(root: &Path, registry: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .env("HOME", root.join("home"))
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&root.join("home")),
+        )
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))

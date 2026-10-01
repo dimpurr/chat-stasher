@@ -64,17 +64,18 @@ cache settings, and every such open planted a per-repository directory in the
 user's cache — 36,174 had accumulated on one machine before W289, which the
 cache-walking tests then had to sweep and which only
 `scripts/dev/prune-test-rustic-cache.sh` can safely reclaim. So: every test
-that opens a repository points its cache (`StoreConfig::cache_dir`, or
-`rustic_cache_dir` in the config a spawned child reads) at a directory under
-its own temp fixture — the cache itself stays enabled, only its location moves
-— and this guard turns a regression back into a red run instead of a slow
-machine. On the first run after a large accumulation the two snapshots cost a
-directory walk each; the prune script is the way to make that cheap again. On
-Windows the guard watches `%LOCALAPPDATA%\rustic` (the Known Folder, which no
-environment variable redirects, which is why the relocation travels through the
-product's own `rustic_cache_dir` knob there rather than through
-`XDG_CACHE_HOME`), and refuses rather than running unguarded when the root
-cannot be named.
+that opens a repository points its cache at a directory under its own temp
+fixture — `StoreConfig::cache_dir` for an in-process open, and
+`CHAT_STASHER_RUSTIC_CACHE_DIR` (the product's runtime override for
+`rustic_cache_dir`, set through `tests`' shared fixture) for a spawned child —
+and the cache itself stays enabled, only its location moves. That guard turns a
+regression back into a red run instead of a slow machine. On the first run after
+a large accumulation the two snapshots cost a directory walk each; the prune
+script is the way to make that cheap again. On Windows the guard watches
+`%LOCALAPPDATA%\rustic` (the Known Folder, which no environment variable
+redirects, which is why the relocation travels through the product's own
+`rustic_cache_dir` knob there rather than through `XDG_CACHE_HOME`), and refuses
+rather than running unguarded when the root cannot be named.
 
 The remaining checks — source-text gates, script self-tests, the release gate
 and the smoke — follow:

@@ -258,13 +258,13 @@ chat-stasher init
 `init` writes a commented default config only when the config does **not**
 already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:165-166`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
-`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:23,823-834`).
+`XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:23,859-870`).
 
 🔴 **A config file that exists has to be valid, and the tool will not pretend
 otherwise.** If it does not parse, if a value has the wrong type, or if a path in
 it cannot be resolved, every command that reads it stops with **exit code `3`**
 and prints the file, the position and the reason
-(`crates/chat-stasher/src/config.rs:367-379,923-930`). It does **not** warn
+(`crates/chat-stasher/src/config.rs:382-398,959-966`). It does **not** warn
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
@@ -275,7 +275,7 @@ reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read
 (`crates/chat-stasher/src/doctor.rs:1498-1542`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
-does use the defaults (`crates/chat-stasher/src/config.rs:367-374`). If you want
+does use the defaults (`crates/chat-stasher/src/config.rs:382-391`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
 
 ---
@@ -597,7 +597,7 @@ Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
 (`crates/chat-stasher/src/store.rs:159-162`, `:348-352`, `:1837-1842`; the config
-field itself is `crates/chat-stasher/src/config.rs:268-269`).
+field itself is `crates/chat-stasher/src/config.rs:283-284`).
 
 **Why this step exists.** A remote destination is reached by running the system
 `ssh` client. The first time it meets a host it has no record of, it refuses:
@@ -687,7 +687,7 @@ Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
 (`crates/chat-stasher/src/store.rs:159-162`, `:1837-1842`; the field itself is
-`crates/chat-stasher/src/config.rs:268-269`), so the option names below belong
+`crates/chat-stasher/src/config.rs:283-284`), so the option names below belong
 to the backend, not to this tool.
 
 **What was tested, and where that stops.** The configuration below was exercised
@@ -769,11 +769,11 @@ owner-only-readable (`chmod 600`). That is the shape most S3 clients document,
 and nothing about it is wrong — it is a secret on a disk.
 
 A value spelled `env:NAME` is instead resolved at config load, out of the
-process environment (`crates/chat-stasher/src/config.rs:1061`). The four ways
+process environment (`crates/chat-stasher/src/config.rs:1097`). The four ways
 that can fail — the name is not a legal variable name, the variable is set but
 empty, it is set to a value that is not valid Unicode, it is not set at all —
 are four different messages, and none of them quotes the value
-(`crates/chat-stasher/src/config.rs:980-997`; the warning is printed at `:901`).
+(`crates/chat-stasher/src/config.rs:1016-1033`; the warning is printed at `:937`).
 A reference that cannot be resolved **removes that option** rather than
 substituting an empty string, so the failure is a credential error, not a
 silently-empty one.

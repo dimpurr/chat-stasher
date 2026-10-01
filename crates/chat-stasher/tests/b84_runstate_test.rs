@@ -46,6 +46,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const FINISHED_AND_FAILED: i32 = 1;
 const CLEAN: i32 = 0;
 
@@ -61,6 +64,10 @@ fn run(sandbox: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .arg("status")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

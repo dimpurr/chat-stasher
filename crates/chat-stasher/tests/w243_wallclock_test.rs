@@ -27,6 +27,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "m-alpha";
 /// Plaintext bytes of the measured session, spread over this many shards.
 const SHARD_BYTES: usize = 2_048_000;
@@ -150,6 +153,10 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         command
             .env("HOME", self.path().join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.path().join("home")),
+            )
             .env("XDG_CONFIG_HOME", self.path().join("config"))
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))

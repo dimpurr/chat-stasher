@@ -44,6 +44,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// 2024-01-01T00:00:00Z. Far enough from any plausible "now" in a test run that
 /// a window around the push and a window around the conversation cannot
 /// accidentally overlap.
@@ -1346,6 +1349,10 @@ fn run_cli(sandbox: &Path, repo: &Path, key: &Path, subcommand: &str, extra: &[&
         .arg(key)
         .args(extra)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

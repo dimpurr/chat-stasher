@@ -34,6 +34,9 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 // --------------------------------------------------------------- sandbox
 
 fn sandbox() -> tempfile::TempDir {
@@ -58,6 +61,10 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
     bin()
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
@@ -310,6 +317,10 @@ impl Ui {
         let mut child = bin()
             .args(&args)
             .env("HOME", &home)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&home),
+            )
             .env("XDG_CONFIG_HOME", sandbox.join("config"))
             .env("XDG_DATA_HOME", sandbox.join("data"))
             .env("XDG_STATE_HOME", sandbox.join("state"))

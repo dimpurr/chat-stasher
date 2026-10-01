@@ -18,6 +18,9 @@
 //! never touched, and no session body is ever read.
 
 use std::fs;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -121,6 +124,10 @@ fn run_cli_args(sandbox: &Path, registry: &Path, args: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
         .args(args)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

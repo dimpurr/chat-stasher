@@ -21,6 +21,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "b83-fixture";
 const SESSION: &str = "b83.synthetic-session";
 
@@ -299,6 +302,10 @@ fn run_clean_ingest(root: &Path) -> Output {
         .arg(&stage)
         .args(["--machine", MACHINE])
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)

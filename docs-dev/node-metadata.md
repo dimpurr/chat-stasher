@@ -164,7 +164,7 @@ fields the table above leaves alone.
 
 ## The check
 
-`crates/chat-stasher/tests/w242_interrupted_push_test.rs:528` asserts the plain
+`crates/chat-stasher/tests/w242_interrupted_push_test.rs:535` asserts the plain
 case — a second push of an untouched stage adds no bytes at all, `data_added
 == 0` and not merely `data_blobs == 0` — on every platform. The two tests in
 "The event, reproduced" above are the single-field reproductions, and the

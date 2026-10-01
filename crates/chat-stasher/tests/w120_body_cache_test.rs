@@ -29,6 +29,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const MACHINE: &str = "m-alpha";
 
 /// The *metadata* cache moved into the sandbox (W289) — distinct from the
@@ -171,6 +174,10 @@ impl Sandbox {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         command
             .env("HOME", self.path().join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&self.path().join("home")),
+            )
             .env("XDG_CONFIG_HOME", self.path().join("config"))
             .env("XDG_DATA_HOME", self.path().join("data"))
             .env("XDG_STATE_HOME", self.path().join("state"))

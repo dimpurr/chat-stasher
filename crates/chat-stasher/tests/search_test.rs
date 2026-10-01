@@ -36,6 +36,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 const SHARD_BYTES: usize = 256 * 1024;
 const SHARDS_PER_SESSION: usize = 4;
 /// Packs at or above this size are data packs in this fixture; tree packs are
@@ -637,6 +640,10 @@ fn no_content_activity_row_survives_real_search_index_read() {
         .arg(&key_path)
         .args(["--machine", machine])
         .env("HOME", root.join("child-home"))
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&root.join("child-home")),
+        )
         .env("XDG_CACHE_HOME", root.join("child-cache"))
         .env_remove("RUSTIC_REPO")
         .env_remove("RUSTIC_KEY_FILE")

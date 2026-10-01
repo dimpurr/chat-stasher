@@ -29,6 +29,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// `doctor::run()` relies on process-level environment variables, whereas cargo runs tests in parallel in the same process.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -201,6 +204,10 @@ fn run_status_sessions(sandbox: &Path, rows: &[(&str, &str)]) -> String {
         .arg("status")
         .arg("--sessions")
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", sandbox.join("xdg-config"))
         .env("XDG_DATA_HOME", sandbox.join("xdg-data"))

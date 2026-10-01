@@ -13,6 +13,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn run_collect(sandbox: &Path, machine: Option<&str>) -> Output {
     let home = sandbox.join("home");
     let no_commands = sandbox.join("no-commands");
@@ -31,6 +34,10 @@ fn run_collect(sandbox: &Path, machine: Option<&str>) -> Output {
         .arg(sandbox.join("stage"))
         .env("PATH", &no_commands)
         .env("HOME", &home)
+        .env(
+            test_support::RUSTIC_CACHE_DIR_ENV,
+            test_support::rustic_cache_root(&home),
+        )
         .env("XDG_CONFIG_HOME", sandbox.join("config"))
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))

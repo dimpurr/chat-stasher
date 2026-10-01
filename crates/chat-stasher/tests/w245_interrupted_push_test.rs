@@ -48,6 +48,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 /// A deterministic, poorly-compressible payload so a push takes measurable
 /// time without the test needing a random-number dependency.
 fn filler(bytes: usize, seed: u64) -> String {
@@ -178,6 +181,10 @@ impl Sandbox {
         let root = self.dir.path();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
         cmd.env("HOME", root.join("home"))
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(&root.join("home")),
+            )
             .env("USERPROFILE", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))

@@ -89,7 +89,7 @@ So the bytes stop being waste because they **become the content**. The measured
 effect at test scale (4 sessions × 500 000 bytes): the old retry added 1 047 572 B
 over a stranded 1 045 700 B repository — a second full copy — while the adopting
 retry adds only its snapshot, index and tree pack
-(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:614-617`).
+(`crates/chat-stasher/tests/w245_interrupted_push_test.rs:621-624`).
 
 Implementation: `crates/chat-stasher/src/orphans.rs:458`. Every read path reaches
 it through `crates/chat-stasher/src/store.rs:404`, which is the whole point of
