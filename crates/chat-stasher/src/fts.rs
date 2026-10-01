@@ -1470,17 +1470,7 @@ impl Index {
         fs::create_dir_all(&self.root)
             .with_context(|| format!("create FTS directory `{}`", self.root.display()))?;
         if !marker_path.exists() {
-            if self
-                .root
-                .read_dir()
-                .context("inspect unmarked FTS directory")?
-                .next()
-                .is_some()
-            {
-                bail!("refusing to adopt a non-empty unmarked FTS directory");
-            }
-            self.publish_marker()?;
-            set_file_private(&self.root.join(MARKER))?;
+            self.initialize_marker_after_missing_probe()?;
         }
         set_dir_private(&self.root)?;
         set_file_private(&marker_path)?;
@@ -1710,6 +1700,29 @@ impl Index {
         }
     }
 
+    /// Finish the marker path after a caller observed it absent. Another
+    /// builder may publish the marker between that probe and this directory
+    /// inspection, so recheck ownership before treating a non-empty directory
+    /// as foreign. The marker is atomically renamed into place and its fixed
+    /// contents are verified by `marker_is_ours`.
+    fn initialize_marker_after_missing_probe(&self) -> Result<()> {
+        if self
+            .root
+            .read_dir()
+            .context("inspect unmarked FTS directory")?
+            .next()
+            .is_some()
+        {
+            if self.marker_is_ours()? {
+                return Ok(());
+            }
+            bail!("refusing to adopt a non-empty unmarked FTS directory");
+        }
+        self.publish_marker()?;
+        set_file_private(&self.root.join(MARKER))?;
+        Ok(())
+    }
+
     /// Publish the ownership marker for this index, atomically and
     /// idempotently.
     ///
@@ -1734,6 +1747,9 @@ impl Index {
     /// so a staging file left there by a concurrent build would make this one
     /// refuse the very directory its sibling had just created.
     fn publish_marker(&self) -> Result<()> {
+        if self.marker_is_ours()? {
+            return Ok(());
+        }
         /// Distinguishes the staging files of concurrent publishers within one
         /// process; the process id distinguishes them across processes.
         static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1751,7 +1767,17 @@ impl Index {
                 .context("write FTS ownership marker")?;
             file.sync_all().context("sync FTS ownership marker")?;
         }
-        fs::rename(&staging, self.root.join(MARKER)).context("publish FTS ownership marker")
+        match fs::rename(&staging, self.root.join(MARKER)) {
+            Ok(()) => Ok(()),
+            Err(error) if self.marker_is_ours()? => {
+                // On Windows rename does not replace an existing destination.
+                // A sibling that published this same fixed marker won the
+                // race, which is the successful outcome we need.
+                drop(fs::remove_file(&staging));
+                Ok(())
+            }
+            Err(error) => Err(error).context("publish FTS ownership marker"),
+        }
     }
 
     fn validate_owned_paths_if_present(&self) -> Result<()> {
@@ -2319,6 +2345,34 @@ mod tests {
             MARKER_CONTENT,
             "a marker that exists is a marker that holds its whole content"
         );
+    }
+
+    /// A sibling can publish the owned marker after this builder's absent
+    /// probe and before it inspects the root. That exact interleaving must be
+    /// adopted, while an unrelated file in an unmarked root remains refused.
+    #[test]
+    fn missing_marker_probe_adopts_a_sibling_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        fs::create_dir_all(index.root()).unwrap();
+
+        // Builder A observes the marker absent. Builder B then completes its
+        // atomic publication before A takes the read_dir branch.
+        assert!(!index.root().join(MARKER).exists());
+        index.publish_marker().unwrap();
+        index
+            .initialize_marker_after_missing_probe()
+            .expect("a sibling's complete marker makes the root owned");
+        assert!(index.marker_is_ours().unwrap());
+
+        let foreign = Index::at(dir.path().join("foreign"));
+        fs::create_dir_all(foreign.root()).unwrap();
+        fs::write(foreign.root().join("unexpected"), b"synthetic").unwrap();
+        assert!(foreign
+            .initialize_marker_after_missing_probe()
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to adopt a non-empty unmarked FTS directory"));
     }
 
     /// A build that meets an index file another process has created but not yet

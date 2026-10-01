@@ -839,7 +839,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1457-1686,1688-1703,2102-2107`; `crates/chat-stasher/src/main.rs:8416-8727`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1457-1676,1678-1693,2128-2137`; `crates/chat-stasher/src/main.rs:8416-8727`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
