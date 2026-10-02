@@ -824,6 +824,14 @@ pub fn seal_payload(
 
     let parsed = parse_bundle(source_file, bytes).map_err(SealError::Other)?;
 
+    // W306: refuse a fixture identity before the stage is touched at all — the
+    // lock file below is itself a write into the stage, so the check has to
+    // precede it, not just the shard. A fixture identity aimed at a temp stage
+    // (every correct test) passes; one that lost its sandbox is refused before
+    // the real `.ingest.lock` changes.
+    crate::test_identity_guard::refuse_fixture_write(&[parsed.id.as_str()], stage)
+        .map_err(SealError::Other)?;
+
     let _lock = lock_stage(stage).map_err(SealError::Lock)?;
     if let (Some(install_id), Some(browser), Some(profile_label)) = (
         parsed.install_id.as_deref(),
@@ -1243,6 +1251,13 @@ fn write_shard_atomic(
     lines: &[String],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
+    // W306: the last gate before a session shard reaches the stage. A fixture
+    // identity (`chatgpt.synthetic-session`, the 2026-10-02 incident) must
+    // never land in a stage outside the process temp directory, whatever the
+    // caller's environment says. Every correct test writes under temp and
+    // passes; a test that lost its sandbox is refused here instead of on the
+    // author's machine.
+    crate::test_identity_guard::refuse_fixture_write(&[id], stage)?;
     let dir = store::session_shard_dir(stage, machine, id);
     fs::create_dir_all(&dir)?;
     clean_stale_tmp(&dir)?;

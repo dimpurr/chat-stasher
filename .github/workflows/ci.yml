@@ -163,9 +163,29 @@ jobs:
       # it can read it, so a Windows leak fails this step exactly as it does on
       # the other cells; when neither variable is set it refuses before running
       # anything rather than going unguarded.
+      #
+      # W306 nests a second guard inside the first: `check-test-isolation.sh`
+      # watches the real *user data* — the data, config and cache roots and the
+      # state home — after a 2026-10-02 test run resolved the real data root and
+      # planted a synthetic session and a coordination row in the author's
+      # machine. It does not fail on a change itself: it fails when a change
+      # carries a reserved fixture identity, or a per-run marker the shared test
+      # sandbox stamps into everything it hands a test. That distinction is
+      # deliberate — the machine this guard gates also runs the live product,
+      # which writes the real stage every few minutes — and run 37023093243 is
+      # why: it red on an empty `~/.local/state` a dependency created, and on
+      # the Windows cell it watched `%LOCALAPPDATA%\chat-stasher` (the *cache*
+      # root there) as if it were the data root. The inbox and the
+      # NativeMessagingHosts directories keep the whole-snapshot rule, because
+      # nothing writes those during a run. The suite therefore runs once, under
+      # both guards; either verdict fails the step. The new guard's own
+      # self-test (the "Test-isolation guard self-test" step below) proves each
+      # of its branches red independently of any real leak.
       - name: Test
         shell: bash
-        run: bash scripts/dev/check-test-cache-isolation.sh -- cargo test
+        run: |
+          bash scripts/dev/check-test-cache-isolation.sh -- \
+            bash scripts/dev/check-test-isolation.sh -- cargo test
 
       # ---------------------------------------------------------------------
       # COVERAGE HOLE (deliberate, not masked): scripts/release-gate.sh runs
@@ -484,6 +504,8 @@ jobs:
       # CONTRIBUTING.md lists both as local checks, so CI has to run them too.
       - name: Cache-isolation guard self-test
         run: bash scripts/dev/test-cache-isolation-guard.sh
+      - name: Test-isolation guard self-test
+        run: bash scripts/dev/test-test-isolation-guard.sh
       - name: Prune script self-test
         run: bash scripts/dev/test-prune-rustic-cache.sh
 

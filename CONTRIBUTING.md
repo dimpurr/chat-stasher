@@ -50,12 +50,14 @@ From the repository root, run:
 cargo fmt --check
 cargo clippy --all-targets -- -D clippy::let_underscore_must_use
 cargo clippy --lib --bins -- -D clippy::unwrap_used
-bash scripts/dev/check-test-cache-isolation.sh -- cargo test
+bash scripts/dev/check-test-cache-isolation.sh -- \
+  bash scripts/dev/check-test-isolation.sh -- cargo test
 python3 scripts/check-semantic-defaults.py
 ```
 
-The fourth line **is** the test suite, run through the rustic-cache isolation
-guard (W289). The guard snapshots this machine's real user cache root
+The fourth line **is** the test suite, run once through two isolation guards:
+the rustic-cache guard (W289) on the outside and the user-data guard (W306)
+inside it. The cache guard snapshots this machine's real user cache root
 (`~/Library/Caches/rustic` on macOS, `$XDG_CACHE_HOME` or `~/.cache/rustic` on
 Linux, `%LOCALAPPDATA%\rustic` on Windows) before and after the suite and exits
 non-zero if the run created, removed or renamed anything there. That invariant
@@ -76,6 +78,59 @@ script is the way to make that cheap again. On Windows the guard watches
 redirects, which is why the relocation travels through the product's own
 `rustic_cache_dir` knob there rather than through `XDG_CACHE_HOME`), and refuses
 rather than running unguarded when the root cannot be named.
+
+The inner guard (`scripts/dev/check-test-isolation.sh`, W306) extends the same
+idea to the rest of the machine's real state, because the cache pin turned out
+to be one directory too narrow: on 2026-10-02 a test run resolved the real
+`$XDG_DATA_HOME/chat-stasher` and planted
+`stage/sessions/<machine>/chatgpt.synthetic-session` and a `synthetic-install`
+row in the real `state/extension-coordination.sqlite3`.
+
+It asks *what a change carries*, not *where it landed*. The machine that runs
+this check also runs the live product, which writes the real
+`stage/ext-status/…` every few minutes, so a guard that reds on any change to
+the data root does not survive contact with its own purpose. Instead, after the
+run, every entry the run created or modified under the real data, config,
+cache and state-home roots is inspected, and is a leak when its name carries a
+reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`,
+case-insensitive, as a whole token) or a per-run marker, when a small file's
+bytes carry the marker, or when a small file under `<data root>/state` carries
+a fixture token — the coordination store is where the incident's row landed,
+and it holds no conversation text for the scan to mistake for one. That last
+rule matches the token as a case-insensitive **substring**, not a whole token,
+because a store is not delimited text: SQLite lays a record's columns down with
+no separator, so the incident's row is the bytes `chatgptsynthetic-install` and
+a boundary rule cannot see the `synthetic` glued to the `chatgpt` before it.
+Both rules subtract a **per-run baseline** — the fixture tokens already in the
+state store and the fixture-named paths already under the watched roots, read
+before the command starts. The machine that runs the check may carry debris
+from an earlier leak (the incident's `chatgpt.synthetic-session` shard is still
+in the real stage), and the live product rewrites the files that hold it, so a
+write that only re-touches pre-existing debris is green while an entry or token
+the run *introduces* is still red. The marker is a random token the guard
+exports for one run; the shared `Sandbox` fixture in `src/test_support.rs`
+names its temp root after it, so a value a test derives from its sandbox
+carries the marker even when the write lands in a real root. A fixture-named
+entry the run *removed* is a leak too. The inbox and every
+`NativeMessagingHosts` directory the machine has (read from the filesystem, so
+a browser directory that appears during the run is itself a diff) keep the old
+whole-snapshot rule, because nothing writes them during a run: any change
+there, including a create-then-delete caught by the run boundary, is red.
+
+Every test still gets its environment from that `Sandbox` fixture, which points
+`HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME` and the rustic-cache pin inside one temp root; the
+native-messaging half is covered by tests passing an explicit `--target-root`,
+because Windows resolves those directories through the Known Folder API and no
+environment variable moves them. The guard is the check; a second, code-level
+fail-safe (`src/test_identity_guard.rs`) refuses to write a reserved fixture
+identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`) to a destination
+outside the process temp directory at all, so a test that loses its sandbox is
+stopped at the write even if the guard is not the thing running it.
+
+The guard's self-test is `bash scripts/dev/test-test-isolation-guard.sh`; the
+code-level fail-safe's is `cargo test -p chat-stasher --test
+w306_test_isolation_test` (the ordinary suite runs it too).
 
 The remaining checks — source-text gates, script self-tests, the release gate
 and the smoke — follow:
@@ -101,6 +156,7 @@ bash scripts/dev/test-reload-extension.sh
 bash scripts/dev/test-rebase-onto-main.sh
 bash scripts/dev/test-merge-drivers.sh
 bash scripts/dev/test-cache-isolation-guard.sh
+bash scripts/dev/test-test-isolation-guard.sh
 bash scripts/dev/test-prune-rustic-cache.sh
 python3 scripts/dev/scoreboard.py --selftest
 bash scripts/selftest-relocate-citations.sh
