@@ -264,8 +264,9 @@ export async function fingerprintAccountId(
  *    with the id its own request named instead of `unknown`. It is still only a
  *    claim: the header is page-visible input, so it is fingerprinted (never stored)
  *    and it distinguishes what the header distinguishes — two workspaces sharing a
- *    value are one fingerprint — rather than being proof of a person. With no header
- *    the reading falls through to the body scan and then to a named `unknown`, and
+ *    value are one fingerprint — rather than being proof of a person. A malformed
+ *    supplied header is a named `unknown`; older captures without the optional field
+ *    retain their previous body-axis behaviour.
  *    the raw value must never reach a bundle, an export, a log or the host (see
  *    `coordinationIdFromCapture`, which refuses this source by name).
  *
@@ -317,8 +318,12 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
   //    it is the narrower, page-owned observation. `chatGptAccountIdHeaderValue` is the
   //    one validator, so a value this reader accepts is one the shape gate also accepts.
   if (row.id === 'chatgpt') {
-    const header = chatGptAccountIdHeaderValue(captured.chatgptAccountIdHeader);
-    if (header !== null) return { kind: 'id', id: header, source: 'request-header-chatgpt-account-id' };
+    if (captured.chatgptAccountIdHeader !== undefined) {
+      const header = chatGptAccountIdHeaderValue(captured.chatgptAccountIdHeader);
+      return header !== null
+        ? { kind: 'id', id: header, source: 'request-header-chatgpt-account-id' }
+        : { kind: 'unknown', reason: 'no-account-id-in-capture' };
+    }
   }
 
   const identity = extractIdentity(captured.text, sessionId);

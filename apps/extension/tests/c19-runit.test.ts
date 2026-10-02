@@ -194,7 +194,10 @@ async function stateOf(): Promise<BackfillState> {
   const { browserLocalStore } = await import('../lib/backfill/store');
   const st = browserLocalStore();
   if (!st) throw new Error('this suite runs against a fake browser with storage.local; it must not be null');
-  return await loadState(st, 'chatgpt', 'chatgpt:acct-fixture-1');
+  const { fingerprintChatGptWorkspace } = await import('../lib/backfill/chatgpt-workspace');
+  const scope = await fingerprintChatGptWorkspace(st, 'acct-fixture-1');
+  if (!scope) throw new Error('the synthetic workspace must fingerprint');
+  return await loadState(st, 'chatgpt', scope);
 }
 const runtimeListeners: Array<(m: any, s: any, r: any) => any> = [];
 const alarmListeners: Array<(a: any) => void> = [];

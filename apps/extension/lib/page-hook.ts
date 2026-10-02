@@ -1,6 +1,7 @@
 import {
   CAPTURE_MESSAGE,
   CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
+  chatGptAccountIdHeaderValue,
   GEMINI_AT_KEY,
   GEMINI_BL_KEY,
   GEMINI_ORIGIN,
@@ -700,15 +701,15 @@ export function installPageFetchHook(options: PageHookOptions): void {
       let accountId: string | null = null;
       if (typeof Headers !== 'undefined' && headers instanceof Headers) accountId = headers.get('ChatGPT-Account-Id');
       else if (Array.isArray(headers)) {
-        const row = headers.find((entry) => Array.isArray(entry) && String(entry[0]).toLowerCase() === 'chatgpt-account-id');
-        if (row) accountId = String(row[1]);
+        const row = headers.find((entry) => Array.isArray(entry) && typeof entry[0] === 'string'
+          && entry[0].toLowerCase() === 'chatgpt-account-id');
+        if (row && typeof row[1] === 'string') accountId = row[1];
       } else if (headers && typeof headers === 'object') {
         const key = Object.keys(headers).find((name) => name.toLowerCase() === 'chatgpt-account-id');
         const value = key ? (headers as Record<string, unknown>)[key] : null;
         if (typeof value === 'string') accountId = value;
       }
-      const trimmed = accountId?.trim();
-      return trimmed ? trimmed : null;
+      return chatGptAccountIdHeaderValue(accountId);
     } catch {
       return null;
     }

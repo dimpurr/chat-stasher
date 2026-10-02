@@ -109,6 +109,8 @@ import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/sp
 import { daySlowPlan, daySlowTriggeredBy, isPlatformDaySlowed, recordPlatformRateLimit } from '../lib/backfill/day-slow';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
+import { fingerprintChatGptWorkspace } from '../lib/backfill/chatgpt-workspace';
+import { migrateChatGptWorkspaceScopes } from '../lib/backfill/chatgpt-scope-migration';
 import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
 import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, parseRetryAfterMs, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
 import {
@@ -847,6 +849,19 @@ async function writeConnectDeliveryOnce(store: BackfillStore | null, delivered: 
 let backfillTransport: HttpPort | null = null;
 let lastTick: TickResult | null = null;
 let pendingTick: Promise<unknown> = Promise.resolve();
+let chatGptScopeMigration: Promise<void> | null = null;
+
+/** Share startup and request-path migration so concurrent worker events cannot race it. */
+function ensureChatGptWorkspaceScopesMigrated(store: BackfillStore | null): Promise<void> {
+  if (!store) return Promise.resolve();
+  if (!chatGptScopeMigration) {
+    const migration = migrateChatGptWorkspaceScopes(store).finally(() => {
+      if (chatGptScopeMigration === migration) chatGptScopeMigration = null;
+    });
+    chatGptScopeMigration = migration;
+  }
+  return chatGptScopeMigration;
+}
 /**
  * Test seam: inject a fake clock / a custom pacing / a deterministic source of
  * randomness so tests do not really sleep 20 seconds and do not have to sample
@@ -1082,7 +1097,7 @@ async function coordinatedTick(
       if (!workspace.ok || workspace.observed !== true) {
         throw new Error(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved');
       }
-      if (workspace.workspace !== expectedWorkspace) throw new Error('scope-mismatch');
+      if (await fingerprintChatGptWorkspace(browserLocalStore(), workspace.workspace) !== accountId) throw new Error('scope-mismatch');
     }
     const segment = coordinationSegmentForRequest(platform, url);
     const response = await lease.request(segment, () => http(url, init));
@@ -1102,7 +1117,14 @@ async function coordinatedTick(
     return response;
   };
   if (expectedWorkspace !== null && http.chatgptWorkspace) {
-    coordinatedHttp.chatgptWorkspace = http.chatgptWorkspace;
+    coordinatedHttp.chatgptWorkspace = async () => {
+      const observed = await http.chatgptWorkspace!();
+      if (!observed.ok) return observed;
+      const scope = await fingerprintChatGptWorkspace(browserLocalStore(), observed.workspace);
+      return scope
+        ? { ok: true as const, workspace: scope, observed: true as const }
+        : { ok: false as const, reason: 'workspace-unresolved' as const, observed: false };
+    };
   }
   try {
     return await run(coordinatedHttp, lease.gentle);
@@ -1977,6 +1999,7 @@ export async function registerBackfillTargetHere(): Promise<
 > {
   const store = browserLocalStore();
   if (!store) return { ok: false, reason: 'no-store' };
+  await ensureChatGptWorkspaceScopesMigrated(store);
   const live = await liveTransport();
   if (!live.wired) return { ok: false, reason: 'no-live-transport' };
   if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
@@ -1999,7 +2022,9 @@ export async function registerBackfillTargetHere(): Promise<
       await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
       return { ok: false, reason };
     }
-    scope = `chatgpt:${resolved.workspace}`;
+    const fingerprintedScope = await fingerprintChatGptWorkspace(store, resolved.workspace);
+    if (!fingerprintedScope) return { ok: false, reason: 'org-unresolved' };
+    scope = fingerprintedScope;
   }
   const resolver = scopeResolverFor(platform);
   if (resolver) {
@@ -2036,7 +2061,7 @@ export function backfillTickSettled(): Promise<unknown> {
 /** Derive a backfill target from one real capture. Returns null when it cannot be derived (no guessing). */
 export function backfillTargetFor(
   captured: CapturedFetch,
-  chatgptWorkspace?: string,
+  chatgptWorkspaceFingerprint?: string,
 ): { platform: string; origin: string; scope: string } | null {
   const row = findPlatformForUrl(captured.url)
     ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
@@ -2051,8 +2076,11 @@ export function backfillTargetFor(
   }
   if (!origin) return null;
   if (row.id === 'chatgpt') {
-    // A workspace key exists only when this page positively exposed its request header.
-    return { platform: row.id, origin, scope: chatgptWorkspace ? `chatgpt:${chatgptWorkspace}` : 'chatgpt:!workspace-unresolved' };
+    // A workspace key is already an HMAC scope; this pure helper never accepts or
+    // returns the page-visible raw header value.
+    const safeScope = chatgptWorkspaceFingerprint && /^[a-f0-9]{64}$/.test(chatgptWorkspaceFingerprint)
+      ? `chatgpt:${chatgptWorkspaceFingerprint}` : 'chatgpt:!workspace-unresolved';
+    return { platform: row.id, origin, scope: safeScope };
   }
   /**
    * 🔴 W31 · **A plan whose paths carry the scope takes it from the page's own
@@ -2094,6 +2122,8 @@ export async function kickBackfill(
   captured: CapturedFetch,
   senderTabId?: number,
 ): Promise<TickResult | null> {
+  const store = browserLocalStore();
+  await ensureChatGptWorkspaceScopesMigrated(store);
   let target = backfillTargetFor(captured);
   if (!target) return null;
   let http = await resolveHttpPort(target.origin, senderTabId);
@@ -2115,9 +2145,12 @@ export async function kickBackfill(
     } catch {
       // The workspace refusal below records that this page supplied no usable evidence.
     }
-    if (workspace) target = backfillTargetFor(captured, workspace)!;
+    if (workspace) {
+      const fingerprintedScope = await fingerprintChatGptWorkspace(store, workspace);
+      if (!fingerprintedScope) return null;
+      target = { ...target, scope: fingerprintedScope };
+    }
   }
-  const store = browserLocalStore();
   // Useful when the alarm wakes: record this target the user really did use, so
   // there is nothing to guess later. A failed write still lets this tick run —
   // the registry only affects the alarm's path.
@@ -2428,6 +2461,11 @@ async function resolveScopeForTick(
 
 async function runAlarmTickBody(): Promise<TickResult> {
   const store = browserLocalStore();
+  try {
+    await ensureChatGptWorkspaceScopesMigrated(store);
+  } catch {
+    return { ran: false, reason: 'no-store', report: null };
+  }
 
   // 🔴 W2 · Every alarm wake sends the outbox first (the first of task 5's two
   //    occasions). It is ordered before the backfill leg: what is sitting in the
@@ -3525,6 +3563,14 @@ export default defineBackground(() => {
     await initUiLocale().catch((err) => {
       console.warn('[chat-stasher] ui locale init failed', (err as Error).message);
     });
+
+    // Migrate old raw ChatGPT workspace scopes on worker startup, even when
+    // backfill is switched off; capture and backfill entry points retry on failure.
+    try {
+      await ensureChatGptWorkspaceScopesMigrated(browserLocalStore());
+    } catch (err) {
+      console.warn('[chat-stasher] ChatGPT workspace scope migration failed', (err as Error).message);
+    }
 
     // Every SW wake (fresh start AND runtime.onStartup) re-asserts the badge's
     // truth, so a dead-worker leftover badge gets cleared once 5 min pass.

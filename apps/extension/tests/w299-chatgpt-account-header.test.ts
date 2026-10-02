@@ -33,6 +33,7 @@ import {
   CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS,
   CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
   isCapturedFetchShape,
+  isPageCaptureMessage,
   type CapturedFetch,
 } from '../lib/contract';
 import { CONVERSATION_SEEN_MESSAGE } from '../lib/platform-auth';
@@ -44,8 +45,11 @@ import {
   coordinationIdFromCapture,
 } from '../lib/account-fingerprint';
 import { memoryStore } from '../lib/backfill/store';
-import { listEntries } from '../lib/outbox';
+import { buildExportFile, listEntries } from '../lib/outbox';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { BACKFILL_TARGETS_KEY } from '../lib/backfill/alarm';
+import { applyDebtDiff, readDebtSet } from '../lib/backfill/debt-store';
+import { stateKey } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
 // Synthetic fixtures. No real account, workspace or conversation id below.
@@ -141,7 +145,9 @@ describe('W299-A · the hook reads the header from every shape a page can pass',
       ['empty string', { headers: { 'ChatGPT-Account-Id': '' } }],
       ['whitespace only', { headers: { 'ChatGPT-Account-Id': '   ' } }],
       ['a number', { headers: { 'ChatGPT-Account-Id': 42 as unknown as string } }],
+      ['a non-string tuple', { headers: [['ChatGPT-Account-Id', 42]] as unknown as HeadersInit }],
       ['null', { headers: { 'ChatGPT-Account-Id': null as unknown as string } }],
+      ['oversized value', { headers: { 'ChatGPT-Account-Id': 'x'.repeat(CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS + 1) } }],
     ];
     for (const [name, init] of misses) {
       const win = pageWindow(ORIGIN, CHATGPT_BODY);
@@ -214,17 +220,17 @@ describe('W299-A2 · the page→content gate refuses a malformed or misplaced fi
     ...extra,
   });
 
-  it('🔴 a bounded non-empty string on a ChatGPT capture is admitted; anything else is refused', () => {
+  it('🔴 bounded metadata is admitted; malformed metadata stays unknown without refusing the capture', () => {
     expect(isCapturedFetchShape(capture({ chatgptAccountIdHeader: HEADER_A }))).toBe(true);
 
-    const refused: Array<[string, Partial<CapturedFetch>]> = [
+    const unknown: Array<[string, Partial<CapturedFetch>]> = [
       ['a number', { chatgptAccountIdHeader: 42 as unknown as string }],
       ['an empty string', { chatgptAccountIdHeader: '' }],
       ['whitespace only', { chatgptAccountIdHeader: '  ' }],
       ['an over-long value', { chatgptAccountIdHeader: 'x'.repeat(CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS + 1) }],
     ];
-    for (const [name, extra] of refused) {
-      expect(isCapturedFetchShape(capture(extra)), name).toBe(false);
+    for (const [name, extra] of unknown) {
+      expect(isCapturedFetchShape(capture(extra)), name).toBe(true);
     }
 
     // …and the field cannot ride a capture for a platform it does not describe.
@@ -340,7 +346,7 @@ const fakeBrowser: any = {
         return out;
       },
       async set(values: Record<string, unknown>) { Object.assign(store, values); },
-      async remove(keys: string[]) { for (const k of keys) delete store[k]; },
+      async remove(keys: string | string[]) { for (const k of Array.isArray(keys) ? keys : [keys]) delete store[k]; },
     },
   },
   action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setTitle() {} },
@@ -425,5 +431,62 @@ describe('W299-C · a forged page-visible value reaches no durable write and no 
     // The queued payload still carries the fingerprint — the durability is in the bundle,
     // not in the transient field.
     expect(entries![0]!.payload).toContain('request-header-chatgpt-account-id');
+  });
+
+  it('🔴 export serialization and a malformed forged page message never serialize the raw value', async () => {
+    const raw = 'oversized-forged-fixture-id'.repeat(40);
+    host = createSyntheticHost({ up: false });
+    const payload = liveCapture({ chatgptAccountIdHeader: raw });
+    expect(raw.length).toBeGreaterThan(CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS);
+    expect((await accountFingerprintFor(payload, memoryStore(), null)).kind).toBe('unknown');
+    const page = {} as MessageEventSource;
+    const event = { source: page, origin: ORIGIN, data: { type: CAPTURE_MESSAGE, payload } };
+    expect(isPageCaptureMessage(event, page, ORIGIN)).toBe(true);
+    expect(isPageCaptureMessage({ ...event, origin: 'https://attacker.invalid' }, page, ORIGIN)).toBe(false);
+    await dispatch((event.data as { payload: CapturedFetch }).payload);
+
+    const queued = await listEntries();
+    expect(queued).not.toBeNull();
+    expect(JSON.stringify(queued)).not.toContain(raw);
+    const exported = buildExportFile(queued!, 1, null, 'abcdef');
+    expect(exported.content).not.toContain(raw);
+    expect(JSON.stringify(exported)).not.toContain(raw);
+    expect(JSON.stringify(store)).not.toContain(raw);
+    expect(host.deliveries.map((delivery) => delivery.payload).join('\n')).not.toContain(raw);
+    expect((await accountFingerprintFor(payload, memoryStore(), null)).kind).toBe('unknown');
+  });
+});
+
+describe('W299-D · old workspace scopes are fingerprinted without losing pending ids', () => {
+  it('🔴 migrates the registry, state key and IDB debt set, then erases the raw scope', async () => {
+    const rawWorkspace = 'legacy-workspace-fixture';
+    const oldScope = `chatgpt:${rawWorkspace}`;
+    const oldKey = stateKey('chatgpt', oldScope);
+    const id = 'pending-conversation-fixture';
+    const { browserLocalStore } = await import('../lib/backfill/store');
+    const storage = browserLocalStore()!;
+    const { openLedger } = await import('../lib/backfill/ledger');
+    const opened = await openLedger(storage, 'chatgpt', oldScope);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) throw new Error('synthetic source ledger must open');
+    expect(await applyDebtDiff('chatgpt', oldScope, { enqueue: [id], settle: [], drop: [] }, 1)).toBe(true);
+    await opened.ledger.save({ ...opened.state, pending: [id] });
+    await storage.save(BACKFILL_TARGETS_KEY, [{ platform: 'chatgpt', origin: ORIGIN, scope: oldScope, at: 1 }]);
+
+    const { migrateChatGptWorkspaceScopes } = await import('../lib/backfill/chatgpt-scope-migration');
+    const { fingerprintChatGptWorkspace } = await import('../lib/backfill/chatgpt-workspace');
+    const expectedScope = await fingerprintChatGptWorkspace(storage, rawWorkspace);
+    expect(expectedScope).toMatch(/^chatgpt:[a-f0-9]{64}$/);
+    await migrateChatGptWorkspaceScopes(storage);
+
+    expect(await storage.load(oldKey)).toBeNull();
+    expect(await storage.keys()).not.toContain(oldKey);
+    expect(JSON.stringify(store)).not.toContain(rawWorkspace);
+    const targetRows = await storage.load(BACKFILL_TARGETS_KEY) as Array<{ scope: string }>;
+    expect(targetRows.map((row) => row.scope)).toEqual([expectedScope]);
+    expect(await readDebtSet('chatgpt', oldScope)).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map() });
+    const migratedDebt = await readDebtSet('chatgpt', expectedScope!);
+    expect(migratedDebt?.pending).toEqual([id]);
+    expect(JSON.stringify(migratedDebt)).not.toContain(rawWorkspace);
   });
 });

@@ -988,9 +988,10 @@ export interface CapturedFetch {
    *
    * 🔴 It is **page-visible and untrusted**. The page can put anything here, so it is a
    *    claim about the request, not a proof of who is signed in. `isCapturedFetchShape`
-   *    admits it only as a bounded, non-empty string on a ChatGPT capture
-   *    (`chatGptAccountIdHeaderValue`), and it has exactly one consumer —
-   *    `accountFingerprintFor`, which turns it into a per-install HMAC. It must never be
+   *    admits the field only on a ChatGPT capture; the fingerprint reader applies
+   *    `chatGptAccountIdHeaderValue` and treats malformed values as unknown. It has
+   *    exactly one consumer — `accountFingerprintFor`, which turns it into a per-install
+   *    HMAC. It must never be
    *    written to a bundle, an export, the outbox, a log line or a native-host message:
    *    `buildBundle` deletes it the moment the fingerprint has been computed.
    *
@@ -998,7 +999,7 @@ export interface CapturedFetch {
    *    absent field is the named `unknown` the fingerprint path already answers with — it
    *    is never recorded as an empty string or filled with a placeholder.
    */
-  chatgptAccountIdHeader?: string;
+  chatgptAccountIdHeader?: unknown;
 }
 
 export interface ChatGptProvenance {
@@ -1098,18 +1099,17 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if ('sessionId' in value) return false;
   if ('provenance' in value) return false;
   if ('provenanceSupplement' in value) return false;
-  // 🔴 W299 · The transient ChatGPT account header is admitted, but only where it can mean
-  //    anything and only in the one shape: a bounded non-empty string on a ChatGPT capture.
-  //    A forged value is still only ever a *claim* (it is hashed, never stored — see
-  //    `CapturedFetch.chatgptAccountIdHeader`), but a malformed or misplaced one is refused
-  //    outright rather than reaching the fingerprint path as an unknown that looks like an
-  //    answer. `platform.id` is checked because a header observed on one platform's request
-  //    says nothing about another's, and an absent field changes nothing.
+  // 🔴 W299 · The transient ChatGPT account header is accepted only on ChatGPT captures.
+  //    A forged or malformed value is page-visible metadata and becomes `unknown` in the
+  //    fingerprint reader; it cannot discard a valid capture. `platform.id` is checked
+  //    because a header on another platform says nothing about ChatGPT account context.
   //    `undefined` is treated as absent, the same way `pageUrl` above is: the hook omits
   //    the key rather than sending an empty one.
   if (value.chatgptAccountIdHeader !== undefined) {
     if (platform.id !== 'chatgpt') return false;
-    if (chatGptAccountIdHeaderValue(value.chatgptAccountIdHeader) === null) return false;
+    // Malformed page-visible metadata is unknown account context, not a reason to
+    // discard an otherwise valid conversation capture. The fingerprint reader
+    // applies the bounded string validator and refuses to hash it.
   }
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
@@ -1124,6 +1124,15 @@ export function isCaptureMessage(
   value: unknown,
 ): value is { type: typeof CAPTURE_MESSAGE; payload: CapturedFetch } {
   return isRecord(value) && value.type === CAPTURE_MESSAGE && isCapturedFetchShape(value.payload);
+}
+
+/** The real page→content capture gate: source, origin, and the capture contract must agree. */
+export function isPageCaptureMessage(
+  event: Pick<MessageEvent<unknown>, 'source' | 'origin' | 'data'>,
+  pageWindow: MessageEventSource,
+  pageOrigin: string,
+): event is Pick<MessageEvent<{ type: typeof CAPTURE_MESSAGE; payload: CapturedFetch }>, 'source' | 'origin' | 'data'> {
+  return event.source === pageWindow && event.origin === pageOrigin && isCaptureMessage(event.data);
 }
 
 export function isMainReadyMessage(

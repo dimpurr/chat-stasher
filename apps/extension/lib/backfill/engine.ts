@@ -911,8 +911,8 @@ function mergeChatGptProvenance(state: BackfillState, id: string, incoming: Chat
 
 function chatGptWorkspaceOfScope(scope: string): string | null {
   if (!scope.startsWith('chatgpt:') || scope.includes('!workspace-')) return null;
-  const workspace = scope.slice('chatgpt:'.length);
-  return workspace.length > 0 ? workspace : null;
+  const fingerprint = scope.slice('chatgpt:'.length);
+  return /^[a-f0-9]{64}$/.test(fingerprint) ? scope : fingerprint || null;
 }
 
 /**
