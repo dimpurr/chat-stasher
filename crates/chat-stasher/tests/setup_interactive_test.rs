@@ -799,7 +799,14 @@ fn master_slave_number(master_fd: RawFd) -> Option<u32> {
 /// fails on the count, so an unwired platform is red with the reason rather than
 /// green on a machine where the question was never put. macOS and Linux — the
 /// platforms CI runs — are both wired up.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+///
+/// `unix` belongs in the guard because the signature is `RawFd`, which is
+/// `std::os::fd` and exists only there. Off Unix there is no function at all
+/// rather than a `None` one: nothing in this file is compiled there, since the
+/// mechanism it drives is `posix_openpt` (the header says why). Without it the
+/// arm was still built on Windows — `not(linux, macos)` is true there — and the
+/// `windows-latest` clippy cell failed on exactly that name.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn master_slave_number(_master_fd: RawFd) -> Option<u32> {
     None
 }
