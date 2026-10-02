@@ -247,8 +247,10 @@ export default defineContentScript({
         && (event.data as { type?: unknown }).type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
         const accountId = (event.data as { accountId?: unknown }).accountId;
         if (typeof accountId === 'string') {
-          const generation = ++chatGptObservationGeneration;
-          chatGptCurrentRawHeader = chatGptAccountIdHeaderValue(accountId);
+          const nextHeader = chatGptAccountIdHeaderValue(accountId);
+          if (nextHeader !== chatGptCurrentRawHeader) chatGptObservationGeneration += 1;
+          chatGptCurrentRawHeader = nextHeader;
+          const generation = chatGptObservationGeneration;
           if (chatGptCurrentRawHeader === null) return;
           void browser.runtime.sendMessage({ type: CHATGPT_WORKSPACE_OBSERVED_MESSAGE, accountId })
             .then((reply: unknown) => {
@@ -564,7 +566,12 @@ export default defineContentScript({
     // The one fetch both legs use. ChatGPT body requests get the session's
     // bearer token (in memory only; lib/platform-auth.ts); every other request
     // is sent exactly as before.
-    const chatgptFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init));
+    const chatgptFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init), {
+      readChatgptAccountIdHeader: () => ({
+        value: chatGptCurrentRawHeader,
+        generation: chatGptObservationGeneration,
+      }),
+    });
     // 🔴 W22 · Kimi's two backfill paths need the page origin's own
     //    `access_token` as a bearer token. The wrapper reads it from localStorage
     //    **at request time**, keeps it in no variable of its own, attaches it only
@@ -602,17 +609,12 @@ export default defineContentScript({
       // 🔴 W303 · Bind the lease identity to this exact backfill request using
       //    the header actually sent; the worker fingerprints it at its boundary.
       const isChatGpt = findPlatformForUrl(url)?.id === 'chatgpt';
-      if (isChatGpt && chatGptCurrentRawHeader === null) {
-        throw new Error('chatgpt-account-header-unavailable');
-      }
-      const sentChatGptAccountId = isChatGpt ? chatGptCurrentRawHeader : null;
       const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
               accept: 'application/json',
-              ...(sentChatGptAccountId !== null ? { 'ChatGPT-Account-Id': sentChatGptAccountId } : {}),
               ...(init.contentType ? { 'content-type': init.contentType } : {}),
             },
             body: init.body,
@@ -621,7 +623,6 @@ export default defineContentScript({
             credentials: 'same-origin',
             headers: {
               accept: 'application/json',
-              ...(sentChatGptAccountId !== null ? { 'ChatGPT-Account-Id': sentChatGptAccountId } : {}),
             },
           });
       // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
@@ -641,7 +642,9 @@ export default defineContentScript({
         text: () => answer.response.text(),
         ...(answer.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
         retryAfter,
-        ...(sentChatGptAccountId !== null ? { chatgptAccountIdHeader: sentChatGptAccountId } : {}),
+        ...(isChatGpt && typeof answer.response.chatgptAccountIdHeader === 'string'
+          ? { chatgptAccountIdHeader: answer.response.chatgptAccountIdHeader }
+          : {}),
       };
     };
 

@@ -95,6 +95,59 @@ describe('authorized fetch', () => {
     expect(net.sessionReads()).toBe(2);
   });
 
+  it('reads the current account header after the session-token await', async () => {
+    let currentHeader = 'acct-before-session-read';
+    let generation = 1;
+    const attempts: string[] = [];
+    const raw: RawFetch = async (url, init) => {
+      if (url === `${ORIGIN}${CHATGPT_SESSION_PATH}`) {
+        // Model an account switch while readSessionToken is awaiting the page fetch.
+        currentHeader = 'acct-after-session-read';
+        generation += 1;
+        return { status: 200, text: async () => JSON.stringify({ accessToken: 'tok-1' }) };
+      }
+      const header = (init.headers as Record<string, string>)['ChatGPT-Account-Id'];
+      attempts.push(header ?? '<missing>');
+      return { status: 200, text: async () => '{}' };
+    };
+
+    const response = await createAuthorizedFetch(ORIGIN, raw, {
+      readChatgptAccountIdHeader: () => ({ value: currentHeader, generation }),
+    })(DETAIL, {});
+
+    expect(attempts).toEqual(['acct-after-session-read']);
+    expect(response.chatgptAccountIdHeader).toBe('acct-after-session-read');
+  });
+
+  it('does not retry a 401 after the current account header changes during auth', async () => {
+    let currentHeader = 'acct-first-attempt';
+    let generation = 1;
+    const attempts: string[] = [];
+    let sessionReads = 0;
+    const raw: RawFetch = async (url, init) => {
+      if (url === `${ORIGIN}${CHATGPT_SESSION_PATH}`) {
+        sessionReads += 1;
+        return { status: 200, text: async () => JSON.stringify({ accessToken: `tok-${sessionReads}` }) };
+      }
+      const header = (init.headers as Record<string, string>)['ChatGPT-Account-Id'];
+      attempts.push(header ?? '<missing>');
+      if (attempts.length === 1) {
+        currentHeader = 'acct-retry-attempt';
+        generation += 1;
+        return { status: 401, text: async () => '{}' };
+      }
+      return { status: 200, text: async () => '{}' };
+    };
+
+    const response = await createAuthorizedFetch(ORIGIN, raw, {
+      readChatgptAccountIdHeader: () => ({ value: currentHeader, generation }),
+    })(DETAIL, {});
+
+    expect(attempts).toEqual(['acct-first-attempt']);
+    expect(response.status).toBe(401);
+    expect(response.chatgptAccountIdHeader).toBe('acct-first-attempt');
+  });
+
   it('the conversation list carries the token (cookie-only answers a false empty list)', async () => {
     const net = fakeNetwork(['tok-1'], () => 'tok-1');
     const list = `${ORIGIN}/backend-api/conversations?offset=0&limit=20`;

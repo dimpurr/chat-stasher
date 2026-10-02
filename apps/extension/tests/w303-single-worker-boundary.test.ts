@@ -5,6 +5,7 @@ import { fingerprintChatGptIdentityAtWorkerBoundary } from '../lib/backfill/tab-
 import type { AccountIdentity } from '../lib/backfill/types';
 
 const contentSource = readFileSync(new URL('../entrypoints/dw-bridge.content.ts', import.meta.url), 'utf8');
+const authSource = readFileSync(new URL('../lib/platform-auth.ts', import.meta.url), 'utf8');
 const tabPortSource = readFileSync(new URL('../lib/backfill/tab-port.ts', import.meta.url), 'utf8');
 const backgroundSource = readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
 
@@ -24,9 +25,13 @@ describe('W303c · one first-worker boundary for raw ChatGPT account ids', () =>
     expect(observationReply).not.toContain('currentAccountId');
     expect(contentSource).toMatch(/runtime\.sendMessage\(\{\s*type:\s*CHATGPT_WORKSPACE_OBSERVED_MESSAGE,\s*accountId\s*\}\)/);
     expect(contentSource).toContain('observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity)');
-    expect(contentSource).toContain("'ChatGPT-Account-Id': sentChatGptAccountId");
-    expect(contentSource).toContain('chatgptAccountIdHeader: sentChatGptAccountId');
-    expect(contentSource).toContain("throw new Error('chatgpt-account-header-unavailable')");
+    expect(contentSource).toContain('value: chatGptCurrentRawHeader');
+    expect(contentSource).toContain('generation: chatGptObservationGeneration');
+    expect(contentSource).toContain('chatgptAccountIdHeader: answer.response.chatgptAccountIdHeader');
+    expect(authSource).toContain("throw new Error('chatgpt-account-header-unavailable')");
+    expect(authSource).toContain("throw new Error('chatgpt-account-header-changed-during-retry')");
+    expect(authSource).toContain("if ((error as Error).message === 'chatgpt-account-header-changed-during-retry') return first");
+    expect(authSource).toContain("headers['ChatGPT-Account-Id'] = current.value");
     expect(backgroundSource).toContain('fingerprintChatGptIdentityAtWorkerBoundary(');
     expect(backgroundSource).not.toContain('fingerprintChatGptWorkspace');
     expect(backgroundSource).not.toMatch(/workspace\.workspace[^;]*fingerprint/);

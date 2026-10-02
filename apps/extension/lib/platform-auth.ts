@@ -72,6 +72,8 @@ export function needsChatgptBearer(url: string, pageOrigin: string): boolean {
 export interface MinimalResponse {
   status: number;
   text: () => Promise<string>;
+  /** Raw value of the ChatGPT account header on this exact fetch attempt. */
+  chatgptAccountIdHeader?: string;
   /**
    * 🔴 W127 · The response's headers, when the underlying object is a real
    * `Response` — which the page's own `fetch` is. Optional because every synthetic
@@ -108,24 +110,57 @@ async function readSessionToken(pageOrigin: string, rawFetch: RawFetch): Promise
  * A fetch that adds the bearer token to ChatGPT body requests and leaves every
  * other request untouched. One instance per content script (one page).
  */
-export function createAuthorizedFetch(pageOrigin: string, rawFetch: RawFetch) {
+export function createAuthorizedFetch(
+  pageOrigin: string,
+  rawFetch: RawFetch,
+  options: { readChatgptAccountIdHeader?: () => { value: string | null; generation: number } } = {},
+) {
   let token: string | null = null;
 
-  const withToken = async (url: string, init: RequestInit): Promise<MinimalResponse> => {
+  const withToken = async (
+    url: string,
+    init: RequestInit,
+    requestHeader: { firstGeneration: number | null },
+  ): Promise<MinimalResponse> => {
     if (token === null) token = await readSessionToken(pageOrigin, rawFetch);
     // No token: send without it, so the caller sees the platform's real status
     // (404/401) and halts with a trace instead of us inventing an outcome.
-    if (token === null) return rawFetch(url, init);
-    const headers = { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` };
-    return rawFetch(url, { ...init, headers });
+    const headers = { ...(init.headers as Record<string, string> | undefined) };
+    if (token !== null) headers.authorization = `Bearer ${token}`;
+    if (needsChatgptBearer(url, pageOrigin) && options.readChatgptAccountIdHeader) {
+      // 🔴 W303 · Read after every auth await, immediately before this attempt is
+      //    issued. A 401/403 retry calls withToken again and reads the live slot
+      //    again; only this attempt's value travels back for worker fingerprinting.
+      const current = options.readChatgptAccountIdHeader();
+      if (current.value === null) throw new Error('chatgpt-account-header-unavailable');
+      if (requestHeader.firstGeneration !== null && current.generation !== requestHeader.firstGeneration) {
+        throw new Error('chatgpt-account-header-changed-during-retry');
+      }
+      requestHeader.firstGeneration ??= current.generation;
+      headers['ChatGPT-Account-Id'] = current.value;
+      const response = await rawFetch(url, { ...init, headers });
+      return {
+        status: response.status,
+        text: () => response.text(),
+        ...(response.headers ? { headers: response.headers } : {}),
+        chatgptAccountIdHeader: current.value,
+      };
+    }
+    return rawFetch(url, token === null ? init : { ...init, headers });
   };
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
     if (!needsChatgptBearer(url, pageOrigin)) return rawFetch(url, init);
-    const first = await withToken(url, init);
+    const requestHeader = { firstGeneration: null as number | null };
+    const first = await withToken(url, init, requestHeader);
     if (first.status !== 401 && first.status !== 403) return first;
     token = null;
-    return withToken(url, init);
+    try {
+      return await withToken(url, init, requestHeader);
+    } catch (error) {
+      if ((error as Error).message === 'chatgpt-account-header-changed-during-retry') return first;
+      throw error;
+    }
   };
 }
 
