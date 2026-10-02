@@ -61,6 +61,7 @@ import {
   deepSeekEnvelopeRefusal,
   parseDeepSeekListPage,
 } from '../lib/backfill/enumerate';
+import { geminiEnvelopeRefusal } from '../lib/gemini-rpc';
 import {
   createDeepSeekAuthorizedFetch,
   DEEPSEEK_USER_TOKEN_STORAGE_KEY,
@@ -581,11 +582,16 @@ describe('W61-5 · the change adds a stop and loosens nothing', () => {
     expect(JSON.parse(DETAIL_REFUSAL).data).toBeNull();
   });
 
-  it('the plan declares the refusal, and only DeepSeek does', () => {
+  it('the plan declares the refusal — DeepSeek and, since W308, Gemini — and no other plan does', () => {
     expect(DEEPSEEK_PLAN.refusalOf).toBe(deepSeekEnvelopeRefusal);
-    // The hook is DeepSeek's measured fact, not a general one: every other plan
-    // leaves it undeclared, so their 2xx bodies take exactly the path they did.
-    for (const plan of [CHATGPT_PLAN, PERPLEXITY_PLAN, GROK_PLAN, KIMI_PLAN, GEMINI_PLAN, CLAUDE_PLAN]) {
+    // 🔴 W308 · Gemini joined this list, for its own evidence and its own narrower
+    //    rule (`wrb.fr[5][0]`; see `geminiEnvelopeRefusal` in lib/gemini-rpc.ts and
+    //    tests/w308-gemini-refusal.test.ts). The property this test exists for is
+    //    unchanged and is what the loop below still pins: a plan that has *not*
+    //    been shown to refuse in-band leaves the hook undeclared, so its 2xx bodies
+    //    take exactly the path they did before the hook existed.
+    expect(GEMINI_PLAN.refusalOf).toBe(geminiEnvelopeRefusal);
+    for (const plan of [CHATGPT_PLAN, PERPLEXITY_PLAN, GROK_PLAN, KIMI_PLAN, CLAUDE_PLAN]) {
       expect(plan.refusalOf).toBeUndefined();
     }
   });

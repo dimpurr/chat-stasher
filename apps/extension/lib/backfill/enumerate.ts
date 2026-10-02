@@ -213,6 +213,7 @@ import {
   GEMINI_RPC_LIST,
   assembleDetailBundle,
   buildBatchExecuteBody,
+  geminiEnvelopeRefusal,
   readDetailBundle,
   readDetailResponse,
   readListResponse,
@@ -1285,9 +1286,20 @@ export interface BackfillEnumPlan {
    *    parser's inability to read it — but it means this hook is the one place in
    *    the plan table that can turn a permanent stop into a transient one, so a
    *    plan that declares it is claiming the platform really does refuse in-band.
-   *    Exactly one plan declares it, and only because that was measured.
+   *
+   * 🔴 W308 · **Two plans declare it now: DeepSeek (measured) and Gemini (one
+   *    source for its status slot, plus the W29 measurement that a missing `at` is
+   *    answered with a structured error entry).** Gemini's is deliberately the
+   *    narrower of the two — it reads `wrb.fr[5][0]`, and only an entry with an
+   *    unusable document or a code this build was read making a claim about becomes
+   *    a refusal (`geminiEnvelopeRefusal` states the rule and its reason). Neither
+   *    hook can return a page or pass a body on; both only *name* a stop the leg
+   *    already reached, and the worst a wrong reading can do is make a stop
+   *    transient that a shape check would have made permanent — which is the
+   *    honest direction, because a stop that heals on its own costs one retry while
+   *    a permanent stop costs a frozen platform.
    */
-  refusalOf?(text: string): DeepSeekEnvelopeRefusal | null;
+  refusalOf?(text: string): InBandRefusal | null;
   /** 7 · Provenance. Same standard as the credibility note in contract.ts. */
   provenance: string;
 }
@@ -1555,6 +1567,20 @@ function sawShape(where: string, value: unknown): string {
 }
 
 /**
+ * 🔴 W308 · The same bracket, for a reader that already phrased its own evidence.
+ *
+ * The Gemini envelope reader describes what it saw in the shape vocabulary that
+ * belongs to *its* layer (an entry's arity, which slot failed, the status code),
+ * and that description is already safe to store — see `describeEntryFailure` in
+ * lib/gemini-rpc.ts, which reads types and numbers and never a value. This only
+ * wraps it in the one bracket a halt detail uses, so a Gemini halt and a DeepSeek
+ * halt read the same way.
+ */
+function sawDetail(detail: string | undefined): string {
+  return detail === undefined ? '' : ` [${detail}]`;
+}
+
+/**
  * 🔴 W61 · **DeepSeek refuses in-band, and a refusal is not a shape change.**
  *
  * Measured from the page's own context in a logged-in Chrome (2026-09-23):
@@ -1632,6 +1658,20 @@ export interface DeepSeekEnvelopeRefusal {
   reason: 'auth-refused' | 'rate-limited' | 'refused-unknown';
   detail: string;
 }
+
+/**
+ * 🔴 W308 · **The contract of `refusalOf`, named for the field rather than for the
+ * first platform that needed it.**
+ *
+ * W61 wrote this shape for DeepSeek, so the interface below is named for DeepSeek
+ * and carries the reasoning that produced it. Gemini became the second plan to
+ * declare `refusalOf` in W308, and its classifier returns a **subset** of the same
+ * shape (`auth-refused` / `refused-unknown`; it never produces `rate-limited`,
+ * because no Gemini code was read saying "not now"). A plan field typed
+ * `DeepSeekEnvelopeRefusal` on a Gemini plan would read as a mistake, so the field
+ * uses this alias while the interface keeps its name and its recorded reasoning.
+ */
+export type InBandRefusal = DeepSeekEnvelopeRefusal;
 
 /**
  * 🔴 W61b · **The only codes this build will call an authentication refusal** —
@@ -3710,7 +3750,15 @@ function geminiRpcUrl(origin: string, rpcid: string): string {
  */
 export function parseGeminiListPage(text: string): ParseResult {
   const read = readListResponse(text);
-  if (!read.ok) return { ok: false, detail: `gemini list response could not be read: ${read.reason}` };
+  if (!read.ok) {
+    // 🔴 W308 · The reader's own shape evidence is appended, so the halt says
+    //    *which* boundary failed (an absent document slot, a non-JSON string, an
+    //    rpcid that never appeared) and what the entry looked like — arity and
+    //    status code — instead of the one word `payload-unusable` that cost the
+    //    2026-10-02 diagnosis a second logged-in session. Shape only: no value
+    //    from the response enters it.
+    return { ok: false, detail: `gemini list response could not be read: ${read.reason}${sawDetail(read.detail)}` };
+  }
   return { ok: true, page: { ids: read.ids, total: null, nextToken: read.nextPageToken } };
 }
 
@@ -3752,7 +3800,7 @@ export function parseGeminiDetailPage(text: string): DetailParseResult {
  */
 export function geminiDetailNextPage(text: string, conversationId: string): DetailPageStep {
   const read = readDetailResponse(text, conversationId);
-  if (!read.ok) return { kind: 'unreadable', reason: read.reason };
+  if (!read.ok) return { kind: 'unreadable', reason: `${read.reason}${sawDetail(read.detail)}` };
   if (read.nextPageToken === null) return { kind: 'last' };
   if (read.pageIsEmpty) {
     return { kind: 'unreadable', reason: 'the page carried a continuation token and no turns' };
@@ -3873,6 +3921,24 @@ export const GEMINI_PLAN: BackfillEnumPlan = {
       ),
   },
   parseListPage: parseGeminiListPage,
+  /**
+   * 🔴 W308 · **The refusal is in the envelope, at `wrb.fr[5][0]`.**
+   *
+   * W61 gave this hook to DeepSeek because a 2xx can still be a refusal; Gemini is
+   * the second platform in the table that answers that way, and the evidence is
+   * `geminiEnvelopeRefusal`'s own (one source for the slot and for `7`, plus the
+   * W29 measurement that a missing `at` is answered with a structured error entry).
+   * Without it a refusal reached `selectRpcPayload`, failed as
+   * `inner-payload-absent`, and halted **`shape-changed`** — permanent, "the API
+   * changed" — about a request the server had refused in its own slot. With it the
+   * stop is `auth-refused` or `refused-unknown`, both transient, and the leg comes
+   * back on its ladder with the code recorded.
+   *
+   * 🔴 It is narrower than DeepSeek's: only entries with an unusable document, or
+   *    with a code this build was read making a claim about, become refusals. That
+   *    rule and its reason are in `geminiEnvelopeRefusal`'s header.
+   */
+  refusalOf: geminiEnvelopeRefusal,
   // 🔴 The two segments share one path, which is why `formSegmentFor` exists; the
   //    rpcid in each segment's pinned query is what tells them apart.
   detailPath: GEMINI_BATCHEXECUTE_PATH,
@@ -3939,6 +4005,18 @@ export const GEMINI_PLAN: BackfillEnumPlan = {
     + 'in the page; without at the server answers HTTP 400 with a structured error entry — a real '
     + 'refusal, which is why a 400/401 here halts instead of being read as "no conversations". '
     + 'The canonical conversation id is the c_-prefixed form, in both legs. '
+    + '🔴 W308 added the in-envelope refusal: a wrb.fr entry carries its own status at [5], and ONE '
+    + 'source (HanaokaYuzu/Gemini-API, client.py, read 2026-10-02) reads [5][0] === 7 as '
+    + 'permission-denied / unauthenticated. That slot and that code are therefore one-source '
+    + 'evidence, kept to a closed set (GEMINI_AUTH_REFUSAL_CODES) with every other non-zero code '
+    + 'recorded as refused-unknown; every SUCCESSFUL entry in this repository\'s fixtures carries '
+    + '[5] === null, and no live response was read for that slot. What W308 did NOT establish: whether Gemini ever signals '
+    + '"the list is finished" with anything other than the two measured signals (an absent token, '
+    + 'an empty items array), so a bare absent document is still a named shape failure rather than '
+    + 'being read as completion. The competitor parser (sisodiabhumca-AI-Exporter, read 2026-10-02) '
+    + 'recursively finds conversation-like arrays and tries alternative argument shapes; only the '
+    + 'former is borrowed, and as a diagnosis in the halt detail, because the alternative argument '
+    + 'shapes contradict this plan\'s recorded decision that the leg never invents a second shape. '
     + '🔴 Unverified and handled, not guessed: the request ARGUMENTS of both RPCs rest on ONE '
     + 'source (the response shapes are measured) — if the argument shape is wrong the RPC fails '
     + 'and the leg halts with a trace; a conversation needing more than 20 pages is refused with '

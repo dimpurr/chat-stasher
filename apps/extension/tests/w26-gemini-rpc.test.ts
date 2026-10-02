@@ -450,13 +450,37 @@ describe('extractListPage', () => {
   });
 
   it('reports a missing items path as a shape error, never as an empty list', () => {
-    expect(extractListPage([null, null])).toEqual({ ok: false, reason: 'list-items-path-missing' });
-    expect(extractListPage([null, 'TOKEN', 'not-an-array'])).toEqual({
-      ok: false,
-      reason: 'list-items-path-missing',
-    });
-    expect(extractListPage(null)).toEqual({ ok: false, reason: 'payload-not-an-array' });
-    expect(extractListPage('nope')).toEqual({ ok: false, reason: 'payload-not-an-array' });
+    // 🔴 W308 · The shape error now also says *what it saw*. The reason is still
+    //    the pinned fact; the `detail` is the evidence a halt carries, and these
+    //    assertions are on the evidence rather than on the wording of a sentence.
+    const absent = extractListPage([null, null]);
+    expect(absent).toMatchObject({ ok: false, reason: 'list-items-path-missing' });
+    if (absent.ok) return;
+    expect(absent.detail).toContain('its items slot (index 2) is absent');
+    expect(absent.detail).toContain('no conversation-like array was found');
+
+    const notAnArray = extractListPage([null, 'TOKEN', 'not-an-array']);
+    expect(notAnArray).toMatchObject({ ok: false, reason: 'list-items-path-missing' });
+    if (notAnArray.ok) return;
+    expect(notAnArray.detail).toContain('its items slot (index 2) holds string');
+
+    expect(extractListPage(null)).toMatchObject({ ok: false, reason: 'payload-not-an-array' });
+    expect(extractListPage('nope')).toMatchObject({ ok: false, reason: 'payload-not-an-array' });
+  });
+
+  it('says when a conversation-like array exists somewhere other than the items slot', () => {
+    // 🔴 W308 · The competitor parser (sisodiabhumca) recursively finds
+    //    conversation-like arrays. This repository does not read a page from a
+    //    fallback location — a recovered list could be partial while the leg
+    //    reports progress — but the *diagnosis* is borrowed: the halt says the list
+    //    is there and where, so "the shape moved" is distinguishable from "this is
+    //    an error document".
+    const moved = extractListPage([null, null, null, [
+      ['c_0001', 'first'], ['c_0002', 'second'],
+    ]]);
+    expect(moved).toMatchObject({ ok: false, reason: 'list-items-path-missing' });
+    if (moved.ok) return;
+    expect(moved.detail).toContain('a conversation-like array of 2 entries was found at depth 1');
   });
 
   it('keeps an empty title empty rather than turning it into an absent one', () => {
@@ -533,11 +557,20 @@ describe('extractDetailPage', () => {
   });
 
   it('reports a missing turns path as a shape error, never as an empty page', () => {
-    expect(extractDetailPage([null, null, null])).toEqual({
-      ok: false,
-      reason: 'detail-turns-path-missing',
-    });
-    expect(extractDetailPage({ payload: [] })).toEqual({ ok: false, reason: 'payload-not-an-array' });
+    // 🔴 W308 · Same evidence rule as the list reader: the failure names the slot
+    //    and what was in it. A slot that held a `null` and a slot that was never
+    //    there are kept apart, exactly as `arrayString` keeps an empty string from
+    //    a missing one.
+    const missing = extractDetailPage([null, null, null]);
+    expect(missing).toMatchObject({ ok: false, reason: 'detail-turns-path-missing' });
+    if (missing.ok) return;
+    expect(missing.detail).toContain('its turns slot (index 0) holds null');
+
+    const absentTurns = extractDetailPage([]);
+    expect(absentTurns).toMatchObject({ ok: false, reason: 'detail-turns-path-missing' });
+    if (absentTurns.ok) return;
+    expect(absentTurns.detail).toContain('its turns slot (index 0) is absent');
+    expect(extractDetailPage({ payload: [] })).toMatchObject({ ok: false, reason: 'payload-not-an-array' });
   });
 
   it('reports absent ids and an absent timestamp as null, not as empty strings or zero', () => {

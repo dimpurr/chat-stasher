@@ -153,7 +153,11 @@ export async function completeGeminiLiveCapture(
 ): Promise<GeminiLiveCaptureResult> {
   const first = readDetailResponse(observed.text);
   if (!first.ok) {
-    return { ok: false, reason: `the observed response could not be read (${first.reason})` };
+    // 🔴 W308 · The reader's shape evidence travels with the reason, so a live
+    //    capture that fails says what the entry looked like rather than only which
+    //    named boundary failed.
+    const detail = first.detail === undefined ? '' : `: ${first.detail}`;
+    return { ok: false, reason: `the observed response could not be read (${first.reason}${detail})` };
   }
   const conversationId = first.conversationId;
   if (conversationId === null) {
