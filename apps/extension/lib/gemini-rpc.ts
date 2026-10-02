@@ -83,7 +83,17 @@ export type BatchExecuteFailureReason =
   /** Frame boundaries were found but not one of them decoded to JSON. */
   | 'frames-undecodable';
 
-/** Named reasons an entry inside a decoded frame yielded no usable payload. */
+/**
+ * Named reasons an entry inside a decoded frame yielded no usable payload.
+ *
+ * 🔴 W308 · These two used to be one. The halt a backfill leg writes carries the
+ *    reason, and "the document slot was absent" and "the document slot held a
+ *    string that did not parse" are, on the wire, different findings: the first is
+ *    an RPC that returned no document (which is what an in-band refusal looks
+ *    like), the second is a document this build cannot read. Collapsing them into
+ *    a single `payload-unusable` cost the 2026-10-02 diagnosis a second
+ *    logged-in session, because the record could not say which had happened.
+ */
 export type BatchExecuteEntryError =
   /** The entry carried no RPC id, so its payload could not be attributed. */
   | 'rpcid-absent'
@@ -112,6 +122,20 @@ export interface BatchExecuteEntry {
   payload: unknown | null;
   /** Why the payload is unusable. Absent when the entry decoded. */
   error?: BatchExecuteEntryError;
+  /**
+   * `entry[5][0]` — the entry's own **status code**, when it carries a finite
+   * number there; null otherwise.
+   *
+   * 🔴 W308 · Shape only: this is a protocol code, never conversation content. It
+   *    exists so a refusal the server puts *in the envelope* rather than in the
+   *    HTTP status can be named (see `geminiEnvelopeRefusal`). Evidence for the
+   *    slot and for `7` meaning "permission denied / unauthenticated" is **one
+   *    source** (HanaokaYuzu/Gemini-API, `client.py`, read 2026-10-02); no live
+   *    response has been read for it by this repository, and every successful
+   *    fixture here carries `[5] === null`. A code is therefore *reported*, and
+   *    the decision to act on it lives in one place with its evidence attached.
+   */
+  statusCode: number | null;
   /** True only for entries of a kind this parser understands. */
   recognized: boolean;
   /** The entry exactly as it appeared, so a caller can inspect what was rejected. */
@@ -350,32 +374,60 @@ function stripGuard(text: string): { body: string; guardPresent: boolean } {
  */
 function toEntry(raw: unknown): BatchExecuteEntry {
   if (!Array.isArray(raw)) {
-    return { label: null, rpcid: null, payload: null, recognized: false, raw };
+    return { label: null, rpcid: null, payload: null, statusCode: null, recognized: false, raw };
   }
 
   const label = typeof raw[0] === 'string' ? raw[0] : null;
+  const statusCode = entryStatusCode(raw);
 
   if (label !== 'wrb.fr') {
-    return { label, rpcid: null, payload: null, recognized: false, raw };
+    return { label, rpcid: null, payload: null, statusCode, recognized: false, raw };
   }
 
   const rpcid = typeof raw[1] === 'string' ? raw[1] : null;
   if (rpcid === null) {
-    return { label, rpcid: null, payload: null, error: 'rpcid-absent', recognized: true, raw };
+    return { label, rpcid: null, payload: null, statusCode, error: 'rpcid-absent', recognized: true, raw };
   }
 
   const inner = raw[2];
   if (typeof inner !== 'string') {
-    return { label, rpcid, payload: null, error: 'inner-payload-absent', recognized: true, raw };
+    return { label, rpcid, payload: null, statusCode, error: 'inner-payload-absent', recognized: true, raw };
   }
 
   const decoded = tryParseJson(inner);
   if (decoded === NO_JSON) {
-    return { label, rpcid, payload: null, error: 'inner-payload-not-json', recognized: true, raw };
+    return { label, rpcid, payload: null, statusCode, error: 'inner-payload-not-json', recognized: true, raw };
   }
 
-  return { label, rpcid, payload: decoded, recognized: true, raw };
+  return { label, rpcid, payload: decoded, statusCode, recognized: true, raw };
 }
+
+/**
+ * `entry[5][0]` when the entry is an array whose sixth slot is an array whose
+ * first element is a finite number; null in every other case.
+ *
+ * 🔴 Deliberately strict: a string `"7"`, a nested object, or a `NaN` is **not**
+ *    read as a code. Reading a non-number as one would be inventing a status the
+ *    server did not give — the same rule `arrayString` follows for the positional
+ *    payloads below.
+ */
+function entryStatusCode(raw: unknown[]): number | null {
+  const statusSlot = raw[GEMINI_ENTRY_STATUS_INDEX];
+  if (!Array.isArray(statusSlot)) return null;
+  const code = statusSlot[0];
+  return typeof code === 'number' && Number.isFinite(code) ? code : null;
+}
+
+/**
+ * `entry[5]` — where a `wrb.fr` entry carries its own status.
+ *
+ * Evidence: **one source** (HanaokaYuzu/Gemini-API, `client.py`, read 2026-10-02),
+ * which reads `part[5][0]` and treats `7` as "permission denied or
+ * unauthenticated". One source is weak, so the slot is only ever *reported*
+ * (never obeyed), and the one place that acts on it (`geminiEnvelopeRefusal`)
+ * carries the same caveat.
+ */
+const GEMINI_ENTRY_STATUS_INDEX = 5;
 
 // --- The request body -------------------------------------------------------
 
@@ -474,6 +526,85 @@ export type GeminiShapeError =
   | 'list-items-path-missing'
   | 'detail-turns-path-missing';
 
+/**
+ * The shape of one JSON value, in the vocabulary a halt detail may hold.
+ *
+ * 🔴 W308 · Types and array lengths only — **never** a value, never an object's
+ *    keys. This module is the pure envelope layer and cannot reach
+ *    `describeJsonShape` (lib/backfill/enumerate.ts), which imports it; and a
+ *    conversation-shaped document must not leak a title through a diagnostic. So
+ *    this deliberately weaker description is what a Gemini halt gets, and it is
+ *    enough: "array(2) whose slot 2 is string" is the fact a reader needs.
+ */
+function describeValue(value: unknown): string {
+  if (value === undefined) return 'absent';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `array(${value.length})`;
+  return typeof value;
+}
+
+/**
+ * How many conversation-like entries a document holds, and where the shallowest
+ * such array sits. Used **only** to phrase a shape failure (see `listItemsDetail`).
+ *
+ * 🔴 W308 · This is the idea borrowed from the competitor parser
+ *    (`sisodiabhumca-AI-Exporter`, `extension/lib/api-gemini.js`, read 2026-10-02),
+ *    whose `walk` recursively finds conversation-like arrays instead of trusting
+ *    `payload[2]`. This repository does **not** silently adopt its recovery: a
+ *    fallback that quietly read a list from elsewhere could file a partial page as
+ *    a whole one. What is borrowed is the *diagnosis* — if the list moved, the halt
+ *    says so, and a human decides.
+ *
+ * The traversal is bounded (`CONVERSATION_SCAN_LIMIT` nodes) because the document
+ * is an untrusted response: a pathological shape must cost a bounded walk, not a
+ * stall.
+ */
+interface ConversationScan {
+  /** The shallowest array in the document that is entirely conversation-like. */
+  shallowest: { depth: number; length: number } | null;
+  /** Total conversation-like entries seen, wherever they were. */
+  entries: number;
+}
+
+const CONVERSATION_SCAN_LIMIT = 20_000;
+
+function scanForConversations(root: unknown): ConversationScan {
+  const scan: ConversationScan = { shallowest: null, entries: 0 };
+  let visited = 0;
+  const walk = (node: unknown, depth: number): void => {
+    if (visited >= CONVERSATION_SCAN_LIMIT || !Array.isArray(node)) return;
+    visited += 1;
+    if (node.length > 0 && node.every(isConversationLike)) {
+      scan.entries += node.length;
+      if (scan.shallowest === null || depth < scan.shallowest.depth) {
+        scan.shallowest = { depth, length: node.length };
+      }
+    }
+    for (const child of node) walk(child, depth + 1);
+  };
+  walk(root, 0);
+  return scan;
+}
+
+/** `item[0]` is a `c_`-prefixed id — the one measured id form the list endpoint returns. */
+function isConversationLike(item: unknown): boolean {
+  return Array.isArray(item) && typeof item[0] === 'string' && item[0].startsWith('c_');
+}
+
+/** The detail for `list-items-path-missing`: what the items slot held, and whether a list exists elsewhere. */
+function listItemsDetail(payload: unknown[]): string {
+  const slot = describeValue(payload[LIST_ITEMS_INDEX]);
+  const slotPhrase = slot === 'absent'
+    ? `its items slot (index ${LIST_ITEMS_INDEX}) is absent`
+    : `its items slot (index ${LIST_ITEMS_INDEX}) holds ${slot}`;
+  const scan = scanForConversations(payload);
+  if (scan.shallowest === null) {
+    return `the payload is array(${payload.length}); ${slotPhrase}; no conversation-like array was found anywhere in it`;
+  }
+  return `the payload is array(${payload.length}); ${slotPhrase}; a conversation-like array of ${scan.shallowest.length} `
+    + `entries was found at depth ${scan.shallowest.depth} (${scan.entries} conversation-like entries in all)`;
+}
+
 export interface GeminiListEntry {
   /**
    * `item[0]`, or null when the item carried none.
@@ -527,11 +658,11 @@ export interface GeminiDetailPage {
 
 export type GeminiListPageResult =
   | ({ ok: true } & GeminiListPage)
-  | { ok: false; reason: GeminiShapeError };
+  | { ok: false; reason: GeminiShapeError; detail?: string };
 
 export type GeminiDetailPageResult =
   | ({ ok: true } & GeminiDetailPage)
-  | { ok: false; reason: GeminiShapeError };
+  | { ok: false; reason: GeminiShapeError; detail?: string };
 
 /**
  * Reads one `MaZiqc` page.
@@ -542,10 +673,23 @@ export type GeminiDetailPageResult =
  * decides the account was fully enumerated.
  */
 export function extractListPage(payload: unknown): GeminiListPageResult {
-  if (!Array.isArray(payload)) return { ok: false, reason: 'payload-not-an-array' };
+  if (!Array.isArray(payload)) {
+    return {
+      ok: false,
+      reason: 'payload-not-an-array',
+      detail: `the decoded document is ${describeValue(payload)}, not an array`,
+    };
+  }
 
   const rawItems = payload[LIST_ITEMS_INDEX];
-  if (!Array.isArray(rawItems)) return { ok: false, reason: 'list-items-path-missing' };
+  if (!Array.isArray(rawItems)) {
+    // 🔴 W308 · `list-items-path-missing` still means what it always did — never an
+    //    empty list — but it now says *what it saw*: the type at index 2, and
+    //    whether a conversation-like array exists elsewhere in the document (the
+    //    competitor's recursive-scan idea, used as a diagnosis rather than as a
+    //    silent recovery; see `scanForConversations`).
+    return { ok: false, reason: 'list-items-path-missing', detail: listItemsDetail(payload) };
+  }
 
   const conversations: GeminiListEntry[] = [];
   for (const item of rawItems) {
@@ -573,10 +717,25 @@ export function extractListPage(payload: unknown): GeminiListPageResult {
  * it here would hide which order the response actually used.
  */
 export function extractDetailPage(payload: unknown): GeminiDetailPageResult {
-  if (!Array.isArray(payload)) return { ok: false, reason: 'payload-not-an-array' };
+  if (!Array.isArray(payload)) {
+    return {
+      ok: false,
+      reason: 'payload-not-an-array',
+      detail: `the decoded document is ${describeValue(payload)}, not an array`,
+    };
+  }
 
   const rawTurns = payload[DETAIL_TURNS_INDEX];
-  if (!Array.isArray(rawTurns)) return { ok: false, reason: 'detail-turns-path-missing' };
+  if (!Array.isArray(rawTurns)) {
+    const slot = describeValue(rawTurns);
+    return {
+      ok: false,
+      reason: 'detail-turns-path-missing',
+      detail: slot === 'absent'
+        ? `the payload is array(${payload.length}); its turns slot (index ${DETAIL_TURNS_INDEX}) is absent`
+        : `the payload is array(${payload.length}); its turns slot (index ${DETAIL_TURNS_INDEX}) holds ${slot}`,
+    };
+  }
 
   const turns: GeminiTurnKey[] = [];
   for (const turn of rawTurns) {
@@ -648,21 +807,30 @@ function arraySeconds(value: unknown, index: number): number | null {
 /**
  * Named reasons a response carried no readable document for one rpcid.
  *
- * `rpcid-absent` and `payload-unusable` are deliberately separate: the first is
- * "this response is not the RPC we asked for", the second is "it is, and the
- * document inside it could not be read". A caller that merged them could not
- * tell a wrong-rpcid response from a corrupted one.
+ * 🔴 W308 · `rpcid-absent` and the two payload reasons are deliberately separate,
+ *    and so are the two payload reasons from each other. The old single
+ *    `payload-unusable` could not tell "this response is not the RPC we asked
+ *    for" from "it is, and the document slot held nothing" from "it is, and the
+ *    document slot held a string that is not JSON" — three different findings that
+ *    reached the user as one sentence. Nothing here is a guess: each reason names
+ *    the fact `toEntry` already recorded.
+ *
+ * A failure also carries a **shape-only** `detail` (see `describeEntryFailure`)
+ * so the halt a caller writes says what it saw — arity, which slot, status code —
+ * without ever holding a conversation's content.
  */
 export type GeminiRpcPayloadFailure =
   | BatchExecuteFailureReason
   /** No `wrb.fr` entry named this rpcid anywhere in the response. */
   | 'rpcid-absent'
-  /** The entry is there and its inner document is null or did not parse. */
-  | 'payload-unusable';
+  /** The matched entry's `[2]` was null or missing — it returned no document. */
+  | 'inner-payload-absent'
+  /** The matched entry's `[2]` was a string that is not valid JSON. */
+  | 'inner-payload-not-json';
 
 export type GeminiRpcPayloadResult =
   | { ok: true; payload: unknown }
-  | { ok: false; reason: GeminiRpcPayloadFailure };
+  | { ok: false; reason: GeminiRpcPayloadFailure; detail?: string };
 
 /**
  * The decoded document of one rpcid, or a named reason.
@@ -678,10 +846,157 @@ export function selectRpcPayload(
   if (!result.ok) return { ok: false, reason: result.reason };
   for (const entry of result.entries) {
     if (!entry.recognized || entry.rpcid !== rpcid) continue;
-    if (entry.error !== undefined) return { ok: false, reason: 'payload-unusable' };
+    if (entry.error !== undefined) {
+      // 🔴 W308 · The entry's own reason is passed through rather than folded into
+      //    one word, and the detail describes the entry's *shape* — which slot,
+      //    its arity, the status code — so a halt is diagnosable without a second
+      //    logged-in session. No value from the document is ever included.
+      //
+      //    This entry matched by rpcid, so its rpcid is a string and `rpcid-absent`
+      //    cannot be the reason here; the two payload reasons are the whole set
+      //    this branch can produce.
+      return { ok: false, reason: entry.error, detail: describeEntryFailure(entry, rpcid) };
+    }
     return { ok: true, payload: entry.payload };
   }
-  return { ok: false, reason: 'rpcid-absent' };
+  const wrbCount = result.entries.filter((entry) => entry.recognized).length;
+  return {
+    ok: false,
+    reason: 'rpcid-absent',
+    detail:
+      `no wrb.fr entry named ${rpcid}; the response carried ${wrbCount} `
+      + `recognised wrb.fr ${wrbCount === 1 ? 'entry' : 'entries'}`,
+  };
+}
+
+/**
+ * What an unusable `wrb.fr` entry looked like, in the shape vocabulary only.
+ *
+ * 🔴 W308 · This is the whole point of the change: a `[2]` that is absent, a `[2]`
+ *    that is a non-JSON string, and the entry's own status code are three facts a
+ *    reader needs to tell an endpoint refusal from a schema change, and the old
+ *    record carried none of them. **Nothing here can carry conversation content:**
+ *    it reads array length, the *type* of the document slot, and the numeric status
+ *    code — never a string value.
+ */
+function describeEntryFailure(entry: BatchExecuteEntry, rpcid: string): string {
+  const arity = Array.isArray(entry.raw) ? entry.raw.length : null;
+  const shape = arity === null ? 'not an array' : `an array of ${arity} fields`;
+  const status = entry.statusCode === null
+    ? 'no status code in slot 5'
+    : `status code ${entry.statusCode} in slot 5`;
+  if (entry.error === 'inner-payload-absent') {
+    return `the ${rpcid} wrb.fr entry is ${shape}; its document slot (index 2) is absent or not a string, and it carries ${status}`;
+  }
+  if (entry.error === 'inner-payload-not-json') {
+    return `the ${rpcid} wrb.fr entry is ${shape}; its document slot (index 2) is a string that is not valid JSON, and it carries ${status}`;
+  }
+  return `the ${rpcid} wrb.fr entry is ${shape}; it carries no rpcid, and it carries ${status}`;
+}
+
+// --- 🔴 W308 · A refusal the envelope names, rather than the HTTP status ------
+
+/**
+ * 🔴 W308 · **Gemini can refuse a `batchexecute` call with HTTP 200 and the
+ * verdict in the envelope.**
+ *
+ * The measured refusal this repository already knows about is a **400** whose
+ * `at` was missing or stale (W29's probe; `platform-auth.ts`). But a `wrb.fr`
+ * entry also carries its own status at `entry[5]`, and the one source that reads
+ * it (HanaokaYuzu/Gemini-API, `client.py`, read 2026-10-02) treats `[5][0] === 7`
+ * as "permission denied or unauthenticated" and marks the account unauthenticated.
+ * A status-less read of that response reaches `selectRpcPayload`, finds
+ * `inner-payload-absent`, and halts **`shape-changed`** — "the API changed" about
+ * an endpoint that was working and had said, in its own slot, that this request
+ * was refused. That is the W61 defect wearing Gemini's clothes.
+ *
+ * ## What this is *not*
+ *  · It is not a second request shape, and it is not a retry: it only *names* a
+ *    stop the leg already reached (the engine halts either way).
+ *  · It does not decide that a response succeeded. `null` means "no refusal was
+ *    named", and every non-refusal body takes exactly the path it took before.
+ *  · It is not reached by guessing a code. `GEMINI_AUTH_REFUSAL_CODES` is a closed
+ *    set of codes a source was read making a claim about; every other non-zero
+ *    code is `refused-unknown`, which claims nothing and is still transient.
+ *
+ * ## Which entries it reads — and why the rule is not simply "any non-zero code"
+ * A **successful** `wrb.fr` entry carries `[5] === null` in every fixture in this
+ * repository, and the one source reads `[5][0]` only to catch a rejection. But
+ * nothing establishes that a stray non-zero code can never ride along a usable
+ * document, and classifying a working response as a refusal would put the leg on
+ * the backoff ladder against an endpoint that is answering. So an entry is read
+ * as a refusal when **the document is unusable and a code is present** (the shape
+ * the measured refusal has), or when the code is one this build already knows
+ * means a refusal. A usable document with an unreadable code is left to the shape
+ * checks, which now name the code in their detail.
+ */
+export interface GeminiEnvelopeRefusal {
+  /**
+   * Two outcomes, and neither is permanent:
+   *  · `'auth-refused'` — the code is in `GEMINI_AUTH_REFUSAL_CODES`, i.e. one a
+   *    source was read calling a credential failure. Transient: the `at` token is
+   *    re-read on every request, so signing back in is the remedy.
+   *  · `'refused-unknown'` — a non-zero code this build cannot read. Also
+   *    transient, on the same gentle ladder, and the code is carried in the detail
+   *    so whoever reads the trace next has the evidence rather than the guess.
+   */
+  reason: 'auth-refused' | 'refused-unknown';
+  detail: string;
+}
+
+/**
+ * The only status code this build will call an authentication refusal.
+ *
+ * Evidence: **one source** — HanaokaYuzu/Gemini-API's `_parse_rpc_results`, which
+ * reads `part[5][0]` and, on `7`, sets `AccountStatus.UNAUTHENTICATED` and warns
+ * "Permission denied or unauthenticated". One source is weak, so the set stays
+ * closed and everything else is `refused-unknown`; a code is added here only when
+ * a source is read making that claim about it.
+ */
+export const GEMINI_AUTH_REFUSAL_CODES: readonly number[] = [7];
+
+/** The rpcid as a detail may name it: only the two this repository declares, never free text. */
+function namedRpcid(rpcid: string | null): string {
+  if (rpcid === GEMINI_RPC_LIST) return `the ${GEMINI_RPC_LIST} (list)`;
+  if (rpcid === GEMINI_RPC_DETAIL) return `the ${GEMINI_RPC_DETAIL} (detail)`;
+  return 'the response’s';
+}
+
+/**
+ * The refusal a Gemini `batchexecute` envelope names in `wrb.fr[5][0]`, or `null`
+ * when no entry names one.
+ *
+ * `null` covers every case that is not a refusal: a body that is not this envelope
+ * at all (including the *bundle* JSON the detail segment is handed —
+ * `refusalOf` is called on both segments, and a bundle is not a `batchexecute`
+ * body), an entry with no status slot, a code of exactly `0`, and a code that is
+ * not a finite number (a string `"7"` is not read as one).
+ */
+export function geminiEnvelopeRefusal(text: string): GeminiEnvelopeRefusal | null {
+  const parsed = parseBatchExecute(text);
+  if (!parsed.ok) return null;
+  for (const entry of parsed.entries) {
+    if (!entry.recognized) continue;
+    const code = entry.statusCode;
+    if (code === null || code === 0) continue;
+    const known = GEMINI_AUTH_REFUSAL_CODES.includes(code);
+    // See the interface's own note: a usable document with an unreadable code is
+    // left to the shape checks rather than being called a refusal.
+    if (entry.error === undefined && !known) continue;
+    const reason: GeminiEnvelopeRefusal['reason'] = known ? 'auth-refused' : 'refused-unknown';
+    const because = known
+      ? 'the one source read for this slot calls it permission-denied / unauthenticated'
+      : 'this build does not recognise this code, so what it means is not established';
+    const document = entry.error === undefined ? 'the entry carried a document' : 'the entry carried no document';
+    return {
+      reason,
+      detail:
+        `gemini refused this request in-band: ${namedRpcid(entry.rpcid)} wrb.fr entry carries `
+        + `status code ${code} in slot 5 and ${document} (${because}; the HTTP status is not the `
+        + 'signal here — this platform answers 200 either way)',
+    };
+  }
+  return null;
 }
 
 /** One `MaZiqc` page, as the capture and backfill legs consume it. */
@@ -696,7 +1011,12 @@ export interface GeminiListRead {
 
 export type GeminiListReadResult =
   | ({ ok: true } & GeminiListRead)
-  | { ok: false; reason: GeminiRpcPayloadFailure | GeminiShapeError | 'item-id-missing' };
+  | {
+      ok: false;
+      reason: GeminiRpcPayloadFailure | GeminiShapeError | 'item-id-missing';
+      /** Shape-only evidence about what could not be read. Absent when there is nothing to describe. */
+      detail?: string;
+    };
 
 /** Reads one `MaZiqc` response body: envelope, then this rpcid's document, then one page of it. */
 export function readListResponse(text: string): GeminiListReadResult {
@@ -753,7 +1073,12 @@ export type GeminiDetailReadFailure =
 
 export type GeminiDetailReadResult =
   | ({ ok: true } & GeminiDetailRead)
-  | { ok: false; reason: GeminiDetailReadFailure };
+  | {
+      ok: false;
+      reason: GeminiDetailReadFailure;
+      /** Shape-only evidence about what could not be read. Absent when there is nothing to describe. */
+      detail?: string;
+    };
 
 /**
  * Reads one `hNvQHb` response body.
@@ -886,7 +1211,18 @@ export function readDetailBundle(text: string): GeminiBundleReadResult {
       return { ok: false, reason: 'bundle holds a page that is not a non-empty string' };
     }
     const read = readDetailResponse(page, record.conversationId);
-    if (!read.ok) return { ok: false, reason: `bundle page could not be read: ${read.reason}` };
+    if (!read.ok) {
+      // 🔴 W308 · The page's own shape evidence travels with the refusal: a stored
+      //    bundle that cannot be read must say *which* page and *what* was wrong
+      //    with it, not only that something was.
+      const where = `bundle page ${index + 1} of ${pages.length}`;
+      return {
+        ok: false,
+        reason: read.detail === undefined
+          ? `${where} could not be read: ${read.reason}`
+          : `${where} could not be read: ${read.reason} (${read.detail})`,
+      };
+    }
     const isLast = index === pages.length - 1;
     if (isLast && read.nextPageToken !== null) {
       return { ok: false, reason: 'the bundle’s last page carries a continuation token, so the bundle is incomplete' };
