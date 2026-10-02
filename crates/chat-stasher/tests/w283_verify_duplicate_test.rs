@@ -153,6 +153,10 @@ fn l3_names_a_repeated_shard_and_does_not_fail_on_it() {
         "the verdict line must carry the count, so a green run cannot hide it:\n{out}"
     );
     assert!(
+        out.contains("chat-stasher repair-duplicates"),
+        "verify must name the read-only repair inventory:\n{out}"
+    );
+    assert!(
         ok,
         "a repeated shard is a possibility, not corruption — L3 must not fail on it:\n{out}"
     );
@@ -207,7 +211,7 @@ fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["complete"], true);
     assert_eq!(json["machines"][0]["machine"], MACHINE);
-    assert_eq!(json["machines"][0]["duplicate_sessions"], 1);
+    assert_eq!(json["machines"][0]["duplicate_sessions"], 1, "{json}");
     assert_eq!(json["machines"][0]["duplicate_shards"], 1);
     assert_eq!(
         json["machines"][0]["duplicate_bytes"],

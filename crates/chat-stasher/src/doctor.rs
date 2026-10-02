@@ -29,9 +29,7 @@ use crate::json_out::{CountState, TimeState};
 use crate::scanner;
 use crate::sqlite_probe;
 use crate::store::{self, StoreConfig};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1657,28 +1655,12 @@ fn inspect_stage_duplicates(config: &Config) -> StageDuplicateCheck {
                 }
             };
             shards.sort_by_key(|(sequence, _)| *sequence);
-            let mut seen_hashes = BTreeSet::new();
+            let mut bodies = Vec::with_capacity(shards.len());
             let mut duplicate_shards = 0usize;
             let mut duplicate_bytes = 0u64;
             for (_, path) in &shards {
                 match fs::read(path) {
-                    Ok(body) => {
-                        let digest: [u8; 32] = Sha256::digest(&body).into();
-                        if !seen_hashes.insert(digest) {
-                            duplicate_shards += 1;
-                            duplicate_bytes = match duplicate_bytes.checked_add(body.len() as u64) {
-                                Some(bytes) => bytes,
-                                None => {
-                                    return StageDuplicateCheck {
-                                        state: "unknown",
-                                        machines: None,
-                                        why: Some("duplicate byte count overflowed".to_string()),
-                                        repair_command: REPAIR,
-                                    };
-                                }
-                            };
-                        }
-                    }
+                    Ok(body) => bodies.push(body),
                     Err(error) => {
                         return StageDuplicateCheck {
                             state: "unknown",
@@ -1688,6 +1670,20 @@ fn inspect_stage_duplicates(config: &Config) -> StageDuplicateCheck {
                         };
                     }
                 }
+            }
+            for index in crate::store::duplicate_shard_indices(&bodies) {
+                duplicate_shards += 1;
+                duplicate_bytes = match duplicate_bytes.checked_add(bodies[index].len() as u64) {
+                    Some(bytes) => bytes,
+                    None => {
+                        return StageDuplicateCheck {
+                            state: "unknown",
+                            machines: None,
+                            why: Some("duplicate byte count overflowed".to_string()),
+                            repair_command: REPAIR,
+                        };
+                    }
+                };
             }
             if duplicate_shards > 0 {
                 summary.duplicate_sessions += 1;

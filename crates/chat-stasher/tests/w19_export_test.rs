@@ -668,7 +668,7 @@ fn written_files_are_byte_identical_to_read_and_the_manifest_sha_matches() {
 }
 
 #[test]
-fn read_and_export_collapse_an_exact_duplicate_shard() {
+fn read_and_export_keep_a_repeated_shard_inside_a_longer_session() {
     let (dir, repo, _key, mk) = build_fixture();
     let root = dir.path();
     let stage = stage_path(root, "m-alpha");
@@ -681,11 +681,11 @@ fn read_and_export_collapse_an_exact_duplicate_shard() {
     store.push(&stage, &mk).unwrap();
 
     let (read_body, read_shards) = store.read_session_concat("m-alpha", CC_ONE, &mk).unwrap();
-    assert_eq!(read_shards.len(), 2, "read reports unique content shards");
+    assert_eq!(read_shards.len(), 3, "a repeated delta remains a shard");
     assert_eq!(
         std::str::from_utf8(&read_body).unwrap().lines().count(),
-        5,
-        "read body excludes the repeated shard"
+        8,
+        "read body retains the repeated delta"
     );
 
     let out = root.join("export-deduplicated");
@@ -709,11 +709,11 @@ fn read_and_export_collapse_an_exact_duplicate_shard() {
     let exported_body = fs::read(file).unwrap();
     assert_eq!(
         exported_body, read_body,
-        "export and read share normalized bytes"
+        "export and read share the same bytes"
     );
     assert_eq!(
         std::str::from_utf8(&exported_body).unwrap().lines().count(),
-        5
+        8
     );
     let mut fts_source_lines = None;
     store
@@ -724,15 +724,73 @@ fn read_and_export_collapse_an_exact_duplicate_shard() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(
-        fts_source_lines,
-        Some(5),
-        "FTS receives normalized session bytes"
-    );
+    assert_eq!(fts_source_lines, Some(8), "FTS receives the repeated delta");
     assert!(
         session_dir.exists(),
         "the read-only repair leaves stage data in place"
     );
+}
+
+#[test]
+fn read_and_export_keep_a_repeated_delta_after_a_multishard_prefix() {
+    let (dir, repo, _key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session = "synthetic-repeated-delta";
+    let first = b"{\"uuid\":\"same\"}\n".to_vec();
+    let second = b"{\"uuid\":\"other\"}\n".to_vec();
+    for body in [first.clone(), second, first.clone()] {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "m-alpha",
+            session,
+            &[body.strip_suffix(b"\n").unwrap().to_vec()],
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .unwrap();
+    }
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let (read_body, _) = store.read_session_concat("m-alpha", session, &mk).unwrap();
+    assert_eq!(
+        read_body,
+        [
+            first.as_slice(),
+            b"{\"uuid\":\"other\"}\n",
+            first.as_slice()
+        ]
+        .concat()
+    );
+    let bulk_read = store.read_all_machines(&mk).unwrap();
+    let bulk_session = bulk_read.machines[0]
+        .sessions
+        .iter()
+        .find(|row| row.session_id == session)
+        .unwrap();
+    assert_eq!(bulk_session.concat_bytes, read_body.len() as u64);
+    assert!(bulk_session.sha_matches(&read_body));
+
+    let out = root.join("export-repeated-delta");
+    let exported = export::export_sessions(
+        &store,
+        &mk,
+        &Selector::default(),
+        &export_opts(&out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(exported.exit_status(), 0);
+    let entry = manifest(&out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == session)
+        .unwrap()
+        .clone();
+    let file = out.join(entry["relative_path"].as_str().unwrap());
+    assert_eq!(fs::read(file).unwrap(), read_body);
 }
 
 // ------------------------------------------------------------------ test 3

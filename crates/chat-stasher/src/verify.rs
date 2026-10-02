@@ -377,7 +377,7 @@ impl BackupStore {
             .collect();
 
         let observation = self
-            .read_cumulative_sessions(mk, Some(&wanted))
+            .read_cumulative_sessions_raw(mk, Some(&wanted))
             .context("read archive back for reconcile")?;
 
         let obs_map: BTreeMap<(String, String), SessionBackedUp> = observation

@@ -864,15 +864,20 @@ impl BackupStore {
 
         let mut concat = Vec::new();
         let mut hashes = Vec::new();
-        let mut seen_shard_hashes = BTreeSet::new();
-        for (seq, _path, node) in entries {
+        let mut bodies = Vec::with_capacity(entries.len());
+        for (_seq, _path, node) in &entries {
             let mut buf = Vec::new();
             repo.dump(&node, &mut buf).context("dump shard")?;
-            let digest: [u8; 32] = Sha256::digest(&buf).into();
-            if seen_shard_hashes.insert(digest) {
-                concat.extend_from_slice(&buf);
-                hashes.push((shard_filename(seq), hex_digest(&digest)));
+            bodies.push(buf);
+        }
+        let duplicates: BTreeSet<_> = duplicate_shard_indices(&bodies).into_iter().collect();
+        for ((seq, _path, _node), (index, buf)) in entries.iter().zip(bodies.iter().enumerate()) {
+            if duplicates.contains(&index) {
+                continue;
             }
+            let digest: [u8; 32] = Sha256::digest(&buf).into();
+            concat.extend_from_slice(buf);
+            hashes.push((shard_filename(*seq), hex_digest(&digest)));
         }
         Ok((concat, hashes))
     }
@@ -1139,17 +1144,22 @@ fn dump_shard_slots<S: rustic_core::IndexedFull>(
     );
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (_, idx, name) in shards {
+    let mut bodies = Vec::with_capacity(shards.len());
+    for (_, idx, _name) in shards {
         let mut buf = Vec::new();
         repo.dump(&entries[*idx].1, &mut buf)
             .context("dump shard for session content")?;
+        bodies.push(buf);
+    }
+    let duplicates: BTreeSet<_> = duplicate_shard_indices(&bodies).into_iter().collect();
+    for ((_, _, name), (index, buf)) in shards.iter().zip(bodies.iter().enumerate()) {
+        if duplicates.contains(&index) {
+            continue;
+        }
         let digest = Sha256::digest(&buf);
         let digest_key: [u8; 32] = digest.into();
-        if seen.insert(digest_key) {
-            concat.extend_from_slice(&buf);
-            hashes.push((name.clone(), hex_digest(&digest_key)));
-        }
+        concat.extend_from_slice(buf);
+        hashes.push((name.clone(), hex_digest(&digest_key)));
     }
     Ok((concat, hashes))
 }
@@ -1722,36 +1732,48 @@ pub fn find_duplicate_shard(
     Ok(None)
 }
 
-/// Indices of shard bodies that repeat an earlier SHA-256 within one session.
+/// Indices in later shards that replay the complete preceding shard sequence.
 ///
-/// Sequence order is the caller's order. The first occurrence is retained and
-/// each later occurrence with the same digest is collapsed. Different content
-/// remains distinct, even when it shares lines with another shard.
+/// Sequence order is the caller's order. A duplicate is recognized only when
+/// a contiguous run reproduces all bytes accumulated before that run and ends
+/// on a shard boundary. A repeated delta inside a longer sequence is retained.
 pub fn duplicate_shard_indices(shards: &[Vec<u8>]) -> Vec<usize> {
-    let mut seen = BTreeSet::new();
-    shards
-        .iter()
-        .enumerate()
-        .filter_map(|(index, shard)| {
-            let digest: [u8; 32] = Sha256::digest(shard).into();
-            if seen.insert(digest) {
-                None
-            } else {
-                Some(index)
+    let mut duplicates = Vec::new();
+    let mut prefix = Vec::new();
+    let mut index = 0;
+    while index < shards.len() {
+        if !prefix.is_empty() {
+            let mut replay = Vec::new();
+            let mut matched = false;
+            for (offset, shard) in shards[index..].iter().enumerate() {
+                replay.extend_from_slice(shard);
+                if replay == prefix {
+                    duplicates.extend(index..=index + offset);
+                    index += offset + 1;
+                    matched = true;
+                    break;
+                }
+                if !prefix.starts_with(&replay) {
+                    break;
+                }
             }
-        })
-        .collect()
+            if matched {
+                continue;
+            }
+        }
+        prefix.extend_from_slice(&shards[index]);
+        index += 1;
+    }
+    duplicates
 }
 
-/// Keep the first occurrence of each exact shard hash within one session.
+/// Keep the first complete shard sequence and later non-replay content.
 pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    let mut seen = BTreeSet::new();
+    let duplicates: BTreeSet<_> = duplicate_shard_indices(&shards).into_iter().collect();
     shards
         .into_iter()
-        .filter(|shard| {
-            let digest: [u8; 32] = Sha256::digest(shard).into();
-            seen.insert(digest)
-        })
+        .enumerate()
+        .filter_map(|(index, shard)| (!duplicates.contains(&index)).then_some(shard))
         .collect()
 }
 
@@ -2187,9 +2209,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_shard_hashes_collapse_only_later_exact_matches() {
-        let shards = vec![b"alpha\n".to_vec(), b"beta\n".to_vec(), b"alpha\n".to_vec()];
-        assert_eq!(duplicate_shard_indices(&shards), vec![2]);
+    fn duplicate_shard_detection_requires_a_complete_prefix_replay() {
+        let repeated_delta = vec![b"alpha\n".to_vec(), b"beta\n".to_vec(), b"alpha\n".to_vec()];
+        assert!(duplicate_shard_indices(&repeated_delta).is_empty());
+        let resealed_prefix = vec![
+            b"alpha\n".to_vec(),
+            b"beta\n".to_vec(),
+            b"alpha\n".to_vec(),
+            b"beta\n".to_vec(),
+        ];
+        assert_eq!(duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
         assert!(duplicate_shard_indices(&[b"alpha\n".to_vec(), b"alpha".to_vec()]).is_empty());
     }
 

@@ -403,6 +403,17 @@ impl BackupStore {
         self.read_cumulative_sessions_inner(mk, wanted, false)
     }
 
+    /// Raw cumulative bytes for L3 reconciliation and duplicate inventory.
+    /// User-facing bulk reads use [`Self::read_all_machines`] so a
+    /// whole-prefix reseal cannot duplicate conversation content.
+    pub fn read_cumulative_sessions_raw(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+    ) -> anyhow::Result<ReadAllReport> {
+        self.read_cumulative_sessions_inner(mk, wanted, false)
+    }
+
     fn read_cumulative_sessions_inner(
         &self,
         mk: &MasterKey,
@@ -516,13 +527,25 @@ impl BackupStore {
                 let mut shard_bytes = Vec::with_capacity(shards.len());
                 let mut shard_run_duplicates = Vec::new();
                 let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
-                let mut seen_shard_hashes = BTreeSet::new();
+                let mut shard_bodies = Vec::with_capacity(shards.len());
                 for (shard, node) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
                         .with_context(|| format!("dump shard {shard}"))?;
+                    shard_bodies.push(buf);
+                }
+                let duplicate_indices: BTreeSet<_> = if collapse_duplicate_shards {
+                    crate::store::duplicate_shard_indices(&shard_bodies)
+                        .into_iter()
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+                for ((_shard, _node), (index, buf)) in
+                    shards.iter().zip(shard_bodies.iter().enumerate())
+                {
                     let digest: [u8; 32] = Sha256::digest(&buf).into();
-                    if collapse_duplicate_shards && !seen_shard_hashes.insert(digest) {
+                    if duplicate_indices.contains(&index) {
                         continue;
                     }
                     let current_index = shard_sha256.len();
@@ -741,8 +764,7 @@ impl BackupStore {
                     continue;
                 }
                 shards.sort_by_key(|(seq, _)| *seq);
-                let mut concat = Vec::new();
-                let mut seen_hashes = BTreeSet::new();
+                let mut shard_bodies = Vec::with_capacity(shards.len());
                 for (_, node) in shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf).with_context(|| {
@@ -751,11 +773,12 @@ impl BackupStore {
                             crate::id::short_session_id(&session)
                         )
                     })?;
-                    let digest: [u8; 32] = Sha256::digest(&buf).into();
-                    if seen_hashes.insert(digest) {
-                        concat.extend_from_slice(&buf);
-                    }
+                    shard_bodies.push(buf);
                 }
+                let concat = crate::store::unique_shard_bodies(shard_bodies)
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 visit(&session, &concat)?;
                 out.sessions += 1;
             }

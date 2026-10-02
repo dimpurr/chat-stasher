@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1457-1676,1678-1693`; `crates/chat-stasher/src/main.rs:8639-8958`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1457-1676,1678-1693`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -637,7 +637,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:295-395,1823-1825,1865-1875`; `crates/chat-stasher/src/main.rs:7815-7816`).
+kept on your machine (`crates/chat-stasher/src/store.rs:295-395,1845-1847,1887-1897`; `crates/chat-stasher/src/main.rs:7820-7821`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -966,10 +966,10 @@ dominant risk.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1823-1825`). The key file
+archive (`crates/chat-stasher/src/store.rs:1845-1847`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1865-1935`).
+(`crates/chat-stasher/src/store.rs:1887-1957`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
@@ -977,7 +977,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:7707-7712`).
+(`crates/chat-stasher/src/main.rs:7712-7717`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

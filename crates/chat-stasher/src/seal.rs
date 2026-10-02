@@ -121,6 +121,14 @@ pub fn seal_active_file(
     if !active.exists() {
         anyhow::bail!("active file does not exist: {}", active.display());
     }
+    let active_bytes = fs::read(active)
+        .with_context(|| format!("read active file {} before sealing", active.display()))?;
+    if let Some(existing) =
+        crate::store::find_duplicate_shard(stage_root, machine, session_id, &active_bytes)?
+    {
+        return crate::store::parse_shard_seq(&existing)
+            .ok_or_else(|| anyhow::anyhow!("existing duplicate shard has an invalid sequence"));
+    }
     let seq = crate::store::next_shard_seq(stage_root, machine, session_id)?;
     let dest = crate::store::shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
     if let Some(parent) = dest.parent() {
@@ -326,6 +334,37 @@ mod tests {
         assert!(active.exists());
         assert_eq!(store::next_shard_seq(stage, "m", "s").unwrap(), 3);
         drop(dir);
+    }
+
+    #[test]
+    fn seal_active_file_does_not_append_a_byte_identical_shard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path();
+        write_sealed_shard(
+            store::StageWriter::Collect,
+            stage,
+            "m",
+            "s",
+            &["same-line".to_string()],
+        )
+        .unwrap();
+        let active = session_shard_dir(stage, "m", "s").join("active.jsonl");
+        fs::write(&active, b"same-line\n").unwrap();
+
+        let seq = seal_active_file(&active, stage, "m", "s", 20).unwrap();
+
+        assert_eq!(seq, 1, "an exact replay resolves to the existing shard");
+        assert!(
+            active.exists(),
+            "a no-op must leave the active source intact"
+        );
+        assert_eq!(
+            store::sealed_shard_entries(&session_shard_dir(stage, "m", "s"))
+                .unwrap()
+                .len(),
+            1,
+            "the active replay must not create a second sealed shard"
+        );
     }
 
     #[test]
