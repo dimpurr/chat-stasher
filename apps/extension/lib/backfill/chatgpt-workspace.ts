@@ -5,6 +5,13 @@ export type ChatGptWorkspaceResolution =
 
 export interface ChatGptWorkspaceObservation { accountIds: string[] }
 
+/** Canonical storage and comparison form for a ChatGPT workspace identity. */
+export function chatGptWorkspaceScope(workspace: unknown): string | null {
+  const value = typeof workspace === 'string' ? workspace.trim() : '';
+  if (!value || value.length > 512) return null;
+  return isFingerprintedChatGptScope(value) ? value : `chatgpt:${value}`;
+}
+
 export function observeChatGptAccountId(
   observation: ChatGptWorkspaceObservation,
   value: string | null | undefined,
@@ -62,7 +69,7 @@ export async function fingerprintChatGptWorkspace(
   const salt = await loadOrCreateAccountSalt(store);
   if (!salt || salt === 'unreadable') return null;
   const fingerprint = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', value);
-  return fingerprint ? `chatgpt:fp1:${fingerprint}` : null;
+  return fingerprint ? chatGptWorkspaceScope(`fp1:${fingerprint}`) : null;
 }
 
 /** Explicit version marker; scope contents are never classified by digest shape alone. */

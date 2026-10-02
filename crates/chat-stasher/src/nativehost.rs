@@ -1376,11 +1376,7 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
             "malformed coordination request",
         );
     }
-    if parsed.platform == "chatgpt"
-        && parsed.account_id.as_deref().is_some_and(|scope| {
-            scope.starts_with("chatgpt:") && !valid_fingerprinted_chatgpt_scope(scope)
-        })
-    {
+    if !chatgpt_account_scope_is_marked(&parsed.platform, parsed.account_id.as_deref()) {
         return nack(
             Some(parsed.request_id),
             NackKind::BadRequest,
@@ -1473,6 +1469,10 @@ fn valid_fingerprinted_chatgpt_scope(scope: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn chatgpt_account_scope_is_marked(platform: &str, scope: Option<&str>) -> bool {
+    platform != "chatgpt" || scope.is_none_or(valid_fingerprinted_chatgpt_scope)
 }
 
 /// What one coordination body decided, for the caller that owns its transaction.
@@ -2859,11 +2859,6 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         );
     }
 
-    let (machine, stage) = match resolve_target() {
-        HostTarget::Ready { machine, stage } => (machine, stage),
-        HostTarget::Refused { kind, detail } => return nack(request_id, kind, detail),
-    };
-
     // `invalid-bundle` is the answer for a payload this channel cannot archive.
     // `ingest` would keep such bytes as a raw-only record, because an inbox
     // file is the user's own drop box; a delivery is machine-fed, and the
@@ -2886,6 +2881,17 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
         .get("platform")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default(); // reason: validated legacy bundles without a platform cannot produce a cross-platform key.
+    if !chatgpt_account_scope_is_marked(platform, parsed.account_id.as_deref()) {
+        return nack(
+            request_id,
+            NackKind::BadRequest,
+            "unmarked ChatGPT account scope refused",
+        );
+    }
+    let (machine, stage) = match resolve_target() {
+        HostTarget::Ready { machine, stage } => (machine, stage),
+        HostTarget::Refused { kind, detail } => return nack(request_id, kind, detail),
+    };
     let account_key = parsed
         .account_id
         .as_deref()
@@ -3989,23 +3995,36 @@ mod tests {
     use crate::json_out::TimeState;
 
     #[test]
-    fn coordination_refuses_unmarked_chatgpt_scope_before_host_state_access() {
-        let response = coordination(
-            serde_json::json!({
-                "request_id": "w299-raw-scope",
-                "mode": "claim",
-                "platform": "chatgpt",
-                "install_id": "synthetic-install",
-                "account_id": format!("chatgpt:{}", "a".repeat(64)),
-            }),
-            Some("w299-raw-scope".into()),
-        );
-        assert_eq!(response["type"], "nack");
-        assert_eq!(response["kind"], "bad-request");
-        assert!(response["detail"]
-            .as_str()
-            .unwrap()
-            .contains("unmarked ChatGPT"));
+    fn coordination_refuses_all_unmarked_chatgpt_scopes_before_host_state_access() {
+        for (index, scope) in [
+            "raw-account-id".to_string(),
+            "chatgpt:raw-account-id".to_string(),
+            "a".repeat(64),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request_id = format!("w299-raw-scope-{index}");
+            let response = coordination(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "mode": "claim",
+                    "platform": "chatgpt",
+                    "install_id": "synthetic-install",
+                    "account_id": scope,
+                }),
+                Some(request_id),
+            );
+            assert_eq!(response["type"], "nack", "scope case {index}");
+            assert_eq!(response["kind"], "bad-request", "scope case {index}");
+            assert!(
+                response["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unmarked ChatGPT"),
+                "scope case {index}"
+            );
+        }
         assert!(valid_fingerprinted_chatgpt_scope(&format!(
             "chatgpt:fp1:{}",
             "a".repeat(64)
@@ -4014,6 +4033,48 @@ mod tests {
             "chatgpt:{}",
             "a".repeat(64)
         )));
+    }
+
+    #[test]
+    fn delivery_refuses_all_unmarked_chatgpt_scopes_before_host_state_access() {
+        let payload = serde_json::json!({
+            "schema": "chat-stasher/inbox@1",
+            "platform": "chatgpt",
+            "sessionId": "synthetic-session",
+            "capturedAt": "2026-09-12T00:00:00.000Z",
+            "parsed": {"hasJson": true, "keys": ["id"]},
+            "raw": {"text": "{}", "bytes": 2},
+        })
+        .to_string();
+        for (index, scope) in [
+            "raw-account-id".to_string(),
+            "chatgpt:raw-account-id".to_string(),
+            "a".repeat(64),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request_id = format!("w299-deliver-raw-scope-{index}");
+            let response = deliver(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "name": "chatgpt-synthetic-session.json",
+                    "payload": payload,
+                    "sha256": sha256_hex(payload.as_bytes()),
+                    "account_id": scope,
+                }),
+                Some(request_id),
+            );
+            assert_eq!(response["type"], "nack", "scope case {index}");
+            assert_eq!(response["kind"], "bad-request", "scope case {index}");
+            assert!(
+                response["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unmarked ChatGPT"),
+                "scope case {index}"
+            );
+        }
     }
 
     #[test]

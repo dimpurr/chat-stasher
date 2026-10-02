@@ -101,10 +101,10 @@ apps/extension/lib/backfill/alarm.ts:1658-1737  a89fbce85bd2  lines=80
   <- docs-dev/privacy.md:491  :: export interface BackfillTickRecord {
 apps/extension/lib/backfill/chatgpt-scope-migration.ts:27-110  78d38f2a028c  lines=84
   <- docs-dev/privacy.md:554, docs-dev/threat-model.md:458  :: /** Remove pre-fingerprint ChatGPT workspace ids from durab…
-apps/extension/lib/backfill/chatgpt-workspace.ts:1-23  fa17ff1df52d  lines=23
+apps/extension/lib/backfill/chatgpt-workspace.ts:1-23  97497f965106  lines=23
   <- docs-dev/privacy.md:553  :: /** Workspace identity observed from this page's own outgoi…
-apps/extension/lib/backfill/chatgpt-workspace.ts:41-65  b00ded78df3e  lines=25
-  <- docs-dev/privacy.md:553, docs-dev/threat-model.md:457  :: /** A defined init.headers replaces Request headers; otherw…
+apps/extension/lib/backfill/chatgpt-workspace.ts:41-65  a1edc2b9e319  lines=25
+  <- docs-dev/privacy.md:553, docs-dev/threat-model.md:457  :: if (!headers || typeof headers !== 'object') return null;
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs-dev/privacy.md:563  :: * ## Why this module exists at all
 apps/extension/lib/backfill/claude-org.ts:112-138  13f59996d45c  lines=27
@@ -125,7 +125,7 @@ apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs-dev/privacy.md:484  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
 apps/extension/lib/backfill/debt-store.ts:111-130  c2b9b363b155  lines=20
   <- docs-dev/privacy.md:484  :: export const BACKFILL_DB_VERSION = 2;
-apps/extension/lib/backfill/engine.ts:156-159  5cfeee9f2531  lines=4
+apps/extension/lib/backfill/engine.ts:156-159  6cb56615d08b  lines=4
   <- docs-dev/privacy.md:669, docs-dev/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
 apps/extension/lib/backfill/engine.ts:1475-1567  e66369a1394d  lines=93
   <- docs-dev/threat-model.md:468  :: *
@@ -743,10 +743,10 @@ crates/chat-stasher/src/nativehost.rs:1290-1306  79c9ebd3c2f8  lines=17
   <- docs-dev/threat-model.md:380  :: fn account_key_from_masterkey_bytes(
 crates/chat-stasher/src/nativehost.rs:1310-1345  c6b2c6d91399  lines=36
   <- docs-dev/threat-model.md:390  :: /// ambiguous, or unreadable key configuration deliberately…
-crates/chat-stasher/src/nativehost.rs:1406-1412  72442e026028  lines=7
-  <- docs-dev/privacy.md:488, docs-dev/threat-model.md:459  :: )
-crates/chat-stasher/src/nativehost.rs:1406-1411  7ece3b5965fc  lines=6
-  <- docs-dev/threat-model.md:391  :: )
+crates/chat-stasher/src/nativehost.rs:1406-1412  17f51eb72b78  lines=7
+  <- docs-dev/privacy.md:488, docs-dev/threat-model.md:459  :: return nack(
+crates/chat-stasher/src/nativehost.rs:1406-1411  465434a805de  lines=6
+  <- docs-dev/threat-model.md:391  :: return nack(
 crates/chat-stasher/src/nativehost.rs:1496-1511  306bf709d1fc  lines=16
   <- docs-dev/privacy.md:348, docs-dev/privacy.md:488, docs-dev/threat-model.md:459  :: now: i64,
 crates/chat-stasher/src/nativehost.rs:1580  1bf1b96a8a89  lines=1
@@ -781,26 +781,26 @@ crates/chat-stasher/src/nativehost.rs:2534  e184724f0636  lines=1
   <- docs-dev/privacy.md:413, docs-dev/threat-model.md:652  :: | "pending"
 crates/chat-stasher/src/nativehost.rs:2559-2575  ffbea61087d6  lines=17
   <- docs-dev/privacy.md:413, docs-dev/threat-model.md:652  :: let result = (|| -> anyhow::Result<()> {
-crates/chat-stasher/src/nativehost.rs:2801-2989  24581290548d  lines=189
+crates/chat-stasher/src/nativehost.rs:2801-2989  6b16abe1b3d0  lines=189
   <- docs-dev/privacy.md:348  :: }
 crates/chat-stasher/src/nativehost.rs:2827-2836  c520f35286ca  lines=10
   <- docs-dev/threat-model.md:554  :: .as_ref()
 crates/chat-stasher/src/nativehost.rs:2843-2849  8e276fcd074b  lines=7
   <- docs-dev/threat-model.md:558  :: return nack(
-crates/chat-stasher/src/nativehost.rs:2926-2937  14c13f95e461  lines=12
-  <- docs-dev/privacy.md:152, docs-dev/threat-model.md:41  :: };
-crates/chat-stasher/src/nativehost.rs:3000-3002  64bc5d5290ce  lines=3
-  <- docs-dev/install.md:537  :: // decision had been made about the capture when none has.
-crates/chat-stasher/src/nativehost.rs:3003-3007  2fdc4901cc20  lines=5
-  <- docs-dev/privacy.md:369  :: NackKind::IdentityConflict,
-crates/chat-stasher/src/nativehost.rs:3008-3010  dad1a215f229  lines=3
-  <- docs-dev/install.md:537  :: "protocol": PROTOCOL,
-crates/chat-stasher/src/nativehost.rs:3213  802dc62f99e9  lines=1
-  <- docs-dev/install.md:307  :: pub sessions: Vec<StageSession>,
-crates/chat-stasher/src/nativehost.rs:3476-3486  e82c651dffe1  lines=11
-  <- docs-dev/install.md:307  :: use crate::runstate::{self, RunOutcome, RunStateRead};
-crates/chat-stasher/src/nativehost.rs:3861-3895  3bb599181630  lines=35
-  <- docs-dev/privacy.md:861, docs-dev/threat-model.md:174, docs-dev/threat-model.md:538  :: pub enum Launch {
+crates/chat-stasher/src/nativehost.rs:2926-2937  c59ec0364dc5  lines=12
+  <- docs-dev/privacy.md:152, docs-dev/threat-model.md:41  :: return nack(
+crates/chat-stasher/src/nativehost.rs:3000-3002  41fa7027a5d7  lines=3
+  <- docs-dev/install.md:537  :: }
+crates/chat-stasher/src/nativehost.rs:3003-3007  6f4ef0f1d2be  lines=5
+  <- docs-dev/privacy.md:369  :: // The refusal is *retryable* on purpose: the bytes are not…
+crates/chat-stasher/src/nativehost.rs:3008-3010  471cf338d1db  lines=3
+  <- docs-dev/install.md:537  :: request_id,
+crates/chat-stasher/src/nativehost.rs:3213  5f92d12a3656  lines=1
+  <- docs-dev/install.md:307  :: pub newest_mtime: Option<i64>,
+crates/chat-stasher/src/nativehost.rs:3476-3486  6a277da09fed  lines=11
+  <- docs-dev/install.md:307  :: /// What the run record says about the last successful push…
+crates/chat-stasher/src/nativehost.rs:3861-3895  e6fbfd65512b  lines=35
+  <- docs-dev/privacy.md:861, docs-dev/threat-model.md:174, docs-dev/threat-model.md:538  :: // ========================================================…
 crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends
 crates/chat-stasher/src/orphans.rs:327  3a21d2f444c5  lines=1

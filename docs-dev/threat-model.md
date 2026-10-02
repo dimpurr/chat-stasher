@@ -450,7 +450,7 @@ nor an export. A separate workspace-observation route fingerprints the header be
 storing it in a target or ledger key, or passing it as the native host's transient
 `account_id`. Fingerprinted scopes use the explicit `chatgpt:fp1:<hmac>` marker; unmarked
 scopes are migrated regardless of their shape, including hex-shaped raw ids, and the host
-refuses an unmarked scope at coordination. The migration preserves pending debt, erases old
+refuses an unmarked scope on coordination and delivery. The migration preserves pending debt, erases old
 storage keys, and is idempotent. Malformed or oversized header metadata is unknown and
 does not discard an otherwise valid capture. Ordinary ChatGPT responses with no observed
 header also remain unknown. The ChatGPT run lease remains disabled

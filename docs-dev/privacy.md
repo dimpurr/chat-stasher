@@ -542,7 +542,7 @@ Three things in that table deserve to be called out rather than buried:
   per-install HMAC key before storing a target, ledger scope, or sending the scope
   to the native host. Fingerprinted scopes carry the explicit `chatgpt:fp1:` marker;
   unmarked ChatGPT scopes are treated as raw migration inputs regardless of their
-  shape, and the host refuses an unmarked scope if one reaches coordination. A
+  shape, and the host refuses an unmarked scope on both coordination and delivery. A
   one-time migration re-keys older raw workspace scopes and their pending debt rows
   before removing old storage keys. Coverage waits for that migration before reading
   the stored scopes. It does not infer the
