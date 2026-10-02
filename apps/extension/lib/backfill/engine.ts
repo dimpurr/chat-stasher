@@ -38,7 +38,7 @@ import {
   type RunLease,
 } from './account-lease';
 import { accountFingerprintFor, accountIdFromCapture } from '../account-fingerprint';
-import { chatGptWorkspaceScope } from './chatgpt-workspace';
+import { chatGptScopeWorkspace, chatGptUnresolvedScope, chatGptWorkspaceScope, isChatGptScope, isIdentitylessChatGptScope, isUnresolvedChatGptScope } from './chatgpt-workspace';
 import type { AccountIdentity } from './types';
 import { isClaudeOrgId } from './claude-org';
 import { recordDebtTimes } from './debt-store';
@@ -911,8 +911,8 @@ function mergeChatGptProvenance(state: BackfillState, id: string, incoming: Chat
 }
 
 function chatGptWorkspaceOfScope(scope: string): string | null {
-  if (!scope.startsWith('chatgpt:') || scope.includes('!workspace-')) return null;
-  return chatGptWorkspaceScope(scope.startsWith('chatgpt:fp1:') ? scope : scope.slice('chatgpt:'.length));
+  if (!isChatGptScope(scope) || isUnresolvedChatGptScope(scope)) return null;
+  return chatGptWorkspaceScope(chatGptScopeWorkspace(scope));
 }
 
 /**
@@ -1839,14 +1839,14 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
 
   // ChatGPT's new workspace scope is not a `scopeInPath` parameter, but the
   // legacy `default` key and the two explicit unknown-workspace sentinels still
-  // carry no identity and are refused before any request is built.
+  // carry no identity and are refused before any request is built. The empty
+  // scope, the legacy `default` key, and both sentinels are one predicate now —
+  // `isIdentitylessChatGptScope` — so the refusal's four shapes cannot drift
+  // apart into separate copies again.
   if (opts.platform === 'chatgpt' && (
-    opts.scope === 'chatgpt:default'
-    || opts.scope === 'chatgpt:!workspace-unresolved'
-    || opts.scope === 'chatgpt:!workspace-ambiguous'
-    || opts.scope === 'chatgpt:'
+    isIdentitylessChatGptScope(opts.scope)
   )) {
-    const ambiguous = opts.scope === 'chatgpt:!workspace-ambiguous';
+    const ambiguous = opts.scope === chatGptUnresolvedScope('workspace-ambiguous');
     return halt(
       ambiguous ? 'org-ambiguous' : 'org-unresolved',
       ambiguous

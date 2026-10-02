@@ -109,7 +109,7 @@ import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/sp
 import { daySlowPlan, daySlowTriggeredBy, isPlatformDaySlowed, recordPlatformRateLimit } from '../lib/backfill/day-slow';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { fingerprintChatGptWorkspace } from '../lib/backfill/chatgpt-workspace';
+import { chatGptUnresolvedScope, fingerprintedChatGptScope, fingerprintChatGptWorkspace, isChatGptFingerprint, isChatGptScope, isDefaultChatGptScope, isUnresolvedChatGptScope } from '../lib/backfill/chatgpt-workspace';
 import { migrateChatGptWorkspaceScopes } from '../lib/backfill/chatgpt-scope-migration';
 import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
 import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, parseRetryAfterMs, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
@@ -1090,10 +1090,10 @@ async function coordinatedTick(
   }
   const lease = await acquireBackfillLease(platform, accountId);
   if (!lease) return { ran: false, reason: 'host-paused', report: null };
-  const expectedWorkspace = platform === 'chatgpt' && accountId?.startsWith('chatgpt:')
-    && !accountId.includes('!workspace-') ? accountId.slice('chatgpt:'.length) : null;
+  const workspaceScoped = platform === 'chatgpt' && accountId !== undefined
+    && isChatGptScope(accountId) && !isUnresolvedChatGptScope(accountId);
   const coordinatedHttp: HttpPort = async (url, init) => {
-    if (expectedWorkspace !== null && http.chatgptWorkspace) {
+    if (workspaceScoped && http.chatgptWorkspace) {
       const workspace = await http.chatgptWorkspace();
       if (!workspace.ok || workspace.observed !== true) {
         throw new Error(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved');
@@ -1117,7 +1117,7 @@ async function coordinatedTick(
     }
     return response;
   };
-  if (expectedWorkspace !== null && http.chatgptWorkspace) {
+  if (workspaceScoped && http.chatgptWorkspace) {
     coordinatedHttp.chatgptWorkspace = async () => {
       const observed = await http.chatgptWorkspace!();
       if (!observed.ok) return observed;
@@ -1924,8 +1924,8 @@ async function tickIdleReason(
   // cursors advance before treating the scope as idle. Ordinary pending bodies
   // still make a capped scope skippable so another platform can use this wake.
   if (platform === 'chatgpt') {
-    const workspaceScoped = scope.startsWith('chatgpt:') && !scope.includes('!workspace-')
-      && scope !== 'chatgpt:default';
+    const workspaceScoped = isChatGptScope(scope) && !isUnresolvedChatGptScope(scope)
+      && !isDefaultChatGptScope(scope);
     const enumeration = raw.chatgptEnumeration;
     const hasAuxiliaryPage = enumeration === undefined
       || enumeration.archived?.complete !== true
@@ -2005,7 +2005,7 @@ export async function registerBackfillTargetHere(): Promise<
   if (!live.wired) return { ok: false, reason: 'no-live-transport' };
   if (!live.target) return { ok: false, reason: 'origin-not-a-platform' };
   const { platform, origin } = live.target;
-  let scope = platform === 'chatgpt' ? 'chatgpt:!workspace-unresolved' : UNRESOLVED_SCOPE;
+  let scope = platform === 'chatgpt' ? chatGptUnresolvedScope('workspace-unresolved') : UNRESOLVED_SCOPE;
   if (platform === 'chatgpt') {
     const tabs = tabsApi();
     const pageHttp = live.tabId === null || !tabs ? undefined : tabHttpPort(live.tabId, tabs.sendMessage);
@@ -2013,7 +2013,7 @@ export async function registerBackfillTargetHere(): Promise<
     try { resolved = await pageHttp?.chatgptWorkspace?.(); } catch { /* unresolved is recorded below */ }
     if (!resolved?.ok || resolved.observed !== true) {
       const reason = resolved?.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved';
-      scope = reason === 'org-ambiguous' ? 'chatgpt:!workspace-ambiguous' : 'chatgpt:!workspace-unresolved';
+      scope = reason === 'org-ambiguous' ? chatGptUnresolvedScope('workspace-ambiguous') : chatGptUnresolvedScope('workspace-unresolved');
       await recordBackfillHalt(store, {
         platform, scope, reason,
         detail: reason === 'org-ambiguous'
@@ -2079,8 +2079,8 @@ export function backfillTargetFor(
   if (row.id === 'chatgpt') {
     // A workspace key is already an HMAC scope; this pure helper never accepts or
     // returns the page-visible raw header value.
-    const safeScope = chatgptWorkspaceFingerprint && /^[a-f0-9]{64}$/.test(chatgptWorkspaceFingerprint)
-      ? `chatgpt:fp1:${chatgptWorkspaceFingerprint}` : 'chatgpt:!workspace-unresolved';
+    const safeScope = isChatGptFingerprint(chatgptWorkspaceFingerprint)
+      ? fingerprintedChatGptScope(chatgptWorkspaceFingerprint) : chatGptUnresolvedScope('workspace-unresolved');
     return { platform: row.id, origin, scope: safeScope };
   }
   /**
@@ -2141,7 +2141,7 @@ export async function kickBackfill(
       const observed = await http?.chatgptWorkspace?.();
       if (observed?.ok) workspace = observed.workspace;
       else if (observed?.reason === 'workspace-ambiguous') {
-        target = { ...target, scope: 'chatgpt:!workspace-ambiguous' };
+        target = { ...target, scope: chatGptUnresolvedScope('workspace-ambiguous') };
       }
     } catch {
       // The workspace refusal below records that this page supplied no usable evidence.

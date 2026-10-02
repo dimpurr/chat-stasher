@@ -69,10 +69,67 @@ export async function fingerprintChatGptWorkspace(
   const salt = await loadOrCreateAccountSalt(store);
   if (!salt || salt === 'unreadable') return null;
   const fingerprint = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', value);
-  return fingerprint ? chatGptWorkspaceScope(`fp1:${fingerprint}`) : null;
+  return fingerprint ? fingerprintedChatGptScope(fingerprint) : null;
 }
 
 /** Explicit version marker; scope contents are never classified by digest shape alone. */
 export function isFingerprintedChatGptScope(scope: string): boolean {
   return /^chatgpt:fp1:[0-9a-f]{64}$/.test(scope);
+}
+
+/**
+ * Every construction and comparison of a ChatGPT scope goes through this module
+ * and nowhere else. `chatGptWorkspaceScope` above is the one entry point for a
+ * workspace value that may still be raw; the builders and predicates below are
+ * its vocabulary for the marked (`fp1:`) and sentinel forms. A grep-based guard
+ * (`tests/w301-one-scope-helper.test.ts`) fails if any other source file writes
+ * the `chatgpt:` / `fp1:` prefix itself.
+ */
+
+/** The workspace-value form of an already-computed fingerprint digest: `fp1:<digest>`. */
+export function fingerprintedChatGptWorkspace(fingerprint: string): string {
+  return `fp1:${fingerprint}`;
+}
+
+/** The marked scope for an already-computed fingerprint digest. */
+export function fingerprintedChatGptScope(fingerprint: string): string {
+  return `chatgpt:${fingerprintedChatGptWorkspace(fingerprint)}`;
+}
+
+/** The digest shape inside a marked scope — the one place the 64-hex rule lives. */
+export function isChatGptFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+/** True when a stored value is a ChatGPT scope at all. */
+export function isChatGptScope(scope: string): boolean {
+  return scope.startsWith('chatgpt:');
+}
+
+/** The workspace part of a ChatGPT scope (raw id, `fp1:<digest>`, or a sentinel). */
+export function chatGptScopeWorkspace(scope: string): string {
+  return scope.slice('chatgpt:'.length);
+}
+
+/** True when a scope is one of the explicit unknown-workspace sentinels. */
+export function isUnresolvedChatGptScope(scope: string): boolean {
+  return scope.includes('!workspace-');
+}
+
+/** The storage scope for one explicit unknown-workspace reason. */
+export function chatGptUnresolvedScope(reason: 'workspace-ambiguous' | 'workspace-unresolved'): string {
+  return `chatgpt:!${reason}`;
+}
+
+/** True when a scope is the legacy `default` key, which names no workspace identity. */
+export function isDefaultChatGptScope(scope: string): boolean {
+  return scope === 'chatgpt:default';
+}
+
+/** True when a scope carries no workspace identity: the legacy default, a sentinel, or an empty workspace. */
+export function isIdentitylessChatGptScope(scope: string): boolean {
+  return isDefaultChatGptScope(scope)
+    || scope === chatGptUnresolvedScope('workspace-unresolved')
+    || scope === chatGptUnresolvedScope('workspace-ambiguous')
+    || scope === 'chatgpt:';
 }
