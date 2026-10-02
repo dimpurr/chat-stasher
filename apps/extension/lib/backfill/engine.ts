@@ -186,7 +186,7 @@ export const notWiredHttp: HttpPort = async (url: string) => {
  *     ≤50 per run.
  *   Eight also makes a whole account's list a bounded number of ticks rather than a
  *   burst: ChatGPT's 1,000 conversations ≈ 10 pages ⇒ two ticks; the 74-page account
- *   above ⇒ ten ticks, about an hour of the 5-10 minute jittered cadence, against
+ *   above ⇒ ten ticks, about 10–20 minutes of the 1-2 minute jittered cadence, against
  *   7,391 bodies it can only fetch 400 of a day. Enumeration is never the constraint
  *   on this leg; a burst is the one thing it must not be.
  *

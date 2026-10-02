@@ -266,11 +266,14 @@ describe('W13-2 · the backoff ladder itself', () => {
     // 🔴 Both bases are at least one whole alarm tick. A base below the tick period
     //    would degenerate to "the next tick retries" — a backoff in name only, and
     //    the number would be a lie about what had been tuned.
-    // 🔴 W16 · The tick gap is drawn from `[5, 10]` minutes now rather than fixed
-    //    at 5, so the reference is its **floor** — the tightest case this bound
-    //    has to hold against. Referencing the mean (7.5) would let a base sit
-    //    below the shortest real gap and quietly become the "next tick retries"
-    //    degenerate case the comment above rules out.
+    // 🔴 W16 · The tick gap is drawn from a band rather than fixed, so the
+    //    reference is its **floor** — the tightest case this bound has to hold
+    //    against. Referencing the mean would let a base sit below the shortest
+    //    real gap and quietly become the "next tick retries" degenerate case the
+    //    comment above rules out. 🔴 W310 lowered that floor to 1 minute, so the
+    //    5/15-minute bases are now several ticks rather than one; the values are
+    //    deliberately unchanged (a backoff does not stop being one because the
+    //    clock ticks faster), so this inequality holds with room to spare.
     const tick = BACKFILL_TICK_DELAY_MIN_MINUTES * 60_000;
     expect(TRANSIENT_RETRY_BASE_MS['transport-error']).toBeGreaterThanOrEqual(tick);
     expect(TRANSIENT_RETRY_BASE_MS['rate-limited']).toBeGreaterThan(tick);

@@ -895,13 +895,17 @@ export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): 
  *    rate-limiting than for transport errors — is what these numbers keep.
  *
  * What is re-based: the reference implementation's retries happen *inside one session's request loop*,
- * so 1 s is a natural unit there. Ours happens once per alarm tick, and the
- * shortest possible tick gap is `BACKFILL_TICK_DELAY_MIN_MINUTES = 5`
- * (lib/backfill/alarm.ts — the tick is jittered since W16, and this is its
- * floor). Any delay at or below that floor therefore degenerates to "the next
- * tick retries" — a perfectly reasonable outcome, but not a backoff, and
- * shipping it with a tuned looking number would be a lie about what has been
- * tuned. So the unit here is one tick, and the ladders are expressed in ticks:
+ * so 1 s is a natural unit there. Ours happens once per alarm tick. When these
+ * ladders were chosen the shortest possible tick gap was
+ * `BACKFILL_TICK_DELAY_MIN_MINUTES = 5` (lib/backfill/alarm.ts — the tick is
+ * jittered since W16, and that was its floor), so any delay at or below that
+ * floor degenerated to "the next tick retries" — a perfectly reasonable outcome,
+ * but not a backoff, and shipping it with a tuned looking number would be a lie
+ * about what had been tuned. So the unit that makes the choice legible is one
+ * tick. 🔴 W310 lowered the tick floor to **1 minute**; the absolute values below
+ * are unchanged (a backoff does not stop being one because the clock ticks
+ * faster), so they are now several ticks rather than one, and the `in ticks`
+ * column below is written against the 5-minute floor they were chosen under:
  *
  *   reason            base     cap      in ticks        why these
  *   ---------------   ------   ------   -------------   -------------------------
@@ -950,7 +954,7 @@ export function haltStillApplies(record: HaltRecord, judgement: HaltJudgement): 
  *    retries, so it can afford to be aggressive. This leg never writes a debt off
  *    (only a real delivery settles one), so a persistent 429 has to land on a
  *    sustainable steady state rather than a deadline. Re-basing its 300 s cap
- *    literally would be 5 min = exactly one tick = no backoff at all.
+ *    literally would land on the shortest tick — no backoff at all.
  *
  * Monotonic, then flat: `attempts` only ever spaces requests further apart, so
  * this change can never issue *more* requests than the old code — for a permanent

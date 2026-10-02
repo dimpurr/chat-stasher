@@ -58,46 +58,70 @@ import {
 export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
 
 /**
- * 🔴 W16 · The gap between two ticks is **drawn uniformly from `[5, 10]` minutes**
- * (mean 7.5). These numbers are derived, not picked out of the air:
+ * 🔴 W310 · The gap between two ticks is **drawn uniformly from `[1, 2]` minutes**
+ * (mean 1.5). The band was `[5, 10]` (mean 7.5) from W16 until W310; the
+ * derivation below says why it moved and, just as importantly, what did **not**.
  *
- *  · **The floor is 5 minutes — the exact fixed period this replaces.** That is
- *    the whole argument for `[5, 10]` rather than a wider band with the same
- *    mean (the task offered `[4, 11]`, also mean 7.5): W16's rule is that
- *    *jitter only ever adds delay*, and a 4-minute floor would be the removal of
- *    a documented minimum. With the floor at 5, **every draw is ≥ the old fixed
- *    period**, so the alarm can only ever tick later than before; its maximum
- *    wake rate stays bit-for-bit what it was (1440/5 = 288 a day) while its mean
- *    drops to 1440/7.5 = 192.
- *  · **The ceiling is 10 minutes.** It bounds how long the leg can sit still —
- *    which matters, because a one-shot alarm that is never re-armed is exactly
- *    the failure the watchdog below exists for.
- *  · **Both brakes now bite, neither alone.** Before W16 the alarm ticked 288
- *    times a day against a fixed cap of 200, so the cap was *always* what
- *    decided the rate and the alarm was pure overhead. With the gap drawn from
- *    `[5, 10]` the wake count is itself a random variable (144-288 a day, mean
- *    192), and at `DEFAULT_TICK_DETAILS` bodies per wake (ADR-033: 2) the alarm's
- *    daily capacity is 288-576 bodies (mean 384) against a cap that is also a
- *    random variable (300-400, mean 350). A day that wakes 144 times is under
- *    every cap draw, so the alarm binds; a day that wakes 288 times is over every
- *    draw, so the cap binds; which one leads changes from day to day. That
- *    interleaving is the "the frequency must not be steady" the product asked
- *    for, expressed in the two places that govern the rate rather than
- *    cosmetically.
- *  · **The band is 2× wide**, so two consecutive gaps differ by a factor of up
- *    to 2 — plainly irregular to anyone watching, and impossible to distinguish
- *    from a person working through their own history.
- *  · **It still does not fight the per-item interval**: 300 seconds ≫ the
- *    20-second per-item minimum ⇒ the **first** body of an alarm tick has a
- *    0 wait (the last fetch was minutes ago); the interval bites only on the
- *    second body of the same tick (ADR-033), and when the live leg kicks
+ *  · **W310 · The wake budget was being divided away from every platform.**
+ *    A wake serves **exactly one** platform — the walk serves the first runnable
+ *    target and stops (`entrypoints/background.ts`'s `runAlarmTickBody`;
+ *    `schedule.served` names it). W86c's fair rotation then spreads the wakes
+ *    over the `m` registered runnable targets, so each platform gets
+ *    `wakes/day ÷ m` bodies. At `[5, 10]` that is 144–288 wakes a day ÷ 5 stable
+ *    platforms ≈ **29–58 bodies per platform per day** (mean 38) — an order of
+ *    magnitude below every preset's own drawn cap (gentle 150–200, standard 300–400), so
+ *    the cap was decorative and the alarm, not the cap, was the brake. W309
+ *    measured ChatGPT draining a 7 107-conversation backlog at ~1.6–2 bodies an
+ *    hour (~5 months) against ADR-033's "tens of days": ADR-033 sized its
+ *    numbers against "the platform receives nearly every wake", which is the
+ *    opposite of what W76's fair rotation made true.
+ *
+ *    The fix is to give each platform back the wake budget the design assumed
+ *    for the **whole machine**: divide the band by `m`. With `m = 5` stable
+ *    platforms, `[5, 10] ÷ 5 = [1, 2]`. ⚠️ The pair is therefore tied to the
+ *    registered-platform count; if the experimental platforms ever ship to
+ *    stable and `m` becomes 7, re-derive by the same rule — floor `5/m`, ceiling
+ *    `10/m` — rather than reusing 1/2.
+ *
+ *  · **Nothing that protects the account moved, and that is the whole boundary.**
+ *    The per-request detail gap is still `20 s + uniform[0, 25 s]`; the two
+ *    bodies of one wake are still paced by the engine's own pacer, persisted
+ *    across ticks; the day's cap is still drawn once per local day and still
+ *    binds per platform; W296's day-slow brake is unchanged; and the
+ *    machine-wide arbiter still enforces its 45 s detail interval, its 400/day
+ *    count and its 60 s cooldown floor. What rose is **how often the waker
+ *    fires**, never how fast one request follows another — ADR-033's own
+ *    boundary, kept. (ADR-033 had rejected shortening the tick on the grounds
+ *    that it "changes the burst shape"; W310 records that the tick is not part
+ *    of the burst shape at all, which is why shortening it touches none of it.)
+ *
+ *  · **The floor is 1 minute — chrome.alarms' own floor, expressed in minutes.**
+ *    Chrome clamps alarms to at most once every 30 seconds (Chrome 120+; one
+ *    minute before that) and may delay them further, so a `delayInMinutes` below
+ *    0.5 would be silently raised and any smaller draw would stop meaning
+ *    anything. 1 is the smallest whole minute above that floor; the ceiling 2
+ *    keeps the band a factor-2 wide like every other jitter band here, so two
+ *    consecutive gaps differ by up to a factor of 2 and the cadence is not a
+ *    metronome.
+ *
+ *  · **Both brakes still bite, neither alone — now per platform.** A day that
+ *    draws the floor arms 1440 wakes (1440/1) ⇒ 288 serves per platform at
+ *    `m = 5`, past every preset's cap draw, so the **cap** binds; a day that
+ *    draws the ceiling arms 720 ⇒ 144 serves per platform, under the gentle
+ *    cap's floor, so the **alarm** binds. Which one leads still changes from day
+ *    to day, which is the interleaving W16 asked for.
+ *
+ *  · **It still does not fight the per-item interval**: 60 seconds ≫ the
+ *    20-second per-item minimum ⇒ the **first** body of a tick has a 0 wait when
+ *    the previous tick is older than the drawn gap; the interval bites only on
+ *    the second body of the same tick (ADR-033), and when the live leg kicks
  *    repeatedly (C19 task 3).
  *  · Each wake still does one very small thing (read storage, fetch at most
  *    `DEFAULT_TICK_DETAILS`),
  *    which is friendly to MV3's SW lifecycle.
  */
-export const BACKFILL_TICK_DELAY_MIN_MINUTES = 5;
-export const BACKFILL_TICK_DELAY_MAX_MINUTES = 10;
+export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
+export const BACKFILL_TICK_DELAY_MAX_MINUTES = 2;
 /** The mean of the uniform draw above, as a constant so the popup and the docs cannot disagree about it. */
 export const BACKFILL_TICK_MEAN_MINUTES =
   (BACKFILL_TICK_DELAY_MIN_MINUTES + BACKFILL_TICK_DELAY_MAX_MINUTES) / 2;
@@ -1351,7 +1375,7 @@ export function scopeFromStateKey(
  * W36 hung the migration off the top of the alarm tick but walked
  * `loadTargets()` — the scopes the user is *currently registered for*. So a
  * pre-W18 record whose scope is not in that registry was visited by nothing at
- * all, and on a machine whose switch is off, or in the 5-10 minutes before the
+ * all, and on a machine whose switch is off, or in the gap before the
  * next tick, neither the tick nor anything else touched it either. The layout is
  * a property of `storage.local`, not of the registry: the scan below enumerates
  * the **keys**, so every pre-W18 record is reachable from every caller of this

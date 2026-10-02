@@ -717,7 +717,7 @@ describe('W214 · the backlog drains by itself when the host first connects', ()
     // No target is registered and the switch is off, so this tick serves no
     // backfill leg at all — but it still sends the outbox before any gate, and
     // that drain is the moment the notice exists for. The review's third flow:
-    // the jittered 5–10-minute tick can beat the outbox alarm's next period.
+    // the jittered 1–2-minute tick can beat the outbox alarm's next period.
     await bg.runAlarmTick();
 
     expect(host.names().length).toBe(2);

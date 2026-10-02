@@ -18,15 +18,21 @@
  *   · how many bodies one tick may fetch (`TickDeps.maxDetails`).
  *
  * It changes **nothing else**. In particular the per-request gaps (detail `20 s + uniform[0,25 s]`,
- * enumeration `2 s + uniform[0,4 s]`) and the `[5,10]`-minute tick interval are identical in all three
+ * enumeration `2 s + uniform[0,4 s]`) and the drawn tick interval are identical in all three
  * presets. That is ADR-033's own boundary, kept here so that "faster" can never quietly become "burstier":
- * it raises how much is done, never how fast any single request follows another.
+ * it raises how much is done, never how fast any single request follows another. (W310 later moved the
+ * tick interval itself — its own change, one band shared by all three presets, not a per-preset knob:
+ * see alarm.ts. It divides by the registered-platform count so each platform's *share* returns to what
+ * these bands were sized against.)
  *
  * ## 🔴 The default is `gentle`, and that is a behaviour decision, not a detail
  *
  * ADR-032 §3 says gentle is the default, and the W113 dispatch repeats it. It sits in genuine tension with ADR-033, whose
  * stated reason for doubling was that the measured backlog (chatgpt 7,703 owed, ≤184/day) would take tens
- * of days — and W111 shipped the doubled numbers as the constants the engine used. So this file decides
+ * of days — and W111 shipped the doubled numbers as the constants the engine used. (🔴 W310 showed the
+ * ≤184/day figure was itself unreachable at the time: the fair rotation divided the wake budget by the
+ * platform count, so the binding brake was the alarm, not any cap here. W310 fixes that in alarm.ts by
+ * dividing the tick interval the same way, which is what makes these bands the brake again.) So this file decides
  * *which of the two the product does when the user has expressed no preference*, and the answer is
  * **gentle**: VISION.md's gentleness is a requirement rather than a compromise ("gentleness is a
  * requirement, not a concession"),

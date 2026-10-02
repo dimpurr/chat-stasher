@@ -484,7 +484,7 @@ describe('C19 task 1 · the alarm: on ⇒ created, off ⇒ cleared', () => {
   /**
    * 🔴 W82 · **One switch-on arms once.** Two overlapping syncs both saw "not
    *    armed", so both drew a delay and both called `create`: one of the two random
-   *    5-10 minute draws was silently thrown away, and which of the two survived was
+   *    tick draws was silently thrown away, and which of the two survived was
    *    decided by arrival order. The lifecycle has one writer at a time, so the
    *    second sync observes the first one's alarm and leaves it alone.
    */
@@ -662,15 +662,17 @@ describe('C19 task 4 · what the popup says agrees with the real state', () => {
     expect(view.running).toContain('Running: archiving');
     expect(view.missing).toBeNull();
     /**
-     * 🔴 W16 · The rate is stated as the **range** it is drawn from now, not as
-     *    a single number, so "5 minutes" (the old fixed period) is gone from the
+     * 🔴 W16 · The rate is stated as the **range** it is drawn from, not as a
+     *    single number, so "5 minutes" (the old fixed period) is gone from the
      *    copy and the two ends of the band are what the user is owed. What this
      *    criterion guards is "the popup states the real rate rather than a
      *    flattering one", and a range is a more honest version of that than the
      *    fixed figure was — the assertion follows the deliberate wording change
      *    and keeps checking that both ends and the daily ceiling are shown.
+     *    🔴 W310 moved the band to `[1, 2]` minutes (alarm.ts); the copy is
+     *    templated from the constants, so the assertion follows them here too.
      */
-    expect(view.running).toContain('5 to 10 minutes');
+    expect(view.running).toContain('1 to 2 minutes');
     expect(view.running).toContain(String(DAILY_CAP_MAX));
     expect(text).not.toContain('estimated remaining');
   });

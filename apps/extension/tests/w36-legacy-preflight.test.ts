@@ -17,7 +17,7 @@
  * `loadTargets()` — the scopes the user is *currently registered for* — which
  * left the same hole one door over: a pre-W18 record whose scope is not in the
  * registry is visited by nothing at all, and neither is any of them on a machine
- * whose switch is off, or in the 5-10 minutes before the next tick. W36b's scan
+ * whose switch is off, or in the gap before the next tick. W36b's scan
  * enumerates the **keys**, so every caller — the tick preflight and the popup's
  * first state load — reaches every record.
  *

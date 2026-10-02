@@ -920,12 +920,14 @@ export type TabSend = (tabId: number, message: unknown) => Promise<unknown>;
  *    16 MiB conversation body plus one token read. A smaller budget would abort a
  *    fetch that was going to succeed, which turns a slow page into a lost one —
  *    a worse failure than the one this bounds.
- *  · And it must stay **below the shortest alarm gap**
- *    (lib/backfill/alarm.ts's BACKFILL_TICK_DELAY_MIN_MINUTES = 5 — since W16
- *    the gap is drawn from `[5, 10]` minutes, so 5 is its floor, i.e. the
- *    tightest case this bound has to hold against). One stuck page
- *    round is then declared lost within a fraction of an alarm period, instead of
- *    still being in flight when the next alarm arrives. (This bounds one *request*;
+ *  · And it must not outlive its tick. 🔴 W310 · This used to be stated as "stay
+ *    below the shortest alarm gap" (5 minutes, `BACKFILL_TICK_DELAY_MIN_MINUTES`
+ *    — the tick is drawn from `[5, 10]` minutes since W16). That inequality no
+ *    longer holds at the W310 floor of 1 minute, and it does not need to: the
+ *    tick alarm is a **one-shot** that is re-armed only after this tick's body
+ *    returns (see `runAlarmTick`), so a stuck fetch and the next alarm cannot
+ *    overlap in time regardless of the gap — the 90 s budget exists to cover a
+ *    slow-but-legitimate body, not to fit a cadence. (This bounds one *request*;
  *    the round as a whole is bounded separately by the engine's own detail budget.)
  *
  * 🔴 **What a timeout is not.** It is not "this page has no data" and not "this
@@ -958,12 +960,16 @@ export const BACKFILL_TAB_REPLY_TIMEOUT_MS = 90_000;
  *    case W13 stopped treating as death. 10 s is orders of magnitude above a
  *    healthy round and far above any plausible scheduling delay, so a page that
  *    answers *at all* answers inside it.
- *  · It must stay well below the shortest alarm gap (5 minutes,
- *    `BACKFILL_TICK_DELAY_MIN_MINUTES`), so that even the worst case — every
- *    registered tab of that origin hung — is decided inside one tick. **12 tabs
- *    is the registry's ceiling (`MAX_TAB_ENTRIES`), and 12 × 10 s = 120 s < the
- *    300 s floor**, so the sweep always finishes before the next alarm can arrive,
- *    whatever the registry holds.
+ *  · It is bounded so that the sweep this timeout makes possible can never run
+ *    unbounded: **12 tabs is the registry's ceiling (`MAX_TAB_ENTRIES`), and
+ *    12 × 10 s = 120 s** is the worst case when every registered tab of that
+ *    origin is hung. 🔴 W310 · That worst case no longer fits inside the shortest
+ *    alarm gap (1 minute), and it no longer has to: the alarm is a **one-shot**
+ *    re-armed only after the tick returns, and ticks are serialized through
+ *    `pendingTick`, so a sweep cannot overlap the next wake. Shrinking this
+ *    budget to fit a 60 s gap is the wrong trade — 10 s is what clears a
+ *    *busy* renderer rather than declaring it dead, and that is a property of
+ *    the page, not of the cadence.
  *
  * 🔴 A timeout here is **not** "this tab has no channel" and not "there is no
  *    tab": it is "we did not get an answer in time", which is why it counts

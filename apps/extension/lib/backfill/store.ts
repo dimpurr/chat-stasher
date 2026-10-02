@@ -32,7 +32,7 @@ export interface BackfillStore {
    * the un-migrated pre-W18 record walked the **target registry** — the scopes the
    * user is currently registered for — so a `cs_backfill_v1:<platform>:<scope>`
    * record whose scope is not in that registry was never visited by anything, and
-   * neither was one on a machine whose switch is off or whose next tick is 5-10
+   * neither was one on a machine whose switch is off or whose next tick is
    * minutes away. The layout is not a property of the target registry; it is a
    * property of `storage.local`, and the only thing that can enumerate it is the
    * area itself.

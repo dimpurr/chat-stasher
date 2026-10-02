@@ -12,9 +12,11 @@
  *    changed" would pass just as happily if the change were a *shortening*, and
  *    shortening a gap is the one thing this change may never do. So every test
  *    here asserts a **bound** as well as a variation, and the two boundary
- *    values are pinned exactly: `random = () => 0` must reproduce the old
- *    deterministic numbers character for character, and `random = () => 1` must
- *    land exactly on the documented ceiling.
+ *    values are pinned exactly: `random = () => 0` must land on the documented
+ *    floor and `random = () => 1` exactly on the documented ceiling. (W310 moved
+ *    the tick floor itself — a deliberate change to the *wake rate*, argued in
+ *    alarm.ts; the per-request gaps are untouched and still reproduce their old
+ *    numbers at `random = () => 0`.)
  *  · **Not** a statistical argument. There is no "run it 10,000 times and hope".
  *    The draws are injected, so a boundary is a deterministic assertion about a
  *    named value, and the "many values" loops exist to show the *band* is never
@@ -123,16 +125,20 @@ describe('W16-1 · the tick cadence is drawn, not fixed', () => {
     }
   });
 
-  it('🔴 the floor is the fixed period it replaced, so the alarm can only ever tick LATER', () => {
+  it('🔴 the floor is the documented minimum, and W310 raised the band by the platform count', () => {
     /**
-     * The tick used to be `periodInMinutes: 5` — 288 wakes a day, exactly. The
-     * new floor is that same 5 minutes, so the worst case is unchanged while the
-     * mean drops. If this assertion is ever loosened to a smaller floor, the
-     * change has started to *raise* the rate rather than lower it.
+     * W16 pinned this floor at 5 minutes — the fixed `periodInMinutes: 5` the
+     * jitter replaced, so every draw was ≥ the old period. 🔴 W310 lowered it to
+     * 1, because that "can only ever tick later" property was the bug: a wake
+     * serves one platform and the fair rotation divides the wake budget by the
+     * platform count, so `[5, 10]` gave each platform ~38–58 bodies/day against
+     * caps of 150–800. The band is `[5, 10] ÷ 5` stable platforms. The floor is
+     * still an exact pinned minimum — and the smallest whole minute above
+     * chrome.alarms' own 30-second floor, so the draw is honoured.
      */
-    expect(BACKFILL_TICK_DELAY_MIN_MINUTES).toBe(5);
+    expect(BACKFILL_TICK_DELAY_MIN_MINUTES).toBe(1);
     for (const r of [0, 0.001, 0.5, 0.999, 1]) {
-      expect(drawTickDelayMinutes(fixed(r))).toBeGreaterThanOrEqual(5);
+      expect(drawTickDelayMinutes(fixed(r))).toBeGreaterThanOrEqual(BACKFILL_TICK_DELAY_MIN_MINUTES);
     }
     // And the ceiling is above the floor: the band has real width.
     expect(BACKFILL_TICK_DELAY_MAX_MINUTES).toBeGreaterThan(BACKFILL_TICK_DELAY_MIN_MINUTES);

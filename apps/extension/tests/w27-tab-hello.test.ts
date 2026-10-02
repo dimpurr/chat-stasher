@@ -48,7 +48,7 @@ import {
   TAB_HELLO_MIN_INTERVAL_MS,
   drawHelloDelayMs,
 } from '../lib/backfill/tab-hello';
-import { BACKFILL_TICK_DELAY_MIN_MINUTES } from '../lib/backfill/alarm';
+import { BACKFILL_SAFETY_PERIOD_MINUTES } from '../lib/backfill/alarm';
 import { memoryStore } from '../lib/backfill/store';
 import {
   MAIN_PROBE_MESSAGE,
@@ -100,18 +100,27 @@ afterEach(() => {
 // ===========================================================================
 
 describe('W27-A · a ping that never answers is bounded by its own budget', () => {
-  it('🔴 the production budget is 10 s, and a full registry of hung tabs fits inside one tick gap', () => {
+  it('🔴 the production budget is 10 s, and the sweep it bounds is finite', () => {
     // The ping is not the fetch: it carries no payload, so it must not inherit the
     // 90 s that exists to cover a 16 MiB body.
     expect(BACKFILL_PING_TIMEOUT_MS).toBe(10_000);
     expect(BACKFILL_PING_TIMEOUT_MS).toBeLessThan(BACKFILL_TAB_REPLY_TIMEOUT_MS);
 
-    // The reason the number is safe: the worst case is *every* registered tab hung,
-    // and that sweep still finishes before the next alarm can arrive.
+    // 🔴 W310 · The worst case — every registered tab hung — used to be checked
+    //    against the shortest alarm gap (300 s then: 12 × 10 s = 120 s < 300 s).
+    //    The tick floor is 1 minute now, so that inequality no longer holds, and
+    //    it is no longer the right bound: the tick is a **one-shot** alarm
+    //    re-armed only after this tick returns (and ticks are serialized through
+    //    `pendingTick`), so a sweep cannot overlap the next wake whatever the gap
+    //    is. What still has to hold is that the sweep is *finite* and well under
+    //    the 60-minute watchdog — the only other thing that can wake this leg.
+    //    Shrinking the 10 s to fit a 60 s gap would trade away the budget's real
+    //    job (clearing a busy renderer, not a dead one) for a cadence it does not
+    //    govern.
     const worstCaseMs = MAX_TAB_ENTRIES * BACKFILL_PING_TIMEOUT_MS;
-    const shortestTickGapMs = BACKFILL_TICK_DELAY_MIN_MINUTES * 60_000;
-    console.log('[W27-A] worst-case sweep', worstCaseMs, 'ms vs shortest tick gap', shortestTickGapMs, 'ms');
-    expect(worstCaseMs).toBeLessThan(shortestTickGapMs);
+    console.log('[W27-A] worst-case sweep', worstCaseMs, 'ms');
+    expect(worstCaseMs).toBe(120_000);
+    expect(worstCaseMs).toBeLessThan(BACKFILL_SAFETY_PERIOD_MINUTES * 60_000);
   });
 
   it('🔴 a tab that never answers is abandoned after the budget, and the next tab of that origin is used', async () => {
@@ -177,13 +186,19 @@ describe('W27-A · a ping that never answers is bounded by its own budget', () =
 // ===========================================================================
 
 describe('W27-B · the hello interval is jittered inside its documented band', () => {
-  it('the floor and the ceiling are exact, and the floor is inside the shortest tick gap', () => {
+  it('the floor and the ceiling are exact, and no longer pinned to the tick gap', () => {
     expect(TAB_HELLO_MIN_INTERVAL_MS).toBe(4 * 60_000);
     expect(TAB_HELLO_MAX_INTERVAL_MS).toBe(6 * 60_000);
-    // The floor is what makes the registry heal *before* the tick that reads it:
-    // the shortest gap between two backfill ticks is 5 minutes.
-    expect(TAB_HELLO_MIN_INTERVAL_MS).toBeLessThan(BACKFILL_TICK_DELAY_MIN_MINUTES * 60_000);
-    expect(TAB_HELLO_MAX_INTERVAL_MS).toBeGreaterThan(BACKFILL_TICK_DELAY_MIN_MINUTES * 60_000);
+    // 🔴 W310 · W27 chose the 4-minute floor to sit inside the then-5-minute tick
+    //    gap, so a lost registration healed *before* the tick that read it. The
+    //    tick floor is 1 minute now, so that inequality is deliberately gone: the
+    //    band is a bound on how often a page talks to the worker, a missing row
+    //    only costs that platform its own cheap `no-http-port` turn (a skip
+    //    consumes no rotation slot), and shrinking the band would multiply
+    //    service-worker wake-ups to save nothing (see tab-hello.ts). What must
+    //    still hold is that this is a real band — floor below ceiling, and the
+    //    jitter never leaves it (the two tests below).
+    expect(TAB_HELLO_MIN_INTERVAL_MS).toBeLessThan(TAB_HELLO_MAX_INTERVAL_MS);
   });
 
   it('the two boundaries are pinned, and no hostile draw can go below the floor', () => {
