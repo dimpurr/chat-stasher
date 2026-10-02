@@ -27,11 +27,15 @@
 //! Two filters can rewrite a session, and both are opt-in:
 //!
 //! * `--turns user` keeps only the lines that are the user's own messages.
-//!   That question has an answer only where the format makes it certain, and
-//!   the harnesses that qualify are listed in [`USER_TURNS_HARNESSES`]. For any
-//!   other harness the flag is **not** silently ignored and content is **not**
-//!   silently dropped: every line is written and the session records
-//!   `turns_filter: "not-supported"` in the manifest.
+//!   Claude Code records those in two shapes — a `type: "user"` turn and a
+//!   mid-turn `attachment`/`queued_command` — and marks injected notices
+//!   (`origin.kind`, `isMeta`, …) apart from typed ones; the rule is in
+//!   [`human_line`]. The question has an answer only where the format makes it
+//!   certain, and the harnesses that qualify are listed in
+//!   [`USER_TURNS_HARNESSES`]. For any other harness the flag is **not**
+//!   silently ignored and content is **not** silently dropped: every line is
+//!   written and the session records `turns_filter: "not-supported"` in the
+//!   manifest.
 //! * `--trim-to-window` (only valid with a time window) drops lines whose own
 //!   timestamp lies outside the window. A line whose timestamp cannot be read
 //!   is **kept** and counted in `untimed_lines` — an unreadable time is not an
@@ -81,7 +85,7 @@ use anyhow::Context;
 use rustic_core::repofile::MasterKey;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::activity::{analyze_session, TimeSource as ActivityTimeSource};
@@ -102,11 +106,16 @@ pub const NO_HARNESS_DIR: &str = "<no-harness-prefix>";
 /// Harnesses where "this line is the user's own message" is determinable from
 /// the archived line alone.
 ///
-/// Claude Code JSONL qualifies: every line is one message with a top-level
-/// `type`, and a tool's output is routed through `type: "user"` with a
-/// `tool_result` content block — which is precisely why `type == "user"` alone
-/// is not the rule. Everything else stays out of this list until its format is
-/// certain, because a wrong entry here silently deletes content.
+/// Claude Code JSONL qualifies: a human message is a `type: "user"` record
+/// (excluding tool results, `isMeta`, `isSidechain`, `isCompactSummary`) or a
+/// `type: "attachment"` / `queued_command` record typed mid-turn, and a typed
+/// record carries `origin.kind == "human"` where injected notices carry another
+/// kind. `type == "user"` alone is not the rule — a tool's output is routed
+/// through the user role, and system notices are injected as user text.
+///
+/// The other harnesses stay out until their formats are shown to make the
+/// question certain, because a wrong entry here silently deletes content; the
+/// per-harness reading is recorded in `docs/` rather than guessed at here.
 pub const USER_TURNS_HARNESSES: &[&str] = &["claude-code"];
 
 /// `--turns`.
@@ -528,45 +537,155 @@ fn line_spans(bytes: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-/// Whether one archived line is a message the user themselves sent.
-///
-/// Only called for harnesses in [`USER_TURNS_HARNESSES`]. The rule is the one
-/// the format makes certain: the line says `type: "user"` **and** it is not a
-/// tool result. A line that is not JSON at all cannot say `type: "user"`, so it
-/// is not a user message — under a filter that asks for user messages only,
-/// that is a real answer, not an unreadable one.
-fn is_user_message(line: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(line) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
-        return false;
-    };
-    if value.get("type").and_then(|t| t.as_str()) != Some("user") {
-        return false;
-    }
-    is_tool_result(&value)
-        .map(|tool_result| !tool_result)
-        .unwrap_or(true)
+/// Which of the two record shapes a human message was found in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HumanKind {
+    /// A `type: "user"` record — a message recorded as its own turn.
+    Turn,
+    /// A `type: "attachment"` / `queued_command` record: a message typed while
+    /// the agent was mid-turn and absorbed into the running turn. A recipe that
+    /// reads only `type: "user"` misses every one of these.
+    MidTurn,
 }
 
-/// Whether a `type: "user"` line is actually a tool's output.
+/// A line the turns filter recognised as something a person sent, with just
+/// enough of it to apply the duplicate rule. The line's own bytes are what gets
+/// written; nothing here is ever re-serialised into the output.
+struct HumanLine {
+    kind: HumanKind,
+    /// The message text, exactly as the record stores it.
+    text: String,
+    /// The line's own unix time, read by the shared activity extractor. `None`
+    /// is "unknown", which the duplicate rule treats as "cannot prove same".
+    unix: Option<i64>,
+}
+
+/// Text prefixes that mark a `type: "user"` record as injected rather than
+/// typed. Used **only** when the record carries no `origin.kind` to judge on:
+/// this is the fallback for older clients, never the primary rule.
 ///
-/// Claude Code routes a tool result through the user role, so `type == "user"`
-/// on its own would keep every tool output in the export. `None` means "this
-/// line does not carry a content shape we recognise as a tool result", which
-/// the caller reads as "not a tool result" — a line is only ever dropped for a
-/// tool result we actually found.
-fn is_tool_result(value: &serde_json::Value) -> Option<bool> {
-    let blocks = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())?;
-    Some(
-        blocks
-            .iter()
-            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")),
-    )
+/// Where `origin.kind` exists it is authoritative, so a record that names
+/// `origin.kind` is decided by that field alone — a plain sentence with no
+/// `origin` and not opening with one of these is kept, and a system notice that
+/// names `kind: "human"` is kept too. The list is what the format documents for
+/// records that predate `origin`.
+const INJECTED_PREFIXES: &[&str] = &[
+    "<system-reminder",
+    "<task-notification",
+    "<local-command",
+    "<command-name",
+    "<command-message",
+    "[SYSTEM NOTIFICATION",
+    "Caveat:",
+    "This session is being continued from a previous conversation",
+];
+
+/// The message one archived record carries, when it is a message shape at all:
+/// its kind, its text, and its `origin` value if present. `None` means the
+/// record type is not a message (a tool exchange, a queue operation, an unknown
+/// type) — under a filter asking for human messages only, that is a real
+/// answer, not an unreadable line.
+fn human_message(
+    value: &serde_json::Value,
+) -> Option<(HumanKind, String, Option<&serde_json::Value>)> {
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some("user") => {
+            let text = content_text(value.pointer("/message/content")?)?;
+            Some((HumanKind::Turn, text, value.get("origin")))
+        }
+        Some("attachment") => {
+            let attachment = value.get("attachment")?;
+            if attachment.get("type").and_then(|t| t.as_str()) != Some("queued_command") {
+                return None;
+            }
+            let prompt = attachment.get("prompt")?.as_str()?;
+            Some((
+                HumanKind::MidTurn,
+                prompt.to_string(),
+                attachment.get("origin"),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A `message.content` read into text the way the format means it: a plain
+/// string, or the `text` of its content blocks joined. An array holding a
+/// `tool_result` block is a tool's output routed through the user role — which
+/// is exactly why `type: "user"` alone is not the rule. Any other shape is
+/// unknown and yields `None`; an unknown is not "empty text".
+fn content_text(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            {
+                return None;
+            }
+            Some(
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<String>(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Classify one archived line for `--turns user`.
+///
+/// Only called for harnesses in [`USER_TURNS_HARNESSES`]. A line that is not
+/// JSON, is a record type the rule does not know, or is not the person's own
+/// message is dropped. Text is never edited: the string here exists only to
+/// apply the mid-turn/turn duplicate rule.
+fn human_line(harness: &str, line: &[u8]) -> Option<HumanLine> {
+    let text = std::str::from_utf8(line).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(text.trim()).ok()?;
+    // A meta record, a sub-agent's task, or a compaction summary is never the
+    // person's own words, whatever its text looks like.
+    if ["isMeta", "isSidechain", "isCompactSummary"]
+        .iter()
+        .any(|f| value.get(f).and_then(|v| v.as_bool()) == Some(true))
+    {
+        return None;
+    }
+    let (kind, message, origin) = human_message(&value)?;
+    match origin {
+        Some(origin) => {
+            if origin.get("kind").and_then(|kind| kind.as_str()) != Some("human") {
+                return None;
+            }
+        }
+        None => {
+            if INJECTED_PREFIXES
+                .iter()
+                .any(|p| message.trim_start().starts_with(p))
+            {
+                return None;
+            }
+        }
+    }
+    Some(HumanLine {
+        kind,
+        text: message,
+        unix: crate::activity::line_unix(harness, text),
+    })
+}
+
+/// The duplicate rule: the same words recorded once mid-turn and once as a
+/// later turn, inside the window, are one message. `None` on either side cannot
+/// prove that, so it keeps — a missing time never silently merges two turns. A
+/// person who repeats themselves in two separate turns records the same *kind*
+/// twice, which this never merges.
+fn is_duplicate_copy(prev_unix: Option<i64>, now_unix: Option<i64>) -> bool {
+    const DUPLICATE_WINDOW_SECS: i64 = 15 * 60;
+    match (prev_unix, now_unix) {
+        (Some(prev), Some(now)) => (0..=DUPLICATE_WINDOW_SECS).contains(&(now - prev)),
+        _ => false,
+    }
 }
 
 /// Where one line stands relative to the window.
@@ -649,9 +768,24 @@ fn filter_session(
     let mut out: Vec<u8> = Vec::with_capacity(raw.len());
     let mut written = 0u64;
     let mut untimed = 0u64;
+    // The last kept message per text, for the mid-turn/turn duplicate rule. In
+    // file order the archive is append-only, so a message's later copy follows
+    // its earlier one, and the first kind seen is the one kept.
+    let mut kept_human: BTreeMap<String, (HumanKind, Option<i64>)> = BTreeMap::new();
     for line in spans {
-        if turns == TurnsOutcome::Applied && !is_user_message(line) {
-            continue;
+        if turns == TurnsOutcome::Applied {
+            let Some(msg) = human_line(harness_name, line) else {
+                continue;
+            };
+            if let Some((prev_kind, prev_unix)) = kept_human.get(&msg.text) {
+                if *prev_kind != msg.kind && is_duplicate_copy(*prev_unix, msg.unix) {
+                    // Consume this pairing. A later same-text message is a
+                    // new turn, even if it is still inside the time window.
+                    kept_human.remove(&msg.text);
+                    continue;
+                }
+            }
+            kept_human.insert(msg.text.clone(), (msg.kind, msg.unix));
         }
         if let Some(window) = window.filter(|_| trimmed) {
             match line_timing(harness_name, line, window) {
@@ -1258,6 +1392,189 @@ mod tests {
         let f = filter_session(None, &raw, &opts(Turns::User, false), None);
         assert_eq!(f.turns, TurnsOutcome::NotSupported);
         assert_eq!(f.lines_written, 1);
+    }
+
+    // ---------------------------------------------- user turns, real shapes
+
+    /// A message typed while the agent was mid-turn is stored as a
+    /// `type: "attachment"` / `queued_command` record, not as `type: "user"`.
+    /// A filter that only reads `type: "user"` misses it entirely. The
+    /// `queue-operation` records that carry the same text are queue plumbing,
+    /// not messages, and must never be written.
+    #[test]
+    fn a_mid_turn_attachment_is_kept_and_queue_operations_are_not() {
+        let attachment = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"typed mid-turn","origin":{"kind":"human"}},"timestamp":"2026-01-15T10:00:01Z"}"#;
+        let enqueue = r#"{"type":"queue-operation","operation":"enqueue","content":"typed mid-turn","timestamp":"2026-01-15T10:00:01Z"}"#;
+        let remove = r#"{"type":"queue-operation","operation":"remove","content":"typed mid-turn","reason":"absorbed_mid_turn","timestamp":"2026-01-15T10:00:02Z"}"#;
+        let raw = joined(&[USER_LINE, attachment, enqueue, remove]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        assert_eq!(f.lines_written, 2, "the user turn and the mid-turn message");
+        let text = String::from_utf8(f.bytes).unwrap();
+        assert!(text.contains(r#""queued_command""#));
+        assert!(!text.contains("queue-operation"));
+    }
+
+    /// When a record carries `origin.kind`, that field is the whitelist: only
+    /// `human` is the person. A `task` notice routed through `type: "user"`
+    /// is dropped even though nothing about its text says so. A record with no
+    /// `origin` at all falls back to the injected-prefix rule.
+    #[test]
+    fn origin_kind_is_the_whitelist_when_present() {
+        let human = r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"typed by a person"}}"#;
+        let task = r#"{"type":"user","origin":{"kind":"task"},"message":{"role":"user","content":"<task-notification>done</task-notification>"}}"#;
+        let unknown_origin = r#"{"type":"user","origin":{},"message":{"role":"user","content":"unknown origin is not a human claim"}}"#;
+        let reminder = r#"{"type":"user","message":{"role":"user","content":"<system-reminder>injected</system-reminder>"}}"#;
+        let plain_no_origin =
+            r#"{"type":"user","message":{"role":"user","content":"older client, no origin"}}"#;
+        let command = r#"{"type":"user","message":{"role":"user","content":"<command-name>/rename</command-name>"}}"#;
+        let whitespace =
+            r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"  "}}"#;
+        let raw = joined(&[
+            human,
+            task,
+            unknown_origin,
+            reminder,
+            plain_no_origin,
+            command,
+            whitespace,
+        ]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        let text = String::from_utf8(f.bytes).unwrap();
+        assert!(text.contains("typed by a person"));
+        assert!(
+            text.contains("older client, no origin"),
+            "an originless line falls back to the prefix rule and is kept"
+        );
+        assert_eq!(f.lines_written, 3);
+        assert_eq!(text.lines().count(), 3);
+        assert!(!text.contains("task-notification"));
+        assert!(!text.contains("unknown origin is not a human claim"));
+        assert!(!text.contains("system-reminder"));
+        assert!(!text.contains("command-name"));
+    }
+
+    /// `isMeta`, `isSidechain` and `isCompactSummary` mark records that are
+    /// not the person's own words, whatever their text looks like.
+    #[test]
+    fn meta_sidechain_and_compact_summary_are_never_user_messages() {
+        let meta =
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta caveat"}}"#;
+        let sidechain = r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"subagent prompt"}}"#;
+        let compact = r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation"}}"#;
+        let raw = joined(&[meta, sidechain, compact]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        assert_eq!(f.lines_written, 0);
+    }
+
+    /// The same words recorded as a mid-turn attachment and then, inside the
+    /// duplicate window, as a normal turn are one message. The window is what
+    /// keeps a person who repeats themselves in two separate turns at two
+    /// messages: the second of those is the same *kind*, and is kept.
+    #[test]
+    fn a_turn_duplicating_a_recent_mid_turn_is_written_once() {
+        let attach = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"same words","origin":{"kind":"human"}},"timestamp":"2026-01-15T10:00:00Z"}"#;
+        let turn = r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"same words"},"timestamp":"2026-01-15T10:00:30Z"}"#;
+        let raw = joined(&[attach, turn]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        assert_eq!(
+            f.lines_written, 1,
+            "the mid-turn copy and its later turn are one message"
+        );
+
+        // Same kind, same text, two separate turns: two messages.
+        let turn_a = r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"twice"},"timestamp":"2026-01-15T10:00:00Z"}"#;
+        let turn_b = r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"twice"},"timestamp":"2026-01-15T10:04:00Z"}"#;
+        let raw = joined(&[turn_a, turn_b]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        assert_eq!(f.lines_written, 2);
+
+        // Once the cross-shape pair was collapsed, the next same-text turn
+        // is a fresh message and must not keep matching the consumed one.
+        let next_turn = r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"same words"},"timestamp":"2026-01-15T10:05:00Z"}"#;
+        let raw = joined(&[attach, turn, next_turn]);
+        let f = filter_session(Some("claude-code"), &raw, &opts(Turns::User, false), None);
+        assert_eq!(f.lines_written, 2);
+    }
+
+    /// The synthetic conformance fixture (the reference implementation's own
+    /// sample, `tests/fixtures/claude-code-jsonl/`) must yield exactly the
+    /// same messages the reference does — the same count, order, and text,
+    /// and the same turn/mid-turn reading of each.
+    #[test]
+    fn the_conformance_fixture_selects_exactly_the_expected_messages() {
+        let f = filter_session(
+            Some("claude-code"),
+            FIXTURE.as_bytes(),
+            &opts(Turns::User, false),
+            None,
+        );
+        assert_eq!(f.turns, TurnsOutcome::Applied);
+        let kept: Vec<(String, String)> = String::from_utf8(f.bytes)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (kind, text) =
+                    reference_kind_and_text(line).expect("every kept line is a human message");
+                (kind.to_string(), text)
+            })
+            .collect();
+        let expected: Vec<(String, String)> = EXPECTED
+            .lines()
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                (
+                    v["source"].as_str().unwrap().to_string(),
+                    v["text"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            5,
+            "the fixture holds exactly five human messages"
+        );
+        assert_eq!(kept, expected);
+    }
+
+    /// The fixture's own text, embedded at build time. `expected.jsonl` is the
+    /// cross-implementation oracle, so the reader below restates the documented
+    /// rule rather than calling the code under test.
+    const FIXTURE: &str = include_str!("../tests/fixtures/claude-code-jsonl/fixture.jsonl");
+    const EXPECTED: &str = include_str!("../tests/fixtures/claude-code-jsonl/expected.jsonl");
+
+    /// Read one fixture line the way the reference read it: which record shape
+    /// it is and what text it carries. Deliberately independent of
+    /// [`human_line`] — this is the thing the implementation is checked against.
+    fn reference_kind_and_text(line: &str) -> Option<(&'static str, String)> {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let (kind, content) = match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => ("turn", v.pointer("/message/content")?.clone()),
+            Some("attachment") => {
+                if v.pointer("/attachment/type").and_then(|t| t.as_str()) != Some("queued_command")
+                {
+                    return None;
+                }
+                ("mid-turn", v.pointer("/attachment/prompt")?.clone())
+            }
+            _ => return None,
+        };
+        let text = match content {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Array(blocks) => {
+                if blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                {
+                    return None;
+                }
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<String>()
+            }
+            _ => return None,
+        };
+        Some((kind, text))
     }
 
     // ------------------------------------------------------------- trimming

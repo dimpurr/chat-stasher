@@ -182,6 +182,24 @@ under its own heading below.
 
 #### Fixed
 
+- **`export --turns user` now reads the messages Claude Code records mid-turn,
+  and stops reading notices as if a person had written them.** The filter kept a
+  line only when it said `type: "user"` and was not a tool result. Two things
+  were wrong with that. A message typed while the agent was working is stored as
+  `type: "attachment"` with `attachment.type == "queued_command"`, not as
+  `type: "user"` — in one measured session seven of twelve human messages
+  existed only in that shape and were silently absent from the export. And
+  `type: "user"` is also how Claude Code injects system reminders, task
+  notifications and command echoes, and how it records compaction summaries and
+  sub-agent prompts, so those were silently kept as if the person had written
+  them. The rule now takes the `queued_command` records too, and where a record
+  carries `origin.kind` that field is the whitelist — only `human` is the
+  person — with the injected-prefix rule kept as the fallback for the older
+  records that predate the field. A message recorded once mid-turn and once as
+  a turn within fifteen minutes is written once; the text is never edited. The
+  other tools still cannot answer the question from the archived line alone, so
+  they are still refused with `turns_filter: "not-supported"` rather than
+  silently filtered.
 - **Codex sessions are found on Linux and Windows.** The registry's cell for
   those two platforms spelled the store's location as the override variable
   itself — `$CODEX_HOME/sessions/`, `%CODEX_HOME%\sessions\` — which is not a

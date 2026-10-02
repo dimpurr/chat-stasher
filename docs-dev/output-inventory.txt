@@ -225,7 +225,7 @@ eprintln     crates/chat-stasher/src/doctor.rs:3891  "  [registry] no probes —
 eprintln     crates/chat-stasher/src/doctor.rs:3901  "  [registry] driven table — platform={platform} · {hit}/{probed} probed harnesses hit / scanned successfully · {never} not probed"
 eprintln     crates/chat-stasher/src/doctor.rs:3968  "    {mark} {:<16} {conf:<26} sessions={:<4}{bytes:<0} {root}{extra}"
 eprintln     crates/chat-stasher/src/doctor.rs:3979  "    low-confidence (community claims only, scanned but cannot be treated as verified): {flagged}"
-with_context crates/chat-stasher/src/export.rs:894  "write manifest `{}`"
+with_context crates/chat-stasher/src/export.rs:1028  "write manifest `{}`"
 context      crates/chat-stasher/src/fts.rs:1133  "count indexed documents"
 context      crates/chat-stasher/src/fts.rs:1141  "read FTS index build status"
 bail         crates/chat-stasher/src/fts.rs:1183  "no local index has been built; run `chat-stasher index build` (no archive read was performed)"
