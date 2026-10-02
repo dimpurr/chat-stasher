@@ -39,6 +39,10 @@ fn bin() -> Command {
 /// `USERPROFILE` is set beside `HOME` for the same reason `w242`'s harness sets
 /// both: a platform that prefers one must not fall back to the real machine's.
 fn run(sandbox: &Path, args: &[&str]) -> Output {
+    run_env(sandbox, args, &[])
+}
+
+fn run_env(sandbox: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let home = sandbox.join("home");
     let cache = sandbox.join("cache");
     let registry = sandbox.join("registry.json");
@@ -55,7 +59,8 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         )
         .unwrap();
     }
-    bin()
+    let mut command = bin();
+    command
         .args(args)
         .env("HOME", &home)
         .env(
@@ -68,9 +73,11 @@ fn run(sandbox: &Path, args: &[&str]) -> Output {
         .env("XDG_DATA_HOME", sandbox.join("data"))
         .env("XDG_STATE_HOME", sandbox.join("state"))
         .env("XDG_CACHE_HOME", &cache)
-        .env("CHAT_STASHER_REGISTRY", &registry)
-        .output()
-        .unwrap()
+        .env("CHAT_STASHER_REGISTRY", &registry);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    command.output().unwrap()
 }
 
 fn stdout_of(output: &Output) -> String {
@@ -105,6 +112,7 @@ const CLAUDE_CODE: &str = "claude-code.mbp-w267.019bf00d-97b6-7eb2-9bf8-eacbacc0
 const OPENCODE: &str = "opencode.mbp-w267.ses_019bf00d97b67eb2";
 const GROK: &str = "grok.mbp-w267.019bf00d-97b6-7eb2-9bf8-eacbacc0a003";
 const ZED: &str = "zed.mbp-w267.019bf00d-97b6-7eb2-9bf8-eacbacc0a004";
+const REPEATED_CLAUDE: &str = "claude-code.mbp-w267.019bf00d-97b6-7eb2-9bf8-eacbacc0a005";
 
 /// A JSONL record in `claude-code`'s own shape.
 const CLAUDE_CODE_SHARD: &str = concat!(
@@ -131,13 +139,17 @@ const OPENCODE_SHARD: &str = concat!(
 const GROK_SHARD: &str = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"019bf00d-97b6-7eb2-9bf8-eacbacc0a003","updated_at":1784924765}}"#;
 
 fn write_shard(stage: &Path, session: &str, bytes: &[u8]) {
+    write_shard_seq(stage, session, 1, bytes);
+}
+
+fn write_shard_seq(stage: &Path, session: &str, seq: u64, bytes: &[u8]) {
     let dir = stage
         .join("sessions")
         .join(MACHINE)
         .join(session)
         .join("000");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("000001.jsonl"), bytes).unwrap();
+    fs::write(dir.join(format!("{seq:06}.jsonl")), bytes).unwrap();
 }
 
 /// A destination repository holding the fixture shards, plus its masterkey.
@@ -152,8 +164,11 @@ fn make_repo(sandbox: &Path) -> (String, String) {
 /// about a shape none of them has.
 fn make_repo_with(sandbox: &Path, extra: &[(&str, &[u8])]) -> (String, String) {
     let stage = sandbox.join("stage");
+    let mut extra_sequences = std::collections::BTreeMap::<&str, u64>::new();
     for (session, bytes) in extra {
-        write_shard(&stage, session, bytes);
+        let seq = extra_sequences.entry(session).or_default();
+        *seq += 1;
+        write_shard_seq(&stage, session, *seq, bytes);
     }
     write_shard(&stage, CLAUDE_CODE, CLAUDE_CODE_SHARD.as_bytes());
     write_shard(&stage, OPENCODE, OPENCODE_SHARD.as_bytes());
@@ -291,6 +306,49 @@ fn a_shard_the_index_cannot_read_is_not_counted_as_covered() {
         all["index_not_indexable_formats"], "sqlite 2",
         "the format is what a reader can act on: {all}"
     );
+}
+
+/// A policy change is part of an FTS source's identity: each switch rebuilds
+/// the source once, and a repeat build under that policy can skip it again.
+#[test]
+fn fts_index_rebuilds_when_duplicate_collapse_policy_changes() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    make_repo_with(
+        sandbox.path(),
+        &[
+            (REPEATED_CLAUDE, CLAUDE_CODE_SHARD.as_bytes()),
+            (REPEATED_CLAUDE, CLAUDE_CODE_SHARD.as_bytes()),
+        ],
+    );
+    let args = ["index", "build", "--destination", "alpha"];
+    let build = |envs: &[(&str, &str)]| {
+        let output = run_env(sandbox.path(), &args, envs);
+        stdout_of(&output)
+    };
+    let assert_build = |stdout: &str, read: usize, unchanged: usize| {
+        assert!(
+            stdout.contains(&format!("read={read}")),
+            "expected read={read}: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("unchanged={unchanged}")),
+            "expected unchanged={unchanged}: {stdout}"
+        );
+    };
+
+    // Five sources are present: the repeated Claude session and four standard
+    // fixtures. The first build reads all of them, then the same policy skips
+    // all five.
+    assert_build(&build(&[]), 5, 0);
+    assert_build(&build(&[]), 0, 5);
+
+    // Switching either direction invalidates the source fingerprints. The
+    // next build reads every source once; an immediate retry skips them.
+    let keep_all = [(chat_stasher::store::KEEP_ALL_SHARDS_ENV, "1")];
+    assert_build(&build(&keep_all), 5, 0);
+    assert_build(&build(&keep_all), 0, 5);
+    assert_build(&build(&[]), 5, 0);
+    assert_build(&build(&[]), 0, 5);
 }
 
 /// `index check` reports the unreadable documents beside the ones it holds,

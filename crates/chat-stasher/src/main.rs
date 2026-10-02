@@ -9011,11 +9011,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             .unwrap_or(u64::MAX)
                     });
                 }
-                let sources = index_sources(&paths_by_id, &entries_all, &titles);
                 // An index has no `--no-collapse` flag; its opt-out is the
                 // environment, decided once per build (see
                 // [`chat_stasher::store::KEEP_ALL_SHARDS_ENV`]).
                 let fts_shard_policy = store::DuplicateShardPolicy::from_env();
+                let sources = index_sources(&paths_by_id, &entries_all, &titles, fts_shard_policy);
                 index.build(&sources, |id| {
                     use chat_stasher::fts::LoadFailure;
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
@@ -9168,6 +9168,7 @@ fn index_sources(
     paths_by_id: &BTreeMap<String, Vec<usize>>,
     entries_all: &[(PathBuf, Node)],
     titles: &BTreeMap<String, String>,
+    shard_policy: store::DuplicateShardPolicy,
 ) -> Vec<chat_stasher::fts::SourceDoc> {
     use chat_stasher::fts::SourceDoc;
     paths_by_id
@@ -9193,7 +9194,7 @@ fn index_sources(
             }
             SourceDoc::fingerprinted(
                 id.clone(),
-                index_source_fingerprint(&shards, titles.get(id).map(String::as_str)),
+                index_source_fingerprint(&shards, titles.get(id).map(String::as_str), shard_policy),
             )
         })
         .collect()
@@ -9201,19 +9202,35 @@ fn index_sources(
 
 const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
     b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0";
+const INDEX_DUPLICATE_RULE_VERSION: u32 = 1;
 
-fn index_source_fingerprint(shards: &[(String, Vec<String>)], title: Option<&str>) -> String {
-    index_source_fingerprint_with_domain(shards, title, INDEX_SOURCE_FINGERPRINT_DOMAIN)
+fn index_source_fingerprint(
+    shards: &[(String, Vec<String>)],
+    title: Option<&str>,
+    shard_policy: store::DuplicateShardPolicy,
+) -> String {
+    index_source_fingerprint_with_domain(
+        shards,
+        title,
+        shard_policy,
+        INDEX_SOURCE_FINGERPRINT_DOMAIN,
+    )
 }
 
 fn index_source_fingerprint_with_domain(
     shards: &[(String, Vec<String>)],
     title: Option<&str>,
+    shard_policy: store::DuplicateShardPolicy,
     domain: &[u8],
 ) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     hasher.update(domain);
+    hasher.update(INDEX_DUPLICATE_RULE_VERSION.to_le_bytes());
+    hasher.update([match shard_policy {
+        store::DuplicateShardPolicy::Collapse => 0,
+        store::DuplicateShardPolicy::KeepAll => 1,
+    }]);
     for (path, data_ids) in shards {
         hasher.update(path.as_bytes());
         hasher.update([0]);
@@ -10316,14 +10333,35 @@ mod decision_surface_tests {
             "sessions/machine/session/000001.jsonl".into(),
             vec!["blob-b".into()],
         )];
-        let first_hash = index_source_fingerprint(&first, Some("synthetic title"));
+        let first_hash = index_source_fingerprint(
+            &first,
+            Some("synthetic title"),
+            store::DuplicateShardPolicy::Collapse,
+        );
         assert_eq!(
             first_hash,
-            index_source_fingerprint(&same, Some("synthetic title"))
+            index_source_fingerprint(
+                &same,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::Collapse
+            )
         );
         assert_ne!(
             first_hash,
-            index_source_fingerprint(&changed, Some("synthetic title"))
+            index_source_fingerprint(
+                &changed,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::Collapse
+            )
+        );
+        assert_ne!(
+            first_hash,
+            index_source_fingerprint(
+                &same,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::KeepAll
+            ),
+            "changing the collapse policy must invalidate the source fingerprint"
         );
         for previous_domain in [
             b"chat-stasher-fts-source-v1\0".as_slice(),
@@ -10333,6 +10371,7 @@ mod decision_surface_tests {
                 index_source_fingerprint_with_domain(
                     &first,
                     Some("synthetic title"),
+                    store::DuplicateShardPolicy::Collapse,
                     previous_domain
                 ),
                 first_hash,
@@ -10401,7 +10440,12 @@ mod decision_surface_tests {
             ("m-1/bad".to_owned(), vec![1usize]),
             ("m-1/empty".to_owned(), vec![2usize]),
         ]);
-        let sources = index_sources(&paths_by_id, &entries_all, &titles);
+        let sources = index_sources(
+            &paths_by_id,
+            &entries_all,
+            &titles,
+            store::DuplicateShardPolicy::Collapse,
+        );
         assert_eq!(sources.len(), 3, "every session is still considered");
         // The one session the archive cannot describe is named, with its reason,
         // and the other two are fingerprinted as usual: one such shard costs one
