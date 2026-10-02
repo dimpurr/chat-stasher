@@ -47,7 +47,7 @@ apps/extension/entrypoints/background.ts:1709-1769  c1a6f7896115  lines=61
   <- docs-dev/privacy.md:539, docs-dev/privacy.md:586, docs-dev/threat-model.md:932  :: */
 apps/extension/entrypoints/background.ts:2032  853e1bc7bf8b  lines=1
   <- docs-dev/privacy.md:734, docs-dev/threat-model.md:314  :: const lease = await acquireBackfillLease(platform);
-apps/extension/entrypoints/background.ts:2050-2098  66ee51ccd106  lines=49
+apps/extension/entrypoints/background.ts:2050-2098  b92db8f7f6f2  lines=49
   <- docs-dev/privacy.md:527  :: }
 apps/extension/entrypoints/background.ts:2120-2132  b33c134498db  lines=13
   <- docs-dev/privacy.md:555, docs-dev/privacy.md:819, docs-dev/threat-model.md:324  :: * of the user's current conversation.
@@ -99,7 +99,7 @@ apps/extension/lib/backfill/alarm.ts:1553-1655  0ec9970a66d5  lines=103
   <- docs-dev/privacy.md:491  :: /**
 apps/extension/lib/backfill/alarm.ts:1658-1737  a89fbce85bd2  lines=80
   <- docs-dev/privacy.md:491  :: export interface BackfillTickRecord {
-apps/extension/lib/backfill/chatgpt-scope-migration.ts:27-110  78d38f2a028c  lines=84
+apps/extension/lib/backfill/chatgpt-scope-migration.ts:27-110  f23da99d58fc  lines=84
   <- docs-dev/privacy.md:554, docs-dev/threat-model.md:458  :: /** Remove pre-fingerprint ChatGPT workspace ids from durab…
 apps/extension/lib/backfill/chatgpt-workspace.ts:1-23  97497f965106  lines=23
   <- docs-dev/privacy.md:553  :: /** Workspace identity observed from this page's own outgoi…
@@ -131,7 +131,7 @@ apps/extension/lib/backfill/engine.ts:1475-1567  e66369a1394d  lines=93
   <- docs-dev/threat-model.md:468  :: *
 apps/extension/lib/backfill/engine.ts:1626-1647  acd18b5f4ef3  lines=22
   <- docs-dev/threat-model.md:468  :: runLease.kind === 'run' ? runLease.lease : undefined,
-apps/extension/lib/backfill/engine.ts:1841-1856  490491c595a1  lines=16
+apps/extension/lib/backfill/engine.ts:1841-1856  65a007bfbcbd  lines=16
   <- docs-dev/privacy.md:556, docs-dev/privacy.md:819, docs-dev/threat-model.md:324  :: // legacy `default` key and the two explicit unknown-worksp…
 apps/extension/lib/backfill/engine.ts:1919-1931  026d25c05d0a  lines=13
   <- docs-dev/privacy.md:595  :: if (plan.scopeInPath && (
