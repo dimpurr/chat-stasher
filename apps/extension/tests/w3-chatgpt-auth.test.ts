@@ -22,6 +22,18 @@ import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 const ORIGIN = 'https://chatgpt.com';
 const ID = '6a93e10f-86d4-83ed-8091-5890097ae6c2';
 const DETAIL = `${ORIGIN}/backend-api/conversation/${ID}`;
+const CHATGPT_BACKFILL_URLS = [
+  CHATGPT_PLAN.listUrl(ORIGIN, 0, 100),
+  ...(CHATGPT_PLAN.listAuxPaths ?? []).map((route) => {
+    const path = route.prefix ? `${route.path}opaque-project/conversations` : route.path;
+    const query = new URLSearchParams();
+    for (const key of route.requiredQueryKeys ?? []) {
+      query.set(key, route.selector?.key === key ? route.selector.value : '0');
+    }
+    return `${ORIGIN}${path}${query.size > 0 ? `?${query}` : ''}`;
+  }),
+  CHATGPT_PLAN.detailUrl!(ORIGIN, 'opaque-conversation'),
+];
 
 interface Call { url: string; auth: string | undefined }
 
@@ -122,16 +134,43 @@ describe('authorized fetch', () => {
     expect(net.sessionReads()).toBe(1);
   });
 
-  it('on 401 drops the token, reads a fresh one once, and retries', async () => {
+  it('returns a backfill 401 immediately, invalidates the token, and refreshes on a later request', async () => {
     let valid = 'tok-1';
     const net = fakeNetwork(['tok-1', 'tok-2'], () => valid);
     const f = createAuthorizedFetch(ORIGIN, net.raw, accountHeader);
     await f(DETAIL, {});
     valid = 'tok-2';                       // the token expired server-side
-    const res = await f(DETAIL, {});
-    expect(res.status).toBe(200);
+    const refused = await f(DETAIL, {});
+    expect(refused.status).toBe(401);
+    expect(net.sessionReads()).toBe(1);
+
+    const later = await f(DETAIL, {});
+    expect(later.status).toBe(200);
     expect(net.sessionReads()).toBe(2);
   });
+
+  it.each(CHATGPT_BACKFILL_URLS.flatMap((url) => [401, 403].map((status) => ({ url, status }))))(
+    'passes a ChatGPT backfill HTTP $status through on $url without a token-refresh retry', async ({ url, status }) => {
+      let sessionReads = 0;
+      let backfillAttempts = 0;
+      const raw: RawFetch = async (requestUrl, init) => {
+        if (requestUrl === `${ORIGIN}${CHATGPT_SESSION_PATH}`) {
+          sessionReads += 1;
+          return { status: 200, text: async () => JSON.stringify({ accessToken: `tok-${sessionReads}` }) };
+        }
+        backfillAttempts += 1;
+        expect((init.headers as Record<string, string>)['ChatGPT-Account-Id']).toBe('synthetic-account');
+        return { status, text: async () => '{}' };
+      };
+
+      const response = await createAuthorizedFetch(ORIGIN, raw, accountHeader)(url, {});
+
+      expect(response.status).toBe(status);
+      expect(backfillAttempts).toBe(1);
+      expect(sessionReads).toBe(needsChatgptBearer(url, ORIGIN) ? 1 : 0);
+      expect(response.chatgptAccountIdHeader).toBe('synthetic-account');
+    },
+  );
 
   it('reads the current account header after the session-token await', async () => {
     let currentHeader = 'acct-before-session-read';

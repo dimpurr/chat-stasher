@@ -1165,9 +1165,15 @@ async function httpResponseFromBackfillReplyAtWorkerBoundary(
     text: reply.text as string,
   };
   if (findPlatformForUrl(url)?.id !== 'chatgpt') return response;
+  // 🔴 W303 amendment 2 · The request-local raw value is needed only long
+  //    enough to fingerprint the header that was actually sent. Remove the
+  //    transient reply copy before any async work; no response or engine state
+  //    retains it after this worker boundary.
+  const rawHeader = reply.chatgptAccountIdHeader;
+  delete reply.chatgptAccountIdHeader;
   const safeIdentity = accountIdentityFromUnknown(reply.chatgptAccountIdentity);
   response.chatgptAccountIdentity = safeIdentity
-    ?? (identityStore ? await fingerprintChatGptIdentityAtWorkerBoundary(reply.chatgptAccountIdHeader, identityStore) : null);
+    ?? (identityStore ? await fingerprintChatGptIdentityAtWorkerBoundary(rawHeader, identityStore) : null);
   if (response.chatgptAccountIdentity === null) delete response.chatgptAccountIdentity;
   return response;
 }

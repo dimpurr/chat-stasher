@@ -35,6 +35,11 @@ describe('W303c · one first-worker boundary for raw ChatGPT account ids', () =>
     expect(backgroundSource).toContain('fingerprintChatGptIdentityAtWorkerBoundary(');
     expect(backgroundSource).not.toContain('fingerprintChatGptWorkspace');
     expect(backgroundSource).not.toMatch(/workspace\.workspace[^;]*fingerprint/);
+    const projection = tabPortSource.slice(tabPortSource.indexOf('async function httpResponseFromBackfillReplyAtWorkerBoundary'));
+    expect(projection.indexOf('delete reply.chatgptAccountIdHeader')).toBeGreaterThan(-1);
+    expect(projection.indexOf('delete reply.chatgptAccountIdHeader'))
+      .toBeLessThan(projection.indexOf('await fingerprintChatGptIdentityAtWorkerBoundary(rawHeader'));
+    expect(projection).not.toMatch(/response\.chatgptAccountIdHeader\s*=/);
   });
 
   it('exports a branded fingerprint from the boundary and only branded workspace results from tabHttpPort', () => {

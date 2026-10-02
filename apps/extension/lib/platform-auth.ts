@@ -130,9 +130,8 @@ export function createAuthorizedFetch(
     const headers = { ...(init.headers as Record<string, string> | undefined) };
     if (includeBearer && token !== null) headers.authorization = `Bearer ${token}`;
     if (needsChatgptAccountHeader(url, pageOrigin)) {
-      // 🔴 W303 · Read after every auth await, immediately before this attempt is
-      //    issued. A 401/403 retry calls withToken again and reads the live slot
-      //    again; only this attempt's value travels back for worker fingerprinting.
+      // 🔴 W303 · Read after every auth await, immediately before the attempt is
+      //    issued. Only this attempt's value travels back for worker fingerprinting.
       const current = options.readChatgptAccountIdHeader?.();
       if (!current) throw new Error('chatgpt-account-header-unavailable');
       if (current.value === null) throw new Error('chatgpt-account-header-unavailable');
@@ -160,6 +159,12 @@ export function createAuthorizedFetch(
     const first = await withToken(url, init, requestHeader, true);
     if (first.status !== 401 && first.status !== 403) return first;
     token = null;
+    // 🔴 W303 ruling 2 · Every bearer-bearing ChatGPT path in this wrapper is
+    //    also a backfill-plan path. Its first 401/403 is the platform's answer
+    //    for this request and must reach the engine so it can suspend the scope
+    //    with pending debt untouched. A refreshed retry here would hide that
+    //    refusal if it succeeded. Keep the token invalidated for a later run.
+    if (needsChatgptAccountHeader(url, pageOrigin)) return first;
     try {
       return await withToken(url, init, requestHeader, true);
     } catch (error) {

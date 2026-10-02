@@ -213,6 +213,17 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
     expect(store[DAY_SLOW_KEY]).toBeUndefined();
   });
 
+  it('🔴 W303 ruling 2 · a ChatGPT 401 suspends the scope through a real background tick', async () => {
+    const mod = await bootBackground();
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(401)));
+
+    const tick = await runRound(mod);
+    expect(tick?.report).toMatchObject({
+      halted: { reason: 'refused-unknown' },
+      state: { suspended: { reason: 'request-refused' } },
+    });
+  });
+
   it('🔴 W303f · a failed host 403 report cannot block the engine suspension', async () => {
     const mod = await bootBackground();
     const sendNativeMessage = host.sendNativeMessage;
