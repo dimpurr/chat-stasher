@@ -27,6 +27,17 @@
 //! in every failure message, so a hang reports itself rather than timing the
 //! suite out.
 //!
+//! Every test in this file runs in the same process, on the runner's default
+//! one-thread-per-test schedule, so the allocation below is shared code under
+//! real concurrency. W300 is what that cost on the glibc cells: the libc call
+//! the allocation used (`ptsname`) answers out of a buffer the whole process
+//! shares there, so two tests starting at once could be handed one terminal —
+//! and the test whose master then had no slave at all blocked in `read` until
+//! the 120s deadline, reporting an empty transcript. [`allocate_pty`] is the
+//! one place a terminal is allocated, and it is serialised; the last test in
+//! this file checks that the path it hands the wizard is the kernel's own
+//! answer for that master.
+//!
 //! `#[cfg(unix)]` states the platform gap rather than hiding it: the mechanism
 //! is `posix_openpt`, which has no counterpart in this workspace's
 //! dependencies — Windows needs ConPTY, an FFI surface this repo has no
@@ -54,13 +65,15 @@ use std::fs;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 #[cfg(unix)]
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
+#[cfg(unix)]
+use std::sync::{mpsc, Arc, Barrier, Mutex};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
@@ -241,40 +254,76 @@ struct InteractiveWizard {
     terminal: mpsc::Receiver<Terminal>,
 }
 
+/// The one lock this suite takes around the pty API, and the reason it exists.
+///
+/// `ptsname(3)` is not reentrant: with glibc it returns a pointer into a
+/// **file-scope `static char buffer[]`** that the man page says is "valid until
+/// the next call", so two threads asking at once can both be handed the *same*
+/// slave path. The tests in this file run concurrently by default, each wizard
+/// test allocating its terminal at start-up, and a crossing does not fail
+/// loudly: both wizards run on one terminal and the test whose master has no
+/// slave at all blocks in `read` forever — W300's flake, whose only symptom was
+/// an empty transcript at the 120s deadline. Darwin's `ptsname` keeps its buffer
+/// per thread, which is why this never reproduced on macOS and was seen exactly
+/// once, on the ubuntu cell.
+///
+/// `libc` declares the reentrant `ptsname_r` for `linux_like` but not for
+/// Apple, so the portable way to close the window is to hold this lock across
+/// both the call *and* the copy out of its buffer. `allocate_pty` is the only
+/// allocation in this process — nothing in the tool's own code calls `ptsname`
+/// — so one lock is the whole of the exclusion this needs.
+#[cfg(unix)]
+static PTY_ALLOC: Mutex<()> = Mutex::new(());
+
+/// Allocate one pseudo-terminal: the master's read and write halves, and the
+/// slave's path as an owned `String`.
+///
+/// Safety: the `libc` calls here are the pty allocation dance on a fresh file
+/// descriptor this test owns — `posix_openpt` to allocate, `grantpt`/`unlockpt`
+/// to make the slave openable, `ptsname` for its path — each checked for
+/// failure the same way `std::fs` would report it. The master fd is wrapped in a
+/// `File` the moment `ptsname` has read its path, so nothing leaks. `ptsname`
+/// hands back a pointer into a libc buffer; it is copied out into an owned
+/// `String` here, and the whole of that is done under [`PTY_ALLOC`] because the
+/// buffer is not this process's to keep — see that lock.
+#[cfg(unix)]
+fn allocate_pty() -> (fs::File, fs::File, String) {
+    // A poisoned lock is not a second failure to report: the panic that poisoned
+    // it happened inside this critical section and has already named the libc
+    // call that failed. Reporting the poison instead would replace that name
+    // with "poisoned" for the three tests that had nothing to do with it.
+    let _allocating = PTY_ALLOC
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    if master_fd < 0 {
+        panic!("posix_openpt failed: {}", std::io::Error::last_os_error());
+    }
+    if unsafe { libc::grantpt(master_fd) } != 0 {
+        panic!("grantpt failed: {}", std::io::Error::last_os_error());
+    }
+    if unsafe { libc::unlockpt(master_fd) } != 0 {
+        panic!("unlockpt failed: {}", std::io::Error::last_os_error());
+    }
+    let slave_path = unsafe { libc::ptsname(master_fd) };
+    if slave_path.is_null() {
+        panic!("ptsname failed: {}", std::io::Error::last_os_error());
+    }
+    let slave_path = unsafe { CStr::from_ptr(slave_path) }
+        .to_string_lossy()
+        .into_owned();
+    let master_read = unsafe { fs::File::from_raw_fd(master_fd) };
+    let master_write = master_read
+        .try_clone()
+        .expect("clone the pty master for the writing half");
+    (master_read, master_write, slave_path)
+}
+
 #[cfg(unix)]
 impl InteractiveWizard {
-    /// Allocate a pseudo-terminal and run the binary on the slave side of it.
-    ///
-    /// Safety: the `libc` calls here are the pty allocation dance on a fresh
-    /// file descriptor this test owns — `posix_openpt` to allocate,
-    /// `grantpt`/`unlockpt` to make the slave openable, `ptsname` for its path
-    /// — each checked for failure the same way `std::fs` would report it. The
-    /// master fd is wrapped in a `File` the moment `ptsname` has read its
-    /// path, so nothing leaks. `ptsname` hands back a pointer into a libc
-    /// buffer; it is copied out into an owned `String` inside this call, and
-    /// this suite is the only thing in the process touching a pty.
+    /// Run the binary on the slave side of a freshly allocated terminal.
     fn run(sandbox: &Sandbox, args: &[&str]) -> Self {
-        let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-        if master_fd < 0 {
-            panic!("posix_openpt failed: {}", std::io::Error::last_os_error());
-        }
-        if unsafe { libc::grantpt(master_fd) } != 0 {
-            panic!("grantpt failed: {}", std::io::Error::last_os_error());
-        }
-        if unsafe { libc::unlockpt(master_fd) } != 0 {
-            panic!("unlockpt failed: {}", std::io::Error::last_os_error());
-        }
-        let slave_path = unsafe { libc::ptsname(master_fd) };
-        if slave_path.is_null() {
-            panic!("ptsname failed: {}", std::io::Error::last_os_error());
-        }
-        let slave_path = unsafe { CStr::from_ptr(slave_path) }
-            .to_string_lossy()
-            .into_owned();
-        let master_read = unsafe { fs::File::from_raw_fd(master_fd) };
-        let master_write = master_read
-            .try_clone()
-            .expect("clone the pty master for the writing half");
+        let (master_read, master_write, slave_path) = allocate_pty();
 
         // Two opens of the slave path — read end for stdin, write end for
         // stdout — because `Stdio` takes an owned file per stream. Both close
@@ -700,5 +749,185 @@ fn an_interactive_run_leaves_a_new_destination_key_undeclared() {
             .join(chat_stasher::keydecl::KEY_DECLARATIONS_FILE)
             .exists(),
         "the run must not record a declaration for the key it just created"
+    );
+}
+
+/// The pty number the kernel itself binds to `master_fd`, or `None` when the
+/// kernel was not asked.
+///
+/// The harness reads a slave's path with `ptsname`, which on some libcs answers
+/// out of storage the whole process shares ([`PTY_ALLOC`]). The ioctl here
+/// writes into a buffer *this* call owns, so it is safe to call from any thread,
+/// and it answers a question about the master this call holds: which slave has
+/// the kernel given it. That is what makes it usable as the ground truth the test
+/// below checks an allocation against.
+#[cfg(target_os = "linux")]
+fn master_slave_number(master_fd: RawFd) -> Option<u32> {
+    // `_IOR('T', 0x30, unsigned int)` — the pty number of a master. glibc builds
+    // its `ptsname` answer on exactly this call (`__ptsname_internal`), so the
+    // number here is directly comparable with the path an allocation returns.
+    let mut number: libc::c_uint = 0;
+    let answered = unsafe { libc::ioctl(master_fd, libc::TIOCGPTN, &mut number) };
+    (answered == 0).then_some(number as u32)
+}
+
+/// Darwin's counterpart to the Linux ioctl above.
+///
+/// `TIOCPTYGNAME` is the call Darwin's own `ptsname` is built on, and it answers
+/// with the slave's *path* (`/dev/ttysNNN`) rather than its number, so the number
+/// is read off the end of what it wrote. The constant is written out here because
+/// `libc` declares these ioctls per platform and has no `TIOCPTYGNAME` for Apple:
+/// `<sys/ttycom.h>` spells it `_IOC(IOC_OUT, 't', 83, 128)`, and a macOS run of
+/// the test below had this ioctl and `ptsname` agree on all 16,384 allocations
+/// (macOS 15.7).
+#[cfg(target_os = "macos")]
+fn master_slave_number(master_fd: RawFd) -> Option<u32> {
+    const TIOCPTYGNAME: libc::c_ulong = 0x4080_7453;
+    let mut name = [0u8; 128];
+    let answered = unsafe { libc::ioctl(master_fd, TIOCPTYGNAME, name.as_mut_ptr()) };
+    if answered != 0 {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(name.as_ptr().cast()) };
+    trailing_number(name.to_str().ok()?)
+}
+
+/// No ioctl for "which slave does this master have" is wired up for this
+/// platform, so the kernel is not asked and the answer is absent.
+///
+/// Absent, deliberately, rather than guessed: the test below counts these and
+/// fails on the count, so an unwired platform is red with the reason rather than
+/// green on a machine where the question was never put. macOS and Linux — the
+/// platforms CI runs — are both wired up.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn master_slave_number(_master_fd: RawFd) -> Option<u32> {
+    None
+}
+
+/// The number a slave path ends in: `/dev/pts/7` and `/dev/ttys007` are both 7.
+///
+/// Compared as numbers, not as strings: the two platforms spell the path
+/// differently, and on one of them the ground truth above spells it differently
+/// again. The number is the part the kernel is answering about, and it is the
+/// part this suite needs — the path is only ever handed to `open`.
+#[cfg(unix)]
+fn trailing_number(path: &str) -> Option<u32> {
+    let digits: String = path
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+/// W300: every terminal this suite allocates is the one the kernel bound to the
+/// master the suite reads, however many tests are allocating at once.
+///
+/// This is the property the flake broke. `ptsname` answers out of one buffer for
+/// the whole process on glibc ([`PTY_ALLOC`]), so with the wizard tests starting
+/// together two of them could be handed the same slave path. The wizard would
+/// then run on the other test's terminal: that test's transcript would carry a
+/// stranger's output, and the test whose own master had no slave at all would
+/// block in `read` until its deadline and report what the flake reported —
+/// nothing. The check here asks the *kernel* which slave belongs to the master
+/// just allocated and compares it with the path the allocation returned, so a
+/// crossing is caught on the allocation that made it, by name, instead of
+/// arriving as an empty transcript two minutes later.
+///
+/// The sample is large on purpose. A crossing needs two threads inside the few
+/// hundred nanoseconds between `ptsname` returning and its result being copied
+/// out, so it is rare per allocation — one in roughly two thousand on glibc 2.36
+/// — and a single allocation per thread would prove almost nothing. 16 threads
+/// × 1024 allocations put that rate at roughly eight crossings per run of this
+/// test, which is what makes the *unfixed* harness fail here essentially every
+/// time it is run rather than occasionally. The threads exist for the same
+/// reason the runner's own schedule matters: the hazard is concurrency, so the
+/// test has to supply it.
+///
+/// Platform statement, in this file's usual form: Darwin's `ptsname` keeps its
+/// buffer per thread, so a crossing cannot happen there and this test cannot go
+/// red on macOS whatever the harness does. That is not a reason to skip it — the
+/// assertion still holds on every allocation on both platforms, and macOS still
+/// checks that the path the suite hands a wizard is the path the kernel gave its
+/// master. It is the reason the flake this pins was seen exactly once, on the
+/// ubuntu cell, and never locally.
+#[cfg(unix)]
+#[test]
+fn every_allocated_terminal_is_the_one_the_kernel_gave_its_master() {
+    const THREADS: usize = 16;
+    const PER_THREAD: usize = 1024;
+
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut workers = Vec::with_capacity(THREADS);
+    for _ in 0..THREADS {
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            // Released together: an allocation that started while no other
+            // thread was in `ptsname` cannot cross, so the threads have to be
+            // in the window at the same time for this to be a real check.
+            barrier.wait();
+            let mut checked = 0usize;
+            let mut crossed_count = 0usize;
+            let mut unanswerable = 0usize;
+            let mut crossed: Vec<String> = Vec::new();
+            for _ in 0..PER_THREAD {
+                let (master, _master_write, path) = allocate_pty();
+                match master_slave_number(master.as_raw_fd()) {
+                    Some(number) if Some(number) == trailing_number(&path) => checked += 1,
+                    Some(number) => {
+                        crossed_count += 1;
+                        // Only the first few are quoted; the count above is what
+                        // the assertions use, so a bad run cannot be shortened
+                        // by this cap.
+                        if crossed.len() < 8 {
+                            crossed.push(format!(
+                                "the kernel gave this master pty {number}, the allocation was \
+                                 handed `{path}`"
+                            ));
+                        }
+                    }
+                    None => unanswerable += 1,
+                }
+                // Closed here: the check above is about the master this call
+                // holds, so nothing has to stay open for it, and the machine's
+                // pty pool is not held for the length of the run.
+                drop(master);
+            }
+            (checked, crossed_count, unanswerable, crossed)
+        }));
+    }
+
+    let mut checked = 0usize;
+    let mut crossed_count = 0usize;
+    let mut unanswerable = 0usize;
+    let mut crossed: Vec<String> = Vec::new();
+    for worker in workers {
+        let (thread_checked, thread_crossed_count, thread_unanswerable, thread_crossed) =
+            worker.join().expect("join an allocating thread");
+        checked += thread_checked;
+        crossed_count += thread_crossed_count;
+        unanswerable += thread_unanswerable;
+        crossed.extend(thread_crossed);
+    }
+
+    assert_eq!(
+        unanswerable, 0,
+        "the kernel did not say which slave belongs to {unanswerable} of the allocated masters, \
+         so this test has no verdict on those allocations — an absence of crossings among the \
+         rest is not evidence about them"
+    );
+    assert_eq!(
+        checked + crossed_count,
+        THREADS * PER_THREAD,
+        "every allocation must have been made and checked; {checked} were checked and \
+         {crossed_count} crossed out of {}",
+        THREADS * PER_THREAD
+    );
+    assert!(
+        crossed.is_empty(),
+        "an allocation was handed a slave path that is not the one the kernel bound to its \
+         master: the wizard would run on another test's terminal, or on one nothing reads, and \
+         the test that owns it would block until its deadline with an empty transcript (W300): \
+         {crossed:#?}"
     );
 }
