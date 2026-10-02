@@ -146,6 +146,55 @@ describe('W233 ChatGPT enumeration', () => {
     });
   });
 
+  it('completes archived and project backfill under the canonical marked workspace scope', async () => {
+    const scope = `chatgpt:fp1:${'a'.repeat(64)}`;
+    const calls: string[] = [];
+    const http = Object.assign(async (url: string) => {
+      calls.push(url);
+      const parsed = new URL(url);
+      if (parsed.pathname === '/backend-api/conversations') {
+        if (parsed.searchParams.get('is_archived') === 'true') {
+          return { status: 200, text: JSON.stringify({ items: parsed.searchParams.get('offset') === '0' ? [{ id: 'marked-archived' }] : [] }) };
+        }
+        return { status: 200, text: JSON.stringify({ items: [] }) };
+      }
+      if (parsed.pathname === '/backend-api/gizmos/snorlax/sidebar') {
+        return { status: 200, text: JSON.stringify({
+          items: [{ gizmo: { gizmo: { id: 'marked-project', name: 'Marked project' } } }], cursor: null,
+        }) };
+      }
+      if (parsed.pathname === '/backend-api/gizmos/marked-project/conversations') {
+        return { status: 200, text: JSON.stringify({ items: [{ id: 'marked-project-conversation' }], cursor: null }) };
+      }
+      if (parsed.pathname.startsWith('/backend-api/conversation/')) {
+        return { status: 200, text: JSON.stringify({ conversation_id: parsed.pathname.split('/').pop(), current_node: 'node', mapping: {} }) };
+      }
+      throw new Error('unexpected synthetic route');
+    }, {
+      chatgptWorkspace: async () => ({ ok: true as const, workspace: scope, observed: true as const }),
+    });
+    const store = memoryStore();
+    let report;
+    for (let tick = 0; tick < 12; tick += 1) {
+      report = await runBackfill({
+        platform: 'chatgpt', origin: 'https://chatgpt.com', scope, store, http,
+        maxDetails: 2, sink: () => ({ saved: true }),
+        clock: { now: () => 1, sleep: async () => {} },
+      });
+    }
+
+    expect(report?.halted).toBeNull();
+    expect(calls.some((url) => new URL(url).searchParams.get('is_archived') === 'true')).toBe(true);
+    expect(calls.some((url) => new URL(url).pathname === '/backend-api/gizmos/marked-project/conversations')).toBe(true);
+    expect(report?.state.chatgptEnumeration?.archived.complete).toBe(true);
+    expect(report?.state.chatgptEnumeration?.projects.discoveryComplete).toBe(true);
+    expect(report?.state.chatgptEnumeration?.projects.entries).toMatchObject([{ id: 'marked-project', complete: true }]);
+    expect(report?.state.chatgptDebtProvenance).toMatchObject({
+      'marked-archived': { source: 'archived', archived: true },
+      'marked-project-conversation': { source: 'project', project: { id: 'marked-project' } },
+    });
+  });
+
   it('records a named workspace refusal without issuing a request or marking sources complete', async () => {
     const calls: string[] = [];
     const report = await runBackfill({

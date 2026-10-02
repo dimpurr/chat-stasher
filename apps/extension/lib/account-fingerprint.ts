@@ -44,7 +44,7 @@
  *    the secret never crosses into a content script or the MAIN world; what travels
  *    from a page is the id, which the capture path already reads.
  */
-import { extractIdentity, findPlatformForUrl, type AccountFingerprint, type AccountIdSource, type AccountUnknownReason, type CapturedFetch } from './contract';
+import { chatGptAccountIdHeaderValue, extractIdentity, findPlatformForUrl, type AccountFingerprint, type AccountIdSource, type AccountUnknownReason, type CapturedFetch } from './contract';
 import { backfillPlanFor } from './backfill/enumerate';
 import { orgFromRequestUrl } from './backfill/claude-org';
 import type { BackfillStore } from './backfill/store';
@@ -253,11 +253,22 @@ export async function fingerprintAccountId(
  *    disagree with the scope it exists to protect. It is *not* presented as a
  *    verified platform field: contract.ts's own note says those key names were
  *    never confirmed against a logged-in page, and a wrong match degrades to
- *    another level rather than to a bogus id (`acceptIdentityValue`). ChatGPT is
- *    the one of the five whose stable id is known to exist — the `ChatGPT-Account-Id`
- *    request header (ADR-031) — and it is exactly the one this build cannot see:
- *    no request header is captured (`CapturedFetch` carries none), so ChatGPT
- *    reports `unknown` here rather than being special-cased on a hope.
+ *    another level rather than to a bogus id (`acceptIdentityValue`).
+ *
+ *  · **ChatGPT — `request-header-chatgpt-account-id`, preferred over its own body
+ *    axis (🔴 W299).** ChatGPT is the one of those five whose stable id is known to
+ *    exist, and it is not in the response body: it is the `ChatGPT-Account-Id`
+ *    request header (ADR-031). W299 carries that header value, read on the exact
+ *    request whose response this is, as a transient field on the capture, and this
+ *    reader selects it **before** the body scan — so a ChatGPT bundle is stamped
+ *    with the id its own request named instead of `unknown`. It is still only a
+ *    claim: the header is page-visible input, so it is fingerprinted (never stored)
+ *    and it distinguishes what the header distinguishes — two workspaces sharing a
+ *    value are one fingerprint — rather than being proof of a person. A malformed
+ *    supplied header is a named `unknown`; older captures without the optional field
+ *    retain their previous body-axis behaviour.
+ *    the raw value must never reach a bundle, an export, a log or the host (see
+ *    `coordinationIdFromCapture`, which refuses this source by name).
  *
  *  · **Email and handle are refused as inputs.** `extractIdentity` will report an
  *    email, and an email does identify an account — but it is not an account/org
@@ -295,6 +306,27 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
     return org === null
       ? { kind: 'unknown', reason: 'organization-not-in-request-url' }
       : { kind: 'unknown', reason: 'organization-is-not-an-account' };
+  }
+
+  // 🔴 W299 · ChatGPT's own request header, **before** the body-derived axis. ChatGPT
+  //    exposes no account id in the response body, so without this the bundle records
+  //    `unknown` while the page's own request named one (ADR-031). The value is read
+  //    here only as a *reading*; the caller must fingerprint it and then discard the
+  //    raw field (see `buildBundle`) — it is a page-visible identifier and must reach
+  //    no bundle, export, log or host message. The header is preferred over a body id
+  //    because both are claims about the same response, and the request that produced
+  //    it is the narrower, page-owned observation. `chatGptAccountIdHeaderValue` is the
+  //    one validator, so a value this reader accepts is one the shape gate also accepts.
+  if (row.id === 'chatgpt') {
+    if (captured.chatgptAccountIdHeaderPresent === false) {
+      return { kind: 'unknown', reason: 'no-account-id-in-capture' };
+    }
+    if (captured.chatgptAccountIdHeaderPresent === true || captured.chatgptAccountIdHeader !== undefined) {
+      const header = chatGptAccountIdHeaderValue(captured.chatgptAccountIdHeader);
+      return header !== null
+        ? { kind: 'id', id: header, source: 'request-header-chatgpt-account-id' }
+        : { kind: 'unknown', reason: 'no-account-id-in-capture' };
+    }
   }
 
   const identity = extractIdentity(captured.text, sessionId);
@@ -348,6 +380,16 @@ export function coordinationIdFromCapture(captured: CapturedFetch, sessionId: st
   // whose only "id" is the session id it is filed under applies here too, and a reader that
   // omitted it would key a budget on the conversation's own name.
   const reading = accountIdFromCapture(captured, sessionId);
+  // 🔴 W299 · The ChatGPT request header is a **raw page-visible account identifier**, and
+  //    this function's answer is sent to the native host as `account_id` (§6.2) and
+  //    persisted in the outbox entry. It must never leave the extension: the header's only
+  //    permitted exit is the HMAC `accountFingerprintFor` computes. ChatGPT is not an
+  //    organization-scoped plan, so without this it would fall through to the reading
+  //    above and leak. Returning null keeps today's behaviour exactly — before W299 this
+  //    platform's body carried no platform uid either, so it coordinated as "no account
+  //    id" — and it is the structural guard that does not depend on `buildBundle` having
+  //    already deleted the field.
+  if (reading.kind === 'id' && reading.source === 'request-header-chatgpt-account-id') return null;
   return reading.kind === 'id' ? reading.id : null;
 }
 

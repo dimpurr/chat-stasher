@@ -142,7 +142,9 @@ Request:
 - `account_id` is optional and is not part of `payload` or its hash. The host
   uses it only to derive a masterkey-scoped account key, never returns or
   persists the raw id, and stores the derived key as sealed shard metadata.
-  Older extensions and captures without a visible account id omit it.
+  Older extensions and captures without a visible account id omit it. For
+  ChatGPT, a present value must be the marked `chatgpt:fp1:<64 lowercase hex>`
+  scope; an unmarked value is `bad-request` on delivery and coordination.
 - `report_seq` is **optional** and is EXT-13's monotonic per-instance counter,
   the same one a `status` report carries (ADR-045). It is meaningful only beside
   `report_nonce`, and the two are described together below §6.7. Absent means the
@@ -413,6 +415,10 @@ Requests carry `request_id`, `mode`, `platform`, and `install_id`, and may carry
 `claim`, `token`, `release`, or `rate_limit`. `token` also carries `segment`
 (`enumerate` or `detail`); `rate_limit` carries `status` (403 or 429) and
 optional `retry_after_ms`.
+
+For ChatGPT, a present `account_id` must be the marked
+`chatgpt:fp1:<64 lowercase hex>` scope. The host refuses raw ChatGPT ids,
+including hex-shaped values without the marker, before arbitration or delivery.
 
 The host derives an account key as HMAC-SHA256 using a salt derived from the
 configured archive masterkey and a versioned, platform-separated message. The

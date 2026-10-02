@@ -9,7 +9,7 @@ import {
   HOOK_SELF_CHECK_INTERVAL_MS,
   HOOK_STATUS_MESSAGE,
   findPlatformForUrl,
-  isCaptureMessage,
+  isPageCaptureMessage,
   isGeminiTokensReply,
   isHookReportMessage,
   isMainReadyMessage,
@@ -303,7 +303,7 @@ export default defineContentScript({
         return;
       }
 
-      if (!isCaptureMessage(event.data)) return;
+      if (!isPageCaptureMessage(event, window, pageOrigin)) return;
       // 🔴 W31c · The page's own requests are the resolver's first and strongest
       //    source of "which organization is this page using" — see
       //    lib/backfill/claude-page.ts. Recorded **before** delivery, so it is

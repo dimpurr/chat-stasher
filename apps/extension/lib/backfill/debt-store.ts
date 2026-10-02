@@ -438,6 +438,38 @@ export async function readDebtSet(platform: string, scope: string): Promise<Debt
   };
 }
 
+/** Move one ChatGPT workspace ledger to its opaque fingerprint scope without dropping debts. */
+export async function rekeyDebtScope(platform: string, from: string, to: string): Promise<boolean> {
+  if (from === to) return true;
+  const db = await openDb();
+  if (!db) return false;
+  try {
+    const tx = db.transaction(DEBTS_STORE, 'readwrite');
+    const done = txDone(tx);
+    const store = tx.objectStore(DEBTS_STORE);
+    const index = store.index(DEBTS_INDEX);
+    const [source, destination] = await Promise.all([
+      requestToPromise(index.getAll([platform, from]) as IDBRequest<DebtRecord[]>),
+      requestToPromise(index.getAll([platform, to]) as IDBRequest<DebtRecord[]>),
+    ]);
+    const byId = new Map<string, DebtRecord>();
+    for (const row of [...destination, ...source]) {
+      const prior = byId.get(row.id);
+      // Pending is the conservative state when two ledgers contain one id.
+      byId.set(row.id, prior?.state === 'pending' || row.state === 'pending'
+        ? (prior?.state === 'pending' ? prior : row)
+        : (prior ?? row));
+    }
+    const merged = [...byId.values()].sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
+    for (const row of source) store.delete([platform, from, row.id]);
+    for (let i = 0; i < merged.length; i += 1) store.put({ ...merged[i]!, platform, scope: to, seq: i + 1 });
+    await done;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isChatGptProvenance(value: unknown): value is import('./types').ChatGptDebtProvenance {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;

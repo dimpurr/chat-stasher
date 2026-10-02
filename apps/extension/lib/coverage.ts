@@ -677,6 +677,12 @@ export function accountNote(row: CoverageRow): string {
 const ACCOUNT_SOURCE_KEY: Record<AccountIdSource, string> = {
   'request-url-organization': 'coverage.account.sourceOrg',
   'response-body-platform-uid': 'coverage.account.sourceBody',
+  // 🔴 W299 · Reached only if a *stored lease* names it. No lease can: ChatGPT is not in
+  //    `ACCOUNT_LEASE_PLATFORMS`, and this label is written only on a capture's `account`
+  //    field, never on a lease. It exists because the record is exhaustive over
+  //    `AccountIdSource` by construction — the same rule the note above states — so a
+  //    label added to the type without a sentence would not compile.
+  'request-header-chatgpt-account-id': 'coverage.account.sourceHeader',
 };
 
 /**

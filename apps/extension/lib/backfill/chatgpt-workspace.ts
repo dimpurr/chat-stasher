@@ -5,12 +5,19 @@ export type ChatGptWorkspaceResolution =
 
 export interface ChatGptWorkspaceObservation { accountIds: string[] }
 
+/** Canonical storage and comparison form for a ChatGPT workspace identity. */
+export function chatGptWorkspaceScope(workspace: unknown): string | null {
+  const value = typeof workspace === 'string' ? workspace.trim() : '';
+  if (!value || value.length > 512) return null;
+  return isFingerprintedChatGptScope(value) ? value : `chatgpt:${value}`;
+}
+
 export function observeChatGptAccountId(
   observation: ChatGptWorkspaceObservation,
   value: string | null | undefined,
 ): ChatGptWorkspaceObservation {
   const accountId = value?.trim();
-  if (!accountId || observation.accountIds.includes(accountId) || observation.accountIds.length >= 2) return observation;
+  if (!accountId || accountId.length > 512 || observation.accountIds.includes(accountId) || observation.accountIds.length >= 2) return observation;
   return { accountIds: [...observation.accountIds, accountId] };
 }
 
@@ -26,7 +33,8 @@ function headerValue(headers: unknown, wanted: string): string | null {
   if (typeof Headers !== 'undefined' && headers instanceof Headers) return headers.get(wanted);
   if (Array.isArray(headers)) {
     for (const row of headers) {
-      if (Array.isArray(row) && row.length >= 2 && String(row[0]).toLowerCase() === wanted.toLowerCase()) return String(row[1]);
+      if (Array.isArray(row) && row.length >= 2 && typeof row[0] === 'string'
+        && row[0].toLowerCase() === wanted.toLowerCase()) return typeof row[1] === 'string' ? row[1] : null;
     }
     return null;
   }
@@ -40,7 +48,31 @@ function headerValue(headers: unknown, wanted: string): string | null {
 /** A defined init.headers replaces Request headers; otherwise inherit them. */
 export function chatGptAccountIdFromRequest(input: unknown, init: unknown): string | null {
   const initHeaders = init && typeof init === 'object' ? (init as { headers?: unknown }).headers : undefined;
-  if (initHeaders !== undefined) return headerValue(initHeaders, 'ChatGPT-Account-Id');
-  const requestHeaders = input && typeof input === 'object' ? (input as { headers?: unknown }).headers : undefined;
-  return headerValue(requestHeaders, 'ChatGPT-Account-Id');
+  const raw = initHeaders !== undefined
+    ? headerValue(initHeaders, 'ChatGPT-Account-Id')
+    : input && typeof input === 'object'
+      ? headerValue((input as { headers?: unknown }).headers, 'ChatGPT-Account-Id')
+      : null;
+  const value = raw?.trim();
+  return value && value.length <= 512 ? value : null;
+}
+
+/** Stable, installation-local storage/coordination scope for a workspace observation. */
+export async function fingerprintChatGptWorkspace(
+  store: import('./store').BackfillStore | null,
+  workspace: unknown,
+): Promise<string | null> {
+  const value = typeof workspace === 'string' ? workspace.trim() : '';
+  if (!value || value.length > 512 || !store) return null;
+  const { loadOrCreateAccountSalt, fingerprintAccountId, ACCOUNT_FINGERPRINT_DOMAIN } =
+    await import('../account-fingerprint');
+  const salt = await loadOrCreateAccountSalt(store);
+  if (!salt || salt === 'unreadable') return null;
+  const fingerprint = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', value);
+  return fingerprint ? chatGptWorkspaceScope(`fp1:${fingerprint}`) : null;
+}
+
+/** Explicit version marker; scope contents are never classified by digest shape alone. */
+export function isFingerprintedChatGptScope(scope: string): boolean {
+  return /^chatgpt:fp1:[0-9a-f]{64}$/.test(scope);
 }

@@ -38,6 +38,7 @@ import {
   type RunLease,
 } from './account-lease';
 import { accountFingerprintFor, accountIdFromCapture } from '../account-fingerprint';
+import { chatGptWorkspaceScope } from './chatgpt-workspace';
 import type { AccountIdentity } from './types';
 import { isClaudeOrgId } from './claude-org';
 import { recordDebtTimes } from './debt-store';
@@ -911,8 +912,7 @@ function mergeChatGptProvenance(state: BackfillState, id: string, incoming: Chat
 
 function chatGptWorkspaceOfScope(scope: string): string | null {
   if (!scope.startsWith('chatgpt:') || scope.includes('!workspace-')) return null;
-  const workspace = scope.slice('chatgpt:'.length);
-  return workspace.length > 0 ? workspace : null;
+  return chatGptWorkspaceScope(scope.startsWith('chatgpt:fp1:') ? scope : scope.slice('chatgpt:'.length));
 }
 
 /**
@@ -2533,7 +2533,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           return halt(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved',
             `ChatGPT ${source} response refused: the observed workspace is not established`);
         }
-        if (expectedWorkspace !== null && workspace.workspace !== expectedWorkspace) {
+        if (expectedWorkspace !== null && chatGptWorkspaceScope(workspace.workspace) !== expectedWorkspace) {
           return halt('scope-mismatch', `ChatGPT ${source} response refused: the observed workspace changed during the request`);
         }
       }

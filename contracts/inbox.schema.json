@@ -115,9 +115,10 @@
             "source": {
               "enum": [
                 "request-url-organization",
-                "response-body-platform-uid"
+                "response-body-platform-uid",
+                "request-header-chatgpt-account-id"
               ],
-              "description": "Where the input id came from. 'request-url-organization' is a path segment of the page's own request (verified, page-owned). 'response-body-platform-uid' is the ADR-002 account axis read from the captured body by the generic scan, whose candidate key names are not confirmed against a logged-in page."
+              "description": "Where the input id came from. 'request-url-organization' is a path segment of the page's own request (verified, page-owned). 'response-body-platform-uid' is the ADR-002 account axis read from the captured body by the generic scan, whose candidate key names are not confirmed against a logged-in page. 'request-header-chatgpt-account-id' (W299) is the ChatGPT-Account-Id value on the exact request whose response this capture is; it is read in the page's MAIN world, so it is untrusted input that distinguishes the values the header distinguishes, not a verified person."
             },
             "saltId": {
               "type": "string",

@@ -1,6 +1,7 @@
 import {
   CAPTURE_MESSAGE,
   CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
+  chatGptAccountIdHeaderValue,
   GEMINI_AT_KEY,
   GEMINI_BL_KEY,
   GEMINI_ORIGIN,
@@ -357,7 +358,22 @@ export function installPageFetchHook(options: PageHookOptions): void {
    * candidate is ignored; a candidate whose body does not match gets the
    * metadata-only shape warning. Never throws into the page.
    */
-  const captureCandidate = (rawUrl: string, method: string, status: number, text: string): void => {
+  const captureCandidate = (
+    rawUrl: string,
+    method: string,
+    status: number,
+    text: string,
+    /**
+     * 🔴 W299 · The `ChatGPT-Account-Id` value the **caller of this capture** observed on
+     * the same request. It travels by argument, not by a page-global "last seen account":
+     * two overlapping requests, or an account switch between two requests, would make a
+     * global reading attach request A's account to request B's body. Optional because the
+     * XHR transport reads no request headers — absent is the honest `unknown`, never a
+     * guess.
+     */
+    chatgptAccountIdHeader?: string | null,
+    chatgptAccountIdHeaderPresent = false,
+  ): void => {
     try {
       const parsed = new URL(rawUrl, baseUrl);
       const platform = getPlatform(parsed.href);
@@ -392,6 +408,11 @@ export function installPageFetchHook(options: PageHookOptions): void {
           text,
           pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
           capturedAt: Date.now(),
+          // 🔴 W299 · Only when this exact capture's request carried the header. Absent
+          //    otherwise — never `undefined` coerced to an empty string, because the
+          //    worker reads the absence as the named unknown it already has a reason for.
+          ...(chatgptAccountIdHeader ? { chatgptAccountIdHeader } : {}),
+          ...(platform.id === 'chatgpt' ? { chatgptAccountIdHeaderPresent } : {}),
         },
       });
     } catch {
@@ -660,11 +681,53 @@ export function installPageFetchHook(options: PageHookOptions): void {
     console.warn(wsUninstalledWarning);
   }
 
+  /**
+   * 🔴 W299 · **The `ChatGPT-Account-Id` header on this exact fetch call, or null.**
+   *
+   * Read from the same `input`/`init` pair the request was made with, which is the only
+   * place the value is bound to the response: `init.headers` wins when it is present
+   * (fetch replaces a `Request`'s headers with `init.headers`), otherwise a `Request`
+   * input's own `headers` are read. All three shapes a page can pass — a `Headers`
+   * instance, a tuple array, a plain object — are read case-insensitively, and anything
+   * that is not a non-empty string is `null` (unknown), never `''`.
+   *
+   * This function never throws into the page: a page that hands us a proxy whose
+   * `headers` getter throws is a page with no observable header, not a broken request.
+  */
+  const readChatGptAccountIdHeader = (input: RequestInfo | URL, init?: RequestInit): { value: string | null; present: boolean } => {
+    let present = false;
+    try {
+      const initHeaders = init?.headers;
+      const headers = initHeaders === undefined && typeof input !== 'string' && !(input instanceof URL)
+        ? (input as Request).headers
+        : initHeaders;
+      let accountId: unknown = null;
+      if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+        accountId = headers.get('ChatGPT-Account-Id');
+        present = accountId !== null;
+      }
+      else if (Array.isArray(headers)) {
+        const row = headers.find((entry) => Array.isArray(entry) && typeof entry[0] === 'string'
+          && entry[0].toLowerCase() === 'chatgpt-account-id');
+        if (row) { present = true; accountId = row[1]; }
+      } else if (headers && typeof headers === 'object') {
+        const key = Object.keys(headers).find((name) => name.toLowerCase() === 'chatgpt-account-id');
+        present = key !== undefined;
+        accountId = key ? (headers as Record<string, unknown>)[key] : null;
+      }
+      return { value: chatGptAccountIdHeaderValue(accountId), present };
+    } catch {
+      return { value: null, present };
+    }
+  };
+
   const originalFetch = window.fetch.bind(window);
   const maybeCapture = async (
     input: RequestInfo | URL,
     method: string,
     response: Response,
+    chatgptAccountIdHeader: string | null,
+    chatgptAccountIdHeaderPresent = false,
   ): Promise<void> => {
     try {
       let url: string;
@@ -700,33 +763,33 @@ export function installPageFetchHook(options: PageHookOptions): void {
 
       // Only candidates are cloned and read; the decision itself is shared with XHR.
       const text = await response.clone().text();
-      captureCandidate(parsed.href, normalizedMethod, response.status, text);
+      captureCandidate(parsed.href, normalizedMethod, response.status, text, chatgptAccountIdHeader, chatgptAccountIdHeaderPresent);
     } catch {
       // Capture is best-effort and must never alter page fetch behaviour.
     }
   };
 
   const hookedFetch: typeof window.fetch = async (input, init) => {
+    /**
+     * 🔴 W299 · Read **once**, before the request, and carried to the capture as an
+     * argument. The same value still feeds W108's separate workspace observation (which is
+     * a page fact about the workspace, not this capture's provenance) — one reading, two
+     * consumers, so the observation and the capture can never disagree about a value that
+     * was on one request.
+     */
+    let chatgptAccountIdHeader: string | null = null;
+    let chatgptAccountIdHeaderPresent = false;
     try {
       const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(rawUrl, baseUrl);
       const platform = getPlatform(parsed.href);
       if (platform?.id === 'chatgpt' && parsed.origin === pageOrigin) {
-        const initHeaders = init?.headers;
-        const headers = initHeaders === undefined && typeof input !== 'string' && !(input instanceof URL)
-          ? input.headers
-          : initHeaders;
-        let accountId: string | null = null;
-        if (typeof Headers !== 'undefined' && headers instanceof Headers) accountId = headers.get('ChatGPT-Account-Id');
-        else if (Array.isArray(headers)) {
-          const row = headers.find((entry) => Array.isArray(entry) && String(entry[0]).toLowerCase() === 'chatgpt-account-id');
-          if (row) accountId = String(row[1]);
-        } else if (headers && typeof headers === 'object') {
-          const key = Object.keys(headers).find((name) => name.toLowerCase() === 'chatgpt-account-id');
-          const value = key ? (headers as Record<string, unknown>)[key] : null;
-          if (typeof value === 'string') accountId = value;
+        const observed = readChatGptAccountIdHeader(input, init);
+        chatgptAccountIdHeader = observed.value;
+        chatgptAccountIdHeaderPresent = observed.present;
+        if (chatgptAccountIdHeader !== null) {
+          post({ type: options.chatgptWorkspaceObservedMessage, accountId: chatgptAccountIdHeader });
         }
-        if (accountId?.trim()) post({ type: options.chatgptWorkspaceObservedMessage, accountId: accountId.trim() });
       }
     } catch {
       // Workspace observation is metadata only and must not affect the page request.
@@ -737,7 +800,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
       inputMethod = input.method;
     }
     const method = String(init?.method ?? inputMethod).toUpperCase();
-    void maybeCapture(input, method, response);
+    void maybeCapture(input, method, response, chatgptAccountIdHeader, chatgptAccountIdHeaderPresent);
     return response;
   };
 
