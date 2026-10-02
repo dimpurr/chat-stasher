@@ -88,7 +88,7 @@ export default defineContentScript({
     let mainReady = false;
     let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { identities: [] };
     let chatGptCurrentRawHeader: string | null = null;
-    let chatGptCurrentRequestIdentity: { accountId: string; identity: FingerprintedChatGptIdentity } | null = null;
+    let chatGptObservationGeneration = 0;
     const isFingerprintAccountIdentity = (value: unknown): value is FingerprintedChatGptIdentity =>
       !!value && typeof value === 'object'
       && typeof (value as AccountIdentity).value === 'string'
@@ -247,16 +247,12 @@ export default defineContentScript({
         && (event.data as { type?: unknown }).type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
         const accountId = (event.data as { accountId?: unknown }).accountId;
         if (typeof accountId === 'string') {
-          const currentAccountId = chatGptAccountIdHeaderValue(accountId);
-          // Invalidate the previous pair immediately. Until the worker fingerprints
-          // this exact observation, no ChatGPT backfill request may leave the page.
-          chatGptCurrentRequestIdentity = null;
-          chatGptCurrentRawHeader = currentAccountId;
-          if (currentAccountId === null) return;
-          // The raw value is held only in this page memory and only for the current
-          // observation, so the request can send this exact value with its identity.
+          const generation = ++chatGptObservationGeneration;
+          chatGptCurrentRawHeader = chatGptAccountIdHeaderValue(accountId);
+          if (chatGptCurrentRawHeader === null) return;
           void browser.runtime.sendMessage({ type: CHATGPT_WORKSPACE_OBSERVED_MESSAGE, accountId })
             .then((reply: unknown) => {
+              if (generation !== chatGptObservationGeneration || chatGptCurrentRawHeader === null) return;
               if (!reply || typeof reply !== 'object') return;
               const identity = (reply as { identity?: unknown }).identity;
               if (!isFingerprintAccountIdentity(identity)) return;
@@ -266,14 +262,12 @@ export default defineContentScript({
                 source: 'request-header-chatgpt-account-id',
               } as FingerprintedChatGptIdentity;
               chatGptWorkspaceObservation = observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity);
-              if (currentAccountId === chatGptCurrentRawHeader) {
-                chatGptCurrentRequestIdentity = { accountId: currentAccountId, identity: safeIdentity };
-              }
             })
             .catch(() => undefined);
         } else {
+          chatGptObservationGeneration += 1;
           chatGptCurrentRawHeader = null;
-          chatGptCurrentRequestIdentity = null;
+          chatGptWorkspaceObservation = { identities: [] };
         }
         return;
       }
@@ -606,19 +600,19 @@ export default defineContentScript({
       //    checks (serveBackfillFetch). Nothing is decided here, and nothing
       //    **may** be — the decision lives in exactly one place, that allowlist.
       // 🔴 W303 · Bind the lease identity to this exact backfill request using
-      //    only the safe fingerprint returned by the first-worker boundary.
+      //    the header actually sent; the worker fingerprints it at its boundary.
       const isChatGpt = findPlatformForUrl(url)?.id === 'chatgpt';
-      const requestIdentity = isChatGpt ? chatGptCurrentRequestIdentity : null;
-      if (isChatGpt && (!requestIdentity || requestIdentity.accountId !== chatGptCurrentRawHeader)) {
+      if (isChatGpt && chatGptCurrentRawHeader === null) {
         throw new Error('chatgpt-account-header-unavailable');
       }
+      const sentChatGptAccountId = isChatGpt ? chatGptCurrentRawHeader : null;
       const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
             credentials: 'same-origin',
             headers: {
               accept: 'application/json',
-              ...(requestIdentity ? { 'ChatGPT-Account-Id': requestIdentity.accountId } : {}),
+              ...(sentChatGptAccountId !== null ? { 'ChatGPT-Account-Id': sentChatGptAccountId } : {}),
               ...(init.contentType ? { 'content-type': init.contentType } : {}),
             },
             body: init.body,
@@ -627,7 +621,7 @@ export default defineContentScript({
             credentials: 'same-origin',
             headers: {
               accept: 'application/json',
-              ...(requestIdentity ? { 'ChatGPT-Account-Id': requestIdentity.accountId } : {}),
+              ...(sentChatGptAccountId !== null ? { 'ChatGPT-Account-Id': sentChatGptAccountId } : {}),
             },
           });
       // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
@@ -647,9 +641,17 @@ export default defineContentScript({
         text: () => answer.response.text(),
         ...(answer.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
         retryAfter,
-        ...(requestIdentity ? { chatgptAccountIdentity: requestIdentity.identity } : {}),
+        ...(sentChatGptAccountId !== null ? { chatgptAccountIdHeader: sentChatGptAccountId } : {}),
       };
     };
+
+    const clearChatGptAccountHeader = (): void => {
+      chatGptObservationGeneration += 1;
+      chatGptCurrentRawHeader = null;
+      chatGptWorkspaceObservation = { identities: [] };
+    };
+    window.addEventListener('pagehide', clearChatGptAccountHeader);
+    window.addEventListener('unload', clearChatGptAccountHeader);
 
     /**
      * 🔴 W31c · **The page-side half of the organization resolver** — the caller

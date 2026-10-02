@@ -2621,6 +2621,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
           source === 'archived' ? enumeration.archived.offset : 0, listLimit));
       } catch (error) {
         const reason = (error as Error).message;
+        if (reason === 'chatgpt-account-header-unavailable') {
+          return stopForChatGptRequestRefusal(`ChatGPT ${source} page had no current account header; the request was not sent`);
+        }
         if (reason === 'scope-mismatch' || reason === 'org-ambiguous' || reason === 'org-unresolved') {
           return halt(reason, `ChatGPT ${source} enumeration refused: the observed workspace did not match this ledger`);
         }

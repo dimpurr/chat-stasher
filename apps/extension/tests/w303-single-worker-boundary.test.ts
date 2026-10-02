@@ -9,14 +9,23 @@ const tabPortSource = readFileSync(new URL('../lib/backfill/tab-port.ts', import
 const backgroundSource = readFileSync(new URL('../entrypoints/background.ts', import.meta.url), 'utf8');
 
 describe('W303c · one first-worker boundary for raw ChatGPT account ids', () => {
-  it('keeps only fingerprints on the long-lived content observation', () => {
+  it('keeps one current raw header slot and fingerprints each sent value at the worker boundary', () => {
     expect(contentSource).not.toContain('accountIds');
     expect(contentSource).not.toContain('observeChatGptAccountId');
     expect(contentSource).toContain('chatGptCurrentRawHeader');
+    expect(contentSource).not.toContain('chatGptCurrentRequestIdentity');
+    expect(contentSource.match(/let chatGptCurrentRawHeader:/g)).toHaveLength(1);
+    expect(contentSource).toContain("window.addEventListener('pagehide', clearChatGptAccountHeader)");
+    expect(contentSource).toContain("window.addEventListener('unload', clearChatGptAccountHeader)");
+    expect(contentSource).toContain('generation !== chatGptObservationGeneration');
+    expect(contentSource).not.toContain('currentAccountId');
+    const observationReply = contentSource.match(/\.then\(\(reply: unknown\) => \{([\s\S]*?)\n\s*\}\)\s*\.catch/)?.[1];
+    expect(observationReply).toBeTruthy();
+    expect(observationReply).not.toContain('currentAccountId');
     expect(contentSource).toMatch(/runtime\.sendMessage\(\{\s*type:\s*CHATGPT_WORKSPACE_OBSERVED_MESSAGE,\s*accountId\s*\}\)/);
     expect(contentSource).toContain('observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity)');
-    expect(contentSource).toContain("'ChatGPT-Account-Id': requestIdentity.accountId");
-    expect(contentSource).toContain('chatgptAccountIdentity: requestIdentity.identity');
+    expect(contentSource).toContain("'ChatGPT-Account-Id': sentChatGptAccountId");
+    expect(contentSource).toContain('chatgptAccountIdHeader: sentChatGptAccountId');
     expect(contentSource).toContain("throw new Error('chatgpt-account-header-unavailable')");
     expect(backgroundSource).toContain('fingerprintChatGptIdentityAtWorkerBoundary(');
     expect(backgroundSource).not.toContain('fingerprintChatGptWorkspace');

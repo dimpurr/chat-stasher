@@ -685,6 +685,51 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     return { report, delivered };
   }
 
+  it.each([
+    ['archived', '/backend-api/conversations', 'true'],
+    ['project-discovery', '/backend-api/gizmos/snorlax/sidebar', undefined],
+    ['project', '/backend-api/gizmos/g-p-fixture/conversations', undefined],
+  ] as const)('%s enumeration without the current header suspends and keeps pending debt', async (source, expectedPath, archivedParam) => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A, [C1]);
+    const opened = await openLedger(store, 'chatgpt', scope);
+    if (!opened.ok) throw new Error('fixture must open the ChatGPT ledger');
+    opened.state.enumCursor.complete = true;
+    opened.state.parkedEmpty = [C1];
+    const enumeration = opened.state.chatgptEnumeration!;
+    enumeration.archived.complete = source !== 'archived';
+    enumeration.projects.discoveryComplete = source === 'project';
+    if (source === 'project') {
+      enumeration.projects.entries.push({ id: 'g-p-fixture', name: 'fixture', cursor: null, complete: false, listed: 0 });
+    }
+    await opened.ledger.save(opened.state);
+
+    const calls: string[] = [];
+    const identity = {
+      value: await fingerprintFor(store, ACCOUNT_A),
+      saltId: saltIdOf(store),
+      source: 'request-header-chatgpt-account-id' as const,
+    };
+    const http: HttpPort = Object.assign(async (url: string): Promise<HttpResponse> => {
+      calls.push(url);
+      throw new Error('chatgpt-account-header-unavailable');
+    }, {
+      chatgptWorkspace: async () => ({ ok: true as const, workspace: fingerprintedChatGptWorkspace(identity.value), identity, observed: true as const }),
+      chatgptAccountIdentity: async () => identity,
+    });
+
+    const result = await runChatGpt(store, http).report;
+
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0]!).pathname).toBe(expectedPath);
+    if (archivedParam !== undefined) expect(new URL(calls[0]!).searchParams.get('is_archived')).toBe(archivedParam);
+    expect(result.halted?.reason).toBe('refused-unknown');
+    expect(result.state.pending).toEqual([C1]);
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toMatchObject({
+      reason: 'request-refused', lease: { value: identity.value },
+    });
+  });
+
   it('takes its lease before enumeration, then accepts IDs only under that header identity', async () => {
     const store = memoryStore();
     const opened = await openLedger(store, 'chatgpt', scope);
