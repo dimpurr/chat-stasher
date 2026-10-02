@@ -1,67 +1,112 @@
 #!/usr/bin/env bash
 # Fail a test run that touches this machine's real chat-stasher user data
-# (W306).
+# (W306; redesigned by W306b after CI run 37023093243).
 #
 #     bash scripts/dev/check-test-isolation.sh -- cargo test
 #
-# runs <command> (default: `cargo test -p chat-stasher`) and exits non-zero if
-# the run created, removed, renamed or modified anything under the machine's
-# real
+# runs <command> (default: `cargo test -p chat-stasher`).
 #
-#   * data root     `$XDG_DATA_HOME/chat-stasher` else `~/.local/share/chat-stasher`
-#   * config root   `$XDG_CONFIG_HOME/chat-stasher` else `~/.config/chat-stasher`
-#   * state home    `$XDG_STATE_HOME` else `~/.local/state`
-#   * inbox         `~/Downloads/chat-stasher/inbox`
-#   * the native-messaging manifest directories
-#                   `~/Library/Application Support/*/NativeMessagingHosts` on
-#                   macOS, `$HOME/.config/*/NativeMessagingHosts` and
-#                   `$HOME/.mozilla/native-messaging-hosts` on Linux,
-#                   `%LOCALAPPDATA%\chat-stasher\NativeMessagingHosts` on Windows
+# A guard is only worth having if the people who must obey it can see it go
+# green. The first version of this guard snapshotted the whole data, config and
+# state root and failed on *any* change. That is correct on a quiet machine and
+# wrong on the machine that matters: the author runs the live product (the
+# extension and its native host) on the box the guard gates, and it writes the
+# real `stage/ext-status/…` every few minutes. CI run 37023093243 then showed
+# the same shape from two more directions:
 #
-# This is the W289 cache guard's sibling, and it exists for the same reason.
-# W289 pinned the *rustic metadata cache*; the run that wrote into this
-# machine's real data on 2026-10-02 proved the pin was one directory too narrow.
-# A test resolved the real `$XDG_DATA_HOME/chat-stasher` root and planted
-# `stage/sessions/<machine>/chatgpt.synthetic-session` and a `synthetic-install`
-# row in `state/extension-coordination.sqlite3`. Those are the author's real
-# archive and coordination state. The environment fix (W306) points every test
-# at a temp root, and `src/test_identity_guard.rs` refuses a fixture identity
-# aimed outside temp; *this* guard is the check that a leak is red on the run
-# that introduces it, on every platform, rather than discovered later.
+#   * ubuntu-latest: `~/.local/state` did not exist before the run and did
+#     after it. The product never writes there (`collect::default_state_dir`
+#     is `<data root>/state`); the writer is the `opendal` SFTP backend inside
+#     one test, which parks its ControlMaster socket under `$XDG_STATE_HOME`.
+#     A guard that reds on that is red on a dependency's scratch directory.
+#   * windows-latest: the branch watched `%LOCALAPPDATA%\chat-stasher` as the
+#     *data and config* root. That is the product's **cache** root there
+#     (`scanner::user_cache_dirs`), so the body cache the suite legitimately
+#     warms — `%LOCALAPPDATA%\chat-stasher\body\…`, hundreds of entries — was
+#     reported as a leak.
 #
-# What it watches, and why each root is the product's own spelling:
+# A guard that reds when the product does its job is a guard people learn to
+# re-run until it is green. So this version stops asking *where* a change
+# landed and asks *what the change carries*: a test write is identifiable by a
+# reserved fixture identity or by a per-run marker the shared test sandbox
+# stamps into everything it hands a test, and a product write is identifiable
+# by carrying neither.
 #
-#   * data/config/state/inbox are the exact fallbacks `config::config_path`,
-#     `config::default_data_root`, `collect::default_state_dir` and the inbox
-#     argument document.
-#   * the manifest directories are read from the filesystem, not hard-coded per
-#     browser: the set that exists now is snapshotted, so a test that writes a
-#     manifest into a browser it found is caught, and a browser directory that
-#     *appears* during the run is a new root and therefore a diff.
+# What it watches:
 #
-# Three changes are each a failure: entries that appeared, entries that
-# vanished (a test that deletes from the real data is worse than one that
-# writes to it), and a change that left the entry set identical — a
-# create-then-delete, caught with a run-boundary marker and `find -newer`, at
-# whatever precision the filesystem keeps (the whole-second comparison the
-# pre-W289 guard used false-passed exactly that case).
+#   * Fingerprint scan over the **data, config, cache and state-homed** roots.
+#     After the run every entry the run created or modified is inspected, and
+#     is a leak when
+#       - its name carries a reserved fixture token (`synthetic`, `fixture`,
+#         `probe`, `dummy`, case-insensitive, as a whole token), or
+#       - its name carries the run marker, or
+#       - a small file's *content* carries the run marker, or
+#       - a small file *under `<data root>/state`* carries a reserved fixture
+#         token — the coordination database is where the 2026-10-02 incident
+#         left its `synthetic-install` row, and it holds no conversation text,
+#         so the token scan cannot mistake an archived conversation for a
+#         fixture.
+#     The state home (`~/.local/state`) is scanned for the **marker only**: it
+#     is a shared directory the product never writes, so a token or structure
+#     rule would red on whatever else uses it, while the run marker can only
+#     come from this run's own sandbox.
+#     A fixture-named entry that is *removed* during the run is a leak too, so
+#     the names are diffed as well; a name the run deleted is only a leak when
+#     it carries a fingerprint.
+#     The marker is a random token this guard generates per run and exports as
+#     `CHAT_STASHER_TEST_ISOLATION_MARKER`. The shared `Sandbox` fixture
+#     (`crates/chat-stasher/src/test_support.rs`) puts it in the name of the
+#     temp root it hands every test, so a value a test derives from its sandbox
+#     — a path echoed into a config file, a status record, an audit row —
+#     carries the marker even when the write itself lands in a real root.
+#   * Structure diff over the **native-messaging manifest directories and the
+#     inbox**: any entry appearing, vanishing, renaming, or appearing and
+#     vanishing inside the run is a leak. Nothing the product does on its own
+#     writes these during a test run, so for them the old whole-snapshot rule
+#     is still the right one.
+#
+# What this deliberately does not catch, stated so it is a decision and not an
+# oversight: a write into a real root that carries no fingerprint at all — a
+# realistic-looking identity, no sandbox-derived value in it — is not
+# distinguishable from the live product writing, and is not flagged. The
+# code-level fail-safe (`crates/chat-stasher/src/test_identity_guard.rs`) is
+# the layer for a fixture identity; this guard is the layer for the run's own
+# traces, and its selftest pins both sides of that boundary with a probe that
+# writes a realistic file into the real data root and must stay green.
+#
+# Roots are the product's own resolutions, not a second spelling:
+#
+#   * home        `$HOME` else `$USERPROFILE`      (`config::home_from_env`)
+#   * data root   `$XDG_DATA_HOME/chat-stasher` else `~/.local/share/chat-stasher`
+#                                                  (`config::default_data_root`)
+#   * config root `$XDG_CONFIG_HOME/chat-stasher` else `~/.config/chat-stasher`
+#                                                  (`config::config_path`)
+#   * cache root  `dirs::cache_dir()/chat-stasher`  (`scanner::user_cache_dirs`):
+#                 `~/Library/Caches` on macOS, `$XDG_CACHE_HOME` else `~/.cache`
+#                 on Linux, `%LOCALAPPDATA%` else `%USERPROFILE%\AppData\Local`
+#                 on Windows. The product's own body cache and activity index
+#                 live here, and neither guard watched it on macOS/Linux before
+#                 W306b.
+#   * state home  `$XDG_STATE_HOME` else `~/.local/state` (`scanner::xdg_state_home`).
+#   * inbox       `~/Downloads/chat-stasher/inbox` — the historical drop point.
+#                 The extension no longer downloads there, so nothing writes it
+#                 during a run; it is kept as a structure root because a test
+#                 that *did* write it would be exactly the class this guards.
+#   * manifests   read from the filesystem, not hard-coded per browser: the set
+#                 that exists now is snapshotted, so a test that writes a
+#                 manifest into a browser the guard found is caught, and a
+#                 browser directory that appears during the run is itself a
+#                 diff.
 #
 # A root that cannot be named is a refusal (exit 1), never a skip: a guard that
-# cannot see is red, not absent.
-#
-# The recursive walk over the data and config roots is the expensive part; on a
-# machine with a large archive it is bounded by the archive's own size, and the
-# two snapshots are the price of the guarantee. `~/.local/state` is watched one
-# level deep only: the product never writes its state there (its state lives
-# under the data root), so a deep change is not a leak this guard is built to
-# catch, while the shallow listing still catches a test creating or removing a
-# top-level entry there.
+# cannot see is red, not absent. The recursive walk is the expensive part and is
+# bounded by the archive's size; the fingerprint scan only reads the files the
+# run touched, so a quiet run reads nothing.
 #
 # Exit codes: 0 = the run left every watched root untouched; 1 = it did not (or
-# the snapshot itself failed — a guard that errors is red, never absent);
-# 2 = usage. The wrapped command's own exit code is reported as part of the
-# verdict and does not bypass it: a green suite that dirtied the real data is a
-# red guard run.
+# the snapshot itself failed); 2 = usage. The wrapped command's own exit code is
+# reported as part of the verdict and does not bypass it: a green suite that
+# dirtied the real data is a red guard run.
 
 set -uo pipefail
 
@@ -70,8 +115,9 @@ TAG="[test-isolation]"
 usage() {
   echo "Usage: bash scripts/dev/check-test-isolation.sh [-- <command...>]" >&2
   echo "Runs <command> (default: cargo test -p chat-stasher) and fails when it" >&2
-  echo "touches this machine's real chat-stasher data, config, state, inbox or" >&2
-  echo "native-messaging manifest directories." >&2
+  echo "leaves a test fingerprint in this machine's real chat-stasher data," >&2
+  echo "config or cache root, or changes a native-messaging manifest directory" >&2
+  echo "or the inbox." >&2
   exit 2
 }
 
@@ -116,68 +162,86 @@ SNAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cs-test-isolation.XXXXXX") || exit 1
 cleanup() { rm -rf "$SNAP_DIR"; }
 trap cleanup EXIT
 
+# The reserved fixture namespace, restated from
+# `test_identity_guard::FIXTURE_IDENTITY_TOKENS`. The selftest reads that
+# constant out of the Rust source and fails if the two ever disagree, so the
+# copy cannot drift silently.
+FIXTURE_TOKENS="synthetic fixture probe dummy"
+# A file larger than this is not read for fingerprints. The marker is a random
+# token and the token scan is confined to `<data root>/state`, so a cap only
+# bounds the cost of a pathological write; it is not a correctness boundary.
+CONTENT_SCAN_CAP=$((4 * 1024 * 1024))
+
+HOME_DIR=""
 DATA_ROOT=""
 CONFIG_ROOT=""
+CACHE_ROOT=""
 STATE_HOME=""
 INBOX_ROOT=""
 LOCALAPPDATA_UNIX=""
 
+# `%LOCALAPPDATA%` (Windows) converted once; empty elsewhere. The product's
+# cache root and manifest directory both hang off it there.
+if [ "$PLATFORM" = "windows" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+  LOCALAPPDATA_UNIX="$(to_unix_path "$LOCALAPPDATA")"
+fi
+
+# The product's home: `$HOME` first, `$USERPROFILE` second (config::home_from_env).
+if [ -n "${HOME:-}" ]; then
+  HOME_DIR="$HOME"
+elif [ "$PLATFORM" = "windows" ] && [ -n "${USERPROFILE:-}" ]; then
+  HOME_DIR="$(to_unix_path "$USERPROFILE")"
+fi
+[ -n "$HOME_DIR" ] || refuse \
+  "neither \$HOME nor (on Windows) \$USERPROFILE is set, so the real user-data" \
+  "roots cannot be named; the run would be unguarded"
+
+# data root — `config::default_data_root`.
+if [ -n "${XDG_DATA_HOME:-}" ]; then
+  DATA_ROOT="$XDG_DATA_HOME/chat-stasher"
+else
+  DATA_ROOT="$HOME_DIR/.local/share/chat-stasher"
+fi
+
+# config root — `config::config_path` (the directory holding `config.toml`).
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+  CONFIG_ROOT="$XDG_CONFIG_HOME/chat-stasher"
+else
+  CONFIG_ROOT="$HOME_DIR/.config/chat-stasher"
+fi
+
+# state home — `scanner::xdg_state_home`.
+STATE_HOME="${XDG_STATE_HOME:-$HOME_DIR/.local/state}"
+
+# cache root — `dirs::cache_dir()` as `scanner::user_cache_dirs` spells it. On
+# Windows that is `%LOCALAPPDATA%`, which is *not* a child of home; the
+# `%USERPROFILE%\AppData\Local` fallback is the documented second candidate.
 case "$PLATFORM" in
-  macos)
-    [ -n "${HOME:-}" ] || refuse "no \$HOME, so the real data root cannot be named"
-    if [ -n "${XDG_DATA_HOME:-}" ] && [ "${XDG_DATA_HOME#\/}" != "$XDG_DATA_HOME" ]; then
-      DATA_ROOT="$XDG_DATA_HOME/chat-stasher"
-    else
-      DATA_ROOT="$HOME/.local/share/chat-stasher"
-    fi
-    if [ -n "${XDG_CONFIG_HOME:-}" ] && [ "${XDG_CONFIG_HOME#\/}" != "$XDG_CONFIG_HOME" ]; then
-      CONFIG_ROOT="$XDG_CONFIG_HOME/chat-stasher"
-    else
-      CONFIG_ROOT="$HOME/.config/chat-stasher"
-    fi
-    STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-    INBOX_ROOT="$HOME/Downloads/chat-stasher/inbox"
-    ;;
+  macos) CACHE_ROOT="$HOME_DIR/Library/Caches/chat-stasher" ;;
   linux)
-    [ -n "${HOME:-}" ] || refuse "no \$HOME, so the real data root cannot be named"
-    if [ -n "${XDG_DATA_HOME:-}" ] && [ "${XDG_DATA_HOME#\/}" != "$XDG_DATA_HOME" ]; then
-      DATA_ROOT="$XDG_DATA_HOME/chat-stasher"
+    if [ -n "${XDG_CACHE_HOME:-}" ]; then
+      CACHE_ROOT="$XDG_CACHE_HOME/chat-stasher"
     else
-      DATA_ROOT="$HOME/.local/share/chat-stasher"
+      CACHE_ROOT="$HOME_DIR/.cache/chat-stasher"
     fi
-    if [ -n "${XDG_CONFIG_HOME:-}" ] && [ "${XDG_CONFIG_HOME#\/}" != "$XDG_CONFIG_HOME" ]; then
-      CONFIG_ROOT="$XDG_CONFIG_HOME/chat-stasher"
-    else
-      CONFIG_ROOT="$HOME/.config/chat-stasher"
-    fi
-    STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-    INBOX_ROOT="$HOME/Downloads/chat-stasher/inbox"
     ;;
   windows)
-    if [ -n "${LOCALAPPDATA:-}" ]; then
-      LOCALAPPDATA_UNIX="$(to_unix_path "$LOCALAPPDATA")"
-      DATA_ROOT="$LOCALAPPDATA_UNIX/chat-stasher"
-      CONFIG_ROOT="$LOCALAPPDATA_UNIX/chat-stasher"
+    if [ -n "$LOCALAPPDATA_UNIX" ]; then
+      CACHE_ROOT="$LOCALAPPDATA_UNIX/chat-stasher"
+    else
+      CACHE_ROOT="$HOME_DIR/AppData/Local/chat-stasher"
     fi
-    if [ -n "${USERPROFILE:-}" ]; then
-      local_profile="$(to_unix_path "$USERPROFILE")"
-      [ -n "$DATA_ROOT" ] || DATA_ROOT="$local_profile/AppData/Local/chat-stasher"
-      [ -n "$CONFIG_ROOT" ] || CONFIG_ROOT="$local_profile/AppData/Local/chat-stasher"
-      STATE_HOME="$local_profile/AppData/Local"
-      INBOX_ROOT="$USERPROFILE/Downloads/chat-stasher/inbox"
-    fi
-    [ -n "$DATA_ROOT" ] || refuse \
-      "neither %LOCALAPPDATA% nor %USERPROFILE% is set, so the real data root" \
-      "cannot be named; the run would be unguarded"
     ;;
 esac
 
-# Every root the guard watches, one per line: the four fixed roots plus every
+INBOX_ROOT="$HOME_DIR/Downloads/chat-stasher/inbox"
+
+# Every root the guard watches structurally: the inbox plus every
 # native-messaging manifest directory that currently exists. Re-derived before
 # and after the run, so a manifest directory that appears or disappears is part
 # of the diff rather than invisible to it.
-collect_roots() {
-  printf '%s\n' "$DATA_ROOT" "$CONFIG_ROOT" "$STATE_HOME" "$INBOX_ROOT"
+collect_structure_roots() {
+  printf '%s\n' "$INBOX_ROOT"
   # `find -name`, not a `*/NativeMessagingHosts` glob: the Chrome path is
   # `Google/Chrome/NativeMessagingHosts` (and Arc's is `Arc/User Data/…`), two
   # components deep, and `*` does not cross `/` — the glob silently missed the
@@ -185,13 +249,13 @@ collect_roots() {
   # in `nativehost.rs`'s table.
   case "$PLATFORM" in
     macos)
-      find "$HOME/Library/Application Support" -maxdepth 4 -type d \
+      find "$HOME_DIR/Library/Application Support" -maxdepth 4 -type d \
         -name NativeMessagingHosts 2>/dev/null
       ;;
     linux)
-      find "$HOME/.config" -maxdepth 3 -type d -name NativeMessagingHosts 2>/dev/null
-      [ -d "$HOME/.mozilla/native-messaging-hosts" ] &&
-        printf '%s\n' "$HOME/.mozilla/native-messaging-hosts"
+      find "$HOME_DIR/.config" -maxdepth 3 -type d -name NativeMessagingHosts 2>/dev/null
+      [ -d "$HOME_DIR/.mozilla/native-messaging-hosts" ] &&
+        printf '%s\n' "$HOME_DIR/.mozilla/native-messaging-hosts"
       ;;
     windows)
       [ -n "$LOCALAPPDATA_UNIX" ] &&
@@ -200,28 +264,31 @@ collect_roots() {
   esac
 }
 
-# Snapshot every watched root, recursively, keyed by path so a changed root is
-# a readable diff. `state` is the shallow exception documented above. An absent
-# root is recorded as `ABSENT <path>` so a run that creates it is a diff, not a
-# surprise.
+# The roots the fingerprint scan covers, one `mode<TAB>root` line each. The
+# state home is `marker`-mode: the product never writes it, so a token or
+# structure rule would red on a dependency's scratch directory (the
+# ubuntu-latest failure of run 37023093243 was exactly that), while the run
+# marker still catches a test trace there.
+scan_roots() {
+  printf 'full\t%s\n' "$DATA_ROOT"
+  printf 'full\t%s\n' "$CONFIG_ROOT"
+  printf 'full\t%s\n' "$CACHE_ROOT"
+  printf 'marker\t%s\n' "$STATE_HOME"
+}
+
+# Snapshot the roots named in `$2` (one path per line) into `$1`, one stat line
+# per entry, keyed by path so a changed root is a readable diff. An absent root
+# is recorded as `ABSENT <path>` so a run that creates it is a diff.
 snapshot_all() {
-  # $1 = output file
+  # $1 = output file, $2 = roots file.
   : >"$1"
-  collect_roots | LC_ALL=C sort -u >"$SNAP_DIR/roots"
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     if [ ! -e "$root" ]; then
       printf 'ABSENT %s\n' "$root" >>"$1"
       continue
     fi
-    depth=()
-    if [ "$root" = "$STATE_HOME" ]; then
-      depth=(-maxdepth 1)
-    fi
-    # `${depth[@]+…}` is the empty-array-safe expansion: macOS ships bash 3.2,
-    # where a bare `"${depth[@]}"` on an empty array is an unbound variable
-    # under `set -u` and would abort the walk.
-    if ! find "$root" ${depth[@]+"${depth[@]}"} -print0 2>"$SNAP_DIR/find.err" |
+    if ! find "$root" -print0 2>"$SNAP_DIR/find.err" |
       LC_ALL=C sort -z >"$SNAP_DIR/names.raw"; then
       echo "$TAG refusing: could not list $root" >&2
       cat "$SNAP_DIR/find.err" >&2
@@ -235,57 +302,183 @@ snapshot_all() {
         printf 'stat-unavailable'
       printf ' %s\n' "$entry"
     done <"$SNAP_DIR/names.raw" >>"$1"
-  done <"$SNAP_DIR/roots"
+  done <"$2"
   LC_ALL=C sort -o "$1" "$1"
 }
 
-snapshot_all "$SNAP_DIR/before"
+# Names only, one per line — the cheap snapshot the fingerprint scan diffs to
+# find a fixture name the run deleted.
+snapshot_names() {
+  # $1 = output file, $2 = roots file.
+  local out="$1"
+  : >"$out"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    [ -e "$root" ] || continue
+    if ! find "$root" 2>"$SNAP_DIR/find.err" | LC_ALL=C sort >"$SNAP_DIR/names.lines"; then
+      echo "$TAG refusing: could not list $root" >&2
+      cat "$SNAP_DIR/find.err" >&2
+      exit 1
+    fi
+    cat "$SNAP_DIR/names.lines" >>"$out"
+  done <"$2"
+  LC_ALL=C sort -o "$out" "$out"
+}
+
+lower() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
+
+# Does the basename carry a reserved fixture token as a whole token?
+name_is_fixture() {
+  local lowered token
+  lowered="$(lower "$1")"
+  for token in $(printf '%s' "$lowered" | LC_ALL=C tr -c 'a-z0-9' ' '); do
+    case " $FIXTURE_TOKENS " in
+      *" $token "*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The run marker, generated once and exported so every test process (and the
+# `Sandbox` fixture it builds) can stamp it. A random token cannot occur in a
+# user's real data by accident, which is what makes it a safe content signal.
+MARKER=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ -n "$MARKER" ] || refuse "could not generate the per-run test marker (/dev/urandom)"
+export CHAT_STASHER_TEST_ISOLATION_MARKER="$MARKER"
+
+name_has_marker() {
+  case "$1" in *"$MARKER"*) return 0 ;; esac
+  return 1
+}
+
+# A small regular file whose content carries the marker.
+file_has_marker() {
+  local size
+  [ -f "$1" ] || return 1
+  size=$(wc -c <"$1" 2>/dev/null) || return 1
+  [ "$size" -le "$CONTENT_SCAN_CAP" ] || return 1
+  LC_ALL=C grep -qF -- "$MARKER" "$1" 2>/dev/null
+}
+
+# A small regular file under `<data root>/state` whose content carries a
+# reserved fixture token. Confined to `state/` so an archived conversation —
+# arbitrary user text that can contain the word "probe" — is never read for
+# tokens.
+file_has_fixture_token() {
+  local path="$1" size token
+  case "$path" in "$DATA_ROOT"/state/*) ;; *) return 1 ;; esac
+  [ -f "$path" ] || return 1
+  size=$(wc -c <"$path" 2>/dev/null) || return 1
+  [ "$size" -le "$CONTENT_SCAN_CAP" ] || return 1
+  for token in $FIXTURE_TOKENS; do
+    if LC_ALL=C grep -qiE "(^|[^[:alnum:]])${token}([^[:alnum:]]|$)" "$path" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---- structure snapshot -----------------------------------------------------
+
+collect_structure_roots | LC_ALL=C sort -u >"$SNAP_DIR/structure.roots"
+snapshot_all "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.roots"
+
+# The scan-root names before the run, so a fixture name deleted during it is a
+# diff. Names only: a stat of the whole archive is not needed to notice a
+# removal. The state home is excluded — a shared directory's entries vanish
+# under unrelated writers.
+scan_roots | cut -d'	' -f2- | grep -v -x -F "$STATE_HOME" |
+  LC_ALL=C sort -u >"$SNAP_DIR/scan.roots"
+snapshot_names "$SNAP_DIR/scan.before" "$SNAP_DIR/scan.roots"
 
 # The run boundary: everything the run does happens with a timestamp after
-# this, so `find -newer` on a root's own directory catches a create-then-delete
-# whose entry names cancel out.
-MARKER="$SNAP_DIR/boundary"
-: >"$MARKER"
+# this, so `find -newer` catches a create-then-delete whose entry names cancel
+# out, and bounds the fingerprint scan to what the run actually touched.
+BOUNDARY="$SNAP_DIR/boundary"
+: >"$BOUNDARY"
 
 started=$(date +%s)
 "${COMMAND[@]}"
 cmd_status=$?
 elapsed=$(( $(date +%s) - started ))
 
-snapshot_all "$SNAP_DIR/after"
-
 failed=0
-if ! diff -q "$SNAP_DIR/before" "$SNAP_DIR/after" >/dev/null; then
+
+# ---- structure diff: any change is a leak ----------------------------------
+
+collect_structure_roots | LC_ALL=C sort -u >"$SNAP_DIR/structure.roots.after"
+snapshot_all "$SNAP_DIR/structure.after" "$SNAP_DIR/structure.roots.after"
+if ! diff -q "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.after" >/dev/null; then
   failed=1
-  echo "$TAG FAIL: this run changed a real chat-stasher user-data location" >&2
-  diff "$SNAP_DIR/before" "$SNAP_DIR/after" 2>&1 | head -60 || true
+  echo "$TAG FAIL: this run changed a real inbox or native-messaging manifest" \
+    "directory" >&2
+  diff "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.after" 2>&1 | head -40 || true
 fi
 
-# Unchanged entry set, but a watched directory was touched during the run: a
+# Unchanged entry set, but a structure directory was touched during the run: a
 # create-then-delete. Reported only when the snapshot diff was clean, so one
-# change is never announced twice. The state home is excluded: the run only
-# reads it, and reading does not change its own mtime.
+# change is never announced twice.
 if [ "$failed" -eq 0 ]; then
-  collect_roots | LC_ALL=C sort -u >"$SNAP_DIR/roots.after"
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     [ -e "$root" ] || continue
-    [ "$root" = "$STATE_HOME" ] && continue
-    depth=()
-    if [ "$root" = "$STATE_HOME" ]; then
-      depth=(-maxdepth 1)
-    fi
-    # Whole-tree, not `-maxdepth 0`: the create-then-delete can happen in a
-    # subdirectory (`stage/<session>`), and only the subdirectory's mtime moves,
-    # which a check of the root's own timestamp would miss.
-    if [ -n "$(find "$root" ${depth[@]+"${depth[@]}"} -newer "$MARKER" -print -quit 2>/dev/null)" ]; then
+    if [ -n "$(find "$root" -newer "$BOUNDARY" -print -quit 2>/dev/null)" ]; then
       echo "$TAG FAIL: this run modified $root during the run (an entry is newer" \
         "than the run boundary) while leaving the entry set unchanged —" \
         "a create-then-delete the snapshot diff cannot see" >&2
       failed=1
     fi
-  done <"$SNAP_DIR/roots.after"
+  done <"$SNAP_DIR/structure.roots.after"
 fi
+
+# ---- fingerprint scan: only what carries a test identity -------------------
+
+report_leak() {
+  echo "$TAG FAIL: $1" >&2
+  failed=1
+}
+
+# A fixture name that was there before the run and is gone now: a test deleted
+# from the real archive (or the live product removed a file whose name happens
+# to carry a token, which is a leak-shaped name either way).
+snapshot_names "$SNAP_DIR/scan.after.names" "$SNAP_DIR/scan.roots"
+while IFS= read -r gone; do
+  [ -n "$gone" ] || continue
+  name_is_fixture "$(basename "$gone")" && report_leak \
+    "a fixture-named entry disappeared during the run: $gone"
+done < <(LC_ALL=C comm -23 "$SNAP_DIR/scan.before" "$SNAP_DIR/scan.after.names")
+
+while IFS='	' read -r mode root; do
+  [ -n "$root" ] || continue
+  [ -e "$root" ] || continue
+  # `-newer` bounds the scan to entries this run created or modified: a quiet
+  # run (everything sandboxed) touches nothing here and reads nothing. A walk
+  # that fails is a refusal, not an empty set: a guard that cannot see is red.
+  if ! find "$root" -newer "$BOUNDARY" -print0 2>"$SNAP_DIR/find.err" |
+    LC_ALL=C sort -z >"$SNAP_DIR/touched.raw"; then
+    echo "$TAG refusing: could not list the entries the run touched under $root" >&2
+    cat "$SNAP_DIR/find.err" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' entry; do
+    base="$(basename "$entry")"
+    if [ "$mode" = "full" ] && name_is_fixture "$base"; then
+      report_leak "a fixture-named entry appeared at $entry during the run"
+      continue
+    fi
+    if name_has_marker "$base"; then
+      report_leak "a run-marked entry appeared at $entry during the run"
+      continue
+    fi
+    if file_has_marker "$entry"; then
+      report_leak "a file carrying this run's marker was written to $entry"
+      continue
+    fi
+    if [ "$mode" = "full" ] && file_has_fixture_token "$entry"; then
+      report_leak "a file carrying a fixture identity was written to $entry"
+    fi
+  done <"$SNAP_DIR/touched.raw"
+done < <(scan_roots)
 
 if [ "$failed" -ne 0 ]; then
   echo "$TAG FAIL: exit code of the wrapped command was $cmd_status — the guard" \
@@ -299,5 +492,6 @@ if [ "$cmd_status" -ne 0 ]; then
   exit 1
 fi
 
-echo "$TAG PASS: ${COMMAND[*]} left the real data, config, state, inbox and" \
-  "native-messaging manifest directories untouched (runtime=${elapsed}s)"
+echo "$TAG PASS: ${COMMAND[*]} left the real data, config, cache, inbox and" \
+  "native-messaging manifest directories free of test fingerprints" \
+  "(runtime=${elapsed}s)"

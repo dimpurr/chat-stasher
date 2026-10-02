@@ -84,22 +84,38 @@ idea to the rest of the machine's real state, because the cache pin turned out
 to be one directory too narrow: on 2026-10-02 a test run resolved the real
 `$XDG_DATA_HOME/chat-stasher` and planted
 `stage/sessions/<machine>/chatgpt.synthetic-session` and a `synthetic-install`
-row in the real `state/extension-coordination.sqlite3`. It snapshots the data
-and config roots, the state home, `~/Downloads/chat-stasher/inbox` and every
-`NativeMessagingHosts` directory the machine has (the set is read from the
-filesystem, so a browser directory that appears during the run is itself a
-diff), and fails on anything created, removed, renamed or — via a run-boundary
-marker — created and deleted inside one run. Every test gets its environment
-from the shared `Sandbox` fixture in `src/test_support.rs`, which points `HOME`,
-`USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+row in the real `state/extension-coordination.sqlite3`.
+
+It asks *what a change carries*, not *where it landed*. The machine that runs
+this check also runs the live product, which writes the real
+`stage/ext-status/…` every few minutes, so a guard that reds on any change to
+the data root does not survive contact with its own purpose. Instead, after the
+run, every entry the run created or modified under the real data, config,
+cache and state-home roots is inspected, and is a leak when its name carries a
+reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`,
+case-insensitive, as a whole token) or a per-run marker, when a small file's
+bytes carry the marker, or when a small file under `<data root>/state` carries
+a fixture token — the coordination store is where the incident's row landed,
+and it holds no conversation text for the scan to mistake for one. The marker
+is a random token the guard exports for one run; the shared `Sandbox` fixture
+in `src/test_support.rs` names its temp root after it, so a value a test derives
+from its sandbox carries the marker even when the write lands in a real root.
+A fixture-named entry the run *removed* is a leak too. The inbox and every
+`NativeMessagingHosts` directory the machine has (read from the filesystem, so
+a browser directory that appears during the run is itself a diff) keep the old
+whole-snapshot rule, because nothing writes them during a run: any change
+there, including a create-then-delete caught by the run boundary, is red.
+
+Every test still gets its environment from that `Sandbox` fixture, which points
+`HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME` and the rustic-cache pin inside one temp root; the
 native-messaging half is covered by tests passing an explicit `--target-root`,
 because Windows resolves those directories through the Known Folder API and no
 environment variable moves them. The guard is the check; a second, code-level
 fail-safe (`src/test_identity_guard.rs`) refuses to write a reserved fixture
-identity (`synthetic-…` / `fixture-…`) to a destination outside the process temp
-directory at all, so a test that loses its sandbox is stopped at the write even
-if the guard is not the thing running it.
+identity (`synthetic-…`, `fixture-…`, `probe-…`, `dummy-…`) to a destination
+outside the process temp directory at all, so a test that loses its sandbox is
+stopped at the write even if the guard is not the thing running it.
 
 The guard's self-test is `bash scripts/dev/test-test-isolation-guard.sh`; the
 code-level fail-safe's is `cargo test -p chat-stasher --test

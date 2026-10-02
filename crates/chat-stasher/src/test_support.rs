@@ -56,15 +56,59 @@
 /// `XDG_CACHE_HOME`, for the same Windows reason W289 documents.
 pub struct Sandbox {
     dir: tempfile::TempDir,
+    marker: Option<String>,
 }
+
+/// The per-run isolation marker `check-test-isolation.sh` exports
+/// (W306b).
+///
+/// It is a random token the guard generates for one run and hands to the whole
+/// process tree. A test write is only *provably* a test write if it carries
+/// something the live product never writes, and the marker is that something:
+/// the guard scans the real roots for it and reds when it finds it, while the
+/// live product — which never sees the variable — cannot trip that scan no
+/// matter how often it rewrites the real stage.
+pub const TEST_MARKER_ENV: &str = "CHAT_STASHER_TEST_ISOLATION_MARKER";
+
+/// Name of the file [`Sandbox::new`] writes into its root, holding the marker.
+/// The path itself carries it too, so a value the product records *by path*
+/// (a status record, an audit row) is marked even when the file lands
+/// elsewhere.
+pub const TEST_MARKER_FILE: &str = ".chat-stasher-test-isolation-marker";
 
 impl Sandbox {
     /// A fresh sandbox. The directory is created; its subdirectories are
     /// created lazily by [`Sandbox::ensure_dirs`] or by the code under test.
+    ///
+    /// When the isolation guard is running, the sandbox names itself after the
+    /// run marker: every path it hands a test carries the marker, so a leaked
+    /// write that echoes a sandbox path is caught by the guard's fingerprint
+    /// scan. Outside the guard the marker is absent and the root is an ordinary
+    /// temp directory.
     pub fn new() -> Sandbox {
-        Sandbox {
-            dir: tempfile::tempdir().expect("create the per-test sandbox"),
+        let marker = std::env::var(TEST_MARKER_ENV)
+            .ok()
+            .filter(|marker| !marker.is_empty());
+        let prefix = match &marker {
+            Some(marker) => format!("cs-sandbox-{marker}-"),
+            None => "cs-sandbox-".to_string(),
+        };
+        let dir = tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempdir()
+            .expect("create the per-test sandbox");
+        if let Some(marker) = &marker {
+            // Best-effort: the marker file is a convenience for a copy or
+            // rename of the tree. The path already carries the marker; a write
+            // failure here must not fail a test that never needed the file.
+            let _ = std::fs::write(dir.path().join(TEST_MARKER_FILE), marker);
         }
+        Sandbox { dir, marker }
+    }
+
+    /// The run marker, when the isolation guard set one.
+    pub fn marker(&self) -> Option<&str> {
+        self.marker.as_deref()
     }
 
     /// The sandbox root. Every other path is under it.
@@ -120,7 +164,7 @@ impl Sandbox {
     /// test assembling `Command::envs` can be) draws from the same list rather
     /// than a second spelling that drifts.
     pub fn envs(&self) -> Vec<(&'static str, std::ffi::OsString)> {
-        vec![
+        let mut envs = vec![
             ("HOME", self.home().into()),
             ("USERPROFILE", self.home().into()),
             ("XDG_CONFIG_HOME", self.config_home().into()),
@@ -128,7 +172,14 @@ impl Sandbox {
             ("XDG_STATE_HOME", self.state_home().into()),
             ("XDG_CACHE_HOME", self.cache_home().into()),
             (RUSTIC_CACHE_DIR_ENV, self.rustic_cache_dir().into()),
-        ]
+        ];
+        if let Some(marker) = &self.marker {
+            // A spawned child keeps the marker for the same reason this
+            // process has it: whatever it derives from its environment is
+            // traceable to this run.
+            envs.push((TEST_MARKER_ENV, marker.into()));
+        }
+        envs
     }
 
     /// Point `command` at this sandbox: set every variable in

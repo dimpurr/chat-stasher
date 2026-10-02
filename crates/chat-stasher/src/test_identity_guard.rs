@@ -22,9 +22,10 @@
 //! Three properties make this safe in production:
 //!
 //!  · It is keyed on a **reserved namespace**. A fixture identity is one whose
-//!    dot/dash/underscore-separated components include `synthetic` or `fixture`
-//!    as a whole token. Real users do not name their conversations that; the
-//!    namespace is documented here as reserved.
+//!    dot/dash/underscore-separated components include `synthetic`, `fixture`,
+//!    `probe` or `dummy` as a whole token, compared case-insensitively. Real
+//!    users do not name their conversations that; the namespace is documented
+//!    here as reserved.
 //!  · It is keyed on the **destination**, not on `cfg(test)`. A fixture written
 //!    under a temp root — every correct test — passes. Only a fixture headed
 //!    outside temp is refused, which is exactly the incident.
@@ -40,23 +41,33 @@ use std::path::Path;
 
 /// Whole-token names reserved for test scaffolding. An identity is a fixture
 /// identity when one of its `.`/`-`/`_`-separated components equals one of
-/// these, case-sensitively.
+/// these, compared case-insensitively.
 ///
 /// `chatgpt.synthetic-session` is the incident's own spelling: the session id
 /// `synthetic-session` composes with the platform into a component
 /// `synthetic-session`, whose tokens are `synthetic` and `session`.
-pub const FIXTURE_IDENTITY_TOKENS: &[&str] = &["synthetic", "fixture"];
+///
+/// `probe` and `dummy` are here because the suite uses them for the same
+/// purpose (`w306-probe-machine`, `dummy-install`), and case-folding is here
+/// because nothing stops a fixture from being spelled `Synthetic-session` —
+/// the namespace is a contract, not a spelling. This list is restated in
+/// `scripts/dev/check-test-isolation.sh`, whose selftest reads this constant
+/// back out of the source so the two cannot drift apart.
+pub const FIXTURE_IDENTITY_TOKENS: &[&str] = &["synthetic", "fixture", "probe", "dummy"];
 
 /// Is `id` a reserved test fixture identity?
 ///
 /// The split is on every non-alphanumeric ASCII character, so `chatgpt.synthetic-session`,
 /// `synthetic-install`, `b83.synthetic-session`, `w292.synthetic-session-one`,
-/// and `b83-fixture` all answer `true`, while an ordinary id that merely
-/// contains the letters (`photosynthetic-blend`) answers `false` because no
-/// whole token matches.
+/// `Synthetic-session` and `b83-fixture` all answer `true`, while an ordinary
+/// id that merely contains the letters (`photosynthetic-blend`,
+/// `reprobe-session`) answers `false` because no whole token matches.
 pub fn is_fixture_identity(id: &str) -> bool {
-    id.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|token| FIXTURE_IDENTITY_TOKENS.contains(&token))
+    id.split(|c: char| !c.is_ascii_alphanumeric()).any(|token| {
+        FIXTURE_IDENTITY_TOKENS
+            .iter()
+            .any(|reserved| token.eq_ignore_ascii_case(reserved))
+    })
 }
 
 /// Is `path` inside the process temp directory?
@@ -112,6 +123,22 @@ mod tests {
             "w292.synthetic-session-one",
             "b83-fixture",
             "fixture-install",
+            "w306-probe-machine",
+            "dummy-install",
+        ] {
+            assert!(is_fixture_identity(id), "`{id}` must be reserved");
+        }
+    }
+
+    #[test]
+    fn a_fixture_identity_is_reserved_whatever_its_case() {
+        // The namespace is a contract, not a spelling: a fixture that happens
+        // to be capitalized must not slip past the fail-safe.
+        for id in [
+            "chatgpt.Synthetic-session",
+            "PROBE-install",
+            "Dummy.session",
+            "Fixture.Install",
         ] {
             assert!(is_fixture_identity(id), "`{id}` must be reserved");
         }
@@ -125,6 +152,8 @@ mod tests {
             "photosynthetic-blend",
             "my-fixtures-collection",
             "claude.28bca09c-196b-4521-8c29-b8de23343d00",
+            "reprobe-session",
+            "dummyish-install",
             "",
         ] {
             assert!(!is_fixture_identity(id), "`{id}` must not be reserved");
