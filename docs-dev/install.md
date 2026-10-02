@@ -91,7 +91,7 @@ that platform."** The extension has two legs; please read them separately:
   them, so it is skipped silently rather than captured.
   So, reading the code, passive capture on Perplexity **does name the
   conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:1294-1322`) — but this is still a conclusion
+  (`apps/extension/lib/contract.ts:1370-1398`) — but this is still a conclusion
   drawn from reading the code, and the route itself was read out of public
   source rather than measured: **we have not tested it on a real perplexity.ai
   page.**
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:237`;
-`apps/extension/entrypoints/background.ts:1209-1211`). That page does not have to
+`apps/extension/entrypoints/background.ts:1223-1225`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -463,7 +463,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:101-126`;
-`apps/extension/entrypoints/background.ts:699-715`).
+`apps/extension/entrypoints/background.ts:713-729`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
@@ -1151,7 +1151,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2312-2413`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2326-2427`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4826-4857`) is covered.

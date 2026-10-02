@@ -216,6 +216,27 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
   //    never spelled as a value (invariant 1), and those conversations keep
   //    being answerable by exact bytes only, exactly as before.
   const fingerprint = await contentFingerprint(platform?.id ?? 'deepseek', captured.text);
+  // 🔴 W128 step 1 · The irreversible account fingerprint. It never throws and
+  //    never guesses: when no id is visible it is `{kind:'unknown', reason}`,
+  //    which is a value on the bundle rather than an absent field.
+  // 🔴 W299 · Computed **before** the transient-header delete below, because this is the
+  //    one and only consumer of `chatgptAccountIdHeader` (see `CapturedFetch`).
+  const account = await accountFingerprintFor(
+    captured,
+    store,
+    sessionId === 'unknown' ? null : sessionId,
+  );
+  // 🔴 W299 · **The one exit for the transient ChatGPT account header.**
+  //
+  //    The fingerprint above is its only consumer; it turns the value into a per-install
+  //    HMAC. Everything after this point either writes durably (the outbox payload, an
+  //    export) or leaves the extension (the native-host `deliver`), and the header is a raw
+  //    page-visible account identifier, so it is deleted here rather than left for each
+  //    later layer to remember to skip. Deleting it the instant its one consumer has run
+  //    makes "the raw value cannot be persisted or forwarded" a property of the object's
+  //    lifetime, not of a review of every writer. `coordinationIdFromCapture` refuses the
+  //    header source as well, so the guarantee does not rest on this line alone.
+  delete captured.chatgptAccountIdHeader;
   return {
     schema: SCHEMA,
     ...install,
@@ -225,14 +246,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
     // ADR-002: the dedupe axis is the ACCOUNT. `sessionId` guard keeps a
     // per-session id from ever being mistaken for the stable account id.
     identity: extractIdentity(captured.text, sessionId === 'unknown' ? null : sessionId),
-    // 🔴 W128 step 1 · The irreversible account fingerprint. It never throws and
-    //    never guesses: when no id is visible it is `{kind:'unknown', reason}`,
-    //    which is a value on the bundle rather than an absent field.
-    account: await accountFingerprintFor(
-      captured,
-      store,
-      sessionId === 'unknown' ? null : sessionId,
-    ),
+    account,
     ...(fingerprint === null ? {} : { fingerprint }),
     ...(captured.provenance ? { provenance: captured.provenance } : {}),
     ...(captured.provenanceSupplement ? { provenanceSupplement: captured.provenanceSupplement } : {}),

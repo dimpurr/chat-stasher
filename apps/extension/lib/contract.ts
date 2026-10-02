@@ -913,6 +913,30 @@ export function getPlatformByOrigin(origin: string, channel?: ReleaseChannel): C
  */
 export const MAX_RAW_BYTES = 16 * 1024 * 1024;
 
+/**
+ * 🔴 W299 · The bound on the transient `ChatGPT-Account-Id` value.
+ *
+ * The real value is an opaque workspace id of a few dozen characters; the bound exists so
+ * a page cannot make this field carry a document. It is a single validator
+ * (`chatGptAccountIdHeaderValue`) called from two places, and it is the only one: the
+ * page→content gate (`isCapturedFetchShape`) and the fingerprint reader both call it, so a
+ * value one accepts is a value the other accepts and neither can be bypassed.
+ */
+export const CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS = 512;
+
+/**
+ * The one reading of the transient header value: a trimmed, non-empty, bounded string, or
+ * `null` for anything else. `null` means **unknown** — it is never coerced to `''`, and an
+ * empty/whitespace/non-string value is refused rather than hashed, because a fingerprint
+ * computed over an empty string would be a value that means "no account" dressed as one.
+ */
+export function chatGptAccountIdHeaderValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > CHATGPT_ACCOUNT_ID_HEADER_MAX_CHARS) return null;
+  return trimmed;
+}
+
 export const INBOX_PREFIX = 'chat-stasher/inbox';
 
 export interface CapturedFetch {
@@ -950,6 +974,31 @@ export interface CapturedFetch {
   provenance?: ChatGptProvenance;
   /** A later observation appended separately; it never rewrites provenance.project. */
   provenanceSupplement?: ChatGptProvenanceSupplement;
+  /**
+   * 🔴 W299 · The `ChatGPT-Account-Id` value observed on **the exact request whose
+   * response this capture is** — transient input to the worker, never a durable field.
+   *
+   * Why it exists: ChatGPT exposes no account id in the response body, so before W299
+   * every ChatGPT bundle recorded `unknown` for its account even though the page's own
+   * request named one (ADR-031). This is that missing **source**. What makes it evidence
+   * is the correlation, not the header: the value is read inside the same `fetch`
+   * invocation that produced this response, never from "the last account seen" — a
+   * page-global reading is wrong the moment two requests overlap or the account switches
+   * between them.
+   *
+   * 🔴 It is **page-visible and untrusted**. The page can put anything here, so it is a
+   *    claim about the request, not a proof of who is signed in. `isCapturedFetchShape`
+   *    admits it only as a bounded, non-empty string on a ChatGPT capture
+   *    (`chatGptAccountIdHeaderValue`), and it has exactly one consumer —
+   *    `accountFingerprintFor`, which turns it into a per-install HMAC. It must never be
+   *    written to a bundle, an export, the outbox, a log line or a native-host message:
+   *    `buildBundle` deletes it the moment the fingerprint has been computed.
+   *
+   * 🔴 Optional, and absent on every older capture and on every non-ChatGPT platform. An
+   *    absent field is the named `unknown` the fingerprint path already answers with — it
+   *    is never recorded as an empty string or filled with a placeholder.
+   */
+  chatgptAccountIdHeader?: string;
 }
 
 export interface ChatGptProvenance {
@@ -1049,6 +1098,19 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if ('sessionId' in value) return false;
   if ('provenance' in value) return false;
   if ('provenanceSupplement' in value) return false;
+  // 🔴 W299 · The transient ChatGPT account header is admitted, but only where it can mean
+  //    anything and only in the one shape: a bounded non-empty string on a ChatGPT capture.
+  //    A forged value is still only ever a *claim* (it is hashed, never stored — see
+  //    `CapturedFetch.chatgptAccountIdHeader`), but a malformed or misplaced one is refused
+  //    outright rather than reaching the fingerprint path as an unknown that looks like an
+  //    answer. `platform.id` is checked because a header observed on one platform's request
+  //    says nothing about another's, and an absent field changes nothing.
+  //    `undefined` is treated as absent, the same way `pageUrl` above is: the hook omits
+  //    the key rather than sending an empty one.
+  if (value.chatgptAccountIdHeader !== undefined) {
+    if (platform.id !== 'chatgpt') return false;
+    if (chatGptAccountIdHeaderValue(value.chatgptAccountIdHeader) === null) return false;
+  }
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }
@@ -1108,6 +1170,13 @@ export interface InboxIdentity {
  *    captured response body by the generic scan. That scan's candidate key names
  *    are explicitly **not** confirmed against a logged-in page, so this is the
  *    value the ledger already scopes by rather than a verified platform field.
+ *  · 'request-header-chatgpt-account-id' — 🔴 W299 · the `ChatGPT-Account-Id`
+ *    value on the exact request whose response this capture is (ADR-031). It is
+ *    read in the page's MAIN world, so it is **untrusted input**: what it carries
+ *    is that the page's own request named this value, not that a person was
+ *    verified. It distinguishes the values the header distinguishes — two
+ *    workspaces sharing one value are one fingerprint — which is why it is a
+ *    provenance label and not a person's identity.
  *
  * 🔴 W239 · **This build no longer produces `'request-url-organization'`** — not on a
  *    bundle and not on a lease. The value is kept, and must be kept, because archives
@@ -1118,7 +1187,10 @@ export interface InboxIdentity {
  *    `organization-is-not-an-account`), so the only way this label is met today is
  *    off disk.
  */
-export type AccountIdSource = 'request-url-organization' | 'response-body-platform-uid';
+export type AccountIdSource =
+  | 'request-url-organization'
+  | 'response-body-platform-uid'
+  | 'request-header-chatgpt-account-id';
 
 /**
  * 🔴 W199 · **The same set as a value**, for a reader that has a string off disk and
@@ -1132,7 +1204,11 @@ export type AccountIdSource = 'request-url-organization' | 'response-body-platfo
  * known. Two declarations in one file, three lines apart, is the cheapest way to keep
  * them true to each other.
  */
-export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = ['request-url-organization', 'response-body-platform-uid'];
+export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = [
+  'request-url-organization',
+  'response-body-platform-uid',
+  'request-header-chatgpt-account-id',
+];
 
 /**
  * 🔴 W128 step 1 · Why a bundle carries no fingerprint. Every value is a fact, and
