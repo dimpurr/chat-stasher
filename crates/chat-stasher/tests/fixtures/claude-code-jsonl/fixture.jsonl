@@ -1,0 +1,17 @@
+{"type": "user", "timestamp": "2026-10-02T10:00:00.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "first typed message,  with  double spaces and a typo: promopt"}, "origin": {"kind": "human"}, "promptSource": "typed"}
+{"type": "user", "timestamp": "2026-10-02T10:00:05.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "tool output"}]}}
+{"type": "user", "timestamp": "2026-10-02T10:00:06.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "<system-reminder>injected</system-reminder>"}}
+{"type": "user", "timestamp": "2026-10-02T10:00:07.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "<task-notification>done</task-notification>"}, "origin": {"kind": "task"}}
+{"type": "user", "timestamp": "2026-10-02T10:00:08.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "meta caveat"}, "isMeta": true}
+{"type": "user", "timestamp": "2026-10-02T10:00:09.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "subagent prompt"}, "isSidechain": true}
+{"type": "user", "timestamp": "2026-10-02T10:00:10.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context."}, "isCompactSummary": true}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-02T10:01:00.000Z", "content": "typed while the agent was busy"}
+{"type": "attachment", "timestamp": "2026-10-02T10:01:00.000Z", "attachment": {"type": "queued_command", "prompt": "typed while the agent was busy", "commandMode": "prompt", "origin": {"kind": "human"}}}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-02T10:01:30.000Z", "content": "typed while the agent was busy", "reason": "absorbed_mid_turn"}
+{"type": "user", "timestamp": "2026-10-02T10:01:35.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "origin": {"kind": "human"}, "message": {"role": "user", "content": "typed while the agent was busy"}}
+{"type": "attachment", "timestamp": "2026-10-02T10:01:40.000Z", "attachment": {"type": "queued_command", "prompt": "queued by a hook", "origin": {"kind": "hook"}}}
+{"type": "attachment", "timestamp": "2026-10-02T10:01:50.000Z", "attachment": {"type": "total_tokens_reminder"}}
+{"type": "user", "timestamp": "2026-10-02T10:02:00.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": [{"type": "text", "text": "[来自 ops 会话，转达 Dim 的任务] 多行\n\n第二段"}]}, "origin": {"kind": "human"}, "promptSource": "typed"}
+{"type": "user", "timestamp": "2026-10-02T10:03:00.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "older client without origin field"}}
+{"type": "user", "timestamp": "2026-10-02T10:03:30.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "<command-name>/rename</command-name>"}}
+{"type": "user", "timestamp": "2026-10-02T10:04:00.000Z", "sessionId": "00000000-0000-0000-0000-000000000000", "message": {"role": "user", "content": "first typed message,  with  double spaces and a typo: promopt"}, "origin": {"kind": "human"}, "promptSource": "typed"}

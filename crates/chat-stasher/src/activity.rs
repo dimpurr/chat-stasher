@@ -767,6 +767,22 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     }
 }
 
+/// One archived line's own conversation time, read by the same per-harness
+/// extractor [`analyze_session`] uses, without the session-level aggregation.
+///
+/// Unlike [`analyze_session`] this reads the time off a line whatever the line
+/// is classified as — a Claude Code `attachment` record is metadata to that
+/// function (it is skipped before its time is read) but still carries the
+/// top-level `timestamp` a caller may need. `None` means the line carries no
+/// readable time; an unknown time is never a zero.
+pub fn line_unix(harness: &str, line: &str) -> Option<i64> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    match line_time(harness, &value) {
+        LineTime::Time { first, .. } => Some(first),
+        _ => None,
+    }
+}
+
 /// Whether an archived session holds no conversation content at all (ADR-035).
 ///
 /// * zero non-blank lines — the shard is empty;
