@@ -215,11 +215,15 @@ chat-stasher repair-duplicates --destination <name>
 chat-stasher repair-duplicates --destination <name> --json
 ```
 
-The report gives duplicate session, shard, and byte counts per machine. A
-duplicate means a later shard in the same session has the same SHA-256 as an
-earlier shard; different hashes remain distinct. `--json` prints one object
-with `complete`, per-machine counts, and `dry_run: true`. Exit `0` means the
-archive was fully read, `3` means it was not fully read, `2` means the command or
+The report gives duplicate session, shard, and byte counts per machine. A later
+run is a duplicate only when it is a byte-identical replay, shard by shard, of
+the session's complete preceding shard sequence. Individual shard repeats
+outside such a replay, including `A,B,A`, are reported separately as suspicious
+and kept. A shard whose bytes equal the concatenation of earlier shards is kept
+unless it also matches the corresponding preceding shard individually.
+`--json` prints one object with `complete`, per-machine duplicate counts,
+`suspicious_kept_*` counts, and `dry_run: true`. Exit `0` means the archive was
+fully read, `3` means it was not fully read, `2` means the command or
 destination was invalid, and `1` means reading completed but report generation
 failed.
 

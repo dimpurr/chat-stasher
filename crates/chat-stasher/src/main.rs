@@ -8178,6 +8178,9 @@ struct DuplicateRepairMachine {
     duplicate_sessions: usize,
     duplicate_shards: usize,
     duplicate_bytes: u64,
+    suspicious_kept_sessions: usize,
+    suspicious_kept_shards: usize,
+    suspicious_kept_bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -8202,28 +8205,15 @@ fn duplicate_repair_report(
             duplicate_sessions: 0,
             duplicate_shards: 0,
             duplicate_bytes: 0,
+            suspicious_kept_sessions: 0,
+            suspicious_kept_shards: 0,
+            suspicious_kept_bytes: 0,
         };
         for session in &machine.sessions {
-            let mut duplicate_indices = duplicate_prefix_hash_indices(&session.shard_sha256);
-            // A single new shard can replay the whole preceding body even when
-            // that body occupied several shards. readback records those exact
-            // byte-range matches; only matches starting at the session prefix
-            // belong to this repair's dest-init signature.
-            duplicate_indices.extend(session.shard_run_duplicates.iter().filter_map(
-                |(start, current)| {
-                    if *start != 0 {
-                        return None;
-                    }
-                    let current_bytes = *session.shard_bytes.get(*current)?;
-                    let prefix_bytes = session
-                        .shard_bytes
-                        .iter()
-                        .take(*current)
-                        .try_fold(0u64, |total, bytes| total.checked_add(*bytes))?;
-                    (current_bytes == prefix_bytes).then_some(*current)
-                },
-            ));
-            let duplicate_indices: BTreeSet<_> = duplicate_indices.into_iter().collect();
+            let duplicate_indices: BTreeSet<_> =
+                store::duplicate_shard_indices(&session.shard_sha256)
+                    .into_iter()
+                    .collect();
             for index in &duplicate_indices {
                 let bytes = session
                     .shard_bytes
@@ -8237,6 +8227,31 @@ fn duplicate_repair_report(
             }
             if !duplicate_indices.is_empty() {
                 summary.duplicate_sessions += 1;
+            }
+
+            let mut seen_hashes = BTreeSet::new();
+            let suspicious_indices: Vec<_> = session
+                .shard_sha256
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hash)| {
+                    (!seen_hashes.insert(hash) && !duplicate_indices.contains(&index))
+                        .then_some(index)
+                })
+                .collect();
+            for index in &suspicious_indices {
+                let bytes = session
+                    .shard_bytes
+                    .get(*index)
+                    .context("suspicious shard index has no byte count")?;
+                summary.suspicious_kept_shards += 1;
+                summary.suspicious_kept_bytes = summary
+                    .suspicious_kept_bytes
+                    .checked_add(*bytes)
+                    .context("suspicious byte count overflow")?;
+            }
+            if !suspicious_indices.is_empty() {
+                summary.suspicious_kept_sessions += 1;
             }
         }
         machines.push(summary);
@@ -8252,36 +8267,6 @@ fn duplicate_repair_report(
         exit_semantics:
             "0=complete report, 1=completed report failed, 2=usage error, 3=archive read incomplete",
     })
-}
-
-fn duplicate_prefix_hash_indices(hashes: &[String]) -> Vec<usize> {
-    let mut duplicates = Vec::new();
-    let mut prefix = Vec::new();
-    let mut index = 0;
-    while index < hashes.len() {
-        if !prefix.is_empty() {
-            let mut replay = Vec::new();
-            let mut matched = false;
-            for (offset, hash) in hashes[index..].iter().enumerate() {
-                replay.push(hash);
-                if replay == prefix {
-                    duplicates.extend(index..=index + offset);
-                    index += offset + 1;
-                    matched = true;
-                    break;
-                }
-                if replay.len() > prefix.len() || replay != prefix[..replay.len()] {
-                    break;
-                }
-            }
-            if matched {
-                continue;
-            }
-        }
-        prefix.push(&hashes[index]);
-        index += 1;
-    }
-    duplicates
 }
 
 fn cmd_repair_duplicates(
@@ -8351,11 +8336,14 @@ fn cmd_repair_duplicates(
         println!("[repair-duplicates] mode        : dry-run");
         for machine in &report.machines {
             println!(
-                "[repair-duplicates] machine={} duplicate_sessions={} duplicate_shards={} duplicate_bytes={}",
+                "[repair-duplicates] machine={} duplicate_sessions={} duplicate_shards={} duplicate_bytes={} suspicious_kept_sessions={} suspicious_kept_shards={} suspicious_kept_bytes={}",
                 machine.machine,
                 machine.duplicate_sessions,
                 machine.duplicate_shards,
-                machine.duplicate_bytes
+                machine.duplicate_bytes,
+                machine.suspicious_kept_sessions,
+                machine.suspicious_kept_shards,
+                machine.suspicious_kept_bytes,
             );
         }
         for warning in &report.warnings {
@@ -9104,7 +9092,7 @@ fn index_sources(
 }
 
 const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
-    b"chat-stasher-fts-source-v2-prefix-reseal-collapse-v1\0";
+    b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0";
 
 fn index_source_fingerprint(shards: &[(String, Vec<String>)], title: Option<&str>) -> String {
     index_source_fingerprint_with_domain(shards, title, INDEX_SOURCE_FINGERPRINT_DOMAIN)
@@ -10229,28 +10217,35 @@ mod decision_surface_tests {
             first_hash,
             index_source_fingerprint(&changed, Some("synthetic title"))
         );
-        assert_ne!(
-            index_source_fingerprint_with_domain(
-                &first,
-                Some("synthetic title"),
-                b"chat-stasher-fts-source-v1\0"
-            ),
-            first_hash,
-            "the collapse-policy domain change must make pre-fix index rows rebuild once"
-        );
+        for previous_domain in [
+            b"chat-stasher-fts-source-v1\0".as_slice(),
+            b"chat-stasher-fts-source-v2-prefix-reseal-collapse-v1\0".as_slice(),
+        ] {
+            assert_ne!(
+                index_source_fingerprint_with_domain(
+                    &first,
+                    Some("synthetic title"),
+                    previous_domain
+                ),
+                first_hash,
+                "a collapse-policy domain change must rebuild older index rows once"
+            );
+        }
     }
 
     #[test]
-    fn duplicate_repair_counts_only_a_complete_prefix_replay() {
+    fn shard_replay_detection_keeps_partial_and_concatenated_matches() {
         let repeated_delta = vec!["a".to_string(), "b".to_string(), "a".to_string()];
-        assert!(duplicate_prefix_hash_indices(&repeated_delta).is_empty());
+        assert!(store::duplicate_shard_indices(&repeated_delta).is_empty());
         let resealed_prefix = vec![
             "a".to_string(),
             "b".to_string(),
             "a".to_string(),
             "b".to_string(),
         ];
-        assert_eq!(duplicate_prefix_hash_indices(&resealed_prefix), vec![2, 3]);
+        assert_eq!(store::duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
+        let concatenated_prefix = vec!["a".to_string(), "b".to_string(), "ab".to_string()];
+        assert!(store::duplicate_shard_indices(&concatenated_prefix).is_empty());
     }
 
     /// A file node with `size` bytes and the given content ids. `None` for
@@ -17266,7 +17261,7 @@ mod duplicate_repair_report_tests {
     use super::*;
 
     #[test]
-    fn report_counts_only_complete_prefix_reseals() {
+    fn report_counts_complete_replays_and_reports_other_repeats_as_kept() {
         let mut archive = readback::ReadAllReport::default();
         archive.machines.push(readback::MachineMerge {
             hostname: "machine-one".to_string(),
@@ -17276,27 +17271,38 @@ mod duplicate_repair_report_tests {
             sessions: vec![
                 readback::SessionBackedUp {
                     machine: "machine-one".to_string(),
-                    session_id: "session-one".to_string(),
-                    shard_count: 3,
-                    concat_bytes: 15,
+                    session_id: "complete-replay".to_string(),
+                    shard_count: 4,
+                    concat_bytes: 24,
                     sha256: "concat".to_string(),
                     shard_sha256: vec![
                         "same".to_string(),
                         "different".to_string(),
                         "same".to_string(),
+                        "different".to_string(),
                     ],
-                    shard_bytes: vec![5, 7, 5],
-                    shard_run_duplicates: vec![(0, 2)],
+                    shard_bytes: vec![5, 7, 5, 7],
+                    shard_run_duplicates: Vec::new(),
                 },
                 readback::SessionBackedUp {
                     machine: "machine-one".to_string(),
-                    session_id: "session-two".to_string(),
+                    session_id: "suspicious-repeat".to_string(),
+                    shard_count: 3,
+                    concat_bytes: 17,
+                    sha256: "concat-two".to_string(),
+                    shard_sha256: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+                    shard_bytes: vec![5, 7, 5],
+                    shard_run_duplicates: Vec::new(),
+                },
+                readback::SessionBackedUp {
+                    machine: "machine-one".to_string(),
+                    session_id: "concatenated-prefix".to_string(),
                     shard_count: 3,
                     concat_bytes: 24,
                     sha256: "concat-two".to_string(),
                     shard_sha256: vec!["a".to_string(), "b".to_string(), "ab".to_string()],
                     shard_bytes: vec![5, 7, 12],
-                    shard_run_duplicates: vec![(0, 2)],
+                    shard_run_duplicates: Vec::new(),
                 },
             ],
         });
@@ -17305,8 +17311,11 @@ mod duplicate_repair_report_tests {
         assert!(report.complete);
         assert!(report.dry_run);
         assert_eq!(report.machines[0].duplicate_sessions, 1);
-        assert_eq!(report.machines[0].duplicate_shards, 1);
+        assert_eq!(report.machines[0].duplicate_shards, 2);
         assert_eq!(report.machines[0].duplicate_bytes, 12);
+        assert_eq!(report.machines[0].suspicious_kept_sessions, 1);
+        assert_eq!(report.machines[0].suspicious_kept_shards, 1);
+        assert_eq!(report.machines[0].suspicious_kept_bytes, 5);
         assert!(report.physical_removal.contains("separate decision"));
     }
 }

@@ -17,10 +17,13 @@ under its own heading below.
 
 - **Repair the duplicated-session read path.** Users who ran `setup` step 4,
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
-  may see duplicated turns in those older builds. Fixed readers collapse
-  same-session shards with the same
-  SHA-256 in `read`, `export`, FTS builds, and activity indexes; new exact shard
-  replays are no-ops at the writer. Run
+  may see duplicated turns in those older builds. In `read`, `export`, FTS
+  builds, activity indexes, and the repair inventory, a later run is dropped
+  only when it is a byte-identical, shard-by-shard replay of that session's
+  complete preceding shard sequence; other individual-shard repeats and
+  matches against concatenated shard bytes are kept. The inventory reports
+  those other individual repeats as suspicious and kept. New exact shard replays
+  are no-ops at the writer. Run
   `chat-stasher repair-duplicates --destination <name> --json` to inventory a
   destination. It is a dry run and never removes shards or snapshots.
 - **Search inside conversation text.** `chat-stasher index build` builds a

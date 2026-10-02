@@ -1732,42 +1732,35 @@ pub fn find_duplicate_shard(
     Ok(None)
 }
 
-/// Indices in later shards that replay the complete preceding shard sequence.
+/// Indices in a later run that replay the complete preceding shard sequence.
 ///
-/// Sequence order is the caller's order. A duplicate is recognized only when
-/// a contiguous run reproduces all bytes accumulated before that run and ends
-/// on a shard boundary. A repeated delta inside a longer sequence is retained.
-pub fn duplicate_shard_indices(shards: &[Vec<u8>]) -> Vec<usize> {
+/// Sequence order is the caller's order. Each replay shard must equal its
+/// corresponding preceding shard; concatenated byte ranges are never compared.
+/// A repeated individual shard that is not a complete replay remains present.
+pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
     let mut duplicates = Vec::new();
-    let mut prefix = Vec::new();
+    let mut preceding = Vec::new();
     let mut index = 0;
     while index < shards.len() {
-        if !prefix.is_empty() {
-            let mut replay = Vec::new();
-            let mut matched = false;
-            for (offset, shard) in shards[index..].iter().enumerate() {
-                replay.extend_from_slice(shard);
-                if replay == prefix {
-                    duplicates.extend(index..=index + offset);
-                    index += offset + 1;
-                    matched = true;
-                    break;
-                }
-                if !prefix.starts_with(&replay) {
-                    break;
-                }
-            }
-            if matched {
-                continue;
-            }
+        if !preceding.is_empty()
+            && index + preceding.len() <= shards.len()
+            && preceding
+                .iter()
+                .enumerate()
+                .all(|(offset, previous)| shards[index + offset] == shards[*previous])
+        {
+            duplicates.extend(index..index + preceding.len());
+            index += preceding.len();
+            continue;
         }
-        prefix.extend_from_slice(&shards[index]);
+        preceding.push(index);
         index += 1;
     }
     duplicates
 }
 
-/// Keep the first complete shard sequence and later non-replay content.
+/// Keep the first sequence and later content unless a full shard-by-shard
+/// replay of that sequence follows it.
 pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     let duplicates: BTreeSet<_> = duplicate_shard_indices(&shards).into_iter().collect();
     shards
@@ -2209,17 +2202,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_shard_detection_requires_a_complete_prefix_replay() {
-        let repeated_delta = vec![b"alpha\n".to_vec(), b"beta\n".to_vec(), b"alpha\n".to_vec()];
-        assert!(duplicate_shard_indices(&repeated_delta).is_empty());
-        let resealed_prefix = vec![
-            b"alpha\n".to_vec(),
-            b"beta\n".to_vec(),
-            b"alpha\n".to_vec(),
-            b"beta\n".to_vec(),
-        ];
-        assert_eq!(duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
-        assert!(duplicate_shard_indices(&[b"alpha\n".to_vec(), b"alpha".to_vec()]).is_empty());
+    fn duplicate_shard_detection_requires_a_shard_by_shard_complete_replay() {
+        let a = b"alpha\n".to_vec();
+        let b = b"beta\n".to_vec();
+        let ab = [a.as_slice(), b.as_slice()].concat();
+        assert_eq!(
+            duplicate_shard_indices(&[a.clone(), b.clone(), a.clone(), b.clone()]),
+            vec![2, 3]
+        );
+        assert!(duplicate_shard_indices(&[a.clone(), b.clone(), a.clone()]).is_empty());
+        assert!(duplicate_shard_indices(&[a, b, ab]).is_empty());
     }
 
     #[test]
