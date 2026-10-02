@@ -12,6 +12,7 @@ import {
   needsChatgptBearer,
   type RawFetch,
 } from '../lib/platform-auth';
+import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 
 /**
  * Measured 2026-09-13 in a logged-in Chrome: ChatGPT's conversation body answers
@@ -47,6 +48,8 @@ function fakeNetwork(tokens: Array<string | null>, validToken: () => string) {
   return { raw, calls, sessionReads: () => sessionReads };
 }
 
+const accountHeader = { readChatgptAccountIdHeader: () => ({ value: 'synthetic-account', generation: 1 }) };
+
 describe('which requests may carry the ChatGPT token', () => {
   it('only the same-origin ChatGPT list and conversation-body URLs', () => {
     expect(needsChatgptBearer(DETAIL, ORIGIN)).toBe(true);
@@ -61,9 +64,44 @@ describe('which requests may carry the ChatGPT token', () => {
 });
 
 describe('authorized fetch', () => {
+  it('checks the account header on every route declared by the ChatGPT backfill plan', async () => {
+    const requests = [
+      CHATGPT_PLAN.listUrl(ORIGIN, 0, 100),
+      ...(CHATGPT_PLAN.listAuxPaths ?? []).map((route) => {
+        const path = route.prefix ? `${route.path}opaque-project/conversations` : route.path;
+        const query = new URLSearchParams();
+        for (const key of route.requiredQueryKeys ?? []) {
+          query.set(key, route.selector?.key === key ? route.selector.value : '0');
+        }
+        return `${ORIGIN}${path}${query.size > 0 ? `?${query}` : ''}`;
+      }),
+      CHATGPT_PLAN.detailUrl!(ORIGIN, 'opaque-conversation'),
+    ];
+    const sent: Array<{ url: string; header: string | undefined; authorization: string | undefined }> = [];
+    const raw: RawFetch = async (url, init) => {
+      if (url === `${ORIGIN}${CHATGPT_SESSION_PATH}`) {
+        return { status: 200, text: async () => '{"accessToken":"synthetic-token"}' };
+      }
+      const headers = init.headers as Record<string, string> | undefined;
+      sent.push({ url, header: headers?.['ChatGPT-Account-Id'], authorization: headers?.authorization });
+      return { status: 200, text: async () => '{}' };
+    };
+    const fetch = createAuthorizedFetch(ORIGIN, raw, {
+      readChatgptAccountIdHeader: () => ({ value: 'synthetic-account', generation: 1 }),
+    });
+
+    for (const url of requests) await fetch(url, {});
+
+    expect(sent.map(({ url }) => url)).toEqual(requests);
+    expect(sent.every(({ header }) => header === 'synthetic-account')).toBe(true);
+    expect(sent.map(({ url, authorization }) => authorization === undefined
+      ? false
+      : needsChatgptBearer(url, ORIGIN))).toEqual(requests.map((url) => needsChatgptBearer(url, ORIGIN)));
+  });
+
   it('adds the session token to a body request, which then succeeds', async () => {
     const net = fakeNetwork(['tok-1'], () => 'tok-1');
-    const res = await createAuthorizedFetch(ORIGIN, net.raw)(DETAIL, { headers: { accept: 'application/json' } });
+    const res = await createAuthorizedFetch(ORIGIN, net.raw, accountHeader)(DETAIL, { headers: { accept: 'application/json' } });
     expect(res.status).toBe(200);
     expect(net.calls.at(-1)?.auth).toBe('Bearer tok-1');
   });
@@ -78,7 +116,7 @@ describe('authorized fetch', () => {
 
   it('reads the session once and reuses the token from memory', async () => {
     const net = fakeNetwork(['tok-1'], () => 'tok-1');
-    const f = createAuthorizedFetch(ORIGIN, net.raw);
+    const f = createAuthorizedFetch(ORIGIN, net.raw, accountHeader);
     await f(DETAIL, {});
     await f(DETAIL, {});
     expect(net.sessionReads()).toBe(1);
@@ -87,7 +125,7 @@ describe('authorized fetch', () => {
   it('on 401 drops the token, reads a fresh one once, and retries', async () => {
     let valid = 'tok-1';
     const net = fakeNetwork(['tok-1', 'tok-2'], () => valid);
-    const f = createAuthorizedFetch(ORIGIN, net.raw);
+    const f = createAuthorizedFetch(ORIGIN, net.raw, accountHeader);
     await f(DETAIL, {});
     valid = 'tok-2';                       // the token expired server-side
     const res = await f(DETAIL, {});
@@ -151,13 +189,13 @@ describe('authorized fetch', () => {
   it('the conversation list carries the token (cookie-only answers a false empty list)', async () => {
     const net = fakeNetwork(['tok-1'], () => 'tok-1');
     const list = `${ORIGIN}/backend-api/conversations?offset=0&limit=20`;
-    await createAuthorizedFetch(ORIGIN, net.raw)(list, { headers: { accept: 'application/json' } });
+    await createAuthorizedFetch(ORIGIN, net.raw, accountHeader)(list, { headers: { accept: 'application/json' } });
     expect(net.calls.at(-1)).toEqual({ url: list, auth: 'Bearer tok-1' });
   });
 
   it('with no token available, sends without one so the real status reaches the caller', async () => {
     const net = fakeNetwork([null], () => 'tok-1');
-    const res = await createAuthorizedFetch(ORIGIN, net.raw)(DETAIL, {});
+    const res = await createAuthorizedFetch(ORIGIN, net.raw, accountHeader)(DETAIL, {});
     expect(res.status).toBe(404);          // not invented: the platform's own answer
     expect(net.calls.filter((c) => c.url === DETAIL).every((c) => c.auth === undefined)).toBe(true);
   });

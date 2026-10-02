@@ -5002,3 +5002,14 @@ export function listPageUrl(origin: string, offset: number, limit = DEFAULT_LIST
 export function detailUrl(origin: string, conversationId: string): string {
   return chatgptDetailUrl(origin, conversationId);
 }
+
+/**
+ * Does a pathname match any request route declared by ChatGPT's backfill plan?
+ * Query construction remains on the plan's URL builders; this predicate shares
+ * its closed path set with the page-side send-time account-header check.
+ */
+export function chatgptBackfillPathMatches(pathname: string): boolean {
+  return pathname === CHATGPT_PLAN.listPath
+    || (CHATGPT_PLAN.listAuxPaths ?? []).some((route) => auxListPathMatches(route, pathname))
+    || (CHATGPT_PLAN.detailPath !== null && detailPathMatches(CHATGPT_PLAN.detailPath, pathname));
+}
