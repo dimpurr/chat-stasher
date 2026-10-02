@@ -139,7 +139,7 @@ describe('W299-A · the hook reads the header from every shape a page can pass',
     expect(captures(win)[0]!.payload.chatgptAccountIdHeader).toBe(HEADER_B);
   });
 
-  it('🔴 missing / empty / whitespace / non-string ⇒ the field is absent, so the worker says unknown', async () => {
+  it('🔴 absent header is distinct from a present malformed value', async () => {
     const misses: Array<[string, RequestInit | undefined]> = [
       ['no header at all', undefined],
       ['empty string', { headers: { 'ChatGPT-Account-Id': '' } }],
@@ -156,8 +156,9 @@ describe('W299-A · the hook reads the header from every shape a page can pass',
       await flush();
       const got = captures(win);
       expect(got, name).toHaveLength(1);
-      // Absent, never `''`: the bundle's `account` is then the named unknown, not a
-      // fingerprint of nothing.
+      // A present but invalid field is carried only as a boolean presence marker,
+      // so the worker cannot mistake it for an absent header and use body data.
+      expect(got[0]!.payload.chatgptAccountIdHeaderPresent, name).toBe(name !== 'no header at all');
       expect('chatgptAccountIdHeader' in got[0]!.payload, name).toBe(false);
       expect(observations(win), name).toHaveLength(0);
       vi.unstubAllGlobals();
@@ -222,6 +223,7 @@ describe('W299-A2 · the page→content gate refuses a malformed or misplaced fi
 
   it('🔴 bounded metadata is admitted; malformed metadata stays unknown without refusing the capture', () => {
     expect(isCapturedFetchShape(capture({ chatgptAccountIdHeader: HEADER_A }))).toBe(true);
+    expect(isCapturedFetchShape(capture({ chatgptAccountIdHeaderPresent: true }))).toBe(true);
 
     const unknown: Array<[string, Partial<CapturedFetch>]> = [
       ['a number', { chatgptAccountIdHeader: 42 as unknown as string }],
@@ -309,6 +311,21 @@ describe('W299-B · the header is the ChatGPT account id, and only ever a finger
       null,
     );
     expect(oversized).toEqual({ kind: 'unknown', reason: 'no-account-id-in-capture' });
+    const malformedWithBodyId = await accountFingerprintFor(
+      capture({ text: JSON.stringify({ account_id: 'body-fixture-uid', mapping: {}, current_node: 'n0' }), chatgptAccountIdHeaderPresent: true }),
+      store,
+      null,
+    );
+    expect(malformedWithBodyId).toEqual({ kind: 'unknown', reason: 'no-account-id-in-capture' });
+    const absentNewHeader = await accountFingerprintFor(
+      capture({ text: JSON.stringify({ account_id: 'body-fixture-uid', mapping: {}, current_node: 'n0' }), chatgptAccountIdHeaderPresent: false }),
+      store,
+      null,
+    );
+    expect(absentNewHeader).toEqual({ kind: 'unknown', reason: 'no-account-id-in-capture' });
+    // Older messages predate the presence marker, so their former body-axis behavior remains readable.
+    expect(accountIdFromCapture(capture({ text: JSON.stringify({ account_id: 'body-fixture-uid', mapping: {}, current_node: 'n0' }) }), null))
+      .toEqual({ kind: 'id', id: 'body-fixture-uid', source: 'response-body-platform-uid' });
   });
 
   it('🔴 an unreadable salt stays salt-unreadable even when the header is present', async () => {
@@ -458,8 +475,8 @@ describe('W299-C · a forged page-visible value reaches no durable write and no 
 });
 
 describe('W299-D · old workspace scopes are fingerprinted without losing pending ids', () => {
-  it('🔴 migrates the registry, state key and IDB debt set, then erases the raw scope', async () => {
-    const rawWorkspace = 'legacy-workspace-fixture';
+  it('🔴 migrates a hex-shaped raw scope, is idempotent, preserves debt and erases the raw scope', async () => {
+    const rawWorkspace = 'a'.repeat(64);
     const oldScope = `chatgpt:${rawWorkspace}`;
     const oldKey = stateKey('chatgpt', oldScope);
     const id = 'pending-conversation-fixture';
@@ -476,7 +493,7 @@ describe('W299-D · old workspace scopes are fingerprinted without losing pendin
     const { migrateChatGptWorkspaceScopes } = await import('../lib/backfill/chatgpt-scope-migration');
     const { fingerprintChatGptWorkspace } = await import('../lib/backfill/chatgpt-workspace');
     const expectedScope = await fingerprintChatGptWorkspace(storage, rawWorkspace);
-    expect(expectedScope).toMatch(/^chatgpt:[a-f0-9]{64}$/);
+    expect(expectedScope).toMatch(/^chatgpt:fp1:[a-f0-9]{64}$/);
     await migrateChatGptWorkspaceScopes(storage);
 
     expect(await storage.load(oldKey)).toBeNull();
@@ -488,5 +505,13 @@ describe('W299-D · old workspace scopes are fingerprinted without losing pendin
     const migratedDebt = await readDebtSet('chatgpt', expectedScope!);
     expect(migratedDebt?.pending).toEqual([id]);
     expect(JSON.stringify(migratedDebt)).not.toContain(rawWorkspace);
+
+    const takeSnapshot = async () => Object.fromEntries(await Promise.all(
+      (await storage.keys()).map(async (key) => [key, await storage.load(key)] as const),
+    ));
+    const afterFirstRun = JSON.stringify(await takeSnapshot());
+    await migrateChatGptWorkspaceScopes(storage);
+    expect(JSON.stringify(await takeSnapshot())).toBe(afterFirstRun);
+    expect(JSON.stringify(await takeSnapshot())).not.toContain(rawWorkspace);
   });
 });

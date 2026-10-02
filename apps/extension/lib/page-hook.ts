@@ -372,6 +372,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
      * guess.
      */
     chatgptAccountIdHeader?: string | null,
+    chatgptAccountIdHeaderPresent = false,
   ): void => {
     try {
       const parsed = new URL(rawUrl, baseUrl);
@@ -411,6 +412,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
           //    otherwise — never `undefined` coerced to an empty string, because the
           //    worker reads the absence as the named unknown it already has a reason for.
           ...(chatgptAccountIdHeader ? { chatgptAccountIdHeader } : {}),
+          ...(platform.id === 'chatgpt' ? { chatgptAccountIdHeaderPresent } : {}),
         },
       });
     } catch {
@@ -691,27 +693,31 @@ export function installPageFetchHook(options: PageHookOptions): void {
    *
    * This function never throws into the page: a page that hands us a proxy whose
    * `headers` getter throws is a page with no observable header, not a broken request.
-   */
-  const readChatGptAccountIdHeader = (input: RequestInfo | URL, init?: RequestInit): string | null => {
+  */
+  const readChatGptAccountIdHeader = (input: RequestInfo | URL, init?: RequestInit): { value: string | null; present: boolean } => {
+    let present = false;
     try {
       const initHeaders = init?.headers;
       const headers = initHeaders === undefined && typeof input !== 'string' && !(input instanceof URL)
         ? (input as Request).headers
         : initHeaders;
-      let accountId: string | null = null;
-      if (typeof Headers !== 'undefined' && headers instanceof Headers) accountId = headers.get('ChatGPT-Account-Id');
+      let accountId: unknown = null;
+      if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+        accountId = headers.get('ChatGPT-Account-Id');
+        present = accountId !== null;
+      }
       else if (Array.isArray(headers)) {
         const row = headers.find((entry) => Array.isArray(entry) && typeof entry[0] === 'string'
           && entry[0].toLowerCase() === 'chatgpt-account-id');
-        if (row && typeof row[1] === 'string') accountId = row[1];
+        if (row) { present = true; accountId = row[1]; }
       } else if (headers && typeof headers === 'object') {
         const key = Object.keys(headers).find((name) => name.toLowerCase() === 'chatgpt-account-id');
-        const value = key ? (headers as Record<string, unknown>)[key] : null;
-        if (typeof value === 'string') accountId = value;
+        present = key !== undefined;
+        accountId = key ? (headers as Record<string, unknown>)[key] : null;
       }
-      return chatGptAccountIdHeaderValue(accountId);
+      return { value: chatGptAccountIdHeaderValue(accountId), present };
     } catch {
-      return null;
+      return { value: null, present };
     }
   };
 
@@ -721,6 +727,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
     method: string,
     response: Response,
     chatgptAccountIdHeader: string | null,
+    chatgptAccountIdHeaderPresent = false,
   ): Promise<void> => {
     try {
       let url: string;
@@ -756,7 +763,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
 
       // Only candidates are cloned and read; the decision itself is shared with XHR.
       const text = await response.clone().text();
-      captureCandidate(parsed.href, normalizedMethod, response.status, text, chatgptAccountIdHeader);
+      captureCandidate(parsed.href, normalizedMethod, response.status, text, chatgptAccountIdHeader, chatgptAccountIdHeaderPresent);
     } catch {
       // Capture is best-effort and must never alter page fetch behaviour.
     }
@@ -771,12 +778,15 @@ export function installPageFetchHook(options: PageHookOptions): void {
      * was on one request.
      */
     let chatgptAccountIdHeader: string | null = null;
+    let chatgptAccountIdHeaderPresent = false;
     try {
       const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(rawUrl, baseUrl);
       const platform = getPlatform(parsed.href);
       if (platform?.id === 'chatgpt' && parsed.origin === pageOrigin) {
-        chatgptAccountIdHeader = readChatGptAccountIdHeader(input, init);
+        const observed = readChatGptAccountIdHeader(input, init);
+        chatgptAccountIdHeader = observed.value;
+        chatgptAccountIdHeaderPresent = observed.present;
         if (chatgptAccountIdHeader !== null) {
           post({ type: options.chatgptWorkspaceObservedMessage, accountId: chatgptAccountIdHeader });
         }
@@ -790,7 +800,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
       inputMethod = input.method;
     }
     const method = String(init?.method ?? inputMethod).toUpperCase();
-    void maybeCapture(input, method, response, chatgptAccountIdHeader);
+    void maybeCapture(input, method, response, chatgptAccountIdHeader, chatgptAccountIdHeaderPresent);
     return response;
   };
 

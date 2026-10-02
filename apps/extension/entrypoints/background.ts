@@ -239,6 +239,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
   //    lifetime, not of a review of every writer. `coordinationIdFromCapture` refuses the
   //    header source as well, so the guarantee does not rest on this line alone.
   delete captured.chatgptAccountIdHeader;
+  delete captured.chatgptAccountIdHeaderPresent;
   return {
     schema: SCHEMA,
     ...install,
@@ -2079,7 +2080,7 @@ export function backfillTargetFor(
     // A workspace key is already an HMAC scope; this pure helper never accepts or
     // returns the page-visible raw header value.
     const safeScope = chatgptWorkspaceFingerprint && /^[a-f0-9]{64}$/.test(chatgptWorkspaceFingerprint)
-      ? `chatgpt:${chatgptWorkspaceFingerprint}` : 'chatgpt:!workspace-unresolved';
+      ? `chatgpt:fp1:${chatgptWorkspaceFingerprint}` : 'chatgpt:!workspace-unresolved';
     return { platform: row.id, origin, scope: safeScope };
   }
   /**

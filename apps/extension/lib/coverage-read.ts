@@ -25,12 +25,14 @@
  * | host pause | `storage.local` `cs_native_host_pause_v1` | the delivery exit is unreachable |
  * | tick trace | `storage.local` `cs_backfill_lasttick_v1` | which platform the last wake passed over, and why |
  *
- * Everything is **read-only**: the only write anywhere near this page is the speed preset, and it is not in
- * this module.
+ * After its initial privacy migration, this reader is **read-only**: it does not contact a platform or host,
+ * and it does not write coverage state. The one-time scope migration is shared with the backfill startup
+ * path so this page never renders a legacy raw ChatGPT scope.
  */
 
 import { BACKFILL_TARGETS_KEY, loadLastTick, type BackfillTarget, type BackfillTickRecord, type TickSkipReason } from './backfill/alarm';
 import { readDebtSet } from './backfill/debt-store';
+import { migrateChatGptWorkspaceScopes } from './backfill/chatgpt-scope-migration';
 import { isBackfillEnabled } from './backfill/schedule';
 import { readSpeedPreset } from './backfill/speed';
 import { browserLocalSnapshot, type BackfillStore } from './backfill/store';
@@ -108,6 +110,9 @@ export async function readCoverageInputs(
   store: BackfillStore | null,
   now: number = Date.now(),
 ): Promise<CoverageInput> {
+  // Coverage is a storage reader too: finish the privacy migration before taking
+  // its snapshot so it cannot surface a legacy raw ChatGPT scope.
+  if (store) await migrateChatGptWorkspaceScopes(store);
   const snapshot: Record<string, unknown> | null = store
     ? await (async () => {
       try {

@@ -3,6 +3,7 @@ import { rekeyDebtScope } from './debt-store';
 import { BACKFILL_TARGETS_KEY } from './alarm';
 import type { BackfillStore } from './store';
 import { BACKFILL_STATE_VERSION, LEGACY_STATE_VERSION, isHeader, isLegacyState, legacyStateKey, stateKey } from './types';
+import { isFingerprintedChatGptScope } from './chatgpt-workspace';
 
 const CURRENT_PREFIX = `cs_backfill_v${BACKFILL_STATE_VERSION}:chatgpt:`;
 const LEGACY_PREFIX = `cs_backfill_v${LEGACY_STATE_VERSION}:chatgpt:`;
@@ -35,20 +36,19 @@ export async function migrateChatGptWorkspaceScopes(store: BackfillStore | null)
     candidates = allKeys.filter((key) => {
       const prefix = key.startsWith(CURRENT_PREFIX) ? CURRENT_PREFIX
         : key.startsWith(LEGACY_PREFIX) ? LEGACY_PREFIX : null;
-      // Actual ChatGPT workspace scopes include the explicit `chatgpt:` value
-      // prefix. Other synthetic or legacy default scopes must keep their meaning.
-      return prefix !== null && key.slice(prefix.length).startsWith('chatgpt:');
+      return prefix !== null && key.slice(prefix.length).startsWith('chatgpt:')
+        && !isFingerprintedChatGptScope(key.slice(prefix.length));
     });
   } catch {
-    // Some embedders expose key reads but not storage.local.get(null). In that
-    // case migrate registered scopes, whose exact state keys remain enumerable.
+    // A restricted embedder may not support listing storage.local. Migrate all
+    // registered raw scopes we can name; an unregistered scope is never read by
+    // that embedder's backfill path. The browser implementation supports listing.
     if (Array.isArray(targetsRaw)) {
       candidates = targetsRaw.flatMap((item) => {
         if (!item || typeof item !== 'object' || (item as { platform?: unknown }).platform !== 'chatgpt'
           || typeof (item as { scope?: unknown }).scope !== 'string') return [];
         const scope = (item as { scope: string }).scope;
-        if (!scope.startsWith('chatgpt:') || scope.includes('!workspace-') || scope === 'chatgpt:default'
-          || /^[a-f0-9]{64}$/.test(scope.slice('chatgpt:'.length))) return [];
+        if (!scope.startsWith('chatgpt:') || isFingerprintedChatGptScope(scope)) return [];
         return [stateKey('chatgpt', scope)];
       });
     }
@@ -56,9 +56,7 @@ export async function migrateChatGptWorkspaceScopes(store: BackfillStore | null)
   const hasRawTargets = Array.isArray(targetsRaw) && targetsRaw.some((item) => item && typeof item === 'object'
     && (item as { platform?: unknown }).platform === 'chatgpt' && typeof (item as { scope?: unknown }).scope === 'string'
     && ((item as { scope: string }).scope.startsWith('chatgpt:'))
-    && !((item as { scope: string }).scope.includes('!workspace-'))
-    && !((item as { scope: string }).scope === 'chatgpt:default')
-    && !(/^[a-f0-9]{64}$/.test((item as { scope: string }).scope.slice('chatgpt:'.length))));
+    && !isFingerprintedChatGptScope((item as { scope: string }).scope));
   if (candidates.length === 0 && !hasRawTargets) return;
   const salt = await loadOrCreateAccountSalt(store);
   if (!salt || salt === 'unreadable') throw new Error('ChatGPT scope migration requires the existing account fingerprint key');
@@ -69,12 +67,11 @@ export async function migrateChatGptWorkspaceScopes(store: BackfillStore | null)
     const oldValue = oldKey.slice(prefix.length);
     if (!oldValue.startsWith('chatgpt:')) continue;
     const oldScope = oldValue;
-    if (/^[a-f0-9]{64}$/.test(oldScope.slice('chatgpt:'.length))) continue;
-    if (oldScope.includes('!workspace-') || oldScope === 'chatgpt:default') continue;
+    if (isFingerprintedChatGptScope(oldScope)) continue;
     const fingerprint = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', oldScope.slice('chatgpt:'.length));
     if (!fingerprint) throw new Error('ChatGPT scope migration could not fingerprint an existing scope');
-    fingerprints.set(oldScope.slice('chatgpt:'.length), fingerprint);
-    const nextScope = `chatgpt:${fingerprint}`;
+    fingerprints.set(oldScope.slice('chatgpt:'.length), `fp1:${fingerprint}`);
+    const nextScope = `chatgpt:fp1:${fingerprint}`;
 
     if (!(await rekeyDebtScope('chatgpt', oldScope, nextScope))) {
       throw new Error('ChatGPT pending backfill ids could not be migrated');
@@ -103,15 +100,14 @@ export async function migrateChatGptWorkspaceScopes(store: BackfillStore | null)
         continue;
       }
       const target = item as { scope: string; [key: string]: unknown };
-      if (!target.scope.startsWith('chatgpt:') || target.scope.includes('!workspace-') || target.scope === 'chatgpt:default'
-        || /^[a-f0-9]{64}$/.test(target.scope.slice('chatgpt:'.length))) {
+      if (!target.scope.startsWith('chatgpt:') || isFingerprintedChatGptScope(target.scope)) {
         migrated.push(item);
         continue;
       }
       const digest = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', target.scope.slice('chatgpt:'.length));
       if (!digest) throw new Error('ChatGPT target migration could not fingerprint an existing scope');
-      fingerprints.set(target.scope.slice('chatgpt:'.length), digest);
-      migrated.push({ ...target, scope: `chatgpt:${digest}` });
+      fingerprints.set(target.scope.slice('chatgpt:'.length), `fp1:${digest}`);
+      migrated.push({ ...target, scope: `chatgpt:fp1:${digest}` });
     }
     await store.save(BACKFILL_TARGETS_KEY, migrated);
   }

@@ -436,7 +436,11 @@ the MAIN-world hook reads it inside the same `fetch` call that produced the resp
 never from a page-global "last account seen", which would pair request A's account with
 request B's body the moment two requests overlap or the account switches between them —
 and the worker hashes it with the per-install HMAC key and deletes the raw field before
-any durable write or host message. Because the page can forge the header, the fingerprint
+any durable write or host message. A present malformed or oversized header is carried as
+a presence bit and yields `unknown`, even if the response body has an `account_id`; only
+an absent header may use the existing body identity reader, and only on a legacy capture
+that predates the explicit presence bit. New captures with no header remain `unknown`.
+Because the page can forge the header, the fingerprint
 is provenance rather than proof: it records that the page's request named this value and
 distinguishes the values the header distinguishes, and it is not evidence of who the
 person is. The bundle's `account.source` names the mechanism
@@ -444,8 +448,10 @@ person is. The bundle's `account.source` names the mechanism
 (the coordination id refuses this source by name), so it reaches neither the native host
 nor an export. A separate workspace-observation route fingerprints the header before
 storing it in a target or ledger key, or passing it as the native host's transient
-`account_id`. Existing raw workspace scopes are migrated with pending debt rows preserved
-and the old storage keys erased. Malformed or oversized header metadata is unknown and
+`account_id`. Fingerprinted scopes use the explicit `chatgpt:fp1:<hmac>` marker; unmarked
+scopes are migrated regardless of their shape, including hex-shaped raw ids, and the host
+refuses an unmarked scope at coordination. The migration preserves pending debt, erases old
+storage keys, and is idempotent. Malformed or oversized header metadata is unknown and
 does not discard an otherwise valid capture. Ordinary ChatGPT responses with no observed
 header also remain unknown. The ChatGPT run lease remains disabled
 (`apps/extension/lib/backfill/chatgpt-workspace.ts:41-65`;

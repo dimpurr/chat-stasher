@@ -1265,7 +1265,8 @@ struct CoordinationRequest {
     segment: Option<String>,
     status: Option<u16>,
     retry_after_ms: Option<u64>,
-    /// W218 · raw id crosses native messaging only; the host stores its HMAC.
+    /// W218 · account scope crosses native messaging only; ChatGPT scopes carry
+    /// the extension's explicit fingerprint marker, and the host stores its HMAC.
     account_id: Option<String>,
 }
 
@@ -1375,6 +1376,17 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
             "malformed coordination request",
         );
     }
+    if parsed.platform == "chatgpt"
+        && parsed.account_id.as_deref().is_some_and(|scope| {
+            scope.starts_with("chatgpt:") && !valid_fingerprinted_chatgpt_scope(scope)
+        })
+    {
+        return nack(
+            Some(parsed.request_id),
+            NackKind::BadRequest,
+            "unmarked ChatGPT account scope refused",
+        );
+    }
     let request_id = parsed.request_id.clone();
     let (machine, _) = match resolve_target() {
         HostTarget::Ready { machine, stage } => (machine, stage),
@@ -1449,6 +1461,18 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
             )
         }
     }
+}
+
+/// ChatGPT coordination accepts only the extension's explicit scope version marker.
+/// A raw id with digest-shaped bytes has no marker and is refused before arbitration.
+fn valid_fingerprinted_chatgpt_scope(scope: &str) -> bool {
+    let Some(digest) = scope.strip_prefix("chatgpt:fp1:") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// What one coordination body decided, for the caller that owns its transaction.
@@ -3963,6 +3987,34 @@ pub fn serve_stdin() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use crate::json_out::TimeState;
+
+    #[test]
+    fn coordination_refuses_unmarked_chatgpt_scope_before_host_state_access() {
+        let response = coordination(
+            serde_json::json!({
+                "request_id": "w299-raw-scope",
+                "mode": "claim",
+                "platform": "chatgpt",
+                "install_id": "synthetic-install",
+                "account_id": format!("chatgpt:{}", "a".repeat(64)),
+            }),
+            Some("w299-raw-scope".into()),
+        );
+        assert_eq!(response["type"], "nack");
+        assert_eq!(response["kind"], "bad-request");
+        assert!(response["detail"]
+            .as_str()
+            .unwrap()
+            .contains("unmarked ChatGPT"));
+        assert!(valid_fingerprinted_chatgpt_scope(&format!(
+            "chatgpt:fp1:{}",
+            "a".repeat(64)
+        )));
+        assert!(!valid_fingerprinted_chatgpt_scope(&format!(
+            "chatgpt:{}",
+            "a".repeat(64)
+        )));
+    }
 
     #[test]
     fn hmac_sha256_matches_rfc_4231_sample() {

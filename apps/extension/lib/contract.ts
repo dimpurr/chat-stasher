@@ -990,7 +990,7 @@ export interface CapturedFetch {
    *    claim about the request, not a proof of who is signed in. `isCapturedFetchShape`
    *    admits the field only on a ChatGPT capture; the fingerprint reader applies
    *    `chatGptAccountIdHeaderValue` and treats malformed values as unknown. It has
-   *    exactly one consumer — `accountFingerprintFor`, which turns it into a per-install
+   *    consumed only by the fingerprint reader, which turns a valid value into a per-install
    *    HMAC. It must never be
    *    written to a bundle, an export, the outbox, a log line or a native-host message:
    *    `buildBundle` deletes it the moment the fingerprint has been computed.
@@ -1000,6 +1000,9 @@ export interface CapturedFetch {
    *    is never recorded as an empty string or filled with a placeholder.
    */
   chatgptAccountIdHeader?: unknown;
+  /** True when the request carried the header, even when its value was invalid. This boolean
+   *  prevents a malformed supplied header from falling through to a response-body id. */
+  chatgptAccountIdHeaderPresent?: boolean;
 }
 
 export interface ChatGptProvenance {
@@ -1111,6 +1114,8 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
     // discard an otherwise valid conversation capture. The fingerprint reader
     // applies the bounded string validator and refuses to hash it.
   }
+  if (value.chatgptAccountIdHeaderPresent !== undefined
+    && (platform.id !== 'chatgpt' || typeof value.chatgptAccountIdHeaderPresent !== 'boolean')) return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }

@@ -62,5 +62,10 @@ export async function fingerprintChatGptWorkspace(
   const salt = await loadOrCreateAccountSalt(store);
   if (!salt || salt === 'unreadable') return null;
   const fingerprint = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', value);
-  return fingerprint ? `chatgpt:${fingerprint}` : null;
+  return fingerprint ? `chatgpt:fp1:${fingerprint}` : null;
+}
+
+/** Explicit version marker; scope contents are never classified by digest shape alone. */
+export function isFingerprintedChatGptScope(scope: string): boolean {
+  return /^chatgpt:fp1:[0-9a-f]{64}$/.test(scope);
 }

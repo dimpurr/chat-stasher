@@ -318,7 +318,10 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
   //    it is the narrower, page-owned observation. `chatGptAccountIdHeaderValue` is the
   //    one validator, so a value this reader accepts is one the shape gate also accepts.
   if (row.id === 'chatgpt') {
-    if (captured.chatgptAccountIdHeader !== undefined) {
+    if (captured.chatgptAccountIdHeaderPresent === false) {
+      return { kind: 'unknown', reason: 'no-account-id-in-capture' };
+    }
+    if (captured.chatgptAccountIdHeaderPresent === true || captured.chatgptAccountIdHeader !== undefined) {
       const header = chatGptAccountIdHeaderValue(captured.chatgptAccountIdHeader);
       return header !== null
         ? { kind: 'id', id: header, source: 'request-header-chatgpt-account-id' }
