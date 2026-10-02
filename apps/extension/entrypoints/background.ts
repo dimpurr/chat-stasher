@@ -1114,8 +1114,20 @@ async function coordinatedTick(
      * and does, when the host is unreachable).
      */
     if (response.status === 403 || response.status === 429) {
-      if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter)))
+      if (response.status === 403) {
+        // 🔴 W303f · 403 is an account refusal the engine must see so it can
+        //    persist suspension. Sharing it with other installs is advisory;
+        //    an unavailable host cannot replace or block that suspension.
+        try {
+          if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter))) {
+            console.warn('[chat-stasher] the 403 could not be shared with the native host');
+          }
+        } catch (err) {
+          console.warn('[chat-stasher] the 403 could not be shared with the native host', (err as Error).message);
+        }
+      } else if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter))) {
         throw new Error('machine-wide rate-limit coordination unavailable');
+      }
     }
     return response;
   };

@@ -76,6 +76,49 @@ describe('W127b-P1 · serveBackfillFetch forwards a 429/503 status and Retry-Aft
     expect(reply).toEqual({ ok: true, status: 503, text: '', retryAfter: '45' });
   });
 
+  it.each([401, 403])('🔴 W303f · ChatGPT HTTP %i survives an unreadable or oversized body', async (status) => {
+    const unreadable = await serveBackfillFetch(LIST_URL, ORIGIN, (async () => ({
+      status,
+      text: async (): Promise<string> => { throw new Error('synthetic body read failure'); },
+    })) as never);
+    expect(unreadable).toMatchObject({ ok: true, status, text: '' });
+
+    const oversized = await serveBackfillFetch(LIST_URL, ORIGIN, (async () => ({
+      status,
+      text: async () => 'x'.repeat(MAX_RAW_BYTES + 1),
+    })) as never);
+    expect(oversized).toMatchObject({ ok: true, status, text: '' });
+  });
+
+  it.each([
+    [401, 'unreadable'], [401, 'oversized'],
+    [403, 'unreadable'], [403, 'oversized'],
+  ] as const)('🔴 W303f · HTTP %i with an %s body reaches the engine and suspends the scope', async (status, bodyKind) => {
+    const pageFetch = async () => ({
+      status,
+      text: async (): Promise<string> => {
+        if (bodyKind === 'unreadable') throw new Error('synthetic body read failure');
+        return 'x'.repeat(MAX_RAW_BYTES + 1);
+      },
+    });
+    const tabPort: HttpPort = tabHttpPort(1, async (_id, message) =>
+      handleBackfillMessage(message, ORIGIN, pageFetch as never));
+    const report = await runBackfill({
+      platform: 'chatgpt',
+      origin: ORIGIN,
+      scope: `w303f-${status}-${bodyKind}`,
+      store: memoryStore(),
+      http: withChatGptLeaseIdentity(tabPort),
+      clock: fakeClock(),
+      build: TEST_BUILD_ID,
+      pace: NO_WAIT,
+      random: () => 0,
+    });
+
+    expect(report.halted?.reason).toBe('refused-unknown');
+    expect(report.state.suspended?.reason).toBe('request-refused');
+  });
+
   it('🔴 the rescued reply keeps a header that is absent absent, not invented', async () => {
     const fetchImpl = async () => ({
       status: 429,

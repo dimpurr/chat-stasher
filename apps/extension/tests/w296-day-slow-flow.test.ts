@@ -213,6 +213,29 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
     expect(store[DAY_SLOW_KEY]).toBeUndefined();
   });
 
+  it('🔴 W303f · a failed host 403 report cannot block the engine suspension', async () => {
+    const mod = await bootBackground();
+    const sendNativeMessage = host.sendNativeMessage;
+    let failedReports = 0;
+    host.sendNativeMessage = async (hostName, message) => {
+      const msg = message as { type?: string; mode?: string };
+      if (msg.type === 'coordination' && msg.mode === 'rate_limit') {
+        failedReports += 1;
+        throw new Error('synthetic host report failure');
+      }
+      return sendNativeMessage(hostName, message);
+    };
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(403)));
+
+    const tick = await runRound(mod);
+    expect(failedReports).toBe(1);
+    expect(tick?.report).toMatchObject({
+      halted: { reason: 'refused-unknown' },
+      state: { suspended: { reason: 'request-refused' } },
+    });
+    expect(store[DAY_SLOW_KEY]).toBeUndefined();
+  });
+
   it('🔴 a healthy round writes no brake at all', async () => {
     const mod = await bootBackground();
     mod.configureBackfillTransport(withChatGptLeaseIdentity(healthy()));

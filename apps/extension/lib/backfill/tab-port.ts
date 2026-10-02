@@ -872,8 +872,13 @@ export async function serveBackfillFetch(
      */
     const status = res.status;
     const rateLimited = status === 429 || status === 503;
-    const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
     const carriesChatGptIdentity = findPlatformForUrl(verdict.url)?.id === 'chatgpt';
+    // 🔴 W303f · ChatGPT credential refusals must reach the engine even when the
+    //    page cannot read (or safely carry) the response body. The engine uses
+    //    401/403 to suspend the account scope; turning either into a transport
+    //    error would leave it eligible to retry as though the account were known.
+    const chatGptCredentialRefusal = carriesChatGptIdentity && (status === 401 || status === 403);
+    const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
     const safeIdentity = carriesChatGptIdentity ? accountIdentityFromUnknown(res.chatgptAccountIdentity) : null;
     const safeChatGptIdentity = safeIdentity ? { chatgptAccountIdentity: safeIdentity } : {};
     const rawChatGptAccountId = carriesChatGptIdentity
@@ -887,11 +892,11 @@ export async function serveBackfillFetch(
       text = await res.text();
       if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
         // The same size red line as the live leg: an over-large response is not conversation JSON.
-        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
+        if (rateLimited || chatGptCredentialRefusal) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
         return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
       }
     } catch (err) {
-      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
+      if (rateLimited || chatGptCredentialRefusal) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
       // Only the technical detail goes back, never the body.
       return { ok: false, error: (err as Error).message };
     }
