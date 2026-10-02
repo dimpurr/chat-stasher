@@ -101,7 +101,7 @@ impl Sandbox {
             // Best-effort: the marker file is a convenience for a copy or
             // rename of the tree. The path already carries the marker; a write
             // failure here must not fail a test that never needed the file.
-            let _ = std::fs::write(dir.path().join(TEST_MARKER_FILE), marker);
+            drop(std::fs::write(dir.path().join(TEST_MARKER_FILE), marker));
         }
         Sandbox { dir, marker }
     }

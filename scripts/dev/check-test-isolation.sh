@@ -38,14 +38,42 @@
 #     After the run every entry the run created or modified is inspected, and
 #     is a leak when
 #       - its name carries a reserved fixture token (`synthetic`, `fixture`,
-#         `probe`, `dummy`, case-insensitive, as a whole token), or
+#         `probe`, `dummy`, case-insensitive, as a whole token) and that path
+#         did not already exist before the run, or
 #       - its name carries the run marker, or
 #       - a small file's *content* carries the run marker, or
 #       - a small file *under `<data root>/state`* carries a reserved fixture
-#         token — the coordination database is where the 2026-10-02 incident
-#         left its `synthetic-install` row, and it holds no conversation text,
-#         so the token scan cannot mistake an archived conversation for a
-#         fixture.
+#         identity this run introduced — the coordination database is where the
+#         2026-10-02 incident left its `synthetic-install` row, and it holds no
+#         conversation text, so the token scan cannot mistake an archived
+#         conversation for a fixture.
+#     The state-store content rule is a case-insensitive **substring** search,
+#     not the whole-token boundary rule the names use. A store is not text with
+#     delimiters around every value: SQLite lays a record's columns down with no
+#     separator, so the incident's row is the bytes `chatgptsynthetic-install`
+#     and a boundary search (`[^alnum]` before the token) is blind to it —
+#     `...tgpt` + `synthetic-install`. Matching the substring catches that row,
+#     while a conversation file is never read because the scan is confined to
+#     `<data root>/state`. The unit is the bare token, not the enclosing word:
+#     the word is not stable, since any alnum byte a store glues on (the next
+#     column of the same record) rewrites `synthetic-install` into a different
+#     string, which would defeat the baseline below.
+#     Because a machine may already carry debris from an *earlier* leak — the
+#     2026-10-02 incident's row lived in the real coordination database until it
+#     was removed by hand, and its `chatgpt.synthetic-session` shard is still in
+#     the real stage — the run is compared against a **per-run baseline**: the
+#     fixture tokens already present in the state store, and the
+#     fixture-named paths already present under the watched roots, are recorded
+#     before the wrapped command starts and subtracted from the verdict. A run
+#     that merely rewrites the file holding old debris (the live product's
+#     heartbeat does exactly that) is green; an identity this run *introduces*
+#     is red. Subtracting a *path* removes only that path: an entry the run adds
+#     inside a residue directory is still a leak, because the baseline names the
+#     entries that were there, not the directory's descendants in general.
+#     What that cannot separate is a test write that re-uses a fixture token the
+#     machine already carries — a new `synthetic-…` value in the state store
+#     while debris holding `synthetic` is still on disk. That residual is stated
+#     below with the other honest limits.
 #     The state home (`~/.local/state`) is scanned for the **marker only**: it
 #     is a shared directory the product never writes, so a token or structure
 #     rule would red on whatever else uses it, while the run marker can only
@@ -68,7 +96,10 @@
 # What this deliberately does not catch, stated so it is a decision and not an
 # oversight: a write into a real root that carries no fingerprint at all — a
 # realistic-looking identity, no sandbox-derived value in it — is not
-# distinguishable from the live product writing, and is not flagged. The
+# distinguishable from the live product writing, and is not flagged. Neither is
+# a write that re-uses a fixture token the baseline already found on the
+# machine: subtracting the baseline to keep pre-existing debris from redding
+# every run is what makes the two indistinguishable. The
 # code-level fail-safe (`crates/chat-stasher/src/test_identity_guard.rs`) is
 # the layer for a fixture identity; this guard is the layer for the run's own
 # traces, and its selftest pins both sides of that boundary with a probe that
@@ -236,6 +267,12 @@ esac
 
 INBOX_ROOT="$HOME_DIR/Downloads/chat-stasher/inbox"
 
+# The product's state store: the one place the fingerprint scan reads content
+# from, and the only place the 2026-10-02 incident left a row rather than a
+# name. Kept apart from the roots above because the content rule — substring,
+# binary-safe — is deliberately narrower than the name rule.
+STATE_STORE_ROOT="$DATA_ROOT/state"
+
 # Every root the guard watches structurally: the inbox plus every
 # native-messaging manifest directory that currently exists. Re-derived before
 # and after the run, so a manifest directory that appears or disappears is part
@@ -360,22 +397,28 @@ file_has_marker() {
   LC_ALL=C grep -qF -- "$MARKER" "$1" 2>/dev/null
 }
 
-# A small regular file under `<data root>/state` whose content carries a
-# reserved fixture token. Confined to `state/` so an archived conversation —
-# arbitrary user text that can contain the word "probe" — is never read for
-# tokens.
-file_has_fixture_token() {
+# The reserved fixture tokens a file's bytes carry, one per line, lowercased
+# and sorted unique. The search is a case-insensitive *substring* match (`-a`
+# so a store is read as bytes, never skipped as binary): a SQLite record lays
+# its columns down with no separator, so the incident's row is
+# `chatgptsynthetic-install` and a whole-token boundary rule cannot see the
+# `synthetic` glued to the `chatgpt` before it. The *token*, not the enclosing
+# word, is the unit, because the word is not stable: any alnum byte the store
+# glues to the end of the value (`...install` + the next column) changes it, so
+# a baseline keyed on the word would miss the same row on the next run.
+# Files past the cap are skipped by design, not here. Confined by the caller to
+# `<data root>/state`, so an archived conversation — arbitrary user text that
+# can contain the word "probe" — is never read for tokens.
+file_fixture_tokens() {
   local path="$1" size token
-  case "$path" in "$DATA_ROOT"/state/*) ;; *) return 1 ;; esac
-  [ -f "$path" ] || return 1
-  size=$(wc -c <"$path" 2>/dev/null) || return 1
-  [ "$size" -le "$CONTENT_SCAN_CAP" ] || return 1
+  [ -f "$path" ] || return 0
+  size=$(wc -c <"$path" 2>/dev/null) || return 0
+  [ "$size" -le "$CONTENT_SCAN_CAP" ] || return 0
   for token in $FIXTURE_TOKENS; do
-    if LC_ALL=C grep -qiE "(^|[^[:alnum:]])${token}([^[:alnum:]]|$)" "$path" 2>/dev/null; then
-      return 0
+    if LC_ALL=C grep -qaiF -- "$token" "$path" 2>/dev/null; then
+      printf '%s\n' "$token"
     fi
   done
-  return 1
 }
 
 # ---- structure snapshot -----------------------------------------------------
@@ -390,6 +433,46 @@ snapshot_all "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.roots"
 scan_roots | cut -d'	' -f2- | grep -v -x -F "$STATE_HOME" |
   LC_ALL=C sort -u >"$SNAP_DIR/scan.roots"
 snapshot_names "$SNAP_DIR/scan.before" "$SNAP_DIR/scan.roots"
+
+# The per-run baseline, so debris an earlier leak left on this machine does not
+# red every run (see the header): the fixture-named paths that already exist
+# under the watched roots, and the fixture tokens that already sit in the state
+# store. Both are subtracted from the verdict, so only a name or a token this
+# run introduces can be a leak.
+# The name rule, applied in one pass rather than one `basename` per entry: the
+# real archive is tens of thousands of entries, so a fork per name costs
+# seconds of overhead on every guarded run — and the guard runs on every
+# `cargo test`, in CONTRIBUTING's line and in CI's Test step alike. The token
+# list is passed in from the shell copy so it cannot drift from
+# `name_is_fixture` — and the selftest pins that copy against
+# `test_identity_guard.rs`.
+: >"$SNAP_DIR/baseline.fixture_paths"
+LC_ALL=C awk -v list="$FIXTURE_TOKENS" '
+  BEGIN { split(list, T, " "); for (i in T) token[T[i]] = 1 }
+  {
+    name = $0
+    sub(/.*\//, "", name)          # basename, as `name_is_fixture` reads it
+    name = tolower(name)
+    gsub(/[^a-z0-9]/, " ", name)   # split into whole alphanumeric tokens
+    count = split(name, parts, " ")
+    for (i = 1; i <= count; i++)
+      if (parts[i] in token) { print $0; next }
+  }
+' "$SNAP_DIR/scan.before" >"$SNAP_DIR/baseline.fixture_paths"
+
+: >"$SNAP_DIR/baseline.identities"
+if [ -e "$STATE_STORE_ROOT" ]; then
+  if ! find "$STATE_STORE_ROOT" -type f -print0 2>"$SNAP_DIR/find.err" |
+    LC_ALL=C sort -z >"$SNAP_DIR/state.raw"; then
+    echo "$TAG refusing: could not list the state store at $STATE_STORE_ROOT" >&2
+    cat "$SNAP_DIR/find.err" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' stored; do
+    file_fixture_tokens "$stored" >>"$SNAP_DIR/baseline.identities"
+  done <"$SNAP_DIR/state.raw"
+  LC_ALL=C sort -u -o "$SNAP_DIR/baseline.identities" "$SNAP_DIR/baseline.identities"
+fi
 
 # The run boundary: everything the run does happens with a timestamp after
 # this, so `find -newer` catches a create-then-delete whose entry names cancel
@@ -438,6 +521,36 @@ report_leak() {
   failed=1
 }
 
+# A file under the state store whose bytes carry a fixture identity this run
+# introduced. The baseline's identities are subtracted, so the live product
+# rewriting the file that holds an earlier leak's row — or a SQLite journal for
+# it — is not a leak by itself.
+report_new_state_tokens() { # $1 path
+  local path="$1" identity
+  case "$path" in "$STATE_STORE_ROOT"/*) ;; *) return 0 ;; esac
+  [ -f "$path" ] || return 0
+  while IFS= read -r identity; do
+    [ -n "$identity" ] || continue
+    grep -qxF -- "$identity" "$SNAP_DIR/baseline.identities" ||
+      report_leak "a file carrying a fixture identity this run introduced" \
+        "($identity) was written to $path"
+  done < <(file_fixture_tokens "$path")
+}
+
+# Is this path *under* a fixture-named path that already existed before the
+# run? The pre-existing directory is residue the baseline subtracts, but an
+# entry the run adds inside it is not residue, and the name rule alone would
+# miss it (the directory's own mtime touch is baselined away, and the new
+# entry's own name carries no token).
+under_baseline_fixture_path() { # $1 path
+  local path="$1" prefix
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    case "$path" in "$prefix"/*) return 0 ;; esac
+  done <"$SNAP_DIR/baseline.fixture_paths"
+  return 1
+}
+
 # A fixture name that was there before the run and is gone now: a test deleted
 # from the real archive (or the live product removed a file whose name happens
 # to carry a token, which is a leak-shaped name either way).
@@ -462,8 +575,19 @@ while IFS='	' read -r mode root; do
   fi
   while IFS= read -r -d '' entry; do
     base="$(basename "$entry")"
-    if [ "$mode" = "full" ] && name_is_fixture "$base"; then
+    if [ "$mode" = "full" ] && name_is_fixture "$base" &&
+      ! grep -qxF -- "$entry" "$SNAP_DIR/baseline.fixture_paths"; then
       report_leak "a fixture-named entry appeared at $entry during the run"
+      continue
+    fi
+    # An entry the run added inside a fixture-named directory that was already
+    # there before the run: the directory is baseline residue, the new entry is
+    # not. Skipped for an entry that existed before the run, so the incident's
+    # own shards stay residue while a new one is a leak.
+    if [ "$mode" = "full" ] &&
+      ! grep -qxF -- "$entry" "$SNAP_DIR/scan.before" &&
+      under_baseline_fixture_path "$entry"; then
+      report_leak "a new entry appeared under fixture-named residue at $entry"
       continue
     fi
     if name_has_marker "$base"; then
@@ -474,8 +598,8 @@ while IFS='	' read -r mode root; do
       report_leak "a file carrying this run's marker was written to $entry"
       continue
     fi
-    if [ "$mode" = "full" ] && file_has_fixture_token "$entry"; then
-      report_leak "a file carrying a fixture identity was written to $entry"
+    if [ "$mode" = "full" ]; then
+      report_new_state_tokens "$entry"
     fi
   done <"$SNAP_DIR/touched.raw"
 done < <(scan_roots)

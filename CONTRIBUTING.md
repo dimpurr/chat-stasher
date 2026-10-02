@@ -96,11 +96,22 @@ reserved fixture token (`synthetic`, `fixture`, `probe`, `dummy`,
 case-insensitive, as a whole token) or a per-run marker, when a small file's
 bytes carry the marker, or when a small file under `<data root>/state` carries
 a fixture token — the coordination store is where the incident's row landed,
-and it holds no conversation text for the scan to mistake for one. The marker
-is a random token the guard exports for one run; the shared `Sandbox` fixture
-in `src/test_support.rs` names its temp root after it, so a value a test derives
-from its sandbox carries the marker even when the write lands in a real root.
-A fixture-named entry the run *removed* is a leak too. The inbox and every
+and it holds no conversation text for the scan to mistake for one. That last
+rule matches the token as a case-insensitive **substring**, not a whole token,
+because a store is not delimited text: SQLite lays a record's columns down with
+no separator, so the incident's row is the bytes `chatgptsynthetic-install` and
+a boundary rule cannot see the `synthetic` glued to the `chatgpt` before it.
+Both rules subtract a **per-run baseline** — the fixture tokens already in the
+state store and the fixture-named paths already under the watched roots, read
+before the command starts. The machine that runs the check may carry debris
+from an earlier leak (the incident's `chatgpt.synthetic-session` shard is still
+in the real stage), and the live product rewrites the files that hold it, so a
+write that only re-touches pre-existing debris is green while an entry or token
+the run *introduces* is still red. The marker is a random token the guard
+exports for one run; the shared `Sandbox` fixture in `src/test_support.rs`
+names its temp root after it, so a value a test derives from its sandbox
+carries the marker even when the write lands in a real root. A fixture-named
+entry the run *removed* is a leak too. The inbox and every
 `NativeMessagingHosts` directory the machine has (read from the filesystem, so
 a browser directory that appears during the run is itself a diff) keep the old
 whole-snapshot rule, because nothing writes them during a run: any change

@@ -19,7 +19,14 @@
 #     A guard that reds on that is one people learn to re-run. The probe writes
 #     exactly that shape and must stay green.
 #   · **A fixture identity is red** — by name, and for the coordination row, by
-#     *content* of the `<data root>/state` store (the incident's second half).
+#     *content* of the `<data root>/state` store (the incident's second half) —
+#     including the *adjacent-bytes* shape a real SQLite record has, which the
+#     W306b boundary rule could not see (W306c).
+#   · **Pre-existing debris is not red, and new writes still are** (W306c): the
+#     per-run baseline subtracts a fixture identity or fixture-named path that
+#     was already on the machine before the run, so the live product rewriting
+#     the file that holds an earlier leak does not red every run — while an
+#     identity the run introduces, or an entry it adds under residue, is red.
 #   · **The per-run marker is red**, in a filename and in a file's bytes, so a
 #     leak that carries only a sandbox-derived value is still caught.
 #   · **The product cache root is watched** (W306b): a fixture written under
@@ -178,6 +185,46 @@ run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/state"
 record "fixture row in the coordination store is red" 1
 contains "carrying a fixture identity"
 
+# The byte shape a *real* SQLite store has (W306c): a record lays its columns
+# down with no separator, so the incident's row is `chatgptsynthetic-install` —
+# the `synthetic` is glued to the `chatgpt` before it, with no boundary the
+# whole-token rule could match. The quoted SQL text above is the *weaker* case;
+# this is the one the guard missed and the reason the content rule is a
+# substring search.
+reset_host
+seed_data_root
+run_host -- bash -c 'mkdir -p "$HOME/.local/share/chat-stasher/state"
+  printf "SQLite format 3\000\022\007chatgptsynthetic-install" \
+    > "$HOME/.local/share/chat-stasher/state/extension-coordination.sqlite3"'
+record "sqlite-adjacent fixture row is red" 1
+contains "carrying a fixture identity"
+
+# The per-run baseline (W306c): an identity that was already in the store
+# before the run — the residue an earlier leak left on this machine — is not a
+# leak, even though the wrapped command rewrites the file that holds it (what
+# the live product's heartbeat does every few minutes). Without the baseline the
+# substring rule would red on the same bytes every run.
+reset_host
+seed_data_root
+mkdir -p "$DATA_ROOT/state"
+printf "SQLite format 3\000\022\007chatgptsynthetic-install" \
+  >"$DATA_ROOT/state/extension-coordination.sqlite3"
+run_host -- bash -c 'printf "2026-10-02T18:00:00Z" \
+  >> "$HOME/.local/share/chat-stasher/state/extension-coordination.sqlite3"'
+record "pre-existing fixture identity rewritten is not red" 0
+
+# ...but an identity the run *introduces* into that same store is still a leak,
+# so the baseline subtracts the residue without blinding the scan.
+reset_host
+seed_data_root
+mkdir -p "$DATA_ROOT/state"
+printf "SQLite format 3\000\022\007chatgptsynthetic-install" \
+  >"$DATA_ROOT/state/extension-coordination.sqlite3"
+run_host -- bash -c 'printf "\007fixture-newrow" \
+  >> "$HOME/.local/share/chat-stasher/state/extension-coordination.sqlite3"'
+record "new fixture identity in a baselined store is red" 1
+contains "carrying a fixture identity"
+
 # A file whose *content* carries the run marker is red even when neither its
 # name nor its location says anything about a test.
 reset_host
@@ -197,6 +244,26 @@ echo x >"$DATA_ROOT/stage/sessions/m/w292.synthetic-session-one"
 run_host -- bash -c 'rm -f "$HOME/.local/share/chat-stasher/stage/sessions/m/w292.synthetic-session-one"'
 record "removed fixture name is red" 1
 contains "disappeared during the run"
+
+# The per-run baseline for *names* (W306c): a fixture-named path that already
+# existed before the run is residue, so a run that touches it is not a leak.
+# This is the incident's own `chatgpt.synthetic-session` shard, still on the
+# real machine; without the baseline its every mtime touch would red.
+reset_host
+seed_data_root
+mkdir -p "$DATA_ROOT/stage/sessions/m/chatgpt.synthetic-session"
+run_host -- bash -c 'touch "$HOME/.local/share/chat-stasher/stage/sessions/m/chatgpt.synthetic-session"'
+record "pre-existing fixture-named residue touched is not red" 0
+
+# ...but subtracting the path must not blind the scan to what the run adds
+# inside it: a new shard under the residue directory is a new write, caught by
+# the ancestor rule even though its own name carries no token.
+reset_host
+seed_data_root
+mkdir -p "$DATA_ROOT/stage/sessions/m/chatgpt.synthetic-session"
+run_host -- bash -c 'echo x > "$HOME/.local/share/chat-stasher/stage/sessions/m/chatgpt.synthetic-session/newshard"'
+record "new entry under pre-existing residue is red" 1
+contains "under fixture-named residue"
 
 # A fixture written into the real config root is red.
 reset_host
