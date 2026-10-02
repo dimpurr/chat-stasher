@@ -21,6 +21,7 @@ chat-stasher <command> --help
 | [`status`](#status) | Is the timer working? What does the scanner find? | No |
 | [`dest-init`](#dest-init) | Seeds a new destination with this machine's history | Stage, destination |
 | [`verify`](#verify) | Proves an archive is intact | No |
+| [`repair-duplicates`](#repair-duplicates) | Reports identical shard copies without changing the archive | No |
 | [`ui`](#ui) | Opens the local dashboard | No |
 | [`search`](#search) | Finds sessions by machine, tool, date or text | No |
 | [`export`](#export) | Writes selected sessions out as files | Files in `--out` |
@@ -103,7 +104,7 @@ Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or ma
 
 ### `doctor`
 
-Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text.
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
 
 | Flag | Meaning |
 |---|---|
@@ -192,17 +193,56 @@ A source destination that cannot be read makes the result incomplete, reported a
 
 L3 also names any session whose archived shard sequence repeats shards byte for
 byte. The three checks above cannot see that — a body stored twice is
-self-consistent — and it is what leaves `read` and `export` returning a
-conversation twice. It is reported as a **possible** duplicate seal and does not
-fail the run: a harness may legitimately append bytes identical to bytes already
-sealed, and the archive records no provenance that could tell the two apart. The
-count is carried in the `L3 verdict` line so a green run cannot hide it.
+self-consistent — and it is what leaves older versions' `read` and `export`
+returning a conversation twice. It is reported as a **possible** duplicate seal
+and does not fail the run. The count is carried in the `L3 verdict` line so a
+green run cannot hide it. Fixed versions collapse repeated same-session shard
+hashes in readers, but keep the stored shards and snapshots unchanged. The
+collapse is a read decision, never a deletion, and it is reversible per run:
+`read` and `export` take `--no-collapse`, and the index builders honour
+`CHAT_STASHER_NO_COLLAPSE` (see [`read`](#read), [`export`](#export) and
+[`index`](#index)).
 
 Each report also names the shape, because the shapes are not equally suspicious.
 The repeat is either the whole body sealed before it — the shape a re-seal
 leaves, whether that body took one shard or several — or a block that recurs
 without beginning the sequence, which is the weakest of the three and the one
 least distinguishable from content that genuinely repeats.
+
+### `repair-duplicates`
+
+Read-only dry-run inventory of identical shard content in the newest archived
+body for each session and machine partition:
+
+```sh
+chat-stasher repair-duplicates --destination <name>
+chat-stasher repair-duplicates --destination <name> --json
+```
+
+The report gives duplicate session, shard, and byte counts per machine. A later
+run is a duplicate only when it is a byte-identical replay, shard by shard, of
+the session's complete preceding shard sequence. Individual shard repeats
+outside such a replay, including `A,B,A`, are reported separately as suspicious
+and kept. A shard whose bytes equal the concatenation of earlier shards is kept
+unless it also matches the corresponding preceding shard individually.
+
+The report also **lists every collapsed run**: each session a read would
+collapse is named with the run's start position in the shard sequence, how many
+shards it spans, the bytes those shards hold, and the session's total shard
+count, so a run that spans the whole sequence (the re-seal shape) reads apart
+from a replay inside longer content. In `--json` these are `collapsed_runs`; the
+text report prints one `collapsed-run` line per run. Sessions are labelled with
+the same privacy-safe short id `read` prints, never the raw id.
+
+`--json` prints one object with `complete`, per-machine duplicate counts,
+`collapsed_runs`, `suspicious_kept_*` counts, and `dry_run: true`. Exit `0` means
+the archive was fully read, `3` means it was not fully read, `2` means the
+command or destination was invalid, and `1` means reading completed but report
+generation failed.
+
+This command never deletes shards or snapshots and never runs `forget`, `prune`,
+or `rewrite`. Physical removal is a separate decision; the append-only policy
+keeps the original data in place.
 
 ### `reclaim-stage`
 
@@ -326,6 +366,7 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 | filters | As in `search`. |
 | `--turns all\|user` | `user` keeps only the person's own messages, where the tool's format makes that certain. Elsewhere every line is written, and the manifest says so. |
 | `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
+| `--no-collapse` | Write every stored shard. By default a run that byte-for-byte replays the session's complete preceding shard sequence is collapsed to its first copy, because that is what a re-seal leaves. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
 
 Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error. `--dry-run` reports the same exit code the real run would, so it is worth running first.
@@ -337,6 +378,8 @@ There are no text filters here: the flags are `search`'s, minus `--text`. Use a 
 ### `read`
 
 Prints one session (`--session <id>`) and its SHA-256, without content: the shard list in sequence order, the concatenated length and digest, and — only when you pass `--stage <dir>` — the digest of the shards on your own disk, to compare against. `--stage` is a comparison aid, never a requirement and never the addressing scheme: the session is resolved from the archive by `--machine` and `--session`, out of the newest snapshot that holds its shards. So a session whose local bodies were reclaimed (see `reclaim-stage`) still reads back, and you do not need the archiving machine's stage path to read its conversations. A snapshot **newer** than the one that holds the copy, which cannot be read, makes the read exit `3` with that snapshot named: an older copy is never returned as the session's current bytes.
+
+`--no-collapse` prints every stored shard instead of joining the copies a whole-content replay repeats. By default a run that byte-for-byte replays the session's complete preceding shard sequence is collapsed to its first copy — the shape `dest-init` and older setups left, and one no reader can tell from new content that happens to repeat the whole session. Nothing is deleted by either choice: the extra shards stay in the archive, and `--no-collapse` is how you see exactly what a collapse dropped. The same flag applies to `--all-machines`.
 
 `--all-machines` instead reports, across **every snapshot of every machine** cumulatively, each session's id, shard count, length and digest — a session is listed against the newest snapshot that holds it. It reads a lot: unlike `search` it downloads and hashes every shard it lists, so it is a full read of the destination, not a listing. If you only need the enumeration — which sessions exist, on which machine, held where — `search` does the same walk (tree metadata only, no `--text`) and never downloads a shard's payload.
 
@@ -383,6 +426,14 @@ the second one rather than folding it into the first:
 
 `search --text` also finds a session by its own id, or by any prefix of it, even
 though an id is not conversation text.
+
+An index has no `--no-collapse` flag; like `read` and `export` it collapses a
+run that byte-for-byte replays a session's complete preceding shard sequence, and
+setting `CHAT_STASHER_NO_COLLAPSE` to any value other than `0`, `false`, `no`,
+`off` or empty makes the next build index every stored shard instead. This
+covers the full-text index here and the activity index (`activity-index`,
+`overview`), which share the same reader. Clearing and rebuilding the index after
+changing the variable is what makes the difference visible.
 
 ### `cache`
 

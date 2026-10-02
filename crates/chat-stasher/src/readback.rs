@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::store::{BackupStore, SESSIONS_DIR, SHARD_SUFFIX};
+use crate::store::{BackupStore, DuplicateShardPolicy, SESSIONS_DIR, SHARD_SUFFIX};
 
 /// One session merged back from the archive.
 #[derive(Debug, Clone)]
@@ -400,6 +400,26 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
+    }
+
+    /// Raw cumulative bytes for L3 reconciliation and duplicate inventory.
+    /// User-facing bulk reads use [`Self::read_all_machines`] so a
+    /// whole-prefix reseal cannot duplicate conversation content.
+    pub fn read_cumulative_sessions_raw(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+    ) -> anyhow::Result<ReadAllReport> {
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
+    }
+
+    fn read_cumulative_sessions_inner(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+        shard_policy: DuplicateShardPolicy,
+    ) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for read-all")?;
@@ -507,10 +527,27 @@ impl BackupStore {
                 let mut shard_bytes = Vec::with_capacity(shards.len());
                 let mut shard_run_duplicates = Vec::new();
                 let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
+                let mut shard_bodies = Vec::with_capacity(shards.len());
                 for (shard, node) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
                         .with_context(|| format!("dump shard {shard}"))?;
+                    shard_bodies.push(buf);
+                }
+                let duplicate_indices: BTreeSet<_> = if shard_policy.collapses() {
+                    crate::store::duplicate_shard_indices(&shard_bodies)
+                        .into_iter()
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+                for ((_shard, _node), (index, buf)) in
+                    shards.iter().zip(shard_bodies.iter().enumerate())
+                {
+                    let digest: [u8; 32] = Sha256::digest(&buf).into();
+                    if duplicate_indices.contains(&index) {
+                        continue;
+                    }
                     let current_index = shard_sha256.len();
                     for (start, offset) in shard_offsets.iter().copied().enumerate() {
                         let Some(end_offset) = offset.checked_add(buf.len()) else {
@@ -525,7 +562,7 @@ impl BackupStore {
                         }
                     }
                     shard_offsets.push(concat.len());
-                    shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+                    shard_sha256.push(hex_digest(&digest));
                     shard_bytes.push(buf.len() as u64);
                     concat.extend_from_slice(&buf);
                 }
@@ -561,7 +598,7 @@ impl BackupStore {
     /// Traverses all snapshots cumulatively, grouping sessions by their newest
     /// snapshot appearance (ADR-021).
     pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions(mk, None)
+        self.read_cumulative_sessions_inner(mk, None, self.shard_policy())
     }
 
     /// Dump the individual sealed shards of selected sessions of one machine
@@ -667,6 +704,31 @@ impl BackupStore {
         &self,
         mk: &MasterKey,
         machine: &str,
+        visit: F,
+    ) -> anyhow::Result<CumulativeSessionRead>
+    where
+        F: FnMut(&str, &[u8]) -> anyhow::Result<()>,
+    {
+        // The index paths have no flag of their own, so their opt-out is the
+        // environment: [`crate::store::KEEP_ALL_SHARDS_ENV`] set to a truthy
+        // value keeps every stored shard in the indexed text instead of
+        // collapsing a whole-content replay.
+        self.for_each_archived_session_with_policy(
+            mk,
+            machine,
+            DuplicateShardPolicy::from_env(),
+            visit,
+        )
+    }
+
+    /// [`Self::for_each_archived_session`] with the shard-joining policy named
+    /// directly, so a caller (or a test) can decide it without a process-wide
+    /// environment change.
+    pub fn for_each_archived_session_with_policy<F>(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        shard_policy: DuplicateShardPolicy,
         mut visit: F,
     ) -> anyhow::Result<CumulativeSessionRead>
     where
@@ -727,7 +789,7 @@ impl BackupStore {
                     continue;
                 }
                 shards.sort_by_key(|(seq, _)| *seq);
-                let mut concat = Vec::new();
+                let mut shard_bodies = Vec::with_capacity(shards.len());
                 for (_, node) in shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf).with_context(|| {
@@ -736,8 +798,12 @@ impl BackupStore {
                             crate::id::short_session_id(&session)
                         )
                     })?;
-                    concat.extend_from_slice(&buf);
+                    shard_bodies.push(buf);
                 }
+                let concat = crate::store::select_shard_bodies(shard_bodies, shard_policy)
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 visit(&session, &concat)?;
                 out.sessions += 1;
             }

@@ -446,6 +446,12 @@ enum Command {
         /// Print full session ids in per-session rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
+        /// Show every stored shard. By default a run that byte-for-byte replays
+        /// the session's complete preceding shard sequence is collapsed to its
+        /// first copy, because that is what a re-seal leaves. Nothing is deleted
+        /// either way; this only changes what the read returns.
+        #[arg(long)]
+        no_collapse: bool,
         /// Machine partition to read. Uses this machine's id when available;
         /// if it is unavailable, use `--machine` explicitly. Unused by
         /// `--all-machines`, which reads every machine.
@@ -519,6 +525,31 @@ enum Command {
         #[arg(long = "option")]
         options: Vec<String>,
         /// Keep the ssh ControlMaster processes open after this run (do not shut them down).
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
+    /// Read-only inventory of byte-identical shards in archived sessions.
+    /// This command never removes or rewrites snapshots or shards.
+    RepairDuplicates {
+        /// Named destination from the config. Required when multiple are declared.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Print one machine-readable JSON object to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Keep ssh ControlMaster processes open after this run.
         #[arg(long)]
         keep_ssh_masters: bool,
     },
@@ -710,6 +741,12 @@ enum Command {
         /// from an earlier export stay where they are.
         #[arg(long)]
         force: bool,
+        /// Write every stored shard. By default a run that byte-for-byte
+        /// replays the session's complete preceding shard sequence is collapsed
+        /// to its first copy, because that is what a re-seal leaves. The archive
+        /// is never modified either way.
+        #[arg(long)]
+        no_collapse: bool,
         /// Print the plan and stop: no directory is created and no file is
         /// written.
         #[arg(long)]
@@ -1673,6 +1710,7 @@ fn run() -> ExitCode {
             session,
             all_machines,
             full_ids,
+            no_collapse,
             machine,
             destination,
             repo,
@@ -1685,6 +1723,7 @@ fn run() -> ExitCode {
             &session,
             all_machines,
             full_ids,
+            no_collapse,
             machine.as_deref(),
             destination,
             repo,
@@ -1717,6 +1756,23 @@ fn run() -> ExitCode {
             key_file,
             connections,
             &options,
+            keep_ssh_masters,
+        ),
+        Command::RepairDuplicates {
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            json,
+            keep_ssh_masters,
+        } => cmd_repair_duplicates(
+            destination,
+            repo,
+            key_file,
+            connections,
+            &options,
+            json,
             keep_ssh_masters,
         ),
         Command::Ingest {
@@ -1797,6 +1853,7 @@ fn run() -> ExitCode {
             turns,
             trim_to_window,
             force,
+            no_collapse,
             dry_run,
             repo,
             key_file,
@@ -1810,6 +1867,7 @@ fn run() -> ExitCode {
             turns,
             trim_to_window,
             force,
+            no_collapse,
             dry_run,
             repo,
             key_file,
@@ -2449,6 +2507,10 @@ fn rebuild_activity_index(
     print_skips: bool,
 ) -> Result<ActivityIndexOutcome, ActivityIndexError> {
     let started = std::time::Instant::now();
+    // An activity index has no `--no-collapse` flag; its opt-out is the
+    // environment, decided once per rebuild (see
+    // [`chat_stasher::store::KEEP_ALL_SHARDS_ENV`]).
+    let index_shard_policy = store::DuplicateShardPolicy::from_env();
     if !stage.is_dir() {
         return Err(ActivityIndexError::Read(format!(
             "stage `{}` is not a directory — nothing was read",
@@ -2642,7 +2704,8 @@ fn rebuild_activity_index(
         use sha2::{Digest, Sha256};
         let mut lines: Vec<String> = Vec::new();
         let mut hasher = Sha256::new();
-        for (_, shard) in shards {
+        let mut shard_bodies = Vec::with_capacity(shards.len());
+        for (_, shard) in &shards {
             let bytes = match fs::read(&shard) {
                 Ok(b) => b,
                 Err(e) => {
@@ -2653,6 +2716,19 @@ fn rebuild_activity_index(
                 }
             };
             hasher.update(&bytes);
+            shard_bodies.push(bytes);
+        }
+        let duplicate_indices: BTreeSet<_> = if index_shard_policy.collapses() {
+            store::duplicate_shard_indices(&shard_bodies)
+                .into_iter()
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        for (index, bytes) in shard_bodies.iter().enumerate() {
+            if duplicate_indices.contains(&index) {
+                continue;
+            }
             for line in String::from_utf8_lossy(&bytes).lines() {
                 lines.push(line.to_string());
             }
@@ -4754,6 +4830,7 @@ fn cmd_export(
     turns: TurnsArg,
     trim_to_window: bool,
     force: bool,
+    no_collapse: bool,
     dry_run: bool,
     repo: Option<String>,
     key_file: Option<String>,
@@ -4798,7 +4875,12 @@ fn cmd_export(
     );
     // Same as `search`: the machine flag is a query over `sessions/<machine>/`,
     // never this machine's identity.
-    let store = BackupStore::for_metadata_query(cfg.clone());
+    let shard_policy = if no_collapse {
+        store::DuplicateShardPolicy::KeepAll
+    } else {
+        store::DuplicateShardPolicy::Collapse
+    };
+    let store = BackupStore::for_metadata_query(cfg.clone()).with_shard_policy(shard_policy);
     let mk = match store::load_key_file(&cfg) {
         Ok(mk) => mk,
         Err(e) => {
@@ -8120,11 +8202,269 @@ fn cmd_push(
     ExitCode::SUCCESS
 }
 
+#[derive(serde::Serialize)]
+struct DuplicateRepairMachine {
+    machine: String,
+    duplicate_sessions: usize,
+    duplicate_shards: usize,
+    duplicate_bytes: u64,
+    suspicious_kept_sessions: usize,
+    suspicious_kept_shards: usize,
+    suspicious_kept_bytes: u64,
+}
+
+/// One contiguous run of shards a reader collapses when it joins a session.
+///
+/// The inventory lists every run so a collapse is auditable: each names the
+/// session, where in its shard sequence the run begins, how many shards it
+/// spans, and the bytes they hold. Nothing here is removed — the run exists
+/// only because a whole-content replay is what a re-seal leaves, and the
+/// operator can see exactly what was dropped on read.
+#[derive(serde::Serialize)]
+struct DuplicateRepairRun {
+    machine: String,
+    /// Privacy-safe short id, the same label `read --all-machines` prints.
+    session: String,
+    /// 0-based position in the session's shard sequence where the run begins.
+    run_start_shard: usize,
+    /// Shards in this run — the copies a collapse read drops.
+    run_shards: usize,
+    /// Bytes those shards hold.
+    run_bytes: u64,
+    /// The session's total shard count, so a run that starts at shard 0 and
+    /// spans the sequence (the re-seal shape) reads apart from a later replay.
+    session_shards: usize,
+}
+
+#[derive(serde::Serialize)]
+struct DuplicateRepairReport {
+    destination: String,
+    complete: bool,
+    dry_run: bool,
+    machines: Vec<DuplicateRepairMachine>,
+    /// Every contiguous run a collapsing read drops, in machine then session
+    /// order. Empty when the destination holds no complete replay.
+    collapsed_runs: Vec<DuplicateRepairRun>,
+    warnings: Vec<String>,
+    physical_removal: &'static str,
+    exit_semantics: &'static str,
+}
+
+fn duplicate_repair_report(
+    destination: String,
+    archive: &readback::ReadAllReport,
+) -> anyhow::Result<DuplicateRepairReport> {
+    let mut machines = Vec::new();
+    let mut collapsed_runs = Vec::new();
+    for machine in &archive.machines {
+        let mut summary = DuplicateRepairMachine {
+            machine: machine.hostname.clone(),
+            duplicate_sessions: 0,
+            duplicate_shards: 0,
+            duplicate_bytes: 0,
+            suspicious_kept_sessions: 0,
+            suspicious_kept_shards: 0,
+            suspicious_kept_bytes: 0,
+        };
+        for session in &machine.sessions {
+            let duplicate_indices: BTreeSet<_> =
+                store::duplicate_shard_indices(&session.shard_sha256)
+                    .into_iter()
+                    .collect();
+            for index in &duplicate_indices {
+                let bytes = session
+                    .shard_bytes
+                    .get(*index)
+                    .context("duplicate shard index has no byte count")?;
+                summary.duplicate_shards += 1;
+                summary.duplicate_bytes = summary
+                    .duplicate_bytes
+                    .checked_add(*bytes)
+                    .context("duplicate byte count overflow")?;
+            }
+            if !duplicate_indices.is_empty() {
+                summary.duplicate_sessions += 1;
+            }
+
+            // The reader collapses whole runs, not scattered shards, so the
+            // inventory names the runs: this is what makes a collapse auditable
+            // rather than a bare count.
+            for (run_start_shard, run_shards) in store::collapsed_shard_runs(
+                &session.shard_sha256,
+                store::DuplicateShardPolicy::Collapse,
+            ) {
+                let mut run_bytes = 0u64;
+                for index in run_start_shard..run_start_shard + run_shards {
+                    let bytes = session
+                        .shard_bytes
+                        .get(index)
+                        .context("collapsed run index has no byte count")?;
+                    run_bytes = run_bytes
+                        .checked_add(*bytes)
+                        .context("collapsed run byte count overflow")?;
+                }
+                collapsed_runs.push(DuplicateRepairRun {
+                    machine: machine.hostname.clone(),
+                    session: chat_stasher::id::short_session_id(&session.session_id),
+                    run_start_shard,
+                    run_shards,
+                    run_bytes,
+                    session_shards: session.shard_count,
+                });
+            }
+
+            let mut seen_hashes = BTreeSet::new();
+            let suspicious_indices: Vec<_> = session
+                .shard_sha256
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hash)| {
+                    (!seen_hashes.insert(hash) && !duplicate_indices.contains(&index))
+                        .then_some(index)
+                })
+                .collect();
+            for index in &suspicious_indices {
+                let bytes = session
+                    .shard_bytes
+                    .get(*index)
+                    .context("suspicious shard index has no byte count")?;
+                summary.suspicious_kept_shards += 1;
+                summary.suspicious_kept_bytes = summary
+                    .suspicious_kept_bytes
+                    .checked_add(*bytes)
+                    .context("suspicious byte count overflow")?;
+            }
+            if !suspicious_indices.is_empty() {
+                summary.suspicious_kept_sessions += 1;
+            }
+        }
+        machines.push(summary);
+    }
+    Ok(DuplicateRepairReport {
+        destination,
+        complete: archive.complete(),
+        dry_run: true,
+        machines,
+        collapsed_runs,
+        warnings: archive.warnings.clone(),
+        physical_removal:
+            "no shards or snapshots were removed; physical removal is a separate decision",
+        exit_semantics:
+            "0=complete report, 1=completed report failed, 2=usage error, 3=archive read incomplete",
+    })
+}
+
+fn cmd_repair_duplicates(
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    json: bool,
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let config = match config_or_refuse("repair-duplicates") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let destination = destination.or_else(|| {
+        (config.destinations.len() == 1)
+            .then(|| config.destinations.keys().next().cloned())
+            .flatten()
+    });
+    let destination_name = destination.clone().unwrap_or_else(|| "local".to_string());
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("repair-duplicates: {error}");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    let archive = match chat_stasher::reader_guard::catching_panic("repair-duplicates", || {
+        store.read_cumulative_sessions_raw(&mk, None)
+    }) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("repair-duplicates: could not finish reading archive: {error}");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    reap_remote(&cfg, keep_ssh_masters);
+    let report = match duplicate_repair_report(destination_name, &archive) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("repair-duplicates: could not build report: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if json {
+        match serde_json::to_writer(std::io::stdout(), &report) {
+            Ok(()) => println!(),
+            Err(error) => {
+                eprintln!("repair-duplicates: could not write JSON report: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        println!("[repair-duplicates] destination : {}", report.destination);
+        println!("[repair-duplicates] mode        : dry-run");
+        for machine in &report.machines {
+            println!(
+                "[repair-duplicates] machine={} duplicate_sessions={} duplicate_shards={} duplicate_bytes={} suspicious_kept_sessions={} suspicious_kept_shards={} suspicious_kept_bytes={}",
+                machine.machine,
+                machine.duplicate_sessions,
+                machine.duplicate_shards,
+                machine.duplicate_bytes,
+                machine.suspicious_kept_sessions,
+                machine.suspicious_kept_shards,
+                machine.suspicious_kept_bytes,
+            );
+        }
+        for run in &report.collapsed_runs {
+            println!(
+                "[repair-duplicates] collapsed-run machine={} session={} run_start_shard={} run_shards={} run_bytes={} session_shards={}",
+                run.machine,
+                run.session,
+                run.run_start_shard,
+                run.run_shards,
+                run.run_bytes,
+                run.session_shards,
+            );
+        }
+        for warning in &report.warnings {
+            println!("[repair-duplicates] WARN: {warning}");
+        }
+        println!(
+            "[repair-duplicates] storage     : {}",
+            report.physical_removal
+        );
+    }
+    if report.complete {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("repair-duplicates: PARTIAL exit_code=3 — archive reading did not complete; the counts do not prove absence");
+        ExitCode::from(3)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_read(
     stage: &Option<PathBuf>,
     session: &Option<String>,
     all_machines: bool,
     full_ids: bool,
+    no_collapse: bool,
     machine: Option<&str>,
     destination: Option<String>,
     repo: Option<String>,
@@ -8163,11 +8503,17 @@ fn cmd_read(
         chat_stasher::body_cache::Policy::ReadThrough
     };
     let body_cache = chat_stasher::body_cache::for_operation(&config, cache_policy);
+    let shard_policy = if no_collapse {
+        store::DuplicateShardPolicy::KeepAll
+    } else {
+        store::DuplicateShardPolicy::Collapse
+    };
     let store = match machine.as_deref() {
         Some(machine) => BackupStore::new(cfg.clone(), machine.to_string()),
         None => BackupStore::for_metadata_query(cfg.clone()),
     }
-    .with_body_cache(body_cache.handle());
+    .with_body_cache(body_cache.handle())
+    .with_shard_policy(shard_policy);
     println!(
         "[read] body cache     : {}",
         body_cache_state_line(&body_cache)
@@ -8665,7 +9011,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             .unwrap_or(u64::MAX)
                     });
                 }
-                let sources = index_sources(&paths_by_id, &entries_all, &titles);
+                // An index has no `--no-collapse` flag; its opt-out is the
+                // environment, decided once per build (see
+                // [`chat_stasher::store::KEEP_ALL_SHARDS_ENV`]).
+                let fts_shard_policy = store::DuplicateShardPolicy::from_env();
+                let sources = index_sources(&paths_by_id, &entries_all, &titles, fts_shard_policy);
                 index.build(&sources, |id| {
                     use chat_stasher::fts::LoadFailure;
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
@@ -8674,24 +9024,31 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                             anyhow::anyhow!("changed source disappeared during index build"),
                         )
                     })?;
-                    let mut raw = Vec::new();
+                    let mut bytes_read = 0u64;
+                    let mut shard_bodies = Vec::with_capacity(indexes.len());
                     for idx in indexes {
-                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut raw) {
-                            // Whatever was read into `raw` before the read failed
-                            // was still read, and the build's volume counts it.
+                        let mut shard = Vec::new();
+                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut shard) {
+                            // Whatever was read from this shard before the read
+                            // failed was still read, and the build's volume counts it.
                             return Err(LoadFailure::new(
-                                raw.len() as u64,
+                                bytes_read + shard.len() as u64,
                                 anyhow::Error::new(error).context("read changed archived document"),
                             ));
                         }
+                        bytes_read += shard.len() as u64;
+                        shard_bodies.push(shard);
                     }
+                    let raw = store::select_shard_bodies(shard_bodies, fts_shard_policy)
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
                     // The shard was read in full before it was handed to the
                     // extractor, so those bytes are part of what this build read
                     // whatever comes back (C6). Only a *read* that failed is
                     // returned as a failure: a shard in a format no reader of
                     // this build knows is a document state, and it must not put
                     // the rest of the archive out of reach (W255 C1).
-                    let bytes_read = raw.len() as u64;
                     let extracted = chat_stasher::fts::extract_index_document_for(
                         chat_stasher::fts::harness_of_document_id(id),
                         &raw,
@@ -8811,6 +9168,7 @@ fn index_sources(
     paths_by_id: &BTreeMap<String, Vec<usize>>,
     entries_all: &[(PathBuf, Node)],
     titles: &BTreeMap<String, String>,
+    shard_policy: store::DuplicateShardPolicy,
 ) -> Vec<chat_stasher::fts::SourceDoc> {
     use chat_stasher::fts::SourceDoc;
     paths_by_id
@@ -8836,16 +9194,43 @@ fn index_sources(
             }
             SourceDoc::fingerprinted(
                 id.clone(),
-                index_source_fingerprint(&shards, titles.get(id).map(String::as_str)),
+                index_source_fingerprint(&shards, titles.get(id).map(String::as_str), shard_policy),
             )
         })
         .collect()
 }
 
-fn index_source_fingerprint(shards: &[(String, Vec<String>)], title: Option<&str>) -> String {
+const INDEX_SOURCE_FINGERPRINT_DOMAIN: &[u8] =
+    b"chat-stasher-fts-source-v3-shard-sequence-replay-v1\0";
+const INDEX_DUPLICATE_RULE_VERSION: u32 = 1;
+
+fn index_source_fingerprint(
+    shards: &[(String, Vec<String>)],
+    title: Option<&str>,
+    shard_policy: store::DuplicateShardPolicy,
+) -> String {
+    index_source_fingerprint_with_domain(
+        shards,
+        title,
+        shard_policy,
+        INDEX_SOURCE_FINGERPRINT_DOMAIN,
+    )
+}
+
+fn index_source_fingerprint_with_domain(
+    shards: &[(String, Vec<String>)],
+    title: Option<&str>,
+    shard_policy: store::DuplicateShardPolicy,
+    domain: &[u8],
+) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(b"chat-stasher-fts-source-v1\0");
+    hasher.update(domain);
+    hasher.update(INDEX_DUPLICATE_RULE_VERSION.to_le_bytes());
+    hasher.update([match shard_policy {
+        store::DuplicateShardPolicy::Collapse => 0,
+        store::DuplicateShardPolicy::KeepAll => 1,
+    }]);
     for (path, data_ids) in shards {
         hasher.update(path.as_bytes());
         hasher.update([0]);
@@ -9327,8 +9712,8 @@ fn print_reconcile(r: &ReconcileReport, full_ids: bool) {
     }
     if !r.possible_duplicate_seals.is_empty() {
         println!(
-            "     (a repeated shard cannot be told apart from content that genuinely repeats; \
-             verify does not fail on it — check `read --all-machines` for the doubled body)"
+            "     (a byte-only report cannot prove a reseal; verify does not fail on it — run \
+             `chat-stasher repair-duplicates` for the read-only inventory)"
         );
     }
     let verdict = if r.ok() {
@@ -9948,15 +10333,66 @@ mod decision_surface_tests {
             "sessions/machine/session/000001.jsonl".into(),
             vec!["blob-b".into()],
         )];
-        let first_hash = index_source_fingerprint(&first, Some("synthetic title"));
+        let first_hash = index_source_fingerprint(
+            &first,
+            Some("synthetic title"),
+            store::DuplicateShardPolicy::Collapse,
+        );
         assert_eq!(
             first_hash,
-            index_source_fingerprint(&same, Some("synthetic title"))
+            index_source_fingerprint(
+                &same,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::Collapse
+            )
         );
         assert_ne!(
             first_hash,
-            index_source_fingerprint(&changed, Some("synthetic title"))
+            index_source_fingerprint(
+                &changed,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::Collapse
+            )
         );
+        assert_ne!(
+            first_hash,
+            index_source_fingerprint(
+                &same,
+                Some("synthetic title"),
+                store::DuplicateShardPolicy::KeepAll
+            ),
+            "changing the collapse policy must invalidate the source fingerprint"
+        );
+        for previous_domain in [
+            b"chat-stasher-fts-source-v1\0".as_slice(),
+            b"chat-stasher-fts-source-v2-prefix-reseal-collapse-v1\0".as_slice(),
+        ] {
+            assert_ne!(
+                index_source_fingerprint_with_domain(
+                    &first,
+                    Some("synthetic title"),
+                    store::DuplicateShardPolicy::Collapse,
+                    previous_domain
+                ),
+                first_hash,
+                "a collapse-policy domain change must rebuild older index rows once"
+            );
+        }
+    }
+
+    #[test]
+    fn shard_replay_detection_keeps_partial_and_concatenated_matches() {
+        let repeated_delta = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        assert!(store::duplicate_shard_indices(&repeated_delta).is_empty());
+        let resealed_prefix = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        ];
+        assert_eq!(store::duplicate_shard_indices(&resealed_prefix), vec![2, 3]);
+        let concatenated_prefix = vec!["a".to_string(), "b".to_string(), "ab".to_string()];
+        assert!(store::duplicate_shard_indices(&concatenated_prefix).is_empty());
     }
 
     /// A file node with `size` bytes and the given content ids. `None` for
@@ -10004,7 +10440,12 @@ mod decision_surface_tests {
             ("m-1/bad".to_owned(), vec![1usize]),
             ("m-1/empty".to_owned(), vec![2usize]),
         ]);
-        let sources = index_sources(&paths_by_id, &entries_all, &titles);
+        let sources = index_sources(
+            &paths_by_id,
+            &entries_all,
+            &titles,
+            store::DuplicateShardPolicy::Collapse,
+        );
         assert_eq!(sources.len(), 3, "every session is still considered");
         // The one session the archive cannot describe is named, with its reason,
         // and the other two are fingerprinted as usual: one such shard costs one
@@ -16964,5 +17405,82 @@ mod schedule_platform_tests {
             !refusal.contains("could not be run"),
             "no tool was attempted, and the wording must not read as if one failed: {refusal}"
         );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_repair_report_tests {
+    use super::*;
+
+    #[test]
+    fn report_counts_complete_replays_and_reports_other_repeats_as_kept() {
+        let mut archive = readback::ReadAllReport::default();
+        archive.machines.push(readback::MachineMerge {
+            hostname: "machine-one".to_string(),
+            snapshot_id: "snapshot".to_string(),
+            snapshot_time: "time".to_string(),
+            snapshot_time_unix: 1,
+            sessions: vec![
+                readback::SessionBackedUp {
+                    machine: "machine-one".to_string(),
+                    session_id: "complete-replay".to_string(),
+                    shard_count: 4,
+                    concat_bytes: 24,
+                    sha256: "concat".to_string(),
+                    shard_sha256: vec![
+                        "same".to_string(),
+                        "different".to_string(),
+                        "same".to_string(),
+                        "different".to_string(),
+                    ],
+                    shard_bytes: vec![5, 7, 5, 7],
+                    shard_run_duplicates: Vec::new(),
+                },
+                readback::SessionBackedUp {
+                    machine: "machine-one".to_string(),
+                    session_id: "suspicious-repeat".to_string(),
+                    shard_count: 3,
+                    concat_bytes: 17,
+                    sha256: "concat-two".to_string(),
+                    shard_sha256: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+                    shard_bytes: vec![5, 7, 5],
+                    shard_run_duplicates: Vec::new(),
+                },
+                readback::SessionBackedUp {
+                    machine: "machine-one".to_string(),
+                    session_id: "concatenated-prefix".to_string(),
+                    shard_count: 3,
+                    concat_bytes: 24,
+                    sha256: "concat-two".to_string(),
+                    shard_sha256: vec!["a".to_string(), "b".to_string(), "ab".to_string()],
+                    shard_bytes: vec![5, 7, 12],
+                    shard_run_duplicates: Vec::new(),
+                },
+            ],
+        });
+
+        let report = duplicate_repair_report("destination-one".to_string(), &archive).unwrap();
+        assert!(report.complete);
+        assert!(report.dry_run);
+        assert_eq!(report.machines[0].duplicate_sessions, 1);
+        assert_eq!(report.machines[0].duplicate_shards, 2);
+        assert_eq!(report.machines[0].duplicate_bytes, 12);
+        assert_eq!(report.machines[0].suspicious_kept_sessions, 1);
+        assert_eq!(report.machines[0].suspicious_kept_shards, 1);
+        assert_eq!(report.machines[0].suspicious_kept_bytes, 5);
+        // The inventory lists every run a collapsing read drops, not just a
+        // count: only the complete replay is a run, and it begins at shard 2.
+        assert_eq!(report.collapsed_runs.len(), 1);
+        let run = &report.collapsed_runs[0];
+        assert_eq!(run.machine, "machine-one");
+        assert_eq!(run.run_start_shard, 2);
+        assert_eq!(run.run_shards, 2);
+        assert_eq!(run.run_bytes, 12);
+        assert_eq!(run.session_shards, 4);
+        assert!(
+            !run.session.contains("complete-replay"),
+            "the inventory prints the privacy-safe short id, never the raw one"
+        );
+        assert!(report.physical_removal.contains("separate decision"));
     }
 }

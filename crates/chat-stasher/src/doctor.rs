@@ -975,6 +975,9 @@ pub struct DoctorReport {
     /// somebody probed (see [`probe_destinations`]), which is why it is filled
     /// in by the CLI rather than by [`run()`].
     pub destinations: Vec<DestinationProbe>,
+    /// Identical shard content in the configured local stage. `None` means the
+    /// config itself could not be read, rather than a clean stage.
+    pub stage_duplicate_shards: Option<StageDuplicateCheck>,
     /// D8 — the Native Messaging registration on this machine and the stage
     /// `[native_host]` points at. `None` when the caller did not ask (the plain
     /// [`run()`] entry point fills it in; the field is an `Option` so a caller
@@ -1007,6 +1010,22 @@ pub struct DestinationProbe {
     /// the running CLI. `None` means **not checked** (the destination was not
     /// reached, is not configured, or holds no repository yet) — never "fresh".
     pub activity_index: Option<ActivityIndexFreshness>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageDuplicateMachine {
+    pub machine: String,
+    pub duplicate_sessions: usize,
+    pub duplicate_shards: usize,
+    pub duplicate_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageDuplicateCheck {
+    pub state: &'static str,
+    pub machines: Option<Vec<StageDuplicateMachine>>,
+    pub why: Option<String>,
+    pub repair_command: &'static str,
 }
 
 /// Whether the activity indexes a destination carries were written by the
@@ -1473,7 +1492,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 9] = [
+const CHECKS_NEEDING_CONFIG: [&str; 10] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -1482,6 +1501,7 @@ const CHECKS_NEEDING_CONFIG: [&str; 9] = [
     "D10 full-text indexes",
     "D7 destination probes",
     "D8 native host stage",
+    "D11 stage duplicate scan",
     "machine identity",
 ];
 
@@ -1522,11 +1542,176 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // is the field a consumer that predates `config_error` already reads.
         scan_failed: true,
         destinations: Vec::new(),
+        stage_duplicate_shards: None,
         native_host: None,
         // Every key path here is derived from the config (the local key's
         // override and each destination's), so an unreadable config means the
         // inventory was not computed — `None`, not an empty list.
         keys: None,
+    }
+}
+
+fn inspect_stage_duplicates(config: &Config) -> StageDuplicateCheck {
+    const REPAIR: &str = "chat-stasher repair-duplicates --destination <name>";
+    let Some(stage) = config
+        .native_host
+        .as_ref()
+        .and_then(|native| native.stage.as_deref())
+    else {
+        return StageDuplicateCheck {
+            state: "not_configured",
+            machines: None,
+            why: Some("native_host.stage is not configured, so no stage was read".to_string()),
+            repair_command: REPAIR,
+        };
+    };
+    let root = expand_tilde(stage);
+    if !root.is_dir() {
+        return StageDuplicateCheck {
+            state: "unknown",
+            machines: None,
+            why: Some("the configured stage is not a readable directory".to_string()),
+            repair_command: REPAIR,
+        };
+    }
+    let sessions_root = root.join(crate::store::SESSIONS_DIR);
+    let machine_entries = match fs::read_dir(&sessions_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return StageDuplicateCheck {
+                state: "clean",
+                machines: Some(Vec::new()),
+                why: None,
+                repair_command: REPAIR,
+            };
+        }
+        Err(error) => {
+            return StageDuplicateCheck {
+                state: "unknown",
+                machines: None,
+                why: Some(format!("cannot list configured stage sessions: {error}")),
+                repair_command: REPAIR,
+            };
+        }
+    };
+    let mut machines = Vec::new();
+    for machine_entry in machine_entries {
+        let machine_entry = match machine_entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                return StageDuplicateCheck {
+                    state: "unknown",
+                    machines: None,
+                    why: Some(format!("cannot list configured stage machines: {error}")),
+                    repair_command: REPAIR,
+                };
+            }
+        };
+        if !machine_entry.path().is_dir() {
+            continue;
+        }
+        let machine = machine_entry.file_name().to_string_lossy().into_owned();
+        let sessions = match fs::read_dir(machine_entry.path()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return StageDuplicateCheck {
+                    state: "unknown",
+                    machines: None,
+                    why: Some(format!("cannot list a configured stage partition: {error}")),
+                    repair_command: REPAIR,
+                };
+            }
+        };
+        let mut summary = StageDuplicateMachine {
+            machine,
+            duplicate_sessions: 0,
+            duplicate_shards: 0,
+            duplicate_bytes: 0,
+        };
+        for session_entry in sessions {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    return StageDuplicateCheck {
+                        state: "unknown",
+                        machines: None,
+                        why: Some(format!("cannot list a stage session: {error}")),
+                        repair_command: REPAIR,
+                    };
+                }
+            };
+            if !session_entry.path().is_dir() {
+                continue;
+            }
+            let mut shards = match crate::store::sealed_shard_entries(&session_entry.path()) {
+                Ok(shards) => shards,
+                Err(error) => {
+                    return StageDuplicateCheck {
+                        state: "unknown",
+                        machines: None,
+                        why: Some(format!("cannot list a stage session's shards: {error}")),
+                        repair_command: REPAIR,
+                    };
+                }
+            };
+            shards.sort_by_key(|(sequence, _)| *sequence);
+            let mut bodies = Vec::with_capacity(shards.len());
+            let mut duplicate_shards = 0usize;
+            let mut duplicate_bytes = 0u64;
+            for (_, path) in &shards {
+                match fs::read(path) {
+                    Ok(body) => bodies.push(body),
+                    Err(error) => {
+                        return StageDuplicateCheck {
+                            state: "unknown",
+                            machines: None,
+                            why: Some(format!("cannot read a stage shard: {error}")),
+                            repair_command: REPAIR,
+                        };
+                    }
+                }
+            }
+            for index in crate::store::duplicate_shard_indices(&bodies) {
+                duplicate_shards += 1;
+                duplicate_bytes = match duplicate_bytes.checked_add(bodies[index].len() as u64) {
+                    Some(bytes) => bytes,
+                    None => {
+                        return StageDuplicateCheck {
+                            state: "unknown",
+                            machines: None,
+                            why: Some("duplicate byte count overflowed".to_string()),
+                            repair_command: REPAIR,
+                        };
+                    }
+                };
+            }
+            if duplicate_shards > 0 {
+                summary.duplicate_sessions += 1;
+                summary.duplicate_shards += duplicate_shards;
+                summary.duplicate_bytes = match summary.duplicate_bytes.checked_add(duplicate_bytes)
+                {
+                    Some(bytes) => bytes,
+                    None => {
+                        return StageDuplicateCheck {
+                            state: "unknown",
+                            machines: None,
+                            why: Some("duplicate byte count overflowed".to_string()),
+                            repair_command: REPAIR,
+                        };
+                    }
+                };
+            }
+        }
+        machines.push(summary);
+    }
+    let found = machines
+        .iter()
+        .any(|machine| machine.duplicate_sessions > 0);
+    StageDuplicateCheck {
+        state: if found { "duplicates_found" } else { "clean" },
+        machines: Some(machines),
+        why: None,
+        repair_command: REPAIR,
     }
 }
 
@@ -1653,6 +1838,10 @@ pub fn run() -> DoctorReport {
     // D10 — local-only, no repository connection and no document payload reads.
     let fts_indexes = Some(inspect_fts_indexes(&config));
 
+    // D11 — inspect only the stage the user explicitly configured for the
+    // browser host. The check reads shard bytes and reports counts only.
+    let stage_duplicate_shards = inspect_stage_duplicates(&config);
+
     // D8 — read-only, opens nothing but the manifests themselves. The root is
     // the machine's, resolved here because this is the one caller that means the
     // real machine: `%LOCALAPPDATA%` on Windows, and `home` everywhere else.
@@ -1679,6 +1868,7 @@ pub fn run() -> DoctorReport {
         // Filled in by the CLI: connecting to a destination is a real network
         // action and this entry point is called directly by the test suite.
         destinations: Vec::new(),
+        stage_duplicate_shards: Some(stage_duplicate_shards),
         native_host: Some(native_host),
         keys: Some(key_inventory(&config)),
     }
@@ -2841,6 +3031,21 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "archive_gaps": r.archive_gaps.iter().map(archive_gap_json).collect::<Vec<_>>(),
         "probes": r.probes.iter().map(scanner::probe_json).collect::<Vec<_>>(),
         "destinations": r.destinations.iter().map(destination_probe_json).collect::<Vec<_>>(),
+        "stage_duplicate_shards": match &r.stage_duplicate_shards {
+            Some(check) => serde_json::json!({
+                "checked": true,
+                "state": check.state,
+                "machines": check.machines.as_ref().map(|machines| machines.iter().map(|machine| serde_json::json!({
+                    "machine": machine.machine,
+                    "duplicate_sessions": machine.duplicate_sessions,
+                    "duplicate_shards": machine.duplicate_shards,
+                    "duplicate_bytes": machine.duplicate_bytes,
+                })).collect::<Vec<_>>()),
+                "why": check.why,
+                "repair_command": check.repair_command,
+            }),
+            None => serde_json::json!({"checked": false}),
+        },
         "keys": match &r.keys {
             Some(rows) => serde_json::json!({
                 "checked": true,
@@ -3278,6 +3483,7 @@ pub fn print_report(r: &DoctorReport) {
         }
         print_fts_indexes(&r.fts_indexes);
         print_destinations(&r.destinations);
+        print_stage_duplicates(&r.stage_duplicate_shards);
         // D8 does not depend on the scan at all — it reads the browser
         // manifests and the config — so it is reported on this path too.
         if let Some(check) = &r.native_host {
@@ -3377,6 +3583,7 @@ pub fn print_report(r: &DoctorReport) {
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
+    print_stage_duplicates(&r.stage_duplicate_shards);
 
     // Every archive copy has its own key, so a backup that names only the
     // local one leaves the off-site copies unreadable (W281 BUG-2). Reported
@@ -3388,6 +3595,37 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!();
         print_native_host(check);
     }
+}
+
+fn print_stage_duplicates(check: &Option<StageDuplicateCheck>) {
+    let Some(check) = check else { return };
+    eprintln!("D11 · Identical duplicate shards in the configured stage");
+    match check.state {
+        "clean" => eprintln!("  no identical duplicate shards found"),
+        "duplicates_found" => {
+            if let Some(machines) = &check.machines {
+                for machine in machines.iter().filter(|row| row.duplicate_sessions > 0) {
+                    eprintln!(
+                        "  {} · {} session(s), {} duplicate shard(s), {} bytes",
+                        machine.machine,
+                        machine.duplicate_sessions,
+                        machine.duplicate_shards,
+                        machine.duplicate_bytes
+                    );
+                }
+            }
+            eprintln!("  inspect the destination with `{}`", check.repair_command);
+            eprintln!("  no shards or snapshots were removed");
+        }
+        _ => {
+            eprintln!("  unknown");
+            if let Some(why) = &check.why {
+                eprintln!("  reason: {why}");
+            }
+            eprintln!("  inspect archived data with `{}`", check.repair_command);
+        }
+    }
+    eprintln!();
 }
 
 /// Which key files this machine holds, per archive copy, and which of them the
@@ -4039,6 +4277,35 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn configured_stage_duplicate_scan_counts_and_names_the_repair_command() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let stage = tmp.path().join("stage");
+        let dir = stage
+            .join(crate::store::SESSIONS_DIR)
+            .join("machine-one")
+            .join("session-one")
+            .join("000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("000001.jsonl"), b"synthetic\n").unwrap();
+        fs::write(dir.join("000002.jsonl"), b"synthetic\n").unwrap();
+        let mut config = Config::default();
+        config
+            .native_host
+            .get_or_insert_with(Default::default)
+            .stage = Some(stage.to_string_lossy().into_owned());
+
+        let check = inspect_stage_duplicates(&config);
+        assert_eq!(check.state, "duplicates_found");
+        let machine = &check.machines.as_ref().unwrap()[0];
+        assert_eq!(machine.duplicate_sessions, 1);
+        assert_eq!(machine.duplicate_shards, 1);
+        assert_eq!(machine.duplicate_bytes, b"synthetic\n".len() as u64);
+        assert!(check
+            .repair_command
+            .starts_with("chat-stasher repair-duplicates"));
+    }
+
     fn write(path: &Path, content: &str) {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p).unwrap();
@@ -4334,6 +4601,7 @@ mod json_tests {
             scan_failed: false,
             destinations: Vec::new(),
             native_host: None,
+            stage_duplicate_shards: None,
             keys: Some(Vec::new()),
         }
     }
@@ -4388,6 +4656,7 @@ mod json_tests {
                 "risks",
                 "scan_failed",
                 "schema_version",
+                "stage_duplicate_shards",
             ]
         );
     }

@@ -92,7 +92,7 @@ retry adds only its snapshot, index and tree pack
 (`crates/chat-stasher/tests/w245_interrupted_push_test.rs:637-648`).
 
 Implementation: `crates/chat-stasher/src/orphans.rs:458`. Every read path reaches
-it through `crates/chat-stasher/src/store.rs:412`, which is the whole point of
+it through `crates/chat-stasher/src/store.rs:437`, which is the whole point of
 routing reads through it — after an adopting push, the snapshot's tree and its
 shards exist **only** in packs no index file names, so a read that reads only
 index files fails with "cannot ls tree" and exit 3.

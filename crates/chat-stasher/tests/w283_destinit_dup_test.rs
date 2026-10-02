@@ -479,12 +479,19 @@ impl Fixture {
     /// Seal `lines` as the next shard, on top of whatever the stage holds: the
     /// shard a pass that re-read a source it had already sealed used to leave.
     fn plant(&self, lines: &[&str]) {
-        store::write_sealed_shard(
+        // Plant pre-fix archive bytes explicitly: ordinary writers now make
+        // exact retries a no-op, while the regressions below need to model
+        // historical shards that were already doubled on disk.
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
             store::StageWriter::Collect,
             &self.stage,
             MACHINE,
             &self.id,
-            &lines.iter().map(|l| (*l).to_string()).collect::<Vec<_>>(),
+            &lines
+                .iter()
+                .map(|line| line.as_bytes().to_vec())
+                .collect::<Vec<_>>(),
+            store::DEFAULT_SHARD_BUCKET_CAP,
         )
         .unwrap();
     }
@@ -753,7 +760,7 @@ fn a_fresh_destination_does_not_reseal_a_doubled_sqlite_session() {
     collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &dest("first")).unwrap();
     let body = store::concat_shards(&stage, MACHINE, &id).unwrap();
     store::write_sealed_shard_raw_with_cap(
-        store::StageWriter::Collect,
+        store::StageWriter::Restore,
         &stage,
         MACHINE,
         &id,

@@ -153,8 +153,115 @@ fn l3_names_a_repeated_shard_and_does_not_fail_on_it() {
         "the verdict line must carry the count, so a green run cannot hide it:\n{out}"
     );
     assert!(
+        out.contains("chat-stasher repair-duplicates"),
+        "verify must name the read-only repair inventory:\n{out}"
+    );
+    assert!(
         ok,
         "a repeated shard is a possibility, not corruption — L3 must not fail on it:\n{out}"
+    );
+}
+
+#[test]
+fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let line = r#"{"type":"user","message":{"role":"user","content":"synthetic"}}"#;
+    write_shard(&stage, 1, &format!("{line}\n"));
+    write_shard(&stage, 2, &format!("{line}\n"));
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let push = run(
+        sandbox,
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            MACHINE,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(push.status.success(), "push failed: {:?}", push.status);
+    let snapshots_before = fs::read_dir(repo.join("snapshots")).unwrap().count();
+
+    let report = run(
+        sandbox,
+        &[
+            "repair-duplicates",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        report.status.success(),
+        "repair-duplicates failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["machines"][0]["machine"], MACHINE);
+    assert_eq!(json["machines"][0]["duplicate_sessions"], 1, "{json}");
+    assert_eq!(json["machines"][0]["duplicate_shards"], 1);
+    assert_eq!(
+        json["machines"][0]["duplicate_bytes"],
+        (line.len() + 1) as u64
+    );
+    assert!(json["physical_removal"]
+        .as_str()
+        .unwrap()
+        .contains("separate decision"));
+    // The inventory lists every collapsed run, not only a count: one run, the
+    // second of the session's two shards.
+    let runs = json["collapsed_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{json}");
+    assert_eq!(runs[0]["machine"], MACHINE);
+    assert_eq!(runs[0]["run_start_shard"], 1);
+    assert_eq!(runs[0]["run_shards"], 1);
+    assert_eq!(runs[0]["run_bytes"], (line.len() + 1) as u64);
+    assert_eq!(runs[0]["session_shards"], 2);
+    assert!(
+        !runs[0]["session"]
+            .as_str()
+            .unwrap()
+            .contains("w283-machine"),
+        "the run's session is the privacy-safe short id: {json}"
+    );
+
+    // The text report names the same run, so the default (non-JSON) inventory
+    // is as auditable as the machine-readable one.
+    let text = run(
+        sandbox,
+        &[
+            "repair-duplicates",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("collapsed-run") && text.contains("run_start_shard=1"),
+        "the text inventory must list the collapsed run:\n{text}"
+    );
+
+    assert_eq!(
+        fs::read_dir(repo.join("snapshots")).unwrap().count(),
+        snapshots_before,
+        "the report must not append or remove snapshots"
     );
 }
 

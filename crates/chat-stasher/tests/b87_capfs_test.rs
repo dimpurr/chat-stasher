@@ -20,13 +20,13 @@ fn write_and_measure(cap: usize, writes: usize) -> ObservedLayout {
     let machine = "b87-machine";
     let session = "b87-session";
 
-    for _ in 0..writes {
+    for index in 0..writes {
         store::write_sealed_shard_with_cap(
             store::StageWriter::Collect,
             stage,
             machine,
             session,
-            &["b87 synthetic shard".to_string()],
+            &[format!("b87 synthetic shard {index}")],
             cap,
         )
         .unwrap();

@@ -667,6 +667,433 @@ fn written_files_are_byte_identical_to_read_and_the_manifest_sha_matches() {
         .any(|v| v == "m-beta"));
 }
 
+#[test]
+fn read_and_export_keep_a_repeated_shard_inside_a_longer_session() {
+    let (dir, repo, _key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session_dir = store::session_shard_dir(&stage, "m-alpha", CC_ONE);
+    let original = fs::read(store::shard_path(&stage, "m-alpha", CC_ONE, 1)).unwrap();
+    let duplicate_path = store::shard_path(&stage, "m-alpha", CC_ONE, 3);
+    fs::create_dir_all(duplicate_path.parent().unwrap()).unwrap();
+    fs::write(&duplicate_path, &original).unwrap();
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let (read_body, read_shards) = store.read_session_concat("m-alpha", CC_ONE, &mk).unwrap();
+    assert_eq!(read_shards.len(), 3, "a repeated delta remains a shard");
+    assert_eq!(
+        std::str::from_utf8(&read_body).unwrap().lines().count(),
+        8,
+        "read body retains the repeated delta"
+    );
+
+    let out = root.join("export-deduplicated");
+    let exported = export::export_sessions(
+        &store,
+        &mk,
+        &Selector::default(),
+        &export_opts(&out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(exported.exit_status(), 0);
+    let entry = manifest(&out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == CC_ONE)
+        .unwrap()
+        .clone();
+    let file = out.join(entry["relative_path"].as_str().unwrap());
+    let exported_body = fs::read(file).unwrap();
+    assert_eq!(
+        exported_body, read_body,
+        "export and read share the same bytes"
+    );
+    assert_eq!(
+        std::str::from_utf8(&exported_body).unwrap().lines().count(),
+        8
+    );
+    let mut fts_source_lines = None;
+    store
+        .for_each_archived_session(&mk, "m-alpha", |id, body| {
+            if id == CC_ONE {
+                fts_source_lines = Some(std::str::from_utf8(body).unwrap().lines().count());
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(fts_source_lines, Some(8), "FTS receives the repeated delta");
+    assert!(
+        session_dir.exists(),
+        "the read-only repair leaves stage data in place"
+    );
+}
+
+#[test]
+fn read_and_export_keep_a_repeated_delta_after_a_multishard_prefix() {
+    let (dir, repo, _key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session = "synthetic-repeated-delta";
+    let first = b"{\"uuid\":\"same\"}\n".to_vec();
+    let second = b"{\"uuid\":\"other\"}\n".to_vec();
+    for body in [first.clone(), second, first.clone()] {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "m-alpha",
+            session,
+            &[body.strip_suffix(b"\n").unwrap().to_vec()],
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .unwrap();
+    }
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let (read_body, _) = store.read_session_concat("m-alpha", session, &mk).unwrap();
+    assert_eq!(
+        read_body,
+        [
+            first.as_slice(),
+            b"{\"uuid\":\"other\"}\n",
+            first.as_slice()
+        ]
+        .concat()
+    );
+    let bulk_read = store.read_all_machines(&mk).unwrap();
+    let bulk_session = bulk_read.machines[0]
+        .sessions
+        .iter()
+        .find(|row| row.session_id == session)
+        .unwrap();
+    assert_eq!(bulk_session.concat_bytes, read_body.len() as u64);
+    assert!(bulk_session.sha_matches(&read_body));
+
+    let out = root.join("export-repeated-delta");
+    let exported = export::export_sessions(
+        &store,
+        &mk,
+        &Selector::default(),
+        &export_opts(&out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(exported.exit_status(), 0);
+    let entry = manifest(&out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == session)
+        .unwrap()
+        .clone();
+    let file = out.join(entry["relative_path"].as_str().unwrap());
+    assert_eq!(fs::read(file).unwrap(), read_body);
+}
+
+/// W304 · the opt-out. A whole-content replay — the session's entire body
+/// sealed again, so the shard sequence is `A,A` — is collapsed to its first copy
+/// by default, and `--no-collapse` (library:
+/// [`store::DuplicateShardPolicy::KeepAll`]) returns every stored shard. The
+/// archive is never touched either way: the second copy is still on disk, which
+/// the stage assertion at the end pins.
+#[test]
+fn no_collapse_returns_every_shard_of_a_whole_content_replay() {
+    let (dir, repo, key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session = "claude-code.m-alpha.aaaaaaaa-0000-0000-0000-0000000000aa";
+    // `write_sealed_shard_bytes…` takes a session's lines and writes the shard
+    // as `line\n`, so the stored shard is `line` with exactly one newline.
+    let body = b"{\"uid\":\"same\"}".to_vec();
+    let line = [body.as_slice(), b"\n"].concat();
+    // Seal the same single shard twice, forcing the repeat past the writer's own
+    // idempotent guard: the stored sequence is [A, A].
+    for _ in 0..2 {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "m-alpha",
+            session,
+            std::slice::from_ref(&body),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .unwrap();
+    }
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let (collapsed, collapsed_shards) = store.read_session_concat("m-alpha", session, &mk).unwrap();
+    assert_eq!(
+        collapsed_shards.len(),
+        1,
+        "the default read collapses the whole-content replay to its first copy"
+    );
+    assert_eq!(collapsed, line);
+
+    let keeping =
+        store_of(&repo, root, "m-alpha").with_shard_policy(store::DuplicateShardPolicy::KeepAll);
+    let (kept, kept_shards) = keeping
+        .read_session_concat("m-alpha", session, &mk)
+        .unwrap();
+    assert_eq!(
+        kept_shards.len(),
+        2,
+        "the opt-out returns every stored shard, the replay included"
+    );
+    assert_eq!(
+        kept,
+        [line.as_slice(), line.as_slice()].concat(),
+        "the opt-out returns the stored bytes in sequence order"
+    );
+
+    // Export is the same reader: the default writes the collapsed body and the
+    // flag writes every shard. The manifest's `shard_count` is the archive's own
+    // count of stored shards, so it reads 2 either way — the written bytes are
+    // the signal.
+    let collapsed_out = root.join("export-collapsed");
+    export::export_sessions(
+        &store,
+        &mk,
+        &Selector::default(),
+        &export_opts(&collapsed_out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    let collapsed_entry = manifest(&collapsed_out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == session)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        fs::read(collapsed_out.join(collapsed_entry["relative_path"].as_str().unwrap())).unwrap(),
+        line
+    );
+
+    let kept_out = root.join("export-kept");
+    export::export_sessions(
+        &keeping,
+        &mk,
+        &Selector::default(),
+        &export_opts(&kept_out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    let kept_entry = manifest(&kept_out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == session)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        fs::read(kept_out.join(kept_entry["relative_path"].as_str().unwrap())).unwrap(),
+        [line.as_slice(), line.as_slice()].concat(),
+        "`--no-collapse` writes every stored shard"
+    );
+
+    // The CLI flag itself, over `read` and `export`.
+    let default_read = run_cli(
+        root,
+        &repo,
+        &key,
+        "read",
+        &["--machine", "m-alpha", "--session", session],
+    );
+    assert!(
+        default_read.status.success(),
+        "read failed: {}",
+        String::from_utf8_lossy(&default_read.stderr)
+    );
+    let default_stdout = String::from_utf8_lossy(&default_read.stdout).into_owned();
+    assert!(
+        default_stdout.contains("[read] shards (seq order):") && !default_stdout.contains("000002"),
+        "the default read must collapse the replay:\n{default_stdout}"
+    );
+
+    let kept_read = run_cli(
+        root,
+        &repo,
+        &key,
+        "read",
+        &[
+            "--machine",
+            "m-alpha",
+            "--session",
+            session,
+            "--no-collapse",
+        ],
+    );
+    assert!(
+        kept_read.status.success(),
+        "read --no-collapse failed: {}",
+        String::from_utf8_lossy(&kept_read.stderr)
+    );
+    let kept_stdout = String::from_utf8_lossy(&kept_read.stdout).into_owned();
+    assert!(
+        kept_stdout.contains("000001") && kept_stdout.contains("000002"),
+        "`read --no-collapse` must list every shard:\n{kept_stdout}"
+    );
+
+    let cli_out = root.join("export-cli-kept");
+    let cli_export = run_export(root, &repo, &key, &cli_out, &["--no-collapse"]);
+    assert!(
+        cli_export.status.success(),
+        "export --no-collapse failed: {}",
+        String::from_utf8_lossy(&cli_export.stderr)
+    );
+    let cli_entry = manifest(&cli_out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == session)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        fs::read(cli_out.join(cli_entry["relative_path"].as_str().unwrap())).unwrap(),
+        [line.as_slice(), line.as_slice()].concat()
+    );
+
+    // Nothing was deleted: both shards are still sealed in the stage.
+    let sealed =
+        store::sealed_shard_entries(&store::session_shard_dir(&stage, "m-alpha", session)).unwrap();
+    assert_eq!(
+        sealed.len(),
+        2,
+        "the read-only opt-out leaves every stored shard in place"
+    );
+}
+
+/// W304 · the index opt-out is the environment variable, and it reaches the
+/// archive walk an activity index is built from.
+#[test]
+fn keep_all_shards_env_var_shows_every_shard_to_the_index_walk() {
+    let (dir, repo, _key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session = "claude-code.m-alpha.aaaaaaaa-0000-0000-0000-0000000000bb";
+    let body = b"{\"uid\":\"indexed\"}".to_vec();
+    for _ in 0..2 {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "m-alpha",
+            session,
+            std::slice::from_ref(&body),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .unwrap();
+    }
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let walk_lines = |policy| {
+        let mut seen = None;
+        store
+            .for_each_archived_session_with_policy(&mk, "m-alpha", policy, |id, body| {
+                if id == session {
+                    seen = Some(std::str::from_utf8(body).unwrap().lines().count());
+                }
+                Ok(())
+            })
+            .unwrap();
+        seen
+    };
+
+    assert_eq!(
+        walk_lines(store::DuplicateShardPolicy::Collapse),
+        Some(1),
+        "the default index walk collapses the whole-content replay"
+    );
+    assert_eq!(
+        walk_lines(store::DuplicateShardPolicy::KeepAll),
+        Some(2),
+        "the opt-out hands every stored shard to the index"
+    );
+
+    // The environment variable is the same switch, decided without mutating the
+    // process environment.
+    assert_eq!(
+        store::DuplicateShardPolicy::from_env_value(None),
+        store::DuplicateShardPolicy::Collapse
+    );
+    assert_eq!(
+        store::DuplicateShardPolicy::from_env_value(Some(std::ffi::OsStr::new("1"))),
+        store::DuplicateShardPolicy::KeepAll
+    );
+    for off in ["", "0", "false", "NO", "off"] {
+        assert_eq!(
+            store::DuplicateShardPolicy::from_env_value(Some(std::ffi::OsStr::new(off))),
+            store::DuplicateShardPolicy::Collapse,
+            "`{off}` must keep the default collapse"
+        );
+    }
+}
+
+/// W304 · the environment variable is wired to a real index build, not only to a
+/// policy value: `activity-index` over a stage that holds a whole-content replay
+/// measures one line by default and both lines under `CHAT_STASHER_NO_COLLAPSE`.
+#[test]
+fn keep_all_shards_env_var_reaches_an_index_build() {
+    let (dir, _repo, _key, _mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session = "claude-code.m-alpha.aaaaaaaa-0000-0000-0000-0000000000cc";
+    let body = b"{\"uid\":\"indexed\"}".to_vec();
+    for _ in 0..2 {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "m-alpha",
+            session,
+            std::slice::from_ref(&body),
+            store::DEFAULT_SHARD_BUCKET_CAP,
+        )
+        .unwrap();
+    }
+    let index_path = stage.join("meta").join("m-alpha").join("activity-v1.jsonl");
+    let line_count = |rows: &str| {
+        rows.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["session_id"] == session)
+            .map(|row| row["line_count"].as_u64().unwrap())
+    };
+
+    let args = ["--stage", stage.to_str().unwrap(), "--machine", "m-alpha"];
+    let default = run_cli_env(root, "activity-index", &args, &[]);
+    assert!(
+        default.status.success(),
+        "activity-index failed: {}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert_eq!(
+        line_count(&fs::read_to_string(&index_path).unwrap()),
+        Some(1),
+        "the default index build collapses the whole-content replay"
+    );
+
+    let keep_all = run_cli_env(
+        root,
+        "activity-index",
+        &args,
+        &[(store::KEEP_ALL_SHARDS_ENV, "1")],
+    );
+    assert!(
+        keep_all.status.success(),
+        "activity-index with the opt-out failed: {}",
+        String::from_utf8_lossy(&keep_all.stderr)
+    );
+    assert_eq!(
+        line_count(&fs::read_to_string(&index_path).unwrap()),
+        Some(2),
+        "CHAT_STASHER_NO_COLLAPSE makes the index build keep every shard"
+    );
+}
+
 // ------------------------------------------------------------------ test 3
 
 /// `--turns user`: applied where the format is certain, explicitly
@@ -1338,15 +1765,32 @@ fn run_export(sandbox: &Path, repo: &Path, key: &Path, out: &Path, extra: &[&str
 /// silently either way. Passing the flag would only add a line after the JSON
 /// `search --json` promises is alone on stdout.
 fn run_cli(sandbox: &Path, repo: &Path, key: &Path, subcommand: &str, extra: &[&str]) -> Output {
+    run_cli_env(
+        sandbox,
+        subcommand,
+        &[
+            &[
+                "--repo",
+                repo.to_str().unwrap(),
+                "--key-file",
+                key.to_str().unwrap(),
+            ],
+            extra,
+        ]
+        .concat(),
+        &[],
+    )
+}
+
+/// [`run_cli`] without the fixed `--repo`/`--key-file` and with extra environment
+/// pairs, for a command whose flags are its own (`activity-index` reads a local
+/// stage, never a destination).
+fn run_cli_env(sandbox: &Path, subcommand: &str, extra: &[&str], envs: &[(&str, &str)]) -> Output {
     let home = sandbox.join("home");
     fs::create_dir_all(&home).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
     command
         .arg(subcommand)
-        .arg("--repo")
-        .arg(repo)
-        .arg("--key-file")
-        .arg(key)
         .args(extra)
         .env("HOME", &home)
         .env(
@@ -1360,5 +1804,8 @@ fn run_cli(sandbox: &Path, repo: &Path, key: &Path, subcommand: &str, extra: &[&
         .env_remove("CODEX_HOME")
         .env_remove("RUSTIC_REPO")
         .env_remove("RUSTIC_KEY_FILE");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
     command.output().unwrap()
 }
