@@ -175,6 +175,9 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
+      if ((message as { type?: string } | null)?.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, observed: true, workspace: 'acct-w303-synthetic-test' };
+      }
       const pending = handleBackfillMessage(message, origin, withChatGptFetchIdentity(syntheticPageFetch) as any);
       if (!pending) return undefined;
       return await pending;

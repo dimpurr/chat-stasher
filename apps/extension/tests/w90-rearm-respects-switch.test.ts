@@ -42,6 +42,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { syntheticCoordinationResponse } from './synthetic-native-host';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 
 import {
   BACKFILL_ALARM_NAME,
@@ -129,7 +130,7 @@ const runtimeClock = { now: () => 1_700_000_000_000, sleep: async () => { /* vir
 async function boot(drawSource: RandomFn): Promise<any> {
   const mod: any = await import('../entrypoints/background');
   mod.configureBackfillPace({ clock: runtimeClock, random: drawSource });
-  mod.configureBackfillTransport(async () => {
+  mod.configureBackfillTransport(withChatGptLeaseIdentity(async () => {
     if (parkNextHttp) {
       parkNextHttp = false;
       httpParked = true;
@@ -137,7 +138,7 @@ async function boot(drawSource: RandomFn): Promise<any> {
     }
     listCalls.push('list');
     return { status: 200, text: '{"items":[],"total":0}' };
-  });
+  }));
   expect(mod.default()).toBeUndefined();
   await mod.backgroundSetupSettled();
   return mod;

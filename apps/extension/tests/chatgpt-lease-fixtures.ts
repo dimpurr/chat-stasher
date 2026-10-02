@@ -20,6 +20,7 @@ export function withChatGptLeaseIdentity(http: HttpPort): HttpPort {
     return { ...response, chatgptAccountIdentity: CHATGPT_TEST_ACCOUNT_IDENTITY };
   };
   Object.assign(wrapped, http);
+  wrapped.chatgptAccountIdentity = async () => CHATGPT_TEST_ACCOUNT_IDENTITY;
   return wrapped;
 }
 

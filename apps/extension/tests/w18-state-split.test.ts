@@ -480,10 +480,10 @@ describe('W18-3 · killed in the middle of a settle', () => {
       save: async (key: string, value: unknown) => {
         if (key === stateKey(PLATFORM, SCOPE)) {
           headerWrites += 1;
-          // The migration's header write is #1 and W303's first request-local
-          // lease write is #2. Let both through so this remains a real resumed
-          // run, and kill the settle's header write (#3).
-          if (headerWrites >= 3) throw new Error('killed after the debt write, before the header');
+          // The resumed run may refresh its request-local lease before it fetches.
+          // Let that checkpoint through, then kill the settle header write (#2),
+          // after the debt transaction has committed.
+          if (headerWrites >= 2) throw new Error('killed after the debt write, before the header');
         }
         await store.save(key, value);
       },

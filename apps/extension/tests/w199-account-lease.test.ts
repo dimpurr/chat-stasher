@@ -548,7 +548,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
   const workspace = 'fixture-shared-workspace';
   const scope = chatGptWorkspaceScope(workspace)!;
 
-  it('carries the exact backfill request header through the page reply and tab port', async () => {
+  it('fingerprints the transient reply header at tabHttpPort and returns no raw value', async () => {
     const requestHeader = 'acct-backfill-fixture';
     const reply = await serveBackfillFetch(
       'https://chatgpt.com/backend-api/conversations?offset=0&limit=100',
@@ -570,10 +570,31 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
       source: 'request-header-chatgpt-account-id',
     });
     expect(JSON.stringify(response)).not.toContain(requestHeader);
+    expect('chatgptAccountIdHeader' in response).toBe(false);
+  });
+
+  it('takes the starting identity through the same worker boundary and exposes only its fingerprint', async () => {
+    const requestHeader = 'acct-starting-fixture';
+    const store = memoryStore();
+    const port = tabHttpPort(7, async (_id, message) => {
+      if ((message as { type?: string }).type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, observed: true, workspace: requestHeader };
+      }
+      throw new Error('the starting identity check must not issue an HTTP request');
+    }, undefined, store);
+
+    const identity = await port.chatgptAccountIdentity?.();
+    expect(identity).toEqual({
+      value: await fingerprintFor(store, requestHeader),
+      saltId: saltIdOf(store),
+      source: 'request-header-chatgpt-account-id',
+    });
+    expect(JSON.stringify(identity)).not.toContain(requestHeader);
   });
 
   function chatGptPort(runStore: ReturnType<typeof memoryStore>, opts: {
     listHeader?: string | null;
+    startHeader?: string | null;
     detailHeader?: string | null;
     listIds?: string[];
     calls?: string[];
@@ -609,6 +630,9 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
       throw new Error(`unexpected ChatGPT fixture route: ${parsed.pathname}`);
     }, {
       chatgptWorkspace: async () => ({ ok: true as const, workspace, observed: true as const }),
+      chatgptAccountIdentity: async () => accountIdentity(
+        Object.hasOwn(opts, 'startHeader') ? opts.startHeader : opts.listHeader,
+      ),
     });
     return { http, calls };
   }
@@ -623,13 +647,13 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     return { report, delivered };
   }
 
-  it('takes its lease from the first list reply, then accepts IDs only under that header identity', async () => {
+  it('takes its lease before enumeration, then accepts IDs only under that header identity', async () => {
     const store = memoryStore();
     const opened = await openLedger(store, 'chatgpt', scope);
     if (!opened.ok) throw new Error('fixture must open the unleased ChatGPT ledger');
     opened.state.enumCursor = { offset: 0, complete: false };
     await opened.ledger.save(opened.state);
-    const port = chatGptPort(store, { listHeader: ACCOUNT_A, detailHeader: ACCOUNT_A, listIds: [C1] });
+    const port = chatGptPort(store, { startHeader: ACCOUNT_A, listHeader: ACCOUNT_A, detailHeader: ACCOUNT_A, listIds: [C1] });
     const { report } = runChatGpt(store, port.http);
     const result = await report;
 
@@ -643,7 +667,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
   it('a list reply for B is not enqueued; suspends A and keeps every old pending id', async () => {
     const store = memoryStore();
     await seedChatGptLease(store, scope, ACCOUNT_A, [C1], { enumerated: false });
-    const port = chatGptPort(store, { listHeader: ACCOUNT_B, detailHeader: ACCOUNT_A, listIds: [C2] });
+    const port = chatGptPort(store, { startHeader: ACCOUNT_A, listHeader: ACCOUNT_B, detailHeader: ACCOUNT_A, listIds: [C2] });
     const { report } = runChatGpt(store, port.http);
     const result = await report;
 
@@ -695,7 +719,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
 
   it('missing request identity fails closed before list IDs or detail debt can change', async () => {
     const store = memoryStore();
-    const port = chatGptPort(store, { listHeader: null, listIds: [C2] });
+    const port = chatGptPort(store, { startHeader: null, listHeader: ACCOUNT_A, listIds: [C2] });
     const { report } = runChatGpt(store, port.http);
     const result = await report;
 
@@ -705,6 +729,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     expect(result.state.enumCursor.offset).toBe(0);
     expect(storedHeader('chatgpt', scope, store.data).accountLease).toBeUndefined();
     expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
+    expect(port.calls).toEqual([]);
     expect(resolveChatGptWorkspace({ accountIds: [ACCOUNT_A, ACCOUNT_B] })).toEqual({
       ok: false, reason: 'workspace-ambiguous', observed: true,
     });
@@ -713,7 +738,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
   it('a distinct header identity mismatches even while the canonical workspace scope stays the same', async () => {
     const store = memoryStore();
     await seedChatGptLease(store, scope, ACCOUNT_A);
-    const port = chatGptPort(store, { listHeader: ACCOUNT_B, detailHeader: ACCOUNT_B, listIds: [C2] });
+    const port = chatGptPort(store, { startHeader: ACCOUNT_A, listHeader: ACCOUNT_B, detailHeader: ACCOUNT_B, listIds: [C2] });
     const { report } = runChatGpt(store, port.http);
     const result = await report;
 
@@ -735,7 +760,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     const first = await identity(store, ACCOUNT_A);
     const incomparable = await identity(replacementStore, ACCOUNT_A);
     const delivered: CapturedFetch[] = [];
-    const http: HttpPort = async (url) => new URL(url).pathname === '/backend-api/conversations'
+    const http: HttpPort = Object.assign(async (url: string): Promise<HttpResponse> => new URL(url).pathname === '/backend-api/conversations'
       ? { status: 200, text: JSON.stringify({ items: [{ id: C1 }] }), chatgptAccountIdentity: first }
       : {
           status: 200,
@@ -744,7 +769,9 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
             mapping: { node: { message: { author: { role: 'user' }, content: { parts: ['synthetic'] } } } },
           }),
           chatgptAccountIdentity: incomparable,
-        };
+        }, {
+      chatgptAccountIdentity: async () => first,
+    });
     const report = await runBackfill({
       platform: 'chatgpt', origin: 'https://chatgpt.com', scope, store,
       http, clock: fakeClock(), pace: NO_WAIT,

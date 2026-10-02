@@ -143,6 +143,7 @@ import {
 } from './enumerate';
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
+import type { AccountIdentity } from './types';
 import { TAB_HELLO_MIN_INTERVAL_MS } from './tab-hello';
 import { carryableRetryAfter } from './types';
 
@@ -235,7 +236,7 @@ export type BackfillFetchReply =
       text: string;
       survivedCredentialReread?: boolean;
       retryAfter?: string;
-      /** Transient page-local request identity; the worker fingerprints then discards it. */
+      /** Raw request header; accepted only by fingerprintChatGptIdentityAtWorkerBoundary. */
       chatgptAccountIdHeader?: string | null;
     }
   | { ok: false; error: string };
@@ -1089,26 +1090,25 @@ export function tabHttpPort(
     //    invented by the transport.
     // 🔴 W127 · Same rule for `Retry-After`: forwarded only when the page fetched a
     //    string. The engine reads it on a 429/503 only (`retryAfterMsFor`).
-    const response: HttpResponse = { status: reply.status, text: reply.text };
+    const response = await httpResponseFromBackfillReplyAtWorkerBoundary(
+      url, init, reply, identityStore,
+    );
     if (reply.survivedCredentialReread === true) response.survivedCredentialReread = true;
     if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
-    if (findPlatformForUrl(url)?.id === 'chatgpt') {
-      const raw = chatGptAccountIdHeaderValue(reply.chatgptAccountIdHeader);
-      if (raw !== null && identityStore) {
-        const fingerprint = await accountFingerprintFor({
-          url, method: init?.method ?? 'GET', status: reply.status,
-          text: reply.text, capturedAt: Date.now(), chatgptAccountIdHeader: raw,
-        }, identityStore, null);
-        if (fingerprint.kind === 'fingerprint') {
-          response.chatgptAccountIdentity = {
-            value: fingerprint.value,
-            saltId: fingerprint.saltId,
-            source: fingerprint.source,
-          };
-        }
-      }
-    }
     return response;
+  };
+  port.chatgptAccountIdentity = async (): Promise<AccountIdentity | null> => {
+    if (!identityStore) return null;
+    let reply: unknown;
+    try {
+      reply = await withReplyTimeout(
+        send(tabId, { type: CHATGPT_WORKSPACE_REQUEST_MESSAGE }), tabId, timeoutMs,
+        'the starting ChatGPT account identity',
+      );
+    } catch {
+      return null;
+    }
+    return startingChatGptIdentityAtWorkerBoundary(reply, identityStore);
   };
   port.chatgptWorkspace = async (): Promise<ChatGptWorkspaceResolution> => {
     const reply = await withReplyTimeout(
@@ -1124,6 +1124,56 @@ export function tabHttpPort(
     throw new Error(`tab ${tabId} gave an unrecognised ChatGPT workspace observation`);
   };
   return port;
+}
+
+/**
+ * 🔴 W303 · The one page-to-worker boundary for a raw ChatGPT header value.
+ * The raw value is inspected only in this call frame, fingerprinted with the
+ * installation key, and never returned. Fetch replies have the raw field removed
+ * by projection before the HttpResponse escapes; startup observations use the
+ * same fingerprinting helper and return only the keyed identity.
+ */
+async function httpResponseFromBackfillReplyAtWorkerBoundary(
+  url: string,
+  init: BackfillRequestInit | undefined,
+  reply: Record<string, unknown>,
+  identityStore: BackfillStore | null,
+): Promise<HttpResponse> {
+  const response: HttpResponse = {
+    status: reply.status as number,
+    text: reply.text as string,
+  };
+  if (findPlatformForUrl(url)?.id !== 'chatgpt' || !identityStore) return response;
+  response.chatgptAccountIdentity = await fingerprintChatGptIdentityAtWorkerBoundary(
+    reply.chatgptAccountIdHeader, identityStore,
+  );
+  if (response.chatgptAccountIdentity === null) delete response.chatgptAccountIdentity;
+  return response;
+}
+
+async function startingChatGptIdentityAtWorkerBoundary(
+  reply: unknown,
+  identityStore: BackfillStore,
+): Promise<AccountIdentity | null> {
+  if (!isRecord(reply) || reply.ok !== true || reply.observed !== true
+    || typeof reply.workspace !== 'string') return null;
+  return fingerprintChatGptIdentityAtWorkerBoundary(reply.workspace, identityStore);
+}
+
+/** The single raw-header crossing: returns a keyed identity, never the input value. */
+async function fingerprintChatGptIdentityAtWorkerBoundary(
+  rawValue: unknown,
+  identityStore: BackfillStore,
+): Promise<AccountIdentity | null> {
+  const raw = chatGptAccountIdHeaderValue(rawValue);
+  if (raw === null) return null;
+  const fingerprint = await accountFingerprintFor({
+    url: 'https://chatgpt.com/backend-api/conversations', method: 'GET',
+    status: 200, text: '', capturedAt: Date.now(), chatgptAccountIdHeader: raw,
+  }, identityStore, null);
+  return fingerprint.kind === 'fingerprint'
+    ? { value: fingerprint.value, saltId: fingerprint.saltId, source: fingerprint.source }
+    : null;
 }
 
 /**

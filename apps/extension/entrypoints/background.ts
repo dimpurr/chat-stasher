@@ -1117,6 +1117,12 @@ async function coordinatedTick(
     }
     return response;
   };
+  // 🔴 W303 · Preserve the pre-enumeration ChatGPT identity capability through
+  // the machine-wide request-budget wrapper. The identity is already keyed by
+  // tabHttpPort; this forwarding does not carry the raw page value.
+  if (platform === 'chatgpt' && http.chatgptAccountIdentity) {
+    coordinatedHttp.chatgptAccountIdentity = () => http.chatgptAccountIdentity!();
+  }
   if (workspaceScoped && http.chatgptWorkspace) {
     coordinatedHttp.chatgptWorkspace = async () => {
       const observed = await http.chatgptWorkspace!();

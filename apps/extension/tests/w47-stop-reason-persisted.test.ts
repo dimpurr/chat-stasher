@@ -52,6 +52,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { syntheticCoordinationResponse } from './synthetic-native-host';
 import { handleBackfillMessage } from '../lib/backfill/tab-port';
+import { withChatGptFetchIdentity } from './chatgpt-lease-fixtures';
 import type { BackfillRuntimeStatus } from '../lib/popup-view';
 
 const ORIGIN = 'https://chatgpt.com';
@@ -120,7 +121,10 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
-      const pending = handleBackfillMessage(message, origin, syntheticPageFetch as any);
+      if ((message as { type?: string } | null)?.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, observed: true, workspace: 'acct-w303-synthetic-test' };
+      }
+      const pending = handleBackfillMessage(message, origin, withChatGptFetchIdentity(syntheticPageFetch) as any);
       if (!pending) return undefined;
       return await pending;
     },

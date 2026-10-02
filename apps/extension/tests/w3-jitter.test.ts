@@ -498,10 +498,10 @@ async function boot(drawSource: RandomFn): Promise<any> {
     clock: runtimeClock,
     random: drawSource,
   });
-  mod.configureBackfillTransport(async () => {
+  mod.configureBackfillTransport(withChatGptLeaseIdentity(async () => {
     listCalls.push('list');
     return { status: 200, text: '{"items":[],"total":0}' };
-  });
+  }));
   expect(mod.default()).toBeUndefined();
   await mod.backgroundSetupSettled();
   return mod;

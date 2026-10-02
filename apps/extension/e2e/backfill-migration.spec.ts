@@ -155,11 +155,11 @@ async function serveChatgpt(ext: Extension): Promise<{ api: string[]; list: stri
 const TICK_ALARM = 'cs-backfill-tick';
 
 /**
- * The capture kicks the backfill asynchronously, so wait for its named workspace
- * refusal before reading the storage snapshot. The bounded wait turns a missing
+ * The capture kicks the backfill asynchronously, so wait for its named starting-
+ * identity refusal before reading storage. The bounded wait turns a missing
  * refusal into an assertion instead of silently observing the pre-tick state.
  */
-async function waitForWorkspaceRefusal(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+async function waitForBackfillRefusal(ext: Extension, timeoutMs = 20_000): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const all = await readStorage(ext, null);
@@ -200,22 +200,21 @@ test('a real tick leaves unscoped legacy debts untouched when the workspace is u
   });
 
   // A real capture on a real platform page. It has no ChatGPT-Account-Id header,
-  // so the backfill leg must name the unresolved workspace and leave the old
+  // so the backfill leg must fail closed before enumeration and leave the old
   // shared/default ledger untouched.
   await loadFixturePage(ext);
   await waitForOutbox(ext, (rows) => rows.length >= 1);
 
-  const all = await waitForWorkspaceRefusal(ext);
+  const all = await waitForBackfillRefusal(ext);
   expect(all[LEGACY_KEY]).toEqual(legacyRecord());
-  const unresolvedKey = Object.keys(all).find((key) =>
-    key.includes('workspace-unresolved'));
+  const unresolvedKey = Object.keys(all).find((key) => key.includes('workspace-unresolved'));
   expect(unresolvedKey, Object.keys(all).join(' | ')).toBeTruthy();
   const header = all[unresolvedKey!] as Record<string, unknown>;
-  expect(header.halted).toMatchObject({ reason: 'org-unresolved' });
+  expect(header.halted).toMatchObject({ reason: 'refused-unknown' });
   expect((header.enumCursor as Record<string, unknown>).complete).toBe(false);
   expect((header.pendingCount as number) + (header.archivedCount as number)).toBe(0);
 
-  // The page's own request was served, but unknown workspace evidence must stop
+  // The page's own request was served, but absent starting identity must stop
   // before any list request or transfer of the unscoped debt set.
   expect(api).toEqual([CHATGPT_API_PATH]);
   expect(list).toEqual([]);

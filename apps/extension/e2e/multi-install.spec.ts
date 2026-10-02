@@ -101,6 +101,8 @@ const PAGE_PATH = `/c/${SESSION_ID}`;
 const API_PATH = `/backend-api/conversation/${SESSION_ID}`;
 /** The plan's own list path (`lib/backfill/enumerate.ts`), queried `?offset=&limit=`. */
 const LIST_PATH = '/backend-api/conversations';
+/** Synthetic only: exercises the ChatGPT lease without identifying a real account. */
+const ACCOUNT_ID_FIXTURE = 'w303-multi-install-account-fixture';
 /** The id the host files this conversation under (`session_dir_id`). */
 const ARCHIVE_ID = `${PLATFORM}.${SESSION_ID}`;
 
@@ -162,6 +164,8 @@ interface Served {
   log: { pageLoads: string[]; apiResponses: string[]; unexpected: string[]; escaped: string[] };
   /** Backfill **list** requests only — the requests cases (b) and (c) are about. */
   list: string[];
+  identityBootstrap: string[];
+  console: string[];
 }
 
 interface Gate {
@@ -248,6 +252,9 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
     { origin: ORIGIN, pagePath: PAGE_PATH, apiPath: API_PATH, apiBody: CONVERSATION_BODY },
   ]);
   const list: string[] = [];
+  const identityBootstrap: string[] = [];
+  const console: string[] = [];
+  ext.context.on('console', (message) => console.push(message.text()));
   const listBehaviour = options.list ?? { status: 200 };
 
   if (options.page === 'inert') {
@@ -259,10 +266,19 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
         status: 200,
         contentType: 'text/html; charset=utf-8',
         body: '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-          + '<title>chat-stasher e2e inert page</title></head><body></body></html>',
+          + '<title>chat-stasher e2e inert page</title></head><body>'
+          + `<script>void fetch('/backend-api/models', {headers: {'ChatGPT-Account-Id': '${ACCOUNT_ID_FIXTURE}'}})</script>`
+          + '</body></html>',
       });
     });
   }
+
+  // The inert page makes one synthetic request solely to seed the starting
+  // request identity. It is not the backfill list and never leaves this route.
+  await ext.context.route(`${ORIGIN}/backend-api/models`, (route) => {
+    identityBootstrap.push('/backend-api/models');
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
 
   await ext.context.route(`${ORIGIN}/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
@@ -288,7 +304,7 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
       body: JSON.stringify({ items: [], limit: 100, offset: 0, total: 0 }),
     });
   });
-  return { log, list };
+  return { log, list, identityBootstrap, console };
 }
 
 /**
@@ -591,6 +607,8 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   // happened, this line is where the case would say so.
   await openPage(a);
   await openPage(b);
+  await waitUntil(() => logA.identityBootstrap.length === 1 && logB.identityBootstrap.length === 1,
+    'both synthetic starting-identity requests');
   expect(logA.log.apiResponses).toEqual([]);
   expect(logB.log.apiResponses).toEqual([]);
   expect(logA.list).toEqual([]);
@@ -630,6 +648,16 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   await fireAlarm(b, TICK_ALARM);
   await waitUntil(() => logB.list.length >= 1, "B's list request once the lease was free");
   expect(logB.list).toEqual([LIST_PATH]);
+
+  // 🔴 W303 · The synthetic raw account header has done its job once both runs
+  //    have completed. It must not appear in durable extension data, queued
+  //    deliveries, any native-host message, or browser/extension console output.
+  const privacySurfaces = [
+    await readStorage(a, null), await readStorage(b, null),
+    await readOutbox(a), await readOutbox(b),
+    host.forwarded, host.answered, logA.console, logB.console,
+  ];
+  expect(JSON.stringify(privacySurfaces)).not.toContain(ACCOUNT_ID_FIXTURE);
 
   // The host is the arbiter here, so its own record is the corroborating fact:
   // both profiles asked it, and it saw two installs on this machine.

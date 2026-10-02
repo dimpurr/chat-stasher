@@ -49,6 +49,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { syntheticCoordinationResponse } from './synthetic-native-host';
+import { withChatGptFetchIdentity } from './chatgpt-lease-fixtures';
 import { IDBFactory } from 'fake-indexeddb';
 import { handleBackfillMessage, type TabEntry, type TabQueryRow } from '../lib/backfill/tab-port';
 import { memoryStore } from '../lib/backfill/store';
@@ -146,7 +147,10 @@ const fakeBrowser: any = {
       }
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
-      const pending = handleBackfillMessage(message, origin, syntheticPageFetch as any);
+      if ((message as { type?: string } | null)?.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, observed: true, workspace: 'acct-w303-synthetic-test' };
+      }
+      const pending = handleBackfillMessage(message, origin, withChatGptFetchIdentity(syntheticPageFetch) as any);
       if (!pending) return undefined;
       return await pending;
     },

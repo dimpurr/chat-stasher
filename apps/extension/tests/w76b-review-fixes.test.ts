@@ -56,6 +56,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { handleBackfillMessage, rememberTab, type TabQueryRow } from '../lib/backfill/tab-port';
 import { withChatGptFetchIdentity } from './chatgpt-lease-fixtures';
 import { createClaudePageScope, type ClaudePageScope } from '../lib/backfill/claude-page';
@@ -206,6 +207,9 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       const tab = tabs.get(tabId);
       if (!tab) throw new Error('Could not establish connection. Receiving end does not exist.');
+      if ((message as { type?: string } | null)?.type === 'cs-backfill-chatgpt-workspace') {
+        return { ok: true, observed: true, workspace: 'acct-w303-synthetic-test' };
+      }
       const pending = contentScriptListener(tab, message);
       if (!pending) return undefined;
       return await pending;
@@ -620,7 +624,7 @@ describe('W76b-4 · a scope whose next run would fetch nothing does not spend th
       // The same clock the tick gives it, so "today" is the day the fixture's cap
       // was drawn for — otherwise the engine rolls a new day and draws a new cap.
       clock: runtimeClock,
-      http: async () => { throw new Error('a capped run must not fetch'); },
+      http: withChatGptLeaseIdentity(async () => { throw new Error('a capped run must not fetch'); }),
     });
     console.log('[W76b-4a] direct run on the capped scope:', report.stopped);
     expect(report.stopped).toBe('daily-cap');

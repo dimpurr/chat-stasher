@@ -148,6 +148,7 @@ export interface HttpResponse {
  */
 export type HttpPort = ((url: string, init?: BackfillRequestInit) => Promise<HttpResponse>) & {
   chatgptWorkspace?: () => Promise<import('./chatgpt-workspace').ChatGptWorkspaceResolution>;
+  chatgptAccountIdentity?: () => Promise<AccountIdentity | null>;
 };
 
 /** 🔴 GET with no body ⇒ fall back to the old call `http(url)`, byte for byte. This line is the back-compat landing point. */
@@ -1528,9 +1529,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     runLease.kind === 'run'
       ? { value: runLease.lease.value, saltId: runLease.lease.saltId, source: runLease.lease.source }
       : null;
-  // A stored lease from an earlier run can be incomparable after its per-install
-  // salt changes. The first request-local proof re-establishes it for this run;
-  // later salt changes are unknown and cannot silently replace this run's lease.
+  // Startup identity is taken separately before the first enumeration request.
   let chatGptLeaseObservedThisRun = false;
   if (runLease.kind === 'refuse') {
     // 🔴 The refusal **writes** — it is a stop like any other, and it goes through the
@@ -1596,23 +1595,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       const identity = chatgptAccountIdentity ?? null;
       if (identity === null) return { verdict: 'unavailable' };
       if (identity.source !== 'request-header-chatgpt-account-id') return { verdict: 'unavailable' };
-      if (!chatGptLeaseObservedThisRun) {
-        if (leaseIdentity === null
-          || leaseIdentity.saltId !== identity.saltId
-          || leaseIdentity.source !== 'request-header-chatgpt-account-id') {
-          // An unknown starting identity cannot be guessed from workspace scope.
-          // A prior-run lease under a replaced salt is incomparable, so this first
-          // request-local proof refreshes it without accusing the unchanged account.
-          state.accountLease = { ...identity, at: clock.now() };
-          leaseIdentity = identity;
-          await persist(state);
-          chatGptLeaseObservedThisRun = true;
-          return { verdict: 'agrees' };
-        }
-      }
       if (leaseIdentity === null || leaseIdentity.saltId !== identity.saltId) return { verdict: 'unavailable' };
       const verdict = compareAccountLease(leaseIdentity, identity);
-      chatGptLeaseObservedThisRun = true;
       if (verdict === 'agrees') return { verdict: 'agrees' };
       if (verdict === 'incomparable') return { verdict: 'unavailable' };
       return { verdict: 'differs', identity, id: null };
@@ -1680,6 +1664,37 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       + ' account is observed again',
     );
   };
+
+  // 🔴 W303 · ChatGPT's workspace scope is not its account lease. Read the
+  // page's current request-header observation through tabHttpPort, which returns
+  // only the per-install fingerprint. This must complete before the first list
+  // request; an absent, ambiguous, or incomparable starting identity stops here.
+  if (opts.platform === 'chatgpt' && !chatGptLeaseObservedThisRun) {
+    let identity: AccountIdentity | null = null;
+    try {
+      identity = await http.chatgptAccountIdentity?.() ?? null;
+    } catch {
+      identity = null;
+    }
+    if (!identity || identity.source !== 'request-header-chatgpt-account-id') {
+      return halt('refused-unknown', 'ChatGPT starting request identity was absent, ambiguous, or incomparable; enumeration was not started');
+    }
+    if (!leaseIdentity || leaseIdentity.saltId !== identity.saltId
+      || leaseIdentity.source !== identity.source) {
+      state.accountLease = { ...identity, at: clock.now() };
+      leaseIdentity = identity;
+      await persist(state);
+    } else {
+      const startingVerdict = compareAccountLease(leaseIdentity, identity);
+      if (startingVerdict === 'differs') {
+        return stopForAccountChange({ verdict: 'differs', identity, id: null }, 'enumerate');
+      }
+      if (startingVerdict !== 'agrees') {
+        return halt('refused-unknown', 'ChatGPT starting request identity was incomparable; enumeration was not started');
+      }
+    }
+    chatGptLeaseObservedThisRun = true;
+  }
 
   /** Check every ChatGPT detail HTTP response, including intermediate steps/pages. */
   const stopForUnattributableChatGptResponse = async (
