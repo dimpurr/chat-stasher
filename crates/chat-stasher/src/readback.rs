@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::store::{BackupStore, SESSIONS_DIR, SHARD_SUFFIX};
+use crate::store::{BackupStore, DuplicateShardPolicy, SESSIONS_DIR, SHARD_SUFFIX};
 
 /// One session merged back from the archive.
 #[derive(Debug, Clone)]
@@ -400,7 +400,7 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, wanted, false)
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
     }
 
     /// Raw cumulative bytes for L3 reconciliation and duplicate inventory.
@@ -411,14 +411,14 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, wanted, false)
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
     }
 
     fn read_cumulative_sessions_inner(
         &self,
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
-        collapse_duplicate_shards: bool,
+        shard_policy: DuplicateShardPolicy,
     ) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
@@ -534,7 +534,7 @@ impl BackupStore {
                         .with_context(|| format!("dump shard {shard}"))?;
                     shard_bodies.push(buf);
                 }
-                let duplicate_indices: BTreeSet<_> = if collapse_duplicate_shards {
+                let duplicate_indices: BTreeSet<_> = if shard_policy.collapses() {
                     crate::store::duplicate_shard_indices(&shard_bodies)
                         .into_iter()
                         .collect()
@@ -598,7 +598,7 @@ impl BackupStore {
     /// Traverses all snapshots cumulatively, grouping sessions by their newest
     /// snapshot appearance (ADR-021).
     pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, None, true)
+        self.read_cumulative_sessions_inner(mk, None, self.shard_policy())
     }
 
     /// Dump the individual sealed shards of selected sessions of one machine
@@ -704,6 +704,31 @@ impl BackupStore {
         &self,
         mk: &MasterKey,
         machine: &str,
+        visit: F,
+    ) -> anyhow::Result<CumulativeSessionRead>
+    where
+        F: FnMut(&str, &[u8]) -> anyhow::Result<()>,
+    {
+        // The index paths have no flag of their own, so their opt-out is the
+        // environment: [`crate::store::KEEP_ALL_SHARDS_ENV`] set to a truthy
+        // value keeps every stored shard in the indexed text instead of
+        // collapsing a whole-content replay.
+        self.for_each_archived_session_with_policy(
+            mk,
+            machine,
+            DuplicateShardPolicy::from_env(),
+            visit,
+        )
+    }
+
+    /// [`Self::for_each_archived_session`] with the shard-joining policy named
+    /// directly, so a caller (or a test) can decide it without a process-wide
+    /// environment change.
+    pub fn for_each_archived_session_with_policy<F>(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        shard_policy: DuplicateShardPolicy,
         mut visit: F,
     ) -> anyhow::Result<CumulativeSessionRead>
     where
@@ -775,7 +800,7 @@ impl BackupStore {
                     })?;
                     shard_bodies.push(buf);
                 }
-                let concat = crate::store::unique_shard_bodies(shard_bodies)
+                let concat = crate::store::select_shard_bodies(shard_bodies, shard_policy)
                     .into_iter()
                     .flatten()
                     .collect::<Vec<_>>();

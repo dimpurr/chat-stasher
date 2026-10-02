@@ -253,6 +253,9 @@ pub struct BackupStore {
     /// from (SRCH-1b). `None` is the default and the whole-cache-off case — see
     /// [`BackupStore::with_snapshot_cache`].
     snapshot_cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
+    /// How this store joins a session's shards: collapse a whole-content replay
+    /// (the default), or hand back every shard. See [`DuplicateShardPolicy`].
+    shard_policy: DuplicateShardPolicy,
 }
 
 impl BackupStore {
@@ -277,6 +280,7 @@ impl BackupStore {
             machine,
             body_cache: None,
             snapshot_cache: None,
+            shard_policy: DuplicateShardPolicy::Collapse,
         }
     }
 
@@ -291,7 +295,28 @@ impl BackupStore {
             machine: String::new(),
             body_cache: None,
             snapshot_cache: None,
+            shard_policy: DuplicateShardPolicy::Collapse,
         }
+    }
+
+    /// Set how this store joins a session's shards (default
+    /// [`DuplicateShardPolicy::Collapse`]).
+    ///
+    /// The opt-out exists because the collapse is a *reader* decision applied to
+    /// bytes that are still, and always will be, on the destination: a whole
+    /// replay that byte-for-byte repeats a session's entire preceding content
+    /// (timestamps and uuids included) is a re-seal, not new conversation, but no
+    /// reader can prove that from the shards alone. Selecting
+    /// [`DuplicateShardPolicy::KeepAll`] shows every stored shard, so an operator
+    /// can see exactly what a collapse dropped. It changes no bytes anywhere.
+    pub fn with_shard_policy(mut self, policy: DuplicateShardPolicy) -> Self {
+        self.shard_policy = policy;
+        self
+    }
+
+    /// The shard-joining policy this store reads with.
+    pub fn shard_policy(&self) -> DuplicateShardPolicy {
+        self.shard_policy
     }
 
     /// Serve this store's conversation-body reads from `cache` (ADR-034).
@@ -968,8 +993,13 @@ impl BackupStore {
             if shards.is_empty() {
                 continue;
             }
-            let (concat, hashes) =
-                dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
+            let (concat, hashes) = dump_shard_slots(
+                &repo,
+                &entries,
+                &shards,
+                self.body_cache.as_ref(),
+                self.shard_policy,
+            )?;
             return Ok((concat, hashes));
         }
 
@@ -1055,8 +1085,13 @@ impl BackupStore {
                     if shards.is_empty() {
                         continue;
                     }
-                    let (concat, hashes) =
-                        dump_shard_slots(&repo, &entries, &shards, self.body_cache.as_ref())?;
+                    let (concat, hashes) = dump_shard_slots(
+                        &repo,
+                        &entries,
+                        &shards,
+                        self.body_cache.as_ref(),
+                        self.shard_policy,
+                    )?;
                     out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
                     resolved.push(*session_id);
                 }
@@ -1134,6 +1169,7 @@ fn dump_shard_slots<S: rustic_core::IndexedFull>(
     entries: &[(PathBuf, rustic_core::repofile::Node)],
     shards: &[(u64, usize, String)],
     body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
+    policy: DuplicateShardPolicy,
 ) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
     let _scope = declare_session_scope(
         body_cache,
@@ -1151,7 +1187,11 @@ fn dump_shard_slots<S: rustic_core::IndexedFull>(
             .context("dump shard for session content")?;
         bodies.push(buf);
     }
-    let duplicates: BTreeSet<_> = duplicate_shard_indices(&bodies).into_iter().collect();
+    let duplicates: BTreeSet<_> = if policy.collapses() {
+        duplicate_shard_indices(&bodies).into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
     for ((_, _, name), (index, buf)) in shards.iter().zip(bodies.iter().enumerate()) {
         if duplicates.contains(&index) {
             continue;
@@ -1732,6 +1772,67 @@ pub fn find_duplicate_shard(
     Ok(None)
 }
 
+/// Environment variable the **index builders** read: set it to a non-empty value
+/// other than `0`, `false`, `no` or `off` and an activity or full-text index
+/// keeps every sealed shard instead of collapsing a whole-content replay.
+///
+/// The CLI has its own explicit `--no-collapse` flag on `read` and `export`;
+/// this variable is the same opt-out for the index paths, which have no flag of
+/// their own. It is read per build and changes nothing that is stored.
+pub const KEEP_ALL_SHARDS_ENV: &str = "CHAT_STASHER_NO_COLLAPSE";
+
+/// How a reader joins a session's sealed shards into its body.
+///
+/// The default is [`Self::Collapse`]: a run of shards that byte-for-byte replays
+/// the session's complete preceding shard sequence is dropped to its first copy,
+/// because that shape is exactly what a re-seal leaves and no reader can tell it
+/// from new content that happens to repeat the whole session. The stored shards
+/// are never touched either way — this decides only what the reader returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DuplicateShardPolicy {
+    /// Collapse a complete-prefix replay run to its first copy.
+    #[default]
+    Collapse,
+    /// Keep every shard, replays included. The opt-out.
+    KeepAll,
+}
+
+impl DuplicateShardPolicy {
+    /// The policy [`KEEP_ALL_SHARDS_ENV`] asks for in this process.
+    pub fn from_env() -> Self {
+        Self::from_env_value(std::env::var_os(KEEP_ALL_SHARDS_ENV).as_deref())
+    }
+
+    /// The policy a variable's *value* asks for. An unset, empty, `0`, `false`,
+    /// `no` or `off` value is [`Self::Collapse`]; anything else is
+    /// [`Self::KeepAll`]. Split out from [`Self::from_env`] so a test can decide
+    /// a value without mutating the process environment.
+    pub fn from_env_value(value: Option<&std::ffi::OsStr>) -> Self {
+        let keep = match value {
+            None => false,
+            Some(value) => {
+                let value = value.to_string_lossy();
+                let value = value.trim();
+                !value.is_empty()
+                    && !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "0" | "false" | "no" | "off"
+                    )
+            }
+        };
+        if keep {
+            Self::KeepAll
+        } else {
+            Self::Collapse
+        }
+    }
+
+    /// Whether a reader following this policy drops whole-content replays.
+    pub fn collapses(self) -> bool {
+        matches!(self, Self::Collapse)
+    }
+}
+
 /// Indices in a later run that replay the complete preceding shard sequence.
 ///
 /// Sequence order is the caller's order. Each replay shard must equal its
@@ -1762,12 +1863,47 @@ pub fn duplicate_shard_indices<T: Eq>(shards: &[T]) -> Vec<usize> {
 /// Keep the first sequence and later content unless a full shard-by-shard
 /// replay of that sequence follows it.
 pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    select_shard_bodies(shards, DuplicateShardPolicy::Collapse)
+}
+
+/// Apply a [`DuplicateShardPolicy`] to a session's shards: drop the copies a
+/// whole-content replay repeats under [`DuplicateShardPolicy::Collapse`], or
+/// return every shard unchanged under [`DuplicateShardPolicy::KeepAll`].
+pub fn select_shard_bodies(shards: Vec<Vec<u8>>, policy: DuplicateShardPolicy) -> Vec<Vec<u8>> {
+    if !policy.collapses() {
+        return shards;
+    }
     let duplicates: BTreeSet<_> = duplicate_shard_indices(&shards).into_iter().collect();
     shards
         .into_iter()
         .enumerate()
         .filter_map(|(index, shard)| (!duplicates.contains(&index)).then_some(shard))
         .collect()
+}
+
+/// The contiguous runs of a session's shard sequence that a
+/// [`DuplicateShardPolicy::Collapse`] read drops, each as
+/// `(first_index, shard_count)` in sequence order.
+///
+/// [`duplicate_shard_indices`] is the single source of which shards are dropped;
+/// this only groups its ascending indices so the repair inventory can name each
+/// collapsed run rather than a flat count. It returns no runs for
+/// [`DuplicateShardPolicy::KeepAll`], because that read drops nothing.
+pub fn collapsed_shard_runs<T: Eq>(
+    shards: &[T],
+    policy: DuplicateShardPolicy,
+) -> Vec<(usize, usize)> {
+    if !policy.collapses() {
+        return Vec::new();
+    }
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for index in duplicate_shard_indices(shards) {
+        match runs.last_mut() {
+            Some((start, len)) if *start + *len == index => *len += 1,
+            _ => runs.push((index, 1)),
+        }
+    }
+    runs
 }
 
 /// Find sealed shards in both layouts: legacy files directly under the
@@ -2212,6 +2348,71 @@ mod tests {
         );
         assert!(duplicate_shard_indices(&[a.clone(), b.clone(), a.clone()]).is_empty());
         assert!(duplicate_shard_indices(&[a, b, ab]).is_empty());
+    }
+
+    #[test]
+    fn keep_all_policy_returns_every_shard_and_collapse_drops_the_run() {
+        let a = b"alpha\n".to_vec();
+        let b = b"beta\n".to_vec();
+        let resealed = vec![a.clone(), b.clone(), a.clone(), b.clone()];
+
+        assert_eq!(
+            select_shard_bodies(resealed.clone(), DuplicateShardPolicy::Collapse),
+            vec![a.clone(), b.clone()],
+            "the default keeps the first sequence and drops the replay"
+        );
+        assert_eq!(
+            select_shard_bodies(resealed.clone(), DuplicateShardPolicy::KeepAll),
+            resealed,
+            "the opt-out returns every stored shard unchanged"
+        );
+
+        assert_eq!(
+            collapsed_shard_runs(&resealed, DuplicateShardPolicy::Collapse),
+            vec![(2, 2)],
+            "the replay is one run starting at index 2"
+        );
+        assert!(
+            collapsed_shard_runs(&resealed, DuplicateShardPolicy::KeepAll).is_empty(),
+            "the opt-out collapses nothing, so it names no run"
+        );
+
+        // A single-shard session sealed twice: the shape the ruling calls out.
+        let doubled = vec![a.clone(), a.clone()];
+        assert_eq!(
+            collapsed_shard_runs(&doubled, DuplicateShardPolicy::Collapse),
+            vec![(1, 1)]
+        );
+        assert_eq!(
+            select_shard_bodies(doubled.clone(), DuplicateShardPolicy::Collapse),
+            vec![a.clone()]
+        );
+        assert_eq!(
+            select_shard_bodies(doubled, DuplicateShardPolicy::KeepAll).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn keep_all_env_value_is_truthy_only_when_explicitly_on() {
+        assert_eq!(
+            DuplicateShardPolicy::from_env_value(None),
+            DuplicateShardPolicy::Collapse
+        );
+        for on in ["1", "true", "yes", "on", "keep-all", "TRUE"] {
+            assert_eq!(
+                DuplicateShardPolicy::from_env_value(Some(std::ffi::OsStr::new(on))),
+                DuplicateShardPolicy::KeepAll,
+                "`{on}` must turn the opt-out on"
+            );
+        }
+        for off in ["", "  ", "0", "false", "no", "off", "FALSE"] {
+            assert_eq!(
+                DuplicateShardPolicy::from_env_value(Some(std::ffi::OsStr::new(off))),
+                DuplicateShardPolicy::Collapse,
+                "`{off}` must leave the default collapse in place"
+            );
+        }
     }
 
     #[test]

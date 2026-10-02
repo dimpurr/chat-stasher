@@ -221,6 +221,43 @@ fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
         .as_str()
         .unwrap()
         .contains("separate decision"));
+    // The inventory lists every collapsed run, not only a count: one run, the
+    // second of the session's two shards.
+    let runs = json["collapsed_runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{json}");
+    assert_eq!(runs[0]["machine"], MACHINE);
+    assert_eq!(runs[0]["run_start_shard"], 1);
+    assert_eq!(runs[0]["run_shards"], 1);
+    assert_eq!(runs[0]["run_bytes"], (line.len() + 1) as u64);
+    assert_eq!(runs[0]["session_shards"], 2);
+    assert!(
+        !runs[0]["session"]
+            .as_str()
+            .unwrap()
+            .contains("w283-machine"),
+        "the run's session is the privacy-safe short id: {json}"
+    );
+
+    // The text report names the same run, so the default (non-JSON) inventory
+    // is as auditable as the machine-readable one.
+    let text = run(
+        sandbox,
+        &[
+            "repair-duplicates",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("collapsed-run") && text.contains("run_start_shard=1"),
+        "the text inventory must list the collapsed run:\n{text}"
+    );
+
     assert_eq!(
         fs::read_dir(repo.join("snapshots")).unwrap().count(),
         snapshots_before,

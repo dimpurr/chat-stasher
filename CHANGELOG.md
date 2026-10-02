@@ -22,8 +22,14 @@ under its own heading below.
   only when it is a byte-identical, shard-by-shard replay of that session's
   complete preceding shard sequence; other individual-shard repeats and
   matches against concatenated shard bytes are kept. The inventory reports
-  those other individual repeats as suspicious and kept. New exact shard replays
-  are no-ops at the writer. Run
+  those other individual repeats as suspicious and kept, and it **lists every
+  collapsed run** — the session, where in its shard sequence the run starts, how
+  many shards it spans and their bytes — so a collapse can be audited rather
+  than trusted. New exact shard replays are no-ops at the writer. The collapse
+  is a read decision and nothing is ever deleted: `read --no-collapse` and
+  `export --no-collapse` return every stored shard, and setting
+  `CHAT_STASHER_NO_COLLAPSE` (any value but `0`/`false`/`no`/`off`) makes the
+  next full-text or activity index build index every stored shard too. Run
   `chat-stasher repair-duplicates --destination <name> --json` to inventory a
   destination. It is a dry run and never removes shards or snapshots.
 - **Search inside conversation text.** `chat-stasher index build` builds a
