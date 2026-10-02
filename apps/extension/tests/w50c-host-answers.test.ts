@@ -59,6 +59,7 @@ import { recoverLedgerLoss } from '../lib/backfill/ledger';
 import { replaceDebtSet } from '../lib/backfill/debt-store';
 import { LAST_DELIVERED_KEY, contentFingerprint } from '../lib/recapture';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 
 // ---------------------------------------------------------------------------
 // The fake extension surface (the pattern of tests/w50-backfill-dedupe.test.ts).
@@ -154,7 +155,7 @@ function makeServer(ids: string[], body: (id: string, fetchNumber: number) => st
     fetches.set(id, n);
     return { status: 200, text: body(id, n) };
   };
-  return { port, listUrls, detailUrls };
+  return { port: withChatGptLeaseIdentity(port), listUrls, detailUrls };
 }
 
 // ---------------------------------------------------------------------------

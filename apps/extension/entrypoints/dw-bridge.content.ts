@@ -569,6 +569,17 @@ export default defineContentScript({
       //    Content-Type have already passed checkBackfillRequest's closed-set
       //    checks (serveBackfillFetch). Nothing is decided here, and nothing
       //    **may** be — the decision lives in exactly one place, that allowlist.
+      // 🔴 W303 · Bind the lease identity to this exact backfill request. The
+      //    request receives the page's single unambiguous observed value, and the
+      //    same value accompanies its response. Missing or ambiguous observation
+      //    stays null so the worker can refuse attribution. The raw value exists
+      //    only on this transient response path; the worker fingerprints it.
+      const isChatGpt = findPlatformForUrl(url)?.id === 'chatgpt';
+      const workspace = isChatGpt ? resolveChatGptWorkspace(chatGptWorkspaceObservation) : null;
+      const chatgptAccountIdHeader = workspace?.ok && workspace.observed ? workspace.workspace : null;
+      const accountHeader: Record<string, string> = chatgptAccountIdHeader === null
+        ? {}
+        : { 'ChatGPT-Account-Id': chatgptAccountIdHeader };
       const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
@@ -576,12 +587,13 @@ export default defineContentScript({
             headers: {
               accept: 'application/json',
               ...(init.contentType ? { 'content-type': init.contentType } : {}),
+              ...accountHeader,
             },
             body: init.body,
           })
         : await authorizedFetch(url, {
             credentials: 'same-origin',
-            headers: { accept: 'application/json' },
+            headers: { accept: 'application/json', ...accountHeader },
           });
       // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
       //    the page but does not own a token, and a decision taken here would be a
@@ -595,9 +607,13 @@ export default defineContentScript({
       //    header, so only the code holding the response can see it. The raw value is
       //    passed on; nothing is parsed or decided here.
       const retryAfter = answer.response.headers?.get('retry-after') ?? null;
-      return answer.survivedCredentialReread === true
-        ? { status: answer.response.status, text: () => answer.response.text(), survivedCredentialReread: true, retryAfter }
-        : { status: answer.response.status, text: () => answer.response.text(), retryAfter };
+      return {
+        status: answer.response.status,
+        text: () => answer.response.text(),
+        ...(answer.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
+        retryAfter,
+        ...(isChatGpt && chatgptAccountIdHeader !== null ? { chatgptAccountIdHeader } : {}),
+      };
     };
 
     /**

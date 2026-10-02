@@ -1231,13 +1231,14 @@ async function resolveHttpPort(origin: string, senderTabId?: number): Promise<Ht
   if (backfillTransport) return backfillTransport;
   const tabs = tabsApi();
   if (!tabs) return undefined;
+  const store = browserLocalStore();
   // On the live leg's path, the tab that sent the message **is open right now and
   // has just performed a real capture** — it is the most reliable fetch channel,
   // and there is no need to consult the registry again.
-  if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage);
-  const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
+  if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage, undefined, store);
+  const live = await pickLiveTab(store, origin, (id) =>
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
-  return live ? tabHttpPort(live.tabId, tabs.sendMessage) : undefined;
+  return live ? tabHttpPort(live.tabId, tabs.sendMessage, undefined, store) : undefined;
 }
 
 /**

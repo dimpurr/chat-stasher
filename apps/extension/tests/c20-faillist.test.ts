@@ -22,6 +22,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { headerOf, type BackfillState } from '../lib/backfill/types';
 
 // ---------------------------------------------------------------------------
@@ -80,7 +81,7 @@ function makeServer(ids: string[], total: number | null = ids.length) {
       }),
     };
   };
-  return { port, calls };
+  return { port: withChatGptLeaseIdentity(port as never), calls };
 }
 
 function liveCapture(): CapturedFetch {

@@ -53,6 +53,7 @@ import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import { handleBackfillMessage, rememberTab, type TabQueryRow } from '../lib/backfill/tab-port';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { withChatGptFetchIdentity } from './chatgpt-lease-fixtures';
 
 const ORIGIN = 'https://chatgpt.com';
 const PLATFORM = 'chatgpt';
@@ -146,7 +147,7 @@ const fakeBrowser: any = {
     async sendMessage(tabId: number, message: unknown) {
       const origin = liveTabs.get(tabId);
       if (!origin) throw new Error('Could not establish connection. Receiving end does not exist.');
-      const pending = handleBackfillMessage(message, origin, syntheticPageFetch as any);
+      const pending = handleBackfillMessage(message, origin, withChatGptFetchIdentity(syntheticPageFetch) as any);
       if (!pending) return undefined;
       return await pending;
     },

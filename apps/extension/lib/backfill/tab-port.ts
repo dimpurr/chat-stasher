@@ -110,10 +110,13 @@
 
 import {
   currentReleaseChannel,
+  findPlatformForUrl,
   getPlatformByOrigin,
+  chatGptAccountIdHeaderValue,
   MAX_RAW_BYTES,
   type ReleaseChannel,
 } from '../contract';
+import { accountFingerprintFor } from '../account-fingerprint';
 import type { OrgResolution } from './claude-org';
 import type { ChatGptWorkspaceResolution } from './chatgpt-workspace';
 import {
@@ -226,7 +229,15 @@ export type BackfillFetchReply =
    * so that a reply from any other wrapper, and every existing reply shape, stays what
    * it was.
    */
-  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean; retryAfter?: string }
+  | {
+      ok: true;
+      status: number;
+      text: string;
+      survivedCredentialReread?: boolean;
+      retryAfter?: string;
+      /** Transient page-local request identity; the worker fingerprints then discards it. */
+      chatgptAccountIdHeader?: string | null;
+    }
   | { ok: false; error: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -798,6 +809,8 @@ export type FetchLike = (
    * it did before.
    */
   retryAfter?: string | null;
+  /** Exact ChatGPT-Account-Id attached to this request; null means unavailable or ambiguous. */
+  chatgptAccountIdHeader?: string | null;
 }>;
 
 /**
@@ -857,16 +870,23 @@ export async function serveBackfillFetch(
     const status = res.status;
     const rateLimited = status === 429 || status === 503;
     const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
+    const carriesChatGptIdentity = findPlatformForUrl(verdict.url)?.id === 'chatgpt';
+    const rawChatGptAccountId = carriesChatGptIdentity
+      ? chatGptAccountIdHeaderValue(res.chatgptAccountIdHeader)
+      : null;
+    const chatgptAccountIdHeader = rawChatGptAccountId === null
+      ? {}
+      : { chatgptAccountIdHeader: rawChatGptAccountId };
     let text: string;
     try {
       text = await res.text();
       if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
         // The same size red line as the live leg: an over-large response is not conversation JSON.
-        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader };
         return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
       }
     } catch (err) {
-      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader };
       // Only the technical detail goes back, never the body.
       return { ok: false, error: (err as Error).message };
     }
@@ -879,6 +899,7 @@ export async function serveBackfillFetch(
       text,
       ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
       ...carryRetryAfter,
+      ...chatgptAccountIdHeader,
     };
   } catch (err) {
     // Only the technical detail goes back, never the body.
@@ -1043,6 +1064,7 @@ export function tabHttpPort(
   tabId: number,
   send: TabSend,
   timeoutMs: number = BACKFILL_TAB_REPLY_TIMEOUT_MS,
+  identityStore: BackfillStore | null = null,
 ): HttpPort {
   const port: HttpPort = async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
     // 🔴 The back-compat landing point: GET with no body ⇒ the message sent is
@@ -1070,6 +1092,22 @@ export function tabHttpPort(
     const response: HttpResponse = { status: reply.status, text: reply.text };
     if (reply.survivedCredentialReread === true) response.survivedCredentialReread = true;
     if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
+    if (findPlatformForUrl(url)?.id === 'chatgpt') {
+      const raw = chatGptAccountIdHeaderValue(reply.chatgptAccountIdHeader);
+      if (raw !== null && identityStore) {
+        const fingerprint = await accountFingerprintFor({
+          url, method: init?.method ?? 'GET', status: reply.status,
+          text: reply.text, capturedAt: Date.now(), chatgptAccountIdHeader: raw,
+        }, identityStore, null);
+        if (fingerprint.kind === 'fingerprint') {
+          response.chatgptAccountIdentity = {
+            value: fingerprint.value,
+            saltId: fingerprint.saltId,
+            source: fingerprint.source,
+          };
+        }
+      }
+    }
     return response;
   };
   port.chatgptWorkspace = async (): Promise<ChatGptWorkspaceResolution> => {

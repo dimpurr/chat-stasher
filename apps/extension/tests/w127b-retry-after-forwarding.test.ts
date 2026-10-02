@@ -15,9 +15,14 @@ import { describe, it, expect, vi } from 'vitest';
 
 import { MAX_RAW_BYTES } from '../lib/contract';
 import {
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpPort,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import {
   DEFAULT_ENUM_PACE,

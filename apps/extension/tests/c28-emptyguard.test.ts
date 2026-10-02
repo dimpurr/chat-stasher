@@ -11,9 +11,14 @@ import { describe, expect, it } from 'vitest';
 import {
   DETAIL_EMPTY_HALT_STREAK,
   loadState,
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpResponse,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { CHATGPT_LIST_PATH, CHATGPT_PLAN, type BackfillEnumPlan } from '../lib/backfill/enumerate';
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillState } from '../lib/backfill/types';

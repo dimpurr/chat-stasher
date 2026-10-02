@@ -75,11 +75,13 @@ function syntheticPageFetch(url: string) {
   if (u.pathname === '/backend-api/conversations') {
     return Promise.resolve({
       status: 200,
+      chatgptAccountIdHeader: 'acct-fixture-1',
       text: async () => JSON.stringify({ items: IDS.map((id) => ({ id })), total: IDS.length }),
     });
   }
   return Promise.resolve({
     status: 200,
+    chatgptAccountIdHeader: 'acct-fixture-1',
     text: async () => JSON.stringify({
       mapping: { n1: { id: 'n1', message: { content: { parts: ['synthetic'] } } } },
       current_node: 'n1',

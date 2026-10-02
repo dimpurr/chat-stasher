@@ -42,11 +42,13 @@ import {
   suspensionFor,
 } from '../lib/backfill/account-lease';
 import { enqueueDebts } from '../lib/backfill/debts';
-import { runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
+import { runBackfill, type HttpPort, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
 import { openLedger } from '../lib/backfill/ledger';
 import { memoryStore } from '../lib/backfill/store';
 import type { Clock } from '../lib/backfill/pace';
 import { stateKey, type BackfillHeader } from '../lib/backfill/types';
+import { chatGptWorkspaceScope, fingerprintedChatGptWorkspace, resolveChatGptWorkspace } from '../lib/backfill/chatgpt-workspace';
+import { serveBackfillFetch, tabHttpPort } from '../lib/backfill/tab-port';
 
 // ---------------------------------------------------------------------------
 // Synthetic fixtures. No real account id, conversation id or email appears
@@ -165,6 +167,34 @@ function saltIdOf(store: ReturnType<typeof memoryStore>): string {
   return (store.data[ACCOUNT_SALT_KEY] as { id: string }).id;
 }
 
+async function seedChatGptLease(
+  store: ReturnType<typeof memoryStore>,
+  scope: string,
+  accountId: string,
+  owed: string[] = [],
+  opts: { enumerated?: boolean } = {},
+): Promise<void> {
+  const opened = await openLedger(store, 'chatgpt', scope);
+  if (!opened.ok) throw new Error('fixture must open the ChatGPT ledger');
+  opened.state.accountLease = {
+    value: await fingerprintFor(store, accountId),
+    saltId: saltIdOf(store),
+    source: 'request-header-chatgpt-account-id',
+    at: 1,
+  };
+  opened.state.enumCursor = { offset: owed.length, complete: opts.enumerated ?? owed.length > 0 };
+  enqueueDebts(opened.state, owed);
+  await opened.ledger.save(opened.state);
+}
+
+async function fingerprintFor(store: ReturnType<typeof memoryStore>, id: string): Promise<string> {
+  const salt = await loadOrCreateAccountSalt(store);
+  if (!salt || salt === 'unreadable') throw new Error('fixture must produce a salt');
+  const value = await fingerprintAccountId(salt, ACCOUNT_FINGERPRINT_DOMAIN, 'chatgpt', id);
+  if (value === null) throw new Error('fixture must produce a fingerprint');
+  return value;
+}
+
 /**
  * Give a scope a lease and (optionally) some owed ids, written through the ledger so the
  * header and the debt store agree — a header that disagrees with the store is W45's
@@ -245,9 +275,9 @@ describe('W199-A · the lease is step 1\'s construction, read from the scope', (
     const store = memoryStore();
     expect(await accountLeaseForScope('grok', 'default', store, 1))
       .toEqual({ kind: 'unleased', reason: 'scope-names-no-account' });
-    // ChatGPT's scope is the same ADR-002 axis and it is deliberately **not** leased: its
-    // stable id is the `ChatGPT-Account-Id` header (ADR-031), which this build does not
-    // capture, and W108 owns binding it.
+    // ChatGPT is not scope-derived leased: its workspace scope and its stable
+    // ChatGPT-Account-Id request header are separate axes. W303 checks the latter
+    // on every response in the engine.
     expect(await accountLeaseForScope('chatgpt', ACCOUNT_A, store, 1))
       .toEqual({ kind: 'unleased', reason: 'platform-not-scoped' });
     // 🔴 W239 · Claude is the third case and it is *not* the second one: its scope does name
@@ -508,5 +538,239 @@ describe('W199-G · a refused run writes nothing', () => {
     // `openLedger`'s refusal, unchanged: an unreadable record is not a record to reason about.
     expect(result.halted?.reason).toBe('state-unreadable');
     expect(server.calls).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// Part C · W303 · ChatGPT's request-local header identity is its run lease
+// ===========================================================================
+describe('W303 · ChatGPT checks the request-local account header on every response', () => {
+  const workspace = 'fixture-shared-workspace';
+  const scope = chatGptWorkspaceScope(workspace)!;
+
+  it('carries the exact backfill request header through the page reply and tab port', async () => {
+    const requestHeader = 'acct-backfill-fixture';
+    const reply = await serveBackfillFetch(
+      'https://chatgpt.com/backend-api/conversations?offset=0&limit=100',
+      'https://chatgpt.com',
+      async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ items: [] }),
+        chatgptAccountIdHeader: requestHeader,
+      }) as never,
+    );
+    expect(reply).toMatchObject({ ok: true, chatgptAccountIdHeader: requestHeader });
+
+    const store = memoryStore();
+    const port = tabHttpPort(7, async () => reply, undefined, store);
+    const response = await port('https://chatgpt.com/backend-api/conversations?offset=0&limit=100');
+    expect(response.chatgptAccountIdentity).toEqual({
+      value: await fingerprintFor(store, requestHeader),
+      saltId: saltIdOf(store),
+      source: 'request-header-chatgpt-account-id',
+    });
+    expect(JSON.stringify(response)).not.toContain(requestHeader);
+  });
+
+  function chatGptPort(runStore: ReturnType<typeof memoryStore>, opts: {
+    listHeader?: string | null;
+    detailHeader?: string | null;
+    listIds?: string[];
+    calls?: string[];
+  }) {
+    const calls = opts.calls ?? [];
+    const accountIdentity = async (header: string | null | undefined) => header
+      ? {
+          value: await fingerprintFor(runStore, header),
+          saltId: saltIdOf(runStore),
+          source: 'request-header-chatgpt-account-id' as const,
+        }
+      : null;
+    const http = Object.assign(async (url: string): Promise<HttpResponse> => {
+      calls.push(url);
+      const parsed = new URL(url);
+      if (parsed.pathname === '/backend-api/conversations') {
+        return {
+          status: 200,
+          text: JSON.stringify({ items: (opts.listIds ?? []).map((id) => ({ id })) }),
+          chatgptAccountIdentity: await accountIdentity(opts.listHeader),
+        } as HttpResponse;
+      }
+      if (parsed.pathname.startsWith('/backend-api/conversation/')) {
+        return {
+          status: 200,
+          text: JSON.stringify({
+            conversation_id: parsed.pathname.split('/').pop(), current_node: 'node',
+            mapping: { node: { message: { author: { role: 'user' }, content: { parts: ['synthetic'] } } } },
+          }),
+          chatgptAccountIdentity: await accountIdentity(opts.detailHeader),
+        } as HttpResponse;
+      }
+      throw new Error(`unexpected ChatGPT fixture route: ${parsed.pathname}`);
+    }, {
+      chatgptWorkspace: async () => ({ ok: true as const, workspace, observed: true as const }),
+    });
+    return { http, calls };
+  }
+
+  function runChatGpt(store: ReturnType<typeof memoryStore>, http: unknown) {
+    const delivered: CapturedFetch[] = [];
+    const report = runBackfill({
+      platform: 'chatgpt', origin: 'https://chatgpt.com', scope, store,
+      http: http as never, clock: fakeClock(), pace: NO_WAIT,
+      sink: (captured) => { delivered.push(captured); return { saved: true, sessionId: captured.sessionId }; },
+    });
+    return { report, delivered };
+  }
+
+  it('takes its lease from the first list reply, then accepts IDs only under that header identity', async () => {
+    const store = memoryStore();
+    const opened = await openLedger(store, 'chatgpt', scope);
+    if (!opened.ok) throw new Error('fixture must open the unleased ChatGPT ledger');
+    opened.state.enumCursor = { offset: 0, complete: false };
+    await opened.ledger.save(opened.state);
+    const port = chatGptPort(store, { listHeader: ACCOUNT_A, detailHeader: ACCOUNT_A, listIds: [C1] });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted).toBeNull();
+    expect(result.archivedThisRun).toContain(C1);
+    expect(storedHeader('chatgpt', scope, store.data).accountLease).toMatchObject({
+      value: await fingerprintFor(store, ACCOUNT_A), source: 'request-header-chatgpt-account-id',
+    });
+  });
+
+  it('a list reply for B is not enqueued; suspends A and keeps every old pending id', async () => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A, [C1], { enumerated: false });
+    const port = chatGptPort(store, { listHeader: ACCOUNT_B, detailHeader: ACCOUNT_A, listIds: [C2] });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted?.reason).toBe('account-changed');
+    expect(result.state.pending).toEqual([C1]);
+    expect(result.newDebts).toBe(0);
+    expect(result.accountChangedTo?.id).toBe(
+      chatGptWorkspaceScope(fingerprintedChatGptWorkspace(await fingerprintFor(store, ACCOUNT_B))),
+    );
+    expect(result.accountChangedTo?.id).not.toContain(ACCOUNT_B);
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toMatchObject({
+      reason: 'account-changed', lease: { value: await fingerprintFor(store, ACCOUNT_A) },
+      observed: { value: await fingerprintFor(store, ACCOUNT_B) },
+    });
+    expect(JSON.stringify(store.data)).not.toContain(ACCOUNT_A);
+    expect(JSON.stringify(store.data)).not.toContain(ACCOUNT_B);
+  });
+
+  it('a detail reply for B is neither settled nor delivered; preserves all pending ids', async () => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A, [C1, C2]);
+    const port = chatGptPort(store, { listHeader: ACCOUNT_A, detailHeader: ACCOUNT_B });
+    const { report, delivered } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted?.reason).toBe('account-changed');
+    expect(result.state.pending).toEqual([C1, C2]);
+    expect(result.archivedThisRun).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(storedHeader('chatgpt', scope, store.data).suspended?.reason).toBe('account-changed');
+  });
+
+  it('a detail mismatch suspends the lease established by this same first run', async () => {
+    const store = memoryStore();
+    const port = chatGptPort(store, { listHeader: ACCOUNT_A, detailHeader: ACCOUNT_B, listIds: [C1] });
+    const { report, delivered } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted?.reason).toBe('account-changed');
+    expect(result.state.pending).toEqual([C1]);
+    expect(result.archivedThisRun).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toMatchObject({
+      reason: 'account-changed',
+      lease: { value: await fingerprintFor(store, ACCOUNT_A) },
+      observed: { value: await fingerprintFor(store, ACCOUNT_B) },
+    });
+  });
+
+  it('missing request identity fails closed before list IDs or detail debt can change', async () => {
+    const store = memoryStore();
+    const port = chatGptPort(store, { listHeader: null, listIds: [C2] });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted?.reason).toBe('refused-unknown');
+    expect(result.newDebts).toBe(0);
+    expect(result.state.pending).toEqual([]);
+    expect(result.state.enumCursor.offset).toBe(0);
+    expect(storedHeader('chatgpt', scope, store.data).accountLease).toBeUndefined();
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
+    expect(resolveChatGptWorkspace({ accountIds: [ACCOUNT_A, ACCOUNT_B] })).toEqual({
+      ok: false, reason: 'workspace-ambiguous', observed: true,
+    });
+  });
+
+  it('a distinct header identity mismatches even while the canonical workspace scope stays the same', async () => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A);
+    const port = chatGptPort(store, { listHeader: ACCOUNT_B, detailHeader: ACCOUNT_B, listIds: [C2] });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(scope).toBe(chatGptWorkspaceScope(workspace));
+    expect(result.halted?.reason).toBe('account-changed');
+    expect(result.state.pending).not.toContain(C2);
+  });
+
+  it('a salt change after this run has established its lease makes the response unknown', async () => {
+    const store = memoryStore();
+    const replacementStore = memoryStore();
+    const replacementSalt = await loadOrCreateAccountSalt(replacementStore);
+    if (!replacementSalt || replacementSalt === 'unreadable') throw new Error('fixture must produce replacement salt');
+    const identity = async (target: ReturnType<typeof memoryStore>, header: string) => ({
+      value: await fingerprintFor(target, header),
+      saltId: saltIdOf(target),
+      source: 'request-header-chatgpt-account-id' as const,
+    });
+    const first = await identity(store, ACCOUNT_A);
+    const incomparable = await identity(replacementStore, ACCOUNT_A);
+    const delivered: CapturedFetch[] = [];
+    const http: HttpPort = async (url) => new URL(url).pathname === '/backend-api/conversations'
+      ? { status: 200, text: JSON.stringify({ items: [{ id: C1 }] }), chatgptAccountIdentity: first }
+      : {
+          status: 200,
+          text: JSON.stringify({
+            conversation_id: C1, current_node: 'node',
+            mapping: { node: { message: { author: { role: 'user' }, content: { parts: ['synthetic'] } } } },
+          }),
+          chatgptAccountIdentity: incomparable,
+        };
+    const report = await runBackfill({
+      platform: 'chatgpt', origin: 'https://chatgpt.com', scope, store,
+      http, clock: fakeClock(), pace: NO_WAIT,
+      sink: (captured) => { delivered.push(captured); return { saved: true, sessionId: captured.sessionId }; },
+    });
+
+    expect(report.halted?.reason).toBe('refused-unknown');
+    expect(report.state.pending).toEqual([C1]);
+    expect(report.archivedThisRun).toEqual([]);
+    expect(delivered).toEqual([]);
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
+  });
+
+  it('the same ID under a replacement salt is incomparable and refreshes the lease without suspension', async () => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A);
+    const replacementStore = memoryStore();
+    const replacementSalt = await loadOrCreateAccountSalt(replacementStore);
+    if (!replacementSalt || replacementSalt === 'unreadable') throw new Error('fixture must produce replacement salt');
+    store.data[ACCOUNT_SALT_KEY] = replacementStore.data[ACCOUNT_SALT_KEY];
+    const port = chatGptPort(store, { listHeader: ACCOUNT_A, detailHeader: ACCOUNT_A, listIds: [C1] });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted).toBeNull();
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
+    expect(storedHeader('chatgpt', scope, store.data).accountLease?.saltId).toBe(replacementSalt.id);
   });
 });

@@ -40,6 +40,7 @@ import { describe, expect, it } from 'vitest';
 import { PLATFORMS } from '../lib/contract';
 import { runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import {
   KIMI_CHAT_FEED_TYPE,
   KIMI_DETAIL_PATH,
@@ -254,7 +255,7 @@ describe('W64-3 · the status is classified the same way whichever plan is drivi
         origin,
         scope: 'w64',
         store: memoryStore(),
-        http: http as never,
+        http: (platform === 'chatgpt' ? withChatGptLeaseIdentity(http) : http) as never,
         clock,
         pace: NO_WAIT,
         sink: (captured): SinkOutcome => ({ saved: true, sessionId: captured.sessionId }),

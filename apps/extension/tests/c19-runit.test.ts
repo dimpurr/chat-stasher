@@ -13,7 +13,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
-import { loadState, runBackfill } from '../lib/backfill/engine';
+import { loadState, runBackfill as runBackfillRaw } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import type { BackfillState } from '../lib/backfill/types';
 import { memoryStore } from '../lib/backfill/store';
 import { DAILY_CAP_MAX, DEFAULT_DETAIL_PACE, type Clock } from '../lib/backfill/pace';
@@ -219,6 +224,7 @@ function syntheticPageFetch(url: string) {
     const offset = Number(u.searchParams.get('offset') ?? '0');
     return Promise.resolve({
       status: 200,
+      chatgptAccountIdHeader: 'acct-fixture-1',
       text: async () => JSON.stringify({
         items: IDS.slice(offset).map((id) => ({ id })),
         total: IDS.length,
@@ -228,6 +234,7 @@ function syntheticPageFetch(url: string) {
   const id = decodeURIComponent(u.pathname.replace('/backend-api/conversation/', ''));
   return Promise.resolve({
     status: 200,
+    chatgptAccountIdHeader: 'acct-fixture-1',
     text: async () => JSON.stringify({
       mapping: { n1: { id: 'n1', message: { content: { parts: [`synthetic ${id}`] } } } },
       current_node: 'n1',

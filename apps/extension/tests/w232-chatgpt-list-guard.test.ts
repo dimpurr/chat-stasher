@@ -66,10 +66,15 @@ import { describe, expect, it } from 'vitest';
 import {
   listPageFingerprint,
   loadState,
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpResponse,
   type HttpPort,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore, type BackfillStore } from '../lib/backfill/store';
 import { replaceDebtSet } from '../lib/backfill/debt-store';
 import { DEFAULT_LIST_LIMIT, CHATGPT_PLAN } from '../lib/backfill/enumerate';

@@ -16,8 +16,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import type { CapturedFetch } from '../lib/contract';
+import type { HttpPort } from '../lib/backfill/engine';
 import { stateKey, type BackfillState } from '../lib/backfill/types';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 
 // ---------------------------------------------------------------------------
 // A fake browser. Storage **survives resetModules** — which is exactly the model of a "browser restart":
@@ -106,7 +108,7 @@ function makeServer(opts: ServerOpts) {
       }),
     };
   };
-  return { port, calls };
+  return { port: withChatGptLeaseIdentity(port as HttpPort), calls };
 }
 
 /** The live leg's payload (a synthetic fixture, not anybody's actual conversation). */

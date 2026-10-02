@@ -30,6 +30,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 import { DAY_SLOW_KEY, localMidnightAfter } from '../lib/backfill/day-slow';
 import type { CapturedFetch } from '../lib/contract';
@@ -186,7 +187,7 @@ beforeEach(async () => {
 describe('W296-D · a 429 on a real round arms the brake at the gateway', () => {
   it('🔴 the round stops on the 429 and storage carries the platform brake until the next local midnight', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(always(429));
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(429)));
 
     const tick = await runRound(mod);
     expect(tick?.report).toMatchObject({ halted: { reason: 'rate-limited' } });
@@ -205,7 +206,7 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
 
   it('🔴 a 403 is a refusal but not this brake: no record is written', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(always(403));
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(403)));
 
     const tick = await runRound(mod);
     expect(tick?.report).toMatchObject({ halted: { reason: 'rate-limited' } });
@@ -214,7 +215,7 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
 
   it('🔴 a healthy round writes no brake at all', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(healthy());
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(healthy()));
 
     const tick = await runRound(mod);
     expect(tick?.report?.halted ?? null).toBeNull();
@@ -226,7 +227,7 @@ describe('W296-E · the next round obeys the brake', () => {
   it('🔴 a `faster` install fetches four bodies a round, and one once the brake is armed', async () => {
     store['cs_backfill_speed_v1'] = 'faster';
     const mod = await bootBackground();
-    mod.configureBackfillTransport(healthy());
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(healthy()));
 
     requests = [];
     await runRound(mod);

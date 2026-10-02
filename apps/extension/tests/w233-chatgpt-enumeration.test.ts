@@ -8,7 +8,12 @@ import {
 } from '../lib/backfill/enumerate';
 import { initialState, headerOf, isHeader, stateFrom } from '../lib/backfill/types';
 import { memoryStore } from '../lib/backfill/store';
-import { runBackfill } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 import {
   chatGptAccountIdFromRequest,

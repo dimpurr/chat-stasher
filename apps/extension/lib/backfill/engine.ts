@@ -38,7 +38,7 @@ import {
   type RunLease,
 } from './account-lease';
 import { accountFingerprintFor, accountIdFromCapture } from '../account-fingerprint';
-import { chatGptScopeWorkspace, chatGptUnresolvedScope, chatGptWorkspaceScope, isChatGptScope, isIdentitylessChatGptScope, isUnresolvedChatGptScope } from './chatgpt-workspace';
+import { chatGptScopeWorkspace, chatGptUnresolvedScope, chatGptWorkspaceScope, fingerprintedChatGptWorkspace, isChatGptScope, isIdentitylessChatGptScope, isUnresolvedChatGptScope } from './chatgpt-workspace';
 import type { AccountIdentity } from './types';
 import { isClaudeOrgId } from './claude-org';
 import { recordDebtTimes } from './debt-store';
@@ -126,6 +126,8 @@ export interface HttpResponse {
    * and means the ladder decides. A non-2xx response is the only one that reads it.
    */
   retryAfter?: string;
+  /** Request-local ChatGPT header identity, already fingerprinted by the tab port. */
+  chatgptAccountIdentity?: AccountIdentity | null;
 }
 
 /**
@@ -424,11 +426,10 @@ export interface RunReport {
    * 🔴 W199 · **The account a response named when it disagreed with this run's lease**,
    * or `null` when no response proved a different account.
    *
-   * The raw id is here, and only here, because the target registry belongs to the
-   * caller and W128 step 2's second half — "start/resume the scope for the new
-   * account" — is a registry write. It is **never** logged, never written to the header
-   * and never archived: the header keeps the fingerprint (`state.suspended`), and the
-   * report is in-memory and dies with the run.
+   * Scope-derived platforms carry a transient raw id so the caller can register its
+   * target. ChatGPT carries a canonical fingerprinted scope instead: its raw request
+   * header has already been discarded by the tab port. Neither form is logged,
+   * written to a halt or suspension, or archived.
    */
   accountChangedTo: AccountObservation | null;
   state: BackfillState;
@@ -444,7 +445,7 @@ export interface RunReport {
  */
 export interface AccountObservation {
   identity: AccountIdentity;
-  /** The account's scope string. Never logged, never persisted, never archived. */
+  /** The target scope to register; ChatGPT supplies a canonical fingerprinted workspace scope. */
   id: string;
   /** Which segment proved it — the same word the halt detail carries. */
   where: 'enumerate' | 'detail';
@@ -1120,10 +1121,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   let enumTruncated: EnumTruncation | null = state.enumCursor.truncated ?? null;
   const detailOutcomes = state.detailOutcomes ?? (state.detailOutcomes = []);
   /**
-   * 🔴 W199 · The raw id of an account a response named that is not this scope's, or
-   * `null`. Set at most once — the first proven disagreement stops the run, so there
-   * is never a second — and it leaves the process through `RunReport.accountChangedTo`
-   * (the caller's registry write) and nowhere else.
+   * 🔴 W199 · The target identity for the first response that disagreed with this
+   * scope's lease, or `null`. Scope-derived platforms use an in-memory raw id until
+   * the caller registers it; ChatGPT builds its target scope from the already-keyed
+   * fingerprint. It leaves through `RunReport.accountChangedTo` and nowhere else.
    */
   let accountChangedTo: AccountObservation | null = null;
 
@@ -1513,16 +1514,24 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   //    from the reason the lease module decides. `accountLeaseForScope` answers for every
   //    plan and touches the store for none of the ones it refuses, so there is one place
   //    this sentence comes from. See the bullet above.
-  const runLease: RunLease = decideRunLease(
-    state.accountLease,
-    await accountLeaseForScope(opts.platform, opts.scope, store, clock.now()),
-  );
+  const runLease: RunLease = opts.platform === 'chatgpt'
+    ? state.accountLease
+      ? { kind: 'run', lease: state.accountLease, take: false }
+      : { kind: 'unleased', reason: 'platform-not-scoped' }
+    : decideRunLease(
+      state.accountLease,
+      await accountLeaseForScope(opts.platform, opts.scope, store, clock.now()),
+    );
   // Exposed to the two attribution checks below as the one comparison partner, so the
   // list segment and the body segment cannot compare against different things.
-  const leaseIdentity: AccountIdentity | null =
+  let leaseIdentity: AccountIdentity | null =
     runLease.kind === 'run'
       ? { value: runLease.lease.value, saltId: runLease.lease.saltId, source: runLease.lease.source }
       : null;
+  // A stored lease from an earlier run can be incomparable after its per-install
+  // salt changes. The first request-local proof re-establishes it for this run;
+  // later salt changes are unknown and cannot silently replace this run's lease.
+  let chatGptLeaseObservedThisRun = false;
   if (runLease.kind === 'refuse') {
     // 🔴 The refusal **writes** — it is a stop like any other, and it goes through the
     //    one funnel so the popup, the coverage page and `scopeRetryDue` read it the same
@@ -1541,14 +1550,14 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
   /**
    * 🔴 W199 · What one response said about this run's lease.
    *
-   * `'differs'` carries everything the two consequences need: the fingerprint to record
-   * on the suspension, and the raw id (when the scan could read one) for the caller's
-   * registry write. `'unleased'` is the answer when this run has no lease at all, and it
+   * `'differs'` carries the fingerprint to record on the suspension and, for the
+   * scope-derived platforms, a raw id for the caller's registry write. ChatGPT's
+   * response identity is already fingerprinted in the tab port. `'unleased'` is the answer when this run has no lease at all, and it
    * is kept distinct from `'incomparable'` because they are different facts — "there is
    * no account here" versus "there is one and this response did not name it".
    */
   type AccountCheck =
-    | { verdict: 'agrees' | 'incomparable' | 'unleased' }
+    | { verdict: 'agrees' | 'incomparable' | 'unleased' | 'unavailable' }
     | { verdict: 'differs'; identity: AccountIdentity; id: string | null };
 
   /**
@@ -1574,14 +1583,40 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    ledger"). The lease's own `unknown` state is what makes "we could not tell"
    *    visible instead of guessed.
    *
-   * 🔴 The raw id is read for one purpose only: the caller's registry write for the new
-   *    account. It is not logged and not persisted.
+   * 🔴 On the scope-derived platforms, the raw id is read for one purpose only: the
+   *    caller's registry write. It is not logged or persisted.
    */
   const accountCheckOf = async (
     url: string,
     text: string,
     sessionId: string | null,
+    chatgptAccountIdentity?: AccountIdentity | null,
   ): Promise<AccountCheck> => {
+    if (opts.platform === 'chatgpt') {
+      const identity = chatgptAccountIdentity ?? null;
+      if (identity === null) return { verdict: 'unavailable' };
+      if (identity.source !== 'request-header-chatgpt-account-id') return { verdict: 'unavailable' };
+      if (!chatGptLeaseObservedThisRun) {
+        if (leaseIdentity === null
+          || leaseIdentity.saltId !== identity.saltId
+          || leaseIdentity.source !== 'request-header-chatgpt-account-id') {
+          // An unknown starting identity cannot be guessed from workspace scope.
+          // A prior-run lease under a replaced salt is incomparable, so this first
+          // request-local proof refreshes it without accusing the unchanged account.
+          state.accountLease = { ...identity, at: clock.now() };
+          leaseIdentity = identity;
+          await persist(state);
+          chatGptLeaseObservedThisRun = true;
+          return { verdict: 'agrees' };
+        }
+      }
+      if (leaseIdentity === null || leaseIdentity.saltId !== identity.saltId) return { verdict: 'unavailable' };
+      const verdict = compareAccountLease(leaseIdentity, identity);
+      chatGptLeaseObservedThisRun = true;
+      if (verdict === 'agrees') return { verdict: 'agrees' };
+      if (verdict === 'incomparable') return { verdict: 'unavailable' };
+      return { verdict: 'differs', identity, id: null };
+    }
     if (runLease.kind !== 'run' || leaseIdentity === null) return { verdict: 'unleased' };
     // Built once and used twice: the fingerprint and the raw id are two readings of one
     // response, and handing them two objects is how they would come to be two readings
@@ -1610,9 +1645,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
    *    running under and the fingerprint it saw instead — never an id;
    *  · **the halt** (`account-changed`) is the ordinary record of what happened, so the
    *    popup, the coverage page and `scopeRetryDue` all read one stop rather than three;
-   *  · **the raw id**, when the scan could read one, leaves through the report for the
-   *    caller's registry write ("start/resume the scope for the new account"). It is not
-   *    in either record above.
+   *  · **the target**, when it can be safely built, leaves through the report for the
+   *    caller's registry write. Scope-derived platforms use a transient raw id;
+   *    ChatGPT derives the canonical fingerprinted workspace scope from the keyed
+   *    identity. Neither value appears in the suspension or halt.
    *
    * 🔴 `where` says which segment proved it. The detail names no id and no
    *    conversation — the two fingerprints are on the suspension record, and a log line
@@ -1623,13 +1659,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     where: 'enumerate' | 'detail',
   ): Promise<RunReport> => {
     const suspended = suspensionFor(
-      runLease.kind === 'run' ? runLease.lease : undefined,
+      leaseIdentity ?? (runLease.kind === 'run' ? runLease.lease : undefined),
       check.identity,
       clock.now(),
     );
     if (suspended) state.suspended = suspended;
-    if (check.id !== null) {
-      accountChangedTo = { identity: check.identity, id: check.id, where };
+    if (opts.platform === 'chatgpt' || check.id !== null) {
+      // ChatGPT's workspace target and account lease are separate records. Its
+      // target is rebuilt through the canonical helper from the already-keyed
+      // identity so the raw header never leaves this function or enters storage.
+      const id = opts.platform === 'chatgpt'
+        ? chatGptWorkspaceScope(fingerprintedChatGptWorkspace(check.identity.value))
+        : check.id;
+      if (id !== null) accountChangedTo = { identity: check.identity, id, where };
     }
     return halt(
       'account-changed',
@@ -1637,6 +1679,22 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       + ' nothing was enqueued, nothing was settled, and this scope is suspended until its own'
       + ' account is observed again',
     );
+  };
+
+  /** Check every ChatGPT detail HTTP response, including intermediate steps/pages. */
+  const stopForUnattributableChatGptResponse = async (
+    url: string,
+    response: HttpResponse,
+    sessionId: string,
+    where: string,
+  ): Promise<RunReport | null> => {
+    if (opts.platform !== 'chatgpt') return null;
+    const check = await accountCheckOf(url, response.text, sessionId, response.chatgptAccountIdentity);
+    if (check.verdict === 'unavailable') {
+      return halt('refused-unknown', `${where}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this conversation remains pending`);
+    }
+    if (check.verdict === 'differs') return stopForAccountChange(check, 'detail');
+    return null;
   };
 
   // 🔴 W13 · A persisted halt is now **two different things**, and this is the line
@@ -2094,6 +2152,13 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       }
       return halt('transport-error', `${listWhere()}: ${(err as Error).message}`);
     }
+    if (opts.platform === 'chatgpt') {
+      const requestIdentity = await accountCheckOf(url, res.text, null, res.chatgptAccountIdentity);
+      if (requestIdentity.verdict === 'unavailable') {
+        return halt('refused-unknown', `${listWhere()}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this page was not accepted`);
+      }
+      if (requestIdentity.verdict === 'differs') return stopForAccountChange(requestIdentity, 'enumerate');
+    }
     if (res.status < 200 || res.status > 299) {
       return halt(
         haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true),
@@ -2136,7 +2201,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * session id here would only give step 1's C21 guard something to reject a real
      * account id against.
      */
-    const listAccount = await accountCheckOf(url, res.text, null);
+    const listAccount = await accountCheckOf(url, res.text, null, res.chatgptAccountIdentity);
+    if (listAccount.verdict === 'unavailable') {
+      return halt('refused-unknown', `${listWhere()}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this page was not accepted`);
+    }
     if (listAccount.verdict === 'differs') {
       return stopForAccountChange(listAccount, 'enumerate');
     }
@@ -2512,6 +2580,11 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         }
         return halt('transport-error', `ChatGPT ${source} page read failed: ${reason}`);
       }
+      const auxiliaryAccount = await accountCheckOf(url, response.text, null, response.chatgptAccountIdentity);
+      if (auxiliaryAccount.verdict === 'unavailable') {
+        return halt('refused-unknown', `ChatGPT ${source} response refused: request-local account identity was absent, ambiguous, or incomparable`);
+      }
+      if (auxiliaryAccount.verdict === 'differs') return stopForAccountChange(auxiliaryAccount, 'enumerate');
       if (response.status < 200 || response.status > 299) {
         return halt(haltReasonForStatus(response.status, plan.platform, response.survivedCredentialReread === true),
           `ChatGPT ${source} page returned HTTP ${response.status}`,
@@ -2806,6 +2879,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       //    for POST.
       return halt('transport-error', `detail: ${(err as Error).message}`);
     }
+    const firstDetailStop = await stopForUnattributableChatGptResponse(url, res, id, 'detail');
+    if (firstDetailStop) return firstDetailStop;
     if (res.status < 200 || res.status > 299) {
       return halt(haltReasonForStatus(res.status, plan.platform, res.survivedCredentialReread === true), `detail returned HTTP ${res.status}`, { retryAfterMs: retryAfterMsFor(res, clock.now()) });
     }
@@ -2842,6 +2917,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     let deliveredMethod: string = init.method;
     let deliveredStatus = res.status;
     let deliveredText = res.text;
+    let deliveredAccountIdentity = res.chatgptAccountIdentity;
     if (step2) {
       const body = step2.body(id, res.text);
       if (body === null) {
@@ -2858,6 +2934,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       } catch (err) {
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
+      const step2Stop = await stopForUnattributableChatGptResponse(step2Url, res2, id, 'detail step 2');
+      if (step2Stop) return step2Stop;
       if (res2.status < 200 || res2.status > 299) {
         return halt(haltReasonForStatus(res2.status, plan.platform, res2.survivedCredentialReread === true), `detail step 2 returned HTTP ${res2.status}`, { retryAfterMs: retryAfterMsFor(res2, clock.now()) });
       }
@@ -2865,6 +2943,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       deliveredMethod = 'POST';
       deliveredStatus = res2.status;
       deliveredText = res2.text;
+      deliveredAccountIdentity = res2.chatgptAccountIdentity;
     }
 
     /**
@@ -2932,6 +3011,8 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         } catch (err) {
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
+        const pageStop = await stopForUnattributableChatGptResponse(pageUrl, next, id, 'detail page');
+        if (pageStop) return pageStop;
         if (next.status < 200 || next.status > 299) {
           return halt(haltReasonForStatus(next.status, plan.platform, next.survivedCredentialReread === true), `detail page returned HTTP ${next.status}`, { retryAfterMs: retryAfterMsFor(next, clock.now()) });
         }
@@ -3053,7 +3134,10 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
      * this conversation's own id must not be read as an account id, and the guard that
      * enforces that is step 1's, reused rather than re-spelled.
      */
-    const detailAccount = await accountCheckOf(deliveredUrl, deliveredText, id);
+    const detailAccount = await accountCheckOf(deliveredUrl, deliveredText, id, deliveredAccountIdentity);
+    if (detailAccount.verdict === 'unavailable') {
+      return halt('refused-unknown', `detail: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this conversation remains pending`);
+    }
     if (detailAccount.verdict === 'differs') {
       return stopForAccountChange(detailAccount, 'detail');
     }

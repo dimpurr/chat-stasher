@@ -57,6 +57,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import { handleBackfillMessage, rememberTab, type TabQueryRow } from '../lib/backfill/tab-port';
+import { withChatGptFetchIdentity } from './chatgpt-lease-fixtures';
 import { createClaudePageScope, type ClaudePageScope } from '../lib/backfill/claude-page';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 
@@ -136,7 +137,7 @@ const pageFetch = async (url: string) => {
 function contentScriptListener(tab: FakeTab, message: unknown): Promise<unknown> | null {
   const orgPending = tab.scope?.handleMessage(message);
   if (orgPending) return orgPending;
-  return handleBackfillMessage(message, tab.origin, pageFetch, undefined, tab.scope?.allowedScope() ?? null);
+  return handleBackfillMessage(message, tab.origin, withChatGptFetchIdentity(pageFetch), undefined, tab.scope?.allowedScope() ?? null);
 }
 
 /** Every URL the page was asked for on behalf of `origin`. */

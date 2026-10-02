@@ -28,7 +28,12 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw, type HttpResponse } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore, type BackfillStore } from '../lib/backfill/store';
 import { openLedger, saveHeader } from '../lib/backfill/ledger';
 import { readDebtSet, serializedBytes, writeStats, resetWriteStatsForTest } from '../lib/backfill/debt-store';
@@ -475,9 +480,10 @@ describe('W18-3 · killed in the middle of a settle', () => {
       save: async (key: string, value: unknown) => {
         if (key === stateKey(PLATFORM, SCOPE)) {
           headerWrites += 1;
-          // The migration's own header write is #1; the settle's is #2. Let the
-          // first through so the run is a real resumed run, and kill the second.
-          if (headerWrites >= 2) throw new Error('killed after the debt write, before the header');
+          // The migration's header write is #1 and W303's first request-local
+          // lease write is #2. Let both through so this remains a real resumed
+          // run, and kill the settle's header write (#3).
+          if (headerWrites >= 3) throw new Error('killed after the debt write, before the header');
         }
         await store.save(key, value);
       },
