@@ -262,7 +262,8 @@ describe('W64-3 · the status is classified the same way whichever plan is drivi
       });
 
       expect(report.stopped).toBe('waiting-retry');
-      expect(report.halted?.reason).toBe('auth-refused');
+      expect(report.halted?.reason).toBe(platform === 'chatgpt' ? 'refused-unknown' : 'auth-refused');
+      if (platform === 'chatgpt') expect(report.state.suspended?.reason).toBe('request-refused');
       expect(report.state.pending).toEqual([]);
       // The leg stopped at the first request; it did not page on through the refusal.
       expect(calls).toHaveLength(1);

@@ -209,7 +209,7 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
     mod.configureBackfillTransport(withChatGptLeaseIdentity(always(403)));
 
     const tick = await runRound(mod);
-    expect(tick?.report).toMatchObject({ halted: { reason: 'rate-limited' } });
+    expect(tick?.report).toMatchObject({ halted: { reason: 'refused-unknown' }, state: { suspended: { reason: 'request-refused' } } });
     expect(store[DAY_SLOW_KEY]).toBeUndefined();
   });
 

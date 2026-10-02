@@ -1665,6 +1665,19 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     );
   };
 
+  /** A ChatGPT request without request-local proof must stop this scope until its
+   * lease is observed again. This leaves pending debt untouched. */
+  const stopForChatGptRequestRefusal = async (
+    where: string,
+  ): Promise<RunReport> => {
+    state.suspended = {
+      at: clock.now(),
+      reason: 'request-refused',
+      ...(leaseIdentity ? { lease: leaseIdentity } : {}),
+    };
+    return halt('refused-unknown', `${where}: ChatGPT did not accept a request with attributable account identity; this scope is suspended and pending conversations remain pending`);
+  };
+
   // 🔴 W303 · ChatGPT's workspace scope is not its account lease. Read the
   // page's current request-header observation through tabHttpPort, which returns
   // only the per-install fingerprint. This must complete before the first list
@@ -1677,7 +1690,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       identity = null;
     }
     if (!identity || identity.source !== 'request-header-chatgpt-account-id') {
-      return halt('refused-unknown', 'ChatGPT starting request identity was absent, ambiguous, or incomparable; enumeration was not started');
+      return stopForChatGptRequestRefusal('ChatGPT starting request identity was absent, ambiguous, or incomparable; enumeration was not started');
     }
     if (!leaseIdentity || leaseIdentity.saltId !== identity.saltId
       || leaseIdentity.source !== identity.source) {
@@ -1706,9 +1719,17 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (opts.platform !== 'chatgpt') return null;
     const check = await accountCheckOf(url, response.text, sessionId, response.chatgptAccountIdentity);
     if (check.verdict === 'unavailable') {
-      return halt('refused-unknown', `${where}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this conversation remains pending`);
+      if (response.chatgptAccountIdentity && leaseIdentity
+        && response.chatgptAccountIdentity.saltId !== leaseIdentity.saltId
+        && response.status !== 401 && response.status !== 403) {
+        return halt('refused-unknown', `${where}: request-local ChatGPT account identity was incomparable; this conversation remains pending`);
+      }
+      return stopForChatGptRequestRefusal(where);
     }
     if (check.verdict === 'differs') return stopForAccountChange(check, 'detail');
+    if ((response.status === 401 || response.status === 403) && opts.platform === 'chatgpt') {
+      return stopForChatGptRequestRefusal(`${where} returned HTTP ${response.status}`);
+    }
     return null;
   };
 
@@ -2160,6 +2181,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       res = await sendVia(http, url, init);
     } catch (err) {
       const pageReason = (err as Error).message;
+      if (opts.platform === 'chatgpt' && pageReason === 'chatgpt-account-header-unavailable') {
+        return stopForChatGptRequestRefusal(`${listWhere()}: no current ChatGPT account header was available; the request was not sent`);
+      }
       if (pageReason === 'scope-mismatch' || pageReason === 'org-ambiguous' || pageReason === 'org-unresolved') {
         return halt(pageReason, pageReason === 'scope-mismatch'
           ? 'the page active organization differs from the stored backfill scope'
@@ -2170,9 +2194,16 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
     if (opts.platform === 'chatgpt') {
       const requestIdentity = await accountCheckOf(url, res.text, null, res.chatgptAccountIdentity);
       if (requestIdentity.verdict === 'unavailable') {
-        return halt('refused-unknown', `${listWhere()}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this page was not accepted`);
+        if (res.chatgptAccountIdentity && leaseIdentity && res.chatgptAccountIdentity.saltId !== leaseIdentity.saltId
+          && res.status !== 401 && res.status !== 403) {
+          return halt('refused-unknown', `${listWhere()}: request-local ChatGPT account identity was incomparable; this page was not accepted`);
+        }
+        return stopForChatGptRequestRefusal(`${listWhere()}: request-local ChatGPT account identity was absent, ambiguous, or incomparable; this page was not accepted`);
       }
       if (requestIdentity.verdict === 'differs') return stopForAccountChange(requestIdentity, 'enumerate');
+      if (res.status === 401 || res.status === 403) {
+        return stopForChatGptRequestRefusal(`${listWhere()} returned HTTP ${res.status}`);
+      }
     }
     if (res.status < 200 || res.status > 299) {
       return halt(
@@ -2597,9 +2628,16 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       }
       const auxiliaryAccount = await accountCheckOf(url, response.text, null, response.chatgptAccountIdentity);
       if (auxiliaryAccount.verdict === 'unavailable') {
-        return halt('refused-unknown', `ChatGPT ${source} response refused: request-local account identity was absent, ambiguous, or incomparable`);
+        if (response.chatgptAccountIdentity && leaseIdentity && response.chatgptAccountIdentity.saltId !== leaseIdentity.saltId
+          && response.status !== 401 && response.status !== 403) {
+          return halt('refused-unknown', `ChatGPT ${source} response refused: request-local account identity was incomparable`);
+        }
+        return stopForChatGptRequestRefusal(`ChatGPT ${source} response refused: request-local account identity was absent, ambiguous, or incomparable`);
       }
       if (auxiliaryAccount.verdict === 'differs') return stopForAccountChange(auxiliaryAccount, 'enumerate');
+      if (response.status === 401 || response.status === 403) {
+        return stopForChatGptRequestRefusal(`ChatGPT ${source} page returned HTTP ${response.status}`);
+      }
       if (response.status < 200 || response.status > 299) {
         return halt(haltReasonForStatus(response.status, plan.platform, response.survivedCredentialReread === true),
           `ChatGPT ${source} page returned HTTP ${response.status}`,
@@ -2884,6 +2922,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       res = await sendVia(http, url, init);
     } catch (err) {
       const pageReason = (err as Error).message;
+      if (opts.platform === 'chatgpt' && pageReason === 'chatgpt-account-header-unavailable') {
+        return stopForChatGptRequestRefusal('detail: no current ChatGPT account header was available; the request was not sent');
+      }
       if (pageReason === 'scope-mismatch' || pageReason === 'org-ambiguous' || pageReason === 'org-unresolved') {
         return halt(pageReason, pageReason === 'scope-mismatch'
           ? 'the page active organization differs from the stored backfill scope'
@@ -2947,6 +2988,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       try {
         res2 = await sendVia(http, step2Url, { method: 'POST', body, contentType: step2.contentType });
       } catch (err) {
+        if (opts.platform === 'chatgpt' && (err as Error).message === 'chatgpt-account-header-unavailable') {
+          return stopForChatGptRequestRefusal('detail step 2: no current ChatGPT account header was available; the request was not sent');
+        }
         return halt('transport-error', `detail step 2: ${(err as Error).message}`);
       }
       const step2Stop = await stopForUnattributableChatGptResponse(step2Url, res2, id, 'detail step 2');
@@ -3024,6 +3068,9 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         try {
           next = await sendVia(http, pageUrl, pageInit);
         } catch (err) {
+          if (opts.platform === 'chatgpt' && (err as Error).message === 'chatgpt-account-header-unavailable') {
+            return stopForChatGptRequestRefusal('detail page: no current ChatGPT account header was available; the request was not sent');
+          }
           return halt('transport-error', `detail page: ${(err as Error).message}`);
         }
         const pageStop = await stopForUnattributableChatGptResponse(pageUrl, next, id, 'detail page');

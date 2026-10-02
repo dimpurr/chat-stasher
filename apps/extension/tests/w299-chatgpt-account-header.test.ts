@@ -160,7 +160,7 @@ describe('W299-A · the hook reads the header from every shape a page can pass',
       // so the worker cannot mistake it for an absent header and use body data.
       expect(got[0]!.payload.chatgptAccountIdHeaderPresent, name).toBe(name !== 'no header at all');
       expect('chatgptAccountIdHeader' in got[0]!.payload, name).toBe(false);
-      expect(observations(win), name).toHaveLength(0);
+      expect(observations(win).map((m) => m.accountId), name).toEqual([null]);
       vi.unstubAllGlobals();
     }
   });

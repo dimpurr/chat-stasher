@@ -403,7 +403,7 @@ describe('W199-D · the run takes its lease at start', () => {
     const result = await run(store, server.http, ACCOUNT_A, { platform: 'chatgpt', origin: 'https://chatgpt.com' }).report;
     expect(result.accountChangedTo).toBeNull();
     expect(storedHeader('chatgpt', ACCOUNT_A, store.data).accountLease).toBeUndefined();
-    expect(storedHeader('chatgpt', ACCOUNT_A, store.data).suspended).toBeUndefined();
+    expect(storedHeader('chatgpt', ACCOUNT_A, store.data).suspended).toMatchObject({ reason: 'request-refused' });
   });
 });
 
@@ -631,6 +631,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
 
   function chatGptPort(runStore: ReturnType<typeof memoryStore>, opts: {
     listHeader?: string | null;
+    listStatus?: number;
     startHeader?: string | null;
     detailHeader?: string | null;
     listIds?: string[];
@@ -649,7 +650,7 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
       const parsed = new URL(url);
       if (parsed.pathname === '/backend-api/conversations') {
         return {
-          status: 200,
+          status: opts.listStatus ?? 200,
           text: JSON.stringify({ items: (opts.listIds ?? []).map((id) => ({ id })) }),
           chatgptAccountIdentity: await accountIdentity(opts.listHeader),
         } as HttpResponse;
@@ -765,13 +766,28 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     expect(result.state.pending).toEqual([]);
     expect(result.state.enumCursor.offset).toBe(0);
     expect(storedHeader('chatgpt', scope, store.data).accountLease).toBeUndefined();
-    expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toMatchObject({ reason: 'request-refused' });
     expect(port.calls).toEqual([]);
     expect(resolveChatGptWorkspace({ identities: [
       { value: 'a'.repeat(64), saltId: 'synthetic', source: 'request-header-chatgpt-account-id' },
       { value: 'b'.repeat(64), saltId: 'synthetic', source: 'request-header-chatgpt-account-id' },
     ] })).toEqual({
       ok: false, reason: 'workspace-ambiguous', observed: true,
+    });
+  });
+
+  it.each([401, 403])('a ChatGPT HTTP %i suspends the scope and keeps pending debt untouched', async (status) => {
+    const store = memoryStore();
+    await seedChatGptLease(store, scope, ACCOUNT_A, [C1], { enumerated: false });
+    const port = chatGptPort(store, { listHeader: ACCOUNT_A, listStatus: status });
+    const { report } = runChatGpt(store, port.http);
+    const result = await report;
+
+    expect(result.halted?.reason).toBe('refused-unknown');
+    expect(result.state.pending).toEqual([C1]);
+    expect(storedHeader('chatgpt', scope, store.data).suspended).toMatchObject({
+      reason: 'request-refused',
+      lease: { value: await fingerprintFor(store, ACCOUNT_A) },
     });
   });
 

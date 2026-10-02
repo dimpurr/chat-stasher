@@ -1502,7 +1502,7 @@ async function patchScopeAccount(
   }
   const state = opened.state;
   state.suspended = next ?? undefined;
-  if (next === null && state.halted?.reason === 'account-changed') {
+  if (next === null && (state.halted?.reason === 'account-changed' || state.halted?.reason === 'refused-unknown')) {
     state.halted = null;
     state.haltRetried = undefined;
   }

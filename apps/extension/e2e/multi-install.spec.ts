@@ -164,6 +164,9 @@ interface Served {
   log: { pageLoads: string[]; apiResponses: string[]; unexpected: string[]; escaped: string[] };
   /** Backfill **list** requests only — the requests cases (b) and (c) are about. */
   list: string[];
+  detail: string[];
+  listHeaders: string[];
+  detailHeaders: string[];
   identityBootstrap: string[];
   console: string[];
 }
@@ -230,6 +233,8 @@ interface ServeOptions {
   page?: 'capture' | 'inert';
   /** What the backfill list request gets. Default: `200` with an empty page. */
   list?: { status: 200; holdUntil?: Gate } | { status: 429; retryAfterSeconds: number };
+  /** Return one synthetic debt and exercise the real ChatGPT detail path. */
+  withDetail?: boolean;
 }
 
 /**
@@ -252,6 +257,9 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
     { origin: ORIGIN, pagePath: PAGE_PATH, apiPath: API_PATH, apiBody: CONVERSATION_BODY },
   ]);
   const list: string[] = [];
+  const detail: string[] = [];
+  const listHeaders: string[] = [];
+  const detailHeaders: string[] = [];
   const identityBootstrap: string[] = [];
   const console: string[] = [];
   ext.context.on('console', (message) => console.push(message.text()));
@@ -282,8 +290,18 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
 
   await ext.context.route(`${ORIGIN}/**`, async (route) => {
     const { pathname } = new URL(route.request().url());
+    if (pathname === API_PATH && options.withDetail) {
+      detail.push(pathname);
+      const header = route.request().headers()['chatgpt-account-id'] ?? '';
+      detailHeaders.push(header);
+      expect(header, 'ChatGPT-Account-Id on the DETAIL request').toBe(ACCOUNT_ID_FIXTURE);
+      return route.fulfill({ status: 200, contentType: 'application/json', body: CONVERSATION_BODY });
+    }
     if (pathname !== LIST_PATH) return route.fallback();
     list.push(pathname);
+    const header = route.request().headers()['chatgpt-account-id'] ?? '';
+    listHeaders.push(header);
+    expect(header, 'ChatGPT-Account-Id on the LIST request').toBe(ACCOUNT_ID_FIXTURE);
     if (listBehaviour.status === 429) {
       return route.fulfill({
         status: 429,
@@ -301,10 +319,13 @@ async function servePlatform(ext: Extension, options: ServeOptions = {}): Promis
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ items: [], limit: 100, offset: 0, total: 0 }),
+      body: JSON.stringify({
+        items: options.withDetail ? [{ id: SESSION_ID }] : [],
+        limit: 100, offset: 0, total: options.withDetail ? 1 : 0,
+      }),
     });
   });
-  return { log, list, identityBootstrap, console };
+  return { log, list, detail, listHeaders, detailHeaders, identityBootstrap, console };
 }
 
 /**
@@ -597,7 +618,7 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   const gate = makeGate();
   // A holds the answer to its own list request. B's list route is not held,
   // because B is not supposed to issue one while A holds the lease.
-  const logA = await servePlatform(a, { page: 'inert', list: { status: 200, holdUntil: gate } });
+  const logA = await servePlatform(a, { page: 'inert', withDetail: true, list: { status: 200, holdUntil: gate } });
   const logB = await servePlatform(b, { page: 'inert' });
 
   // Inert pages: the tab is registered (so a tick has a port to fetch through)
@@ -623,6 +644,7 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   await fireAlarm(a, TICK_ALARM);
   await gate.seen;
   expect(logA.list).toEqual([LIST_PATH]);
+  expect(logA.listHeaders).toEqual([ACCOUNT_ID_FIXTURE]);
 
   // B is switched on **inside** that window, so its attempt cannot be the one
   // that got there first: any tick it runs now meets a lease A is holding.
@@ -640,6 +662,8 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   gate.release();
   await tickAfter(a, firedAtA);
   expect(logA.list).toEqual([LIST_PATH]);
+  expect(logA.detail).toEqual([API_PATH]);
+  expect(logA.detailHeaders).toEqual([ACCOUNT_ID_FIXTURE]);
 
   // B, asking again once the lease is free, does backfill: the refusal above was
   // "not your turn", never "not ever". Exactly one request — two would mean a
@@ -648,6 +672,7 @@ multiTest('(b) only one install backfills a platform at a time: the second makes
   await fireAlarm(b, TICK_ALARM);
   await waitUntil(() => logB.list.length >= 1, "B's list request once the lease was free");
   expect(logB.list).toEqual([LIST_PATH]);
+  expect(logB.listHeaders).toEqual([ACCOUNT_ID_FIXTURE]);
 
   // 🔴 W303 · The synthetic raw account header has done its job once both runs
   //    have completed. It must not appear in durable extension data, queued

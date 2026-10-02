@@ -789,6 +789,10 @@ export function installPageFetchHook(options: PageHookOptions): void {
         chatgptAccountIdHeaderPresent = observed.present;
         if (chatgptAccountIdHeader !== null) {
           post({ type: options.chatgptWorkspaceObservedMessage, accountId: chatgptAccountIdHeader });
+        } else {
+          // A later request without an account header invalidates any older
+          // in-memory observation on the content side; it must not be replayed.
+          post({ type: options.chatgptWorkspaceObservedMessage, accountId: null });
         }
       }
     } catch {

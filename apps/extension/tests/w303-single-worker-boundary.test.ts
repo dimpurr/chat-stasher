@@ -12,10 +12,12 @@ describe('W303c · one first-worker boundary for raw ChatGPT account ids', () =>
   it('keeps only fingerprints on the long-lived content observation', () => {
     expect(contentSource).not.toContain('accountIds');
     expect(contentSource).not.toContain('observeChatGptAccountId');
-    expect(contentSource).not.toContain('chatgptAccountIdHeader');
+    expect(contentSource).toContain('chatGptCurrentRawHeader');
     expect(contentSource).toMatch(/runtime\.sendMessage\(\{\s*type:\s*CHATGPT_WORKSPACE_OBSERVED_MESSAGE,\s*accountId\s*\}\)/);
     expect(contentSource).toContain('observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity)');
-    expect(contentSource).not.toContain("'ChatGPT-Account-Id':");
+    expect(contentSource).toContain("'ChatGPT-Account-Id': requestIdentity.accountId");
+    expect(contentSource).toContain('chatgptAccountIdentity: requestIdentity.identity');
+    expect(contentSource).toContain("throw new Error('chatgpt-account-header-unavailable')");
     expect(backgroundSource).toContain('fingerprintChatGptIdentityAtWorkerBoundary(');
     expect(backgroundSource).not.toContain('fingerprintChatGptWorkspace');
     expect(backgroundSource).not.toMatch(/workspace\.workspace[^;]*fingerprint/);
