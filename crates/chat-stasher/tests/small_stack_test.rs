@@ -40,19 +40,17 @@ const TINY_STACK_KIB: u32 = 256;
 fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
     let bin = env!("CARGO_BIN_EXE_chat-stasher");
     // `--version` reads no config and opens no repository, but every spawn in
-    // this suite carries the cache pin anyway (W289): one rule for the whole
-    // suite leaves no spawn for a later change to start leaking through.
-    let cache = tempfile::tempdir().unwrap();
-    let output = Command::new("sh")
+    // this suite carries the full sandbox anyway (W289/W306): one rule for the
+    // whole suite leaves no spawn for a later change to start leaking through.
+    // `HOME`/`XDG_*` matter as much as the cache pin — without them
+    // `config_path()` and `default_state_dir()` fall back to the real home.
+    let sandbox = test_support::Sandbox::new();
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(format!("ulimit -s {TINY_STACK_KIB}; exec \"$0\" --version",))
-        .arg(bin)
-        .env(
-            test_support::RUSTIC_CACHE_DIR_ENV,
-            test_support::rustic_cache_root(cache.path()),
-        )
-        .output()
-        .expect("spawn sh");
+        .arg(bin);
+    let output = sandbox.apply(&mut command).output().expect("spawn sh");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,16 +78,11 @@ fn argument_parsing_survives_a_stack_smaller_than_windows_gives() {
 #[test]
 fn argument_parsing_survives_the_windows_main_thread_stack() {
     let bin = env!("CARGO_BIN_EXE_chat-stasher");
-    // Same rule as the unix arm: pin the cache on every spawn (W289).
-    let cache = tempfile::tempdir().unwrap();
-    let output = Command::new(bin)
-        .arg("--version")
-        .env(
-            test_support::RUSTIC_CACHE_DIR_ENV,
-            test_support::rustic_cache_root(cache.path()),
-        )
-        .output()
-        .expect("spawn binary");
+    // Same rule as the unix arm: the full sandbox on every spawn (W289/W306).
+    let sandbox = test_support::Sandbox::new();
+    let mut command = Command::new(bin);
+    command.arg("--version");
+    let output = sandbox.apply(&mut command).output().expect("spawn binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

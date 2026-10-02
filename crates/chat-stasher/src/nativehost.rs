@@ -1384,6 +1384,17 @@ fn coordination(request: serde_json::Value, request_id: Option<String>) -> serde
         );
     }
     let request_id = parsed.request_id.clone();
+    // W306: the coordination rows (`ext_install_v2`, the lease) are the second
+    // half of the 2026-10-02 incident — a `synthetic-install` row landed in the
+    // real `extension-coordination.sqlite3`. Refuse a fixture identity before
+    // the state database is opened at all; a fixture under a temp state root
+    // (every correct test) passes.
+    if let Err(e) = crate::test_identity_guard::refuse_fixture_write(
+        &[parsed.install_id.as_str()],
+        &crate::collect::default_state_dir(),
+    ) {
+        return nack(Some(request_id), NackKind::BadRequest, format!("{e}"));
+    }
     let (machine, _) = match resolve_target() {
         HostTarget::Ready { machine, stage } => (machine, stage),
         HostTarget::Refused { kind, detail } => return nack(Some(request_id), kind, detail),
@@ -2888,10 +2899,38 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
             "unmarked ChatGPT account scope refused",
         );
     }
+    // W306: the delivery path records an identity row in the state database
+    // *and* seals a shard into the stage, so a fixture identity has to be
+    // refused before either is touched. The install id heads for the state
+    // directory and the session id for the stage; each is checked against the
+    // root it would actually reach. A fixture under a temp root (every correct
+    // test) passes both.
+    if let Some(install_id) = inbox::bundle_install_id(parsed.payload.as_bytes()) {
+        if let Err(e) = crate::test_identity_guard::refuse_fixture_write(
+            &[install_id.as_str()],
+            &crate::collect::default_state_dir(),
+        ) {
+            return nack(request_id, NackKind::BadRequest, format!("{e}"));
+        }
+    }
     let (machine, stage) = match resolve_target() {
         HostTarget::Ready { machine, stage } => (machine, stage),
         HostTarget::Refused { kind, detail } => return nack(request_id, kind, detail),
     };
+    let session_id = bundle
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        // reason: this value feeds only the fixture guard, which composes the
+        // session partition an ordinary delivery would use; a validated legacy
+        // bundle without a sessionId names no partition, and an empty session
+        // can never carry a reserved fixture token.
+        .unwrap_or_default();
+    if let Err(e) = crate::test_identity_guard::refuse_fixture_write(
+        &[&inbox::session_dir_id(platform, session_id)],
+        &stage,
+    ) {
+        return nack(request_id, NackKind::BadRequest, format!("{e}"));
+    }
     let account_key = parsed
         .account_id
         .as_deref()

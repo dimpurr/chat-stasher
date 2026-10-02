@@ -29,6 +29,121 @@
 //! long another thread's child takes to reach its own `execve`.
 #![allow(dead_code)] // the integration suites also use `copy_executable`
 
+/// One per-test temporary root, and the environment that points every real
+/// user-data location at it.
+///
+/// This is the W306 shared fixture. A test — or a binary it spawns — that gets
+/// its environment from [`Sandbox::apply`] cannot reach the machine's real
+/// config, data, state, cache, native-messaging manifest directories or inbox,
+/// because every one of them resolves through a variable this sets:
+///
+/// | location | variable |
+/// |---|---|
+/// | home (and Windows' fallback) | `HOME` / `USERPROFILE` |
+/// | config (`config_path`) | `XDG_CONFIG_HOME` |
+/// | data + state (`default_data_root`, `default_state_dir`) | `XDG_DATA_HOME` |
+/// | scanner's state home | `XDG_STATE_HOME` |
+/// | cache (`dirs::cache_dir`) | `XDG_CACHE_HOME` |
+/// | rustic's metadata cache | [`RUSTIC_CACHE_DIR_ENV`] |
+///
+/// The native-messaging manifest dirs are under `HOME` on macOS/Linux and the
+/// Known Folder API on Windows; the latter is not environment-redirectable, so
+/// manifest tests pass an explicit `--target-root` instead — see
+/// `tests/nativehost_install_test.rs`. `apply` still moves `HOME` for the
+/// mac/linux half.
+///
+/// The rustic cache pin travels through the product's own knob, not
+/// `XDG_CACHE_HOME`, for the same Windows reason W289 documents.
+pub struct Sandbox {
+    dir: tempfile::TempDir,
+}
+
+impl Sandbox {
+    /// A fresh sandbox. The directory is created; its subdirectories are
+    /// created lazily by [`Sandbox::ensure_dirs`] or by the code under test.
+    pub fn new() -> Sandbox {
+        Sandbox {
+            dir: tempfile::tempdir().expect("create the per-test sandbox"),
+        }
+    }
+
+    /// The sandbox root. Every other path is under it.
+    pub fn root(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+
+    pub fn home(&self) -> std::path::PathBuf {
+        self.root().join("home")
+    }
+
+    pub fn config_home(&self) -> std::path::PathBuf {
+        self.root().join("config")
+    }
+
+    pub fn data_home(&self) -> std::path::PathBuf {
+        self.root().join("data")
+    }
+
+    pub fn state_home(&self) -> std::path::PathBuf {
+        self.root().join("state")
+    }
+
+    pub fn cache_home(&self) -> std::path::PathBuf {
+        self.root().join("cache")
+    }
+
+    /// [`rustic_cache_root`] rooted at this sandbox, kept as one spelling.
+    pub fn rustic_cache_dir(&self) -> std::path::PathBuf {
+        rustic_cache_root(self.root())
+    }
+
+    /// Create the `home`, `config`, `data`, `state` and `cache` directories.
+    /// Spawning a child that takes the stage lock needs its `home` to exist,
+    /// and a config-writing test needs its config directory to exist.
+    pub fn ensure_dirs(&self) {
+        for path in [
+            self.home(),
+            self.config_home(),
+            self.data_home(),
+            self.state_home(),
+            self.cache_home(),
+        ] {
+            std::fs::create_dir_all(&path)
+                .unwrap_or_else(|e| panic!("create sandbox dir {}: {e}", path.display()));
+        }
+    }
+
+    /// The environment this sandbox pins, as `(name, value)` pairs.
+    ///
+    /// Prefer [`Sandbox::apply`]. This is `pub` so a test that builds an
+    /// environment map by hand (the Node e2e harness is not Rust, but a Rust
+    /// test assembling `Command::envs` can be) draws from the same list rather
+    /// than a second spelling that drifts.
+    pub fn envs(&self) -> Vec<(&'static str, std::ffi::OsString)> {
+        vec![
+            ("HOME", self.home().into()),
+            ("USERPROFILE", self.home().into()),
+            ("XDG_CONFIG_HOME", self.config_home().into()),
+            ("XDG_DATA_HOME", self.data_home().into()),
+            ("XDG_STATE_HOME", self.state_home().into()),
+            ("XDG_CACHE_HOME", self.cache_home().into()),
+            (RUSTIC_CACHE_DIR_ENV, self.rustic_cache_dir().into()),
+        ]
+    }
+
+    /// Point `command` at this sandbox: set every variable in
+    /// [`Sandbox::envs`]. Returns the command for chaining.
+    pub fn apply<'a>(
+        &self,
+        command: &'a mut std::process::Command,
+    ) -> &'a mut std::process::Command {
+        for (name, value) in self.envs() {
+            command.env(name, value);
+        }
+        command
+    }
+}
+
 /// The product's runtime override for its rustic metadata cache
 /// (`chat_stasher::config::rustic_cache_dir`), re-stated here so an
 /// integration suite can name it through the one fixture it already imports.

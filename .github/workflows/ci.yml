@@ -163,9 +163,21 @@ jobs:
       # it can read it, so a Windows leak fails this step exactly as it does on
       # the other cells; when neither variable is set it refuses before running
       # anything rather than going unguarded.
+      #
+      # W306 nests a second guard inside the first: `check-test-isolation.sh`
+      # watches the real *user data* — the data and config roots, the state
+      # home, `~/Downloads/chat-stasher/inbox` and every NativeMessagingHosts
+      # directory the machine has — after a 2026-10-02 test run resolved the
+      # real data root and planted a synthetic session and a coordination row
+      # in the author's machine. The suite therefore runs once, under both
+      # guards; either verdict fails the step. The new guard's own self-test
+      # (the "Test-isolation guard self-test" step below) proves each of its
+      # branches red independently of any real leak.
       - name: Test
         shell: bash
-        run: bash scripts/dev/check-test-cache-isolation.sh -- cargo test
+        run: |
+          bash scripts/dev/check-test-cache-isolation.sh -- \
+            bash scripts/dev/check-test-isolation.sh -- cargo test
 
       # ---------------------------------------------------------------------
       # COVERAGE HOLE (deliberate, not masked): scripts/release-gate.sh runs
@@ -484,6 +496,8 @@ jobs:
       # CONTRIBUTING.md lists both as local checks, so CI has to run them too.
       - name: Cache-isolation guard self-test
         run: bash scripts/dev/test-cache-isolation-guard.sh
+      - name: Test-isolation guard self-test
+        run: bash scripts/dev/test-test-isolation-guard.sh
       - name: Prune script self-test
         run: bash scripts/dev/test-prune-rustic-cache.sh
 

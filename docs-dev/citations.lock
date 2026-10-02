@@ -595,23 +595,23 @@ crates/chat-stasher/src/inbox.rs:550-555  028e2a170cf7  lines=6
   <- docs-dev/threat-model.md:368  :: /// The `identity` envelope — the account axis an `inbox@2`…
 crates/chat-stasher/src/inbox.rs:756-764  5d580cdaac0c  lines=9
   <- docs-dev/threat-model.md:678  :: /// item-scope, non-retryable `install-conflict`, whose `de…
-crates/chat-stasher/src/inbox.rs:828-838  87d5599f8f90  lines=11
+crates/chat-stasher/src/inbox.rs:836-846  87d5599f8f90  lines=11
   <- docs-dev/privacy.md:368, docs-dev/threat-model.md:678  :: if let (Some(install_id), Some(browser), Some(profile_label…
-crates/chat-stasher/src/inbox.rs:868-870  824a84722be5  lines=3
+crates/chat-stasher/src/inbox.rs:876-878  824a84722be5  lines=3
   <- docs-dev/privacy.md:349  :: account_key: account_key.map(str::to_string),
-crates/chat-stasher/src/inbox.rs:868  663d372c8179  lines=1
+crates/chat-stasher/src/inbox.rs:876  663d372c8179  lines=1
   <- docs-dev/threat-model.md:370  :: account_key: account_key.map(str::to_string),
-crates/chat-stasher/src/inbox.rs:869-872  488fcbe9c4c7  lines=4
+crates/chat-stasher/src/inbox.rs:877-880  488fcbe9c4c7  lines=4
   <- docs-dev/privacy.md:362  :: install_id: parsed.install_id,
-crates/chat-stasher/src/inbox.rs:906-967  10351a7dbb65  lines=62
+crates/chat-stasher/src/inbox.rs:914-975  10351a7dbb65  lines=62
   <- docs-dev/privacy.md:368  :: /// profile yet (schema: `contracts/inbox.schema.json`, `pr…
-crates/chat-stasher/src/inbox.rs:912-967  b3743335944f  lines=56
+crates/chat-stasher/src/inbox.rs:920-975  b3743335944f  lines=56
   <- docs-dev/threat-model.md:678  :: fn names_a_profile(label: &str) -> bool {
-crates/chat-stasher/src/inbox.rs:1180-1208  81d263fdddc2  lines=29
+crates/chat-stasher/src/inbox.rs:1188-1216  81d263fdddc2  lines=29
   <- docs-dev/install.md:531, docs-dev/threat-model.md:547  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
-crates/chat-stasher/src/inbox.rs:1418-1426  f6aba9ee7e33  lines=9
+crates/chat-stasher/src/inbox.rs:1433-1441  f6aba9ee7e33  lines=9
   <- docs-dev/threat-model.md:371  :: // These are required identity axes. Falling back here chan…
-crates/chat-stasher/src/inbox.rs:1979-2001  b73a1c5a7abb  lines=23
+crates/chat-stasher/src/inbox.rs:1994-2016  b73a1c5a7abb  lines=23
   <- docs-dev/threat-model.md:387  :: fn host_derived_account_key_is_stored_in_shard_metadata_onl…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
@@ -743,63 +743,63 @@ crates/chat-stasher/src/nativehost.rs:1290-1306  79c9ebd3c2f8  lines=17
   <- docs-dev/threat-model.md:380  :: fn account_key_from_masterkey_bytes(
 crates/chat-stasher/src/nativehost.rs:1310-1345  c6b2c6d91399  lines=36
   <- docs-dev/threat-model.md:390  :: /// ambiguous, or unreadable key configuration deliberately…
-crates/chat-stasher/src/nativehost.rs:1406-1412  17f51eb72b78  lines=7
+crates/chat-stasher/src/nativehost.rs:1417-1423  17f51eb72b78  lines=7
   <- docs-dev/privacy.md:488, docs-dev/threat-model.md:459  :: return nack(
-crates/chat-stasher/src/nativehost.rs:1406-1411  465434a805de  lines=6
+crates/chat-stasher/src/nativehost.rs:1417-1422  465434a805de  lines=6
   <- docs-dev/threat-model.md:391  :: return nack(
-crates/chat-stasher/src/nativehost.rs:1496-1511  306bf709d1fc  lines=16
+crates/chat-stasher/src/nativehost.rs:1507-1522  306bf709d1fc  lines=16
   <- docs-dev/privacy.md:348, docs-dev/privacy.md:488, docs-dev/threat-model.md:459  :: now: i64,
-crates/chat-stasher/src/nativehost.rs:1580  1bf1b96a8a89  lines=1
+crates/chat-stasher/src/nativehost.rs:1591  1bf1b96a8a89  lines=1
   <- docs-dev/privacy.md:726, docs-dev/threat-model.md:305  :: wait = cooldown_wait.max((next - now).max(0)).max(daily_wai…
-crates/chat-stasher/src/nativehost.rs:1597-1600  3d782ac6f08b  lines=4
+crates/chat-stasher/src/nativehost.rs:1608-1611  3d782ac6f08b  lines=4
   <- docs-dev/threat-model.md:370  :: } else {
-crates/chat-stasher/src/nativehost.rs:1598  31e5c1bc25ce  lines=1
+crates/chat-stasher/src/nativehost.rs:1609  31e5c1bc25ce  lines=1
   <- docs-dev/privacy.md:726, docs-dev/threat-model.md:305  :: conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,nex…
-crates/chat-stasher/src/nativehost.rs:1636  647b94f559c0  lines=1
+crates/chat-stasher/src/nativehost.rs:1647  647b94f559c0  lines=1
   <- docs-dev/threat-model.md:703  :: /// connections to **one** database and watch what one tran…
-crates/chat-stasher/src/nativehost.rs:1674-1691  bec1a874ab56  lines=18
+crates/chat-stasher/src/nativehost.rs:1685-1702  bec1a874ab56  lines=18
   <- docs-dev/privacy.md:386, docs-dev/threat-model.md:700  :: Unknown,
-crates/chat-stasher/src/nativehost.rs:1795  0b80e068e5d2  lines=1
+crates/chat-stasher/src/nativehost.rs:1806  0b80e068e5d2  lines=1
   <- docs-dev/privacy.md:386, docs-dev/threat-model.md:700  :: rusqlite::params![machine, install_id, value as i64, nonce,…
-crates/chat-stasher/src/nativehost.rs:1805-1810  7daf8635d5f1  lines=6
+crates/chat-stasher/src/nativehost.rs:1816-1821  7daf8635d5f1  lines=6
   <- docs-dev/threat-model.md:705  :: };
-crates/chat-stasher/src/nativehost.rs:1900-1902  d551c176516f  lines=3
+crates/chat-stasher/src/nativehost.rs:1911-1913  d551c176516f  lines=3
   <- docs-dev/privacy.md:390, docs-dev/threat-model.md:729  :: }))
-crates/chat-stasher/src/nativehost.rs:1918-1924  158a11208423  lines=7
+crates/chat-stasher/src/nativehost.rs:1929-1935  158a11208423  lines=7
   <- docs-dev/threat-model.md:711  :: ///
-crates/chat-stasher/src/nativehost.rs:1970  021fb596db81  lines=1
+crates/chat-stasher/src/nativehost.rs:1981  021fb596db81  lines=1
   <- docs-dev/threat-model.md:711  :: {
-crates/chat-stasher/src/nativehost.rs:2048-2123  8f4e7a0473bd  lines=76
+crates/chat-stasher/src/nativehost.rs:2059-2134  8f4e7a0473bd  lines=76
   <- docs-dev/install.md:303, docs-dev/install.md:434  :: let tail = &tail[1..];
-crates/chat-stasher/src/nativehost.rs:2056-2123  a6b24a6f758a  lines=68
+crates/chat-stasher/src/nativehost.rs:2067-2134  a6b24a6f758a  lines=68
   <- docs-dev/install.md:534, docs-dev/threat-model.md:543  :: }
-crates/chat-stasher/src/nativehost.rs:2111-2122  d41b221503c0  lines=12
+crates/chat-stasher/src/nativehost.rs:2122-2133  d41b221503c0  lines=12
   <- docs-dev/install.md:409, docs-dev/install.md:522  :: "no `[native_host] stage` in {}; fix with: \
-crates/chat-stasher/src/nativehost.rs:2128-2157  03341b34c42b  lines=30
+crates/chat-stasher/src/nativehost.rs:2139-2168  03341b34c42b  lines=30
   <- docs-dev/install.md:547, docs-dev/threat-model.md:543  :: }
-crates/chat-stasher/src/nativehost.rs:2534  e184724f0636  lines=1
+crates/chat-stasher/src/nativehost.rs:2545  e184724f0636  lines=1
   <- docs-dev/privacy.md:413, docs-dev/threat-model.md:652  :: | "pending"
-crates/chat-stasher/src/nativehost.rs:2559-2575  ffbea61087d6  lines=17
+crates/chat-stasher/src/nativehost.rs:2570-2586  ffbea61087d6  lines=17
   <- docs-dev/privacy.md:413, docs-dev/threat-model.md:652  :: let result = (|| -> anyhow::Result<()> {
-crates/chat-stasher/src/nativehost.rs:2801-2989  6b16abe1b3d0  lines=189
+crates/chat-stasher/src/nativehost.rs:2812-3027  312983d6d3b4  lines=216
   <- docs-dev/privacy.md:348  :: }
-crates/chat-stasher/src/nativehost.rs:2827-2836  c520f35286ca  lines=10
+crates/chat-stasher/src/nativehost.rs:2838-2847  c520f35286ca  lines=10
   <- docs-dev/threat-model.md:554  :: .as_ref()
-crates/chat-stasher/src/nativehost.rs:2843-2849  8e276fcd074b  lines=7
+crates/chat-stasher/src/nativehost.rs:2854-2860  8e276fcd074b  lines=7
   <- docs-dev/threat-model.md:558  :: return nack(
-crates/chat-stasher/src/nativehost.rs:2926-2937  c59ec0364dc5  lines=12
+crates/chat-stasher/src/nativehost.rs:2965-2976  c59ec0364dc5  lines=12
   <- docs-dev/privacy.md:152, docs-dev/threat-model.md:41  :: return nack(
-crates/chat-stasher/src/nativehost.rs:3000-3002  41fa7027a5d7  lines=3
+crates/chat-stasher/src/nativehost.rs:3039-3041  41fa7027a5d7  lines=3
   <- docs-dev/install.md:537  :: }
-crates/chat-stasher/src/nativehost.rs:3003-3007  6f4ef0f1d2be  lines=5
+crates/chat-stasher/src/nativehost.rs:3042-3046  6f4ef0f1d2be  lines=5
   <- docs-dev/privacy.md:369  :: // The refusal is *retryable* on purpose: the bytes are not…
-crates/chat-stasher/src/nativehost.rs:3008-3010  471cf338d1db  lines=3
+crates/chat-stasher/src/nativehost.rs:3047-3049  471cf338d1db  lines=3
   <- docs-dev/install.md:537  :: request_id,
-crates/chat-stasher/src/nativehost.rs:3213  5f92d12a3656  lines=1
+crates/chat-stasher/src/nativehost.rs:3252  5f92d12a3656  lines=1
   <- docs-dev/install.md:307  :: pub newest_mtime: Option<i64>,
-crates/chat-stasher/src/nativehost.rs:3476-3486  6a277da09fed  lines=11
+crates/chat-stasher/src/nativehost.rs:3515-3525  6a277da09fed  lines=11
   <- docs-dev/install.md:307  :: /// What the run record says about the last successful push…
-crates/chat-stasher/src/nativehost.rs:3861-3895  e6fbfd65512b  lines=35
+crates/chat-stasher/src/nativehost.rs:3900-3934  e6fbfd65512b  lines=35
   <- docs-dev/privacy.md:861, docs-dev/threat-model.md:174, docs-dev/threat-model.md:538  :: // ========================================================…
 crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends

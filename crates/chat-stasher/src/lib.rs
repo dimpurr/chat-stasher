@@ -44,6 +44,7 @@ pub mod snapshot_cache;
 pub mod sqlite_probe;
 pub mod stagereclaim;
 pub mod store;
+pub mod test_identity_guard;
 #[cfg(test)]
 mod test_support;
 pub mod ui;
