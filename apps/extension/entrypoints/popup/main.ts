@@ -136,7 +136,7 @@ async function collect(): Promise<PopupModel> {
   //
   // Opening the popup is the one other occasion the backfill layout gets read,
   // and until now it was the one that left the old layout alone: a user who opened
-  // the popup in the 5-10 minutes before the next alarm tick — or with the switch
+  // the popup in the gap before the next alarm tick — or with the switch
   // off, so no alarm fires at all — saw "not started yet" over a
   // `cs_backfill_v1:*` record still holding every id. This is the same scan the
   // tick preflight runs (lib/backfill/alarm.ts's `migrateLegacyScopes`), against

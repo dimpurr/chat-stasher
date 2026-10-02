@@ -20,7 +20,7 @@
  *    size). A server that returns a non-empty page for every offset therefore ends the
  *    enumeration **never**;
  *  · a ChatGPT leg reads **one list page per tick** (`canBackfillDetail(plan) ⇒ 1`), so
- *    the loop is slow but unbounded: the same page is re-read every 5–10 minutes for as
+ *    the loop is slow but unbounded: the same page is re-read every 1–2 minutes for as
  *    long as the scope runs, `enqueueDebts` adds nothing, and
  *  · every persisted state still reads as healthy: `complete` is false (nothing said it
  *    finished), `truncated` is undefined (nothing said it stopped), `halted` is null

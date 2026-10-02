@@ -222,7 +222,7 @@ export interface PopupModel {
    *
    * The popup is a place a user's storage layout gets loaded, and until now it
    * was the one place that showed the old layout's absence and moved nothing:
-   * a user who opened it in the 5-10 minutes before the next alarm tick, or with
+   * a user who opened it in the gap before the next alarm tick, or with
    * the switch off so no alarm fires at all, saw "not started yet" over a
    * `cs_backfill_v1:*` record that was sitting right there. The scan now runs
    * here too, on the same function the tick preflight uses.

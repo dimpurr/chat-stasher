@@ -50,15 +50,27 @@
  *   never kept awake for our benefit.
  *
  * ## 🔴 Why 4–6 minutes
- * The bound that matters is the tick's: `BACKFILL_TICK_DELAY_MIN_MINUTES` is 5, so
- * the shortest gap between two backfill ticks is 300 s. With the floor at **4
- * minutes** a tab has normally re-announced itself inside the gap before the tick
- * that would look for it — the registry is healed **before** it is read, not one
- * tick later. The ceiling is **6 minutes**, so a run of unlucky draws still
- * re-announces at least once per tick on average, and the band is 2× wide like the
- * tick's own jitter: two consecutive hellos differ by up to a factor of 1.5, so the
- * page is not a metronome either. Both ends are far below any rate that could
- * matter for a single in-process message.
+ * 🔴 **W310 · This band is deliberately NOT scaled with the tick.** The bound
+ * that motivated it was the tick's: with `BACKFILL_TICK_DELAY_MIN_MINUTES = 5`
+ * the shortest gap between two backfill ticks was 300 s, so a 4-minute floor had
+ * a tab re-announce itself inside the gap *before* the tick that would look for
+ * it — the registry was healed before it was read. W310 lowered the tick floor to
+ * 1 minute (see alarm.ts), so that particular inequality no longer holds: on a
+ * fast day a lost registration can now be read by a couple of ticks before the
+ * page checks in again. That is accepted rather than chased, for two reasons:
+ *  · the ticks it costs are `no-http-port` skips, and a skip **consumes no
+ *    rotation slot** — the walk keeps going past the missing platform, so a slow
+ *    heal delays nothing but that platform's own turn (alarm.ts's W86c bound
+ *    still holds for every row that *is* registered);
+ *  · the hello is a message that *wakes the MV3 service worker*, and shrinking
+ *    the band to stay inside a 60 s gap would multiply those wake-ups with no
+ *    request saved. With a one-minute tick already waking the worker, the cheap
+ *    side of the trade is to let a heal span a few ticks.
+ * The band itself is unchanged and still earns its shape: the floor is a bound
+ * on how often a page talks to the worker, the ceiling means a run of unlucky
+ * draws still re-announces at least once per tick on average, and the 1.5× width
+ * keeps two consecutive hellos from looking like a metronome. Both ends are far
+ * below any rate that could matter for a single in-process message.
  *
  * The draw uses `uniformBetween`, the leg's single source of randomness (see
  * lib/backfill/random.ts): it is clamped before scaling, so **no draw can ever land
@@ -67,7 +79,10 @@
 
 import { systemRandom, uniformBetween, type RandomFn } from './random';
 
-/** The floor of the hello interval: shorter than the shortest gap between two backfill ticks. */
+/**
+ * The floor of the hello interval: a bound on how often a page talks to the
+ * worker, not an inequality against the tick gap (W310 — see the note above).
+ */
 export const TAB_HELLO_MIN_INTERVAL_MS = 4 * 60_000;
 /** The ceiling of the hello interval: the tab re-announces at least once per tick on average. */
 export const TAB_HELLO_MAX_INTERVAL_MS = 6 * 60_000;

@@ -2213,7 +2213,7 @@ export async function kickBackfill(
  * One alarm clears at most DEFAULT_TICK_DETAILS debts (currently 2); once it runs, it stops.
  *
  * 🔴 W16 · **This function is also where the next tick is armed**, at the very
- *    end, with a fresh draw from `[5, 10]` minutes. The alarm that woke us was a
+ *    end, with a fresh draw from `[1, 2]` minutes. The alarm that woke us was a
  *    one-shot and the browser has already removed it, so the line below is the
  *    only thing standing between "the leg is running" and "the leg has silently
  *    stopped" — which is why it runs on *every* exit path, including the ones
@@ -2263,7 +2263,7 @@ async function rearmBackfillTick(): Promise<void> {
  * uses, so it is ordered with them and the last decision wins.
  *
  * This is the tick's re-arm and it keeps W16's shape: switch **on** ⇒
- * `armBackfillTick` draws a fresh `[5, 10]`-minute one-shot exactly as it did
+ * `armBackfillTick` draws a fresh `[1, 2]`-minute one-shot exactly as it did
  * before; switch **off** ⇒ both alarms are cleared (they already are, by the
  * switch's own sync, so this is a no-op) and none is created. Reading the switch
  * here, when the queued work runs, is the whole fix: the previous bare
@@ -2479,8 +2479,8 @@ async function runAlarmTickBody(): Promise<TickResult> {
   await refreshBadgeSafely();
   // 🔴 EXT-12c · The tick sends the outbox before any gate, so it can be the one
   //    that finally empties a backlog the helper was away for — the backfill alarm
-  //    (5–10 min, jittered) can beat the outbox alarm's next 5-minute period to
-  //    it. This is wired **before** the gates below on purpose: the gate probe is
+  //    (1–2 min, jittered since W310) can beat the outbox alarm's next 5-minute
+  //    period to it. This is wired **before** the gates below on purpose: the gate probe is
   //    a `tickBackfill` call, and with the switch on and a pause on record its
   //    resume `hello` clears the pause in this very tick (`resumeBackfill`) —
   //    after which the pause testimony is gone, while the outbox's own attempts
@@ -3141,7 +3141,7 @@ function cancelledIdLike(id: string | null): boolean {
  *
  *    It also removes a duplicate the old shape produced on every switch-on: two
  *    syncs both saw "not armed", both drew a delay and both called `create`, so
- *    one of the two random 5-10 minute draws was thrown away and which survived
+ *    one of the two random 1-2 minute draws was thrown away and which survived
  *    was decided by arrival order.
  *
  *    🔴 W90 · The re-arm at the end of a tick is one of these callers too.

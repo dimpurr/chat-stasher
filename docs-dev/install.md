@@ -1073,7 +1073,7 @@ confirmed in the code, not a temporary disclaimer.
   Content is fetched under a **daily cap drawn once per local day**, and the cap
   belongs to the speed preset in force. The shipped default is *gentle*, which
   draws **150–200** bodies a day and fetches **one** conversation per round
-  (`apps/extension/lib/backfill/speed.ts:65`, `:92-136`;
+  (`apps/extension/lib/backfill/speed.ts:71`, `:98-142`;
   `apps/extension/lib/backfill/pace.ts:158-159`); *standard* draws 300–400 and
   fetches two (`apps/extension/lib/backfill/pace.ts:154-155`;
   `apps/extension/lib/backfill/schedule.ts:73`); *faster* draws 600–800 and
@@ -1081,15 +1081,18 @@ confirmed in the code, not a temporary disclaimer.
   20 seconds plus a random 0–25 seconds between two bodies
   (`apps/extension/lib/backfill/pace.ts:121-132`), 2 plus 0–4 seconds between two
   list pages (`apps/extension/lib/backfill/pace.ts:109-119`), and each round
-  starts a random 5–10 minutes after the previous one
-  (`apps/extension/lib/backfill/alarm.ts:99-100`). At the *gentle* cap a thousand
-  conversations take 5–6.7 days; at *standard*, 2.5–3.3. This is deliberately
-  slow, not a bug.
+  starts a random **1–2 minutes** after the previous one
+  (`apps/extension/lib/backfill/alarm.ts:123-124`). A round serves **one**
+  platform, and that interval is divided by the number of platforms being
+  backfilled, so each platform receives about one round per interval on average
+  — which is what keeps the per-platform daily cap the brake rather than the
+  wake rate. At the *gentle* cap a thousand conversations take 5–6.7 days; at
+  *standard*, 2.5–3.3. This is deliberately slow, not a bug.
 
 - 🔴 **And every number above is per install, not per account.** The preset, the
   day's draw, the day's counter and the request anchors all live in that
   profile's own `storage.local`
-  (`apps/extension/lib/backfill/speed.ts:59`;
+  (`apps/extension/lib/backfill/speed.ts:65`;
   `apps/extension/lib/backfill/store.ts:85-97`), which no other install can read.
   N profiles with backfill on are therefore N independent schedules, and the
   account sees about N times the band above: three profiles at *faster* is up to
