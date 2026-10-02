@@ -1082,10 +1082,51 @@ export function transientRetryDelayMs(
 export const RETRY_AFTER_MIN_MS = 30_000;
 export const RETRY_AFTER_MAX_MS = TRANSIENT_RETRY_BASE_MS['rate-limited'];
 
-/** Clamp a decided wait into the band above. `NaN` is not a wait; it degrades to the floor. */
+/**
+ * 🔴 W296b · **The longest non-digit `Retry-After` value this leg carries.**
+ *
+ * A delta-seconds header is `1*DIGIT` and RFC 9110 puts no ceiling on the digits, so
+ * length is not a way to bound *that* form — see `carryableRetryAfter`. Every other
+ * usable value is an HTTP-date, whose three forms are under 30 characters, so the
+ * bound still applies to those and to anything that is not a run of digits.
+ */
+export const RETRY_AFTER_HEADER_MAX_CHARS = 64;
+
+/**
+ * 🔴 W296b · **Is this raw `Retry-After` value one worth carrying across a boundary?**
+ *
+ * P1 (W127) dropped a header longer than 64 characters at the port boundary. That is
+ * right for the date form — a date is ~30 characters — and wrong for delta-seconds: a
+ * run of digits is a valid `Retry-After` however long it is, and dropping an
+ * over-long one falls back to the retry ladder, **shorter** than the 15 minutes the
+ * value plainly means. So a digit string is always carried, and `parseRetryAfterMs`
+ * clamps it; an unrepresentably large number now clamps *up* to the ceiling rather
+ * than down to the floor (see `clampRetryAfterMs`).
+ *
+ * The four sites that used to inline `length <= 64` (the page fetch and the port reply
+ * in `tab-port.ts`, the page-side Claude fetch, and that error's reading) call this
+ * instead: the digit form is carried unbounded on purpose — it is the platform's own
+ * header and the value is clamped below; anything else over the bound is `null`.
+ */
+export function carryableRetryAfter(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (/^\d+$/.test(value)) return value;
+  return value.length <= RETRY_AFTER_HEADER_MAX_CHARS ? value : null;
+}
+
+/**
+ * Clamp a decided wait into the band above.
+ *
+ * `NaN` is not a wait — the header said something unusable — so it degrades to the
+ * floor. `+Infinity` **is** a wait, just one larger than a double can hold: a
+ * delta-seconds header with more digits than a number has room for, times the 1000 ms
+ * in `parseRetryAfterMs`. Mapping that to the floor would turn "wait far longer than
+ * we track" into "retry in 30 s", the opposite of what the platform said, so it falls
+ * to the ceiling like any other over-large value — the `Math.min` below.
+ */
 function clampRetryAfterMs(ms: number, maximum = RETRY_AFTER_MAX_MS): number {
-  const finite = Number.isFinite(ms) ? ms : RETRY_AFTER_MIN_MS;
-  return Math.min(maximum, Math.max(RETRY_AFTER_MIN_MS, finite));
+  const decided = Number.isNaN(ms) ? RETRY_AFTER_MIN_MS : ms;
+  return Math.min(maximum, Math.max(RETRY_AFTER_MIN_MS, decided));
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   tabHttpPort,
 } from '../lib/backfill/tab-port';
 import { TEST_BUILD_ID } from './i18n-harness';
+import { RETRY_AFTER_MAX_MS } from '../lib/backfill/types';
 
 const ORIGIN = 'https://chatgpt.com';
 const LIST_URL = `${ORIGIN}${CHATGPT_PLAN.listPath}`;
@@ -77,6 +78,24 @@ describe('W127b-P1 · serveBackfillFetch forwards a 429/503 status and Retry-Aft
     });
     const reply = await serveBackfillFetch(LIST_URL, ORIGIN, fetchImpl as never);
     expect(reply).toEqual({ ok: true, status: 429, text: '' });
+  });
+
+  it('🔴 W296b · an over-long delta-seconds header is carried, not dropped to the ladder', async () => {
+    // The defect: the port dropped any header over 64 characters, so a platform that
+    // answered with a very large `Retry-After` (milliseconds, say) fell back to the
+    // retry ladder — *shorter* than the 15 minutes the value plainly means.
+    const huge = '9'.repeat(400);
+    expect(huge.length).toBeGreaterThan(64);
+    const fetchImpl = async () => ({ status: 429, text: async () => 'rate limited', retryAfter: huge });
+    const reply = await serveBackfillFetch(LIST_URL, ORIGIN, fetchImpl as never);
+    expect(reply).toEqual({ ok: true, status: 429, text: 'rate limited', retryAfter: huge });
+
+    // And over a long non-digit value the bound still holds: it is not a delta-seconds
+    // header and not a date, so it is dropped and the ladder decides.
+    const garbage = 'x'.repeat(400);
+    const garbageFetch = async () => ({ status: 429, text: async () => 'rate limited', retryAfter: garbage });
+    expect(await serveBackfillFetch(LIST_URL, ORIGIN, garbageFetch as never))
+      .toEqual({ ok: true, status: 429, text: 'rate limited' });
   });
 
   it('🔴 the normal path is unchanged: a readable 429 body keeps its text and header', async () => {
@@ -130,5 +149,32 @@ describe('W127b-P1 · through the tab port the engine sees rate-limited, not tra
 
     expect(report.halted?.reason).toBe('rate-limited');
     expect(report.halted?.retryAt).toBe(report.halted!.at + 120_000);
+  });
+
+  it('🔴 W296b · an over-long delta-seconds header reaches the engine as the 15-minute ceiling', async () => {
+    const pageFetch = async () => ({
+      status: 429,
+      text: async () => 'rate limited',
+      retryAfter: '9'.repeat(400),
+    });
+    const http: HttpPort = tabHttpPort(1, async (_id, msg) =>
+      handleBackfillMessage(msg, ORIGIN, pageFetch as never));
+
+    const clock = fakeClock();
+    const report = await runBackfill({
+      platform: 'chatgpt',
+      origin: ORIGIN,
+      scope: 'w296b-huge-retry-after',
+      store: memoryStore(),
+      http,
+      clock,
+      build: TEST_BUILD_ID,
+      pace: NO_WAIT,
+      random: () => 0,
+    });
+
+    expect(report.halted?.reason).toBe('rate-limited');
+    expect(report.halted?.retryAt).toBe(report.halted!.at + RETRY_AFTER_MAX_MS);
+    expect(RETRY_AFTER_MAX_MS).toBe(15 * 60_000);
   });
 });

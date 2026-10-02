@@ -493,6 +493,17 @@ under its own heading below.
 
 #### Changed
 
+- **A platform that answered "too many requests" slows this profile down for
+  the rest of the day.** A 429 used to cost a wait of minutes, after which the
+  leg resumed the very rhythm that had just been refused. Now the refusal is
+  remembered in this browser profile: for the rest of the **local** day every
+  request to that platform is made at half the pace of whichever speed preset
+  is in force, and one tick fetches at most one conversation. The record holds a
+  platform id and two timestamps and is forgotten by itself at the next local
+  midnight, so nothing has to be cleared by hand and restarting the extension
+  changes nothing about it. This brake is per install on this machine — it is
+  not the machine-wide cooldown below, which the native host shares between
+  installs.
 - **Backfill is coordinated per machine.** Platform leases, request pacing
   and rate-limit cooldowns are now shared across every extension install on
   the machine, through the native host: when more than one install backfills

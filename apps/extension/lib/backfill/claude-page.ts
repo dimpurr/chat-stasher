@@ -42,6 +42,7 @@ import {
   type BackfillRequestSpec,
   type FetchLike,
 } from './tab-port';
+import { carryableRetryAfter } from './types';
 
 export interface ClaudePageScopeDeps {
   /** The page's own origin, and the origin every request below is checked against. */
@@ -102,7 +103,11 @@ export function createClaudePageScope(deps: ClaudePageScopeDeps): ClaudePageScop
         const error = new Error(`the organizations request answered HTTP ${reply.status}`) as Error & { status?: number; retryAfter?: string };
         if (reply.status === 403 || reply.status === 429) {
           error.status = reply.status;
-          if (typeof reply.retryAfter === 'string' && reply.retryAfter.length <= 64) error.retryAfter = reply.retryAfter;
+          // 🔴 W296b · `carryableRetryAfter` (types.ts) is the one rule for which
+          //    raw header value crosses a boundary: a digit run at any length, and a
+          //    bounded date form.
+          const retryAfter = carryableRetryAfter(reply.retryAfter);
+          if (retryAfter !== null) error.retryAfter = retryAfter;
         }
         throw error;
       }

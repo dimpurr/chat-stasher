@@ -141,6 +141,7 @@ import {
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
 import { TAB_HELLO_MIN_INTERVAL_MS } from './tab-hello';
+import { carryableRetryAfter } from './types';
 
 /** background → content script: fetch this URL for me. */
 export const BACKFILL_FETCH_MESSAGE = 'cs-backfill-fetch';
@@ -800,13 +801,6 @@ export type FetchLike = (
 }>;
 
 /**
- * 🔴 W127 · A `Retry-After` value worth forwarding: a delta-seconds header is a few
- * characters and an HTTP-date is under 30. Anything longer is not a header this leg
- * has a use for, and it is dropped at the boundary rather than carried.
- */
-const RETRY_AFTER_HEADER_MAX_CHARS = 64;
-
-/**
  * The content-script-side fetch. **This code runs in the context of the page the
  * user is logged into.**
  * Every failure becomes `{ok:false}`; an exception is never thrown back into the
@@ -838,12 +832,13 @@ export async function serveBackfillFetch(
     // 🔴 A GET segment keeps C22's call byte for byte: pass the url only, not one argument more.
     const res = verdict.method === 'GET' ? await fetchImpl(verdict.url) : await fetchImpl(verdict.url, init);
     // 🔴 W127 · The platform's `Retry-After`, when the page-side fetch could read it,
-    //    is forwarded as the raw header value and bounded in length. The engine parses
-    //    and clamps it (`parseRetryAfterMs`, types.ts); a value that is not a short
-    //    string is left off, which the engine reads as "no header".
-    const retryAfter = typeof res.retryAfter === 'string' && res.retryAfter.length <= RETRY_AFTER_HEADER_MAX_CHARS
-      ? res.retryAfter
-      : null;
+    //    is forwarded as the raw header value. The engine parses and clamps it
+    //    (`parseRetryAfterMs`, types.ts); a value this leg has no use for is left off,
+    //    which the engine reads as "no header".
+    // 🔴 W296b · A delta-seconds header is carried however long it is — see
+    //    `carryableRetryAfter` — because an over-long digit string is a *huge* wait
+    //    that must clamp up to the ceiling, not a broken header to drop.
+    const retryAfter = carryableRetryAfter(res.retryAfter);
     /**
      * 🔴 W127b · **A 429/503 carries its status and `Retry-After` independently of
      * its body.** Those are the two statuses RFC 9110 defines `Retry-After` for,
@@ -1149,9 +1144,10 @@ export function readClaudeOrgReply(reply: unknown, tabId: number): OrgResolution
   const rateLimitStatus = reply.rateLimitStatus === 403 || reply.rateLimitStatus === 429
     ? reply.rateLimitStatus
     : undefined;
-  const retryAfter = typeof reply.retryAfter === 'string' && reply.retryAfter.length <= 64
-    ? reply.retryAfter
-    : undefined;
+  // 🔴 W296b · Same rule as the page-fetch boundary above: `carryableRetryAfter`
+  //    keeps the digit form at any length so the engine clamps it up, and bounds
+  //    everything else.
+  const retryAfter = carryableRetryAfter(reply.retryAfter);
   return {
     ok: false,
     halt,

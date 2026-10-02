@@ -106,6 +106,20 @@ describe('W127-A · parseRetryAfterMs is one place, and its three answers are di
     expect(parseRetryAfterMs('3600', 0, 30 * 24 * 60 * 60 * 1000)).toBe(3_600_000);
   });
 
+  it('🔴 W296b · a delta-seconds header too large for a double clamps UP to the ceiling, never down to the floor', () => {
+    // The defect: `Number(huge)` is `Infinity`, `Number.isFinite` was false, and the
+    // "not a wait" branch sent it to the 30 s floor — reading "wait far longer than we
+    // can count" as "retry in 30 seconds", the opposite of what the platform said.
+    const huge = '9'.repeat(400);
+    expect(Number(huge)).toBe(Number.POSITIVE_INFINITY);
+    expect(parseRetryAfterMs(huge)).toBe(RETRY_AFTER_MAX_MS);
+    // The overflow can also happen in the ×1000, where the digits alone are finite.
+    const overflowsOnMultiply = `1${'0'.repeat(308)}`;
+    expect(Number.isFinite(Number(overflowsOnMultiply))).toBe(true);
+    expect(Number(overflowsOnMultiply) * 1000).toBe(Number.POSITIVE_INFINITY);
+    expect(parseRetryAfterMs(overflowsOnMultiply)).toBe(RETRY_AFTER_MAX_MS);
+  });
+
   it('🔴 absent, empty and garbage are all null — not zero, which would mean "now"', () => {
     expect(parseRetryAfterMs(undefined)).toBeNull();
     expect(parseRetryAfterMs(null)).toBeNull();

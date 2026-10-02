@@ -106,6 +106,7 @@ import { backfillCapabilityOf, backfillPlanFor, canBackfillDetail } from '../lib
 //    the engine would (`tickIdleReason`).
 import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
+import { daySlowPlan, daySlowTriggeredBy, isPlatformDaySlowed, recordPlatformRateLimit } from '../lib/backfill/day-slow';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
 import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
@@ -895,6 +896,8 @@ async function pauseForCoordinationFailure(reason: string): Promise<void> {
 }
 
 type BackfillLease = {
+  /** The platform this lease governs — carried so a rate-limit report can name it. */
+  platform: string;
   request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T>;
   rateLimit(status: 403 | 429, retryAfter?: string): Promise<boolean>;
   release(): Promise<void>;
@@ -920,6 +923,7 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
     if (!claim.granted) return null;
     let held = true;
     return {
+      platform,
       gentle: claim.gentle,
       async request<T>(segment: 'enumerate' | 'detail', send: () => Promise<T>): Promise<T> {
         if (!held) throw new Error('backfill lease is not held');
@@ -953,9 +957,46 @@ async function acquireBackfillLease(platform: string, accountId?: string): Promi
   });
 }
 
+/**
+ * 🔴 W296 · **Report a platform refusal in one place, so no path can do half of it.**
+ *
+ * A 429 has two consequences: this install slows every request to that platform for
+ * the rest of the local day (`recordPlatformRateLimit`, day-slow.ts), and the
+ * machine-wide arbiter is told so the other installs on this machine back off too
+ * (`lease.rateLimit`). The second was reported from three places (the request
+ * gateway and both Claude organization-discovery paths) while the first was armed
+ * only in the gateway — so a 429 seen by organization discovery armed no brake and
+ * requirement (c) was met on every path but that one.
+ *
+ * The order is deliberate and it is why this is one function rather than two calls
+ * scattered at the call sites: the local brake is armed **first**, and its write is
+ * wrapped so it cannot fail the run, because the machine-wide report below *can* fail
+ * the tick and a coordination outage must never cost the local brake. `tickNow()`
+ * rather than `Date.now()` so a test with an injected clock sees its own day boundary.
+ *
+ * `403` passes through to the arbiter only: it is a credential refusal the engine also
+ * classifies `rate-limited`, but the day-long brake is the response to a platform
+ * saying "you are over your request budget", which is what 429 means
+ * (`daySlowTriggeredBy`).
+ */
+async function reportPlatformRateLimit(
+  lease: BackfillLease,
+  status: 403 | 429,
+  retryAfter?: string,
+): Promise<boolean> {
+  if (daySlowTriggeredBy(status)) {
+    try {
+      await recordPlatformRateLimit(browserLocalStore(), lease.platform, tickNow());
+    } catch (err) {
+      console.warn('[chat-stasher] the platform day-slow brake could not be recorded', (err as Error).message);
+    }
+  }
+  return lease.rateLimit(status, retryAfter);
+}
+
 /** Share Claude organization-discovery refusals before the last holder releases. */
 async function reportClaudeOrganizationRateLimit(lease: BackfillLease, status: 403 | 429, retryAfter?: string): Promise<boolean> {
-  const shared = await lease.rateLimit(status, retryAfter);
+  const shared = await reportPlatformRateLimit(lease, status, retryAfter);
   if (shared) return true;
   console.warn('[chat-stasher] Claude rate-limit cooldown could not be shared');
   return false;
@@ -975,16 +1016,34 @@ async function reportClaudeOrganizationRateLimit(lease: BackfillLease, status: 4
  *
  * One `storage.local` read per tick. It is not cached in a module variable: the SW is reclaimed between
  * ticks, so a cache would mostly be a stale value, and the read is the same one the switch itself costs.
+ *
+ * 🔴 W296 · **It is also where the machine-wide `gentle` claim and this install's own rest-of-day brake
+ *    are folded in**, and that is deliberate rather than convenient: this is the one place a stored
+ *    choice becomes a rate, so a slowdown applied anywhere else could be out-ranked by the preset read
+ *    here. The order is `preset → gentle (when the host says another install is also backfilling) →
+ *    day-slow`, each step only ever slowing the one before it, and the test seam is still spread *after*
+ *    the whole thing at every call site so a test can pin an exact pace.
+ *
+ * The day-slow read is `readDaySlowUntil`'s (lib/backfill/day-slow.ts): a record that is absent, of
+ * another shape, or already expired is no brake, and a store that refuses the read is no brake either —
+ * the same answer `readSpeedPreset` gives for a value it cannot read, and for the same reason (this only
+ * ever selects between rates we chose ourselves).
  */
 async function presetTickOptions(
   store: ReturnType<typeof browserLocalStore>,
+  platform: string,
+  gentle = false,
 ): Promise<{ pace: BackfillOptions['pace']; maxDetails: number }> {
   // The seam's preset, when a test named one, is read here rather than at the spread below because the
   // plan has to be resolved to get `maxDetails` out of it — the seam itself carries no `maxDetails`.
   const plan = backfillPaceOverride?.preset
     ? SPEED_PLANS[backfillPaceOverride.preset]
     : await readSpeedPlan(store);
-  return { pace: plan.pace, maxDetails: plan.tickDetails };
+  // The host's machine-wide answer outranks the stored preset but never the seam, exactly as the
+  // `gentle && !backfillPaceOverride` spread it replaces did.
+  const chosen = gentle && !backfillPaceOverride ? SPEED_PLANS.gentle : plan;
+  const slowed = (await isPlatformDaySlowed(store, platform, tickNow())) ? daySlowPlan(chosen) : chosen;
+  return { pace: slowed.pace, maxDetails: slowed.tickDetails };
 }
 
 /** Run only while the gateway holds this install's machine-wide platform lease. */
@@ -1013,8 +1072,17 @@ async function coordinatedTick(
     }
     const segment = coordinationSegmentForRequest(platform, url);
     const response = await lease.request(segment, () => http(url, init));
+    /**
+     * 🔴 W296 · **A 429 seen by any request arms the same brake, from the one report.**
+     *
+     * This is the gateway, so it is where "every request to that platform" is
+     * literally true: the engine sees one run's responses, this sees all of them.
+     * `reportPlatformRateLimit` arms the local rest-of-day brake first (and its write
+     * cannot fail the tick) and reports to the machine-wide arbiter second (which can,
+     * and does, when the host is unreachable).
+     */
     if (response.status === 403 || response.status === 429) {
-      if (!(await lease.rateLimit(response.status, response.retryAfter)))
+      if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter)))
         throw new Error('machine-wide rate-limit coordination unavailable');
     }
     return response;
@@ -2072,10 +2140,10 @@ export async function kickBackfill(
     //    so the engine heard no objection and cleared the debt even when nothing
     //    had been stored.
     sink: (c) => deliverBackfillItem(c),
-    // W113 · The stored speed preset (ADR-032 §3), then the test seam over it.
-    ...(await presetTickOptions(store)),
+    // W113 · The stored speed preset (ADR-032 §3), the host's machine-wide gentle claim
+    // and this install's own rest-of-day brake (W296), then the test seam over all of them.
+    ...(await presetTickOptions(store, target.platform, gentle)),
     ...(backfillPaceOverride ?? {}),
-    ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
   }));
   /**
    * 🔴 W199 · **The run's own discovery, after the live leg's.** The capture already told
@@ -2496,7 +2564,9 @@ async function runAlarmTickBody(): Promise<TickResult> {
     // W113 · Same preset as a real tick would use. This probe can only ever answer a gate reason — it has
     // no port, so the engine is never entered — but passing the preset keeps the two call sites identical,
     // and a future gate that did read the pace would then be reading the right one.
-    ...(await presetTickOptions(store)),
+    // W296 · The host has not been asked yet at this point, so there is no `gentle` claim to fold in; the
+    // day-slow brake is per platform and is read here like everywhere else.
+    ...(await presetTickOptions(store, head.platform)),
     ...(backfillPaceOverride ?? {}),
   });
 
@@ -2599,10 +2669,10 @@ async function runAlarmTickBody(): Promise<TickResult> {
         // 🔴 C20: the alarm's kick must return too (both heartbeats share one exit,
         //    and one of them reporting while the other does not is not acceptable).
         sink: (c) => deliverBackfillItem(c),
-        // W113 · The alarm's path. Read once per tick, the same as the live leg's kick.
-        ...(await presetTickOptions(store)),
+        // W113 · The alarm's path. Read once per tick, the same as the live leg's kick,
+        // and folded the same way (preset → host gentle → W296 day-slow), then the seam.
+        ...(await presetTickOptions(store, target.platform, gentle)),
         ...(backfillPaceOverride ?? {}),
-        ...(gentle && !backfillPaceOverride ? { pace: SPEED_PLANS.gentle.pace, maxDetails: SPEED_PLANS.gentle.tickDetails } : {}),
       }));
     let http = await resolveHttpPort(target.origin);
     if (http === undefined) {
