@@ -501,7 +501,7 @@ Three things in that table deserve to be called out rather than buried:
 - For platforms that use response-body identity extraction, the `<scope>` part
   of that key is your **account identifier on that platform** when the extension
   could find one (a user id, an email address, or a handle), and the literal
-  string `default` when it could not (`apps/extension/entrypoints/background.ts:1955-2003`;
+  string `default` when it could not (`apps/extension/entrypoints/background.ts:2023-2071`;
   the identity itself is read by `apps/extension/lib/contract.ts:1396-1412`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
