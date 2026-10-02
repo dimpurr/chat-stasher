@@ -118,7 +118,7 @@ import {
 } from '../contract';
 import { accountFingerprintFor } from '../account-fingerprint';
 import type { OrgResolution } from './claude-org';
-import type { ChatGptWorkspaceResolution } from './chatgpt-workspace';
+import { fingerprintedChatGptWorkspace, type ChatGptWorkspaceResolution, type FingerprintedChatGptIdentity, type FingerprintedChatGptWorkspace } from './chatgpt-workspace';
 import {
   backfillPlanFor,
   auxListPathMatches,
@@ -236,8 +236,8 @@ export type BackfillFetchReply =
       text: string;
       survivedCredentialReread?: boolean;
       retryAfter?: string;
-      /** Raw request header; accepted only by fingerprintChatGptIdentityAtWorkerBoundary. */
-      chatgptAccountIdHeader?: string | null;
+      /** Untrusted transient request header; consumed only by the worker boundary. */
+      chatgptAccountIdHeader?: unknown;
     }
   | { ok: false; error: string };
 
@@ -810,8 +810,10 @@ export type FetchLike = (
    * it did before.
    */
   retryAfter?: string | null;
-  /** Exact ChatGPT-Account-Id attached to this request; null means unavailable or ambiguous. */
-  chatgptAccountIdHeader?: string | null;
+  /** Untrusted transient request header; consumed only by the worker boundary. */
+  chatgptAccountIdHeader?: unknown;
+  /** Install-keyed identity already fingerprinted in the first worker boundary. */
+  chatgptAccountIdentity?: AccountIdentity | null;
 }>;
 
 /**
@@ -872,6 +874,8 @@ export async function serveBackfillFetch(
     const rateLimited = status === 429 || status === 503;
     const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
     const carriesChatGptIdentity = findPlatformForUrl(verdict.url)?.id === 'chatgpt';
+    const safeIdentity = carriesChatGptIdentity ? accountIdentityFromUnknown(res.chatgptAccountIdentity) : null;
+    const safeChatGptIdentity = safeIdentity ? { chatgptAccountIdentity: safeIdentity } : {};
     const rawChatGptAccountId = carriesChatGptIdentity
       ? chatGptAccountIdHeaderValue(res.chatgptAccountIdHeader)
       : null;
@@ -883,11 +887,11 @@ export async function serveBackfillFetch(
       text = await res.text();
       if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
         // The same size red line as the live leg: an over-large response is not conversation JSON.
-        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader };
+        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
         return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
       }
     } catch (err) {
-      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader };
+      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
       // Only the technical detail goes back, never the body.
       return { ok: false, error: (err as Error).message };
     }
@@ -901,6 +905,7 @@ export async function serveBackfillFetch(
       ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
       ...carryRetryAfter,
       ...chatgptAccountIdHeader,
+      ...safeChatGptIdentity,
     };
   } catch (err) {
     // Only the technical detail goes back, never the body.
@@ -1114,8 +1119,19 @@ export function tabHttpPort(
     const reply = await withReplyTimeout(
       send(tabId, { type: CHATGPT_WORKSPACE_REQUEST_MESSAGE }), tabId, timeoutMs, 'the ChatGPT workspace observation',
     );
-    if (isRecord(reply) && reply.ok === true && reply.observed === true && typeof reply.workspace === 'string') {
-      return { ok: true, workspace: reply.workspace, observed: true };
+    if (isRecord(reply) && reply.ok === true && reply.observed === true
+      && (isFingerprintedWorkspace(reply.workspace) || typeof reply.workspace === 'string')) {
+      const identity = accountIdentityFromUnknown(reply.identity)
+        ?? (!isFingerprintedWorkspace(reply.workspace)
+          ? await fingerprintChatGptIdentityAtWorkerBoundary(reply.workspace, identityStore)
+          : null);
+      if (!identity) return { ok: false, reason: 'workspace-unresolved', observed: false };
+      return {
+        ok: true,
+        workspace: fingerprintedChatGptWorkspace(identity.value),
+        identity,
+        observed: true,
+      };
     }
     if (isRecord(reply) && reply.ok === false
       && (reply.reason === 'workspace-ambiguous' || reply.reason === 'workspace-unresolved')) {
@@ -1143,10 +1159,10 @@ async function httpResponseFromBackfillReplyAtWorkerBoundary(
     status: reply.status as number,
     text: reply.text as string,
   };
-  if (findPlatformForUrl(url)?.id !== 'chatgpt' || !identityStore) return response;
-  response.chatgptAccountIdentity = await fingerprintChatGptIdentityAtWorkerBoundary(
-    reply.chatgptAccountIdHeader, identityStore,
-  );
+  if (findPlatformForUrl(url)?.id !== 'chatgpt') return response;
+  const safeIdentity = accountIdentityFromUnknown(reply.chatgptAccountIdentity);
+  response.chatgptAccountIdentity = safeIdentity
+    ?? (identityStore ? await fingerprintChatGptIdentityAtWorkerBoundary(reply.chatgptAccountIdHeader, identityStore) : null);
   if (response.chatgptAccountIdentity === null) delete response.chatgptAccountIdentity;
   return response;
 }
@@ -1155,16 +1171,19 @@ async function startingChatGptIdentityAtWorkerBoundary(
   reply: unknown,
   identityStore: BackfillStore,
 ): Promise<AccountIdentity | null> {
-  if (!isRecord(reply) || reply.ok !== true || reply.observed !== true
-    || typeof reply.workspace !== 'string') return null;
+  if (!isRecord(reply) || reply.ok !== true || reply.observed !== true) return null;
+  const identity = accountIdentityFromUnknown(reply.identity);
+  if (identity) return identity;
+  if (isFingerprintedWorkspace(reply.workspace)) return null;
   return fingerprintChatGptIdentityAtWorkerBoundary(reply.workspace, identityStore);
 }
 
 /** The single raw-header crossing: returns a keyed identity, never the input value. */
-async function fingerprintChatGptIdentityAtWorkerBoundary(
+export async function fingerprintChatGptIdentityAtWorkerBoundary(
   rawValue: unknown,
-  identityStore: BackfillStore,
-): Promise<AccountIdentity | null> {
+  identityStore: BackfillStore | null,
+): Promise<FingerprintedChatGptIdentity | null> {
+  if (!identityStore) return null;
   const raw = chatGptAccountIdHeaderValue(rawValue);
   if (raw === null) return null;
   const fingerprint = await accountFingerprintFor({
@@ -1172,8 +1191,22 @@ async function fingerprintChatGptIdentityAtWorkerBoundary(
     status: 200, text: '', capturedAt: Date.now(), chatgptAccountIdHeader: raw,
   }, identityStore, null);
   return fingerprint.kind === 'fingerprint'
-    ? { value: fingerprint.value, saltId: fingerprint.saltId, source: fingerprint.source }
+    ? { value: fingerprint.value, saltId: fingerprint.saltId, source: fingerprint.source } as FingerprintedChatGptIdentity
     : null;
+}
+
+function accountIdentityFromUnknown(value: unknown): FingerprintedChatGptIdentity | null {
+  if (!isRecord(value) || typeof value.value !== 'string' || !/^[0-9a-f]{64}$/.test(value.value)
+    || typeof value.saltId !== 'string' || value.source !== 'request-header-chatgpt-account-id') return null;
+  return {
+    value: value.value,
+    saltId: value.saltId,
+    source: 'request-header-chatgpt-account-id',
+  } as FingerprintedChatGptIdentity;
+}
+
+function isFingerprintedWorkspace(value: unknown): value is FingerprintedChatGptWorkspace {
+  return typeof value === 'string' && /^fp1:[0-9a-f]{64}$/.test(value);
 }
 
 /**

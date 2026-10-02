@@ -578,7 +578,13 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     const store = memoryStore();
     const port = tabHttpPort(7, async (_id, message) => {
       if ((message as { type?: string }).type === 'cs-backfill-chatgpt-workspace') {
-        return { ok: true, observed: true, workspace: requestHeader };
+        return {
+          ok: true, observed: true, workspace: `fp1:${await fingerprintFor(store, requestHeader)}`,
+          identity: {
+            value: await fingerprintFor(store, requestHeader), saltId: saltIdOf(store),
+            source: 'request-header-chatgpt-account-id',
+          },
+        };
       }
       throw new Error('the starting identity check must not issue an HTTP request');
     }, undefined, store);
@@ -590,6 +596,37 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
       source: 'request-header-chatgpt-account-id',
     });
     expect(JSON.stringify(identity)).not.toContain(requestHeader);
+    const workspace = await port.chatgptWorkspace?.();
+    expect(workspace).toEqual({
+      ok: true,
+      workspace: `fp1:${await fingerprintFor(store, requestHeader)}`,
+      identity: {
+        value: await fingerprintFor(store, requestHeader), saltId: saltIdOf(store),
+        source: 'request-header-chatgpt-account-id',
+      },
+      observed: true,
+    });
+    expect(JSON.stringify(workspace)).not.toContain(requestHeader);
+  });
+
+  it('fingerprints a raw workspace reply inside tabHttpPort before any worker caller receives it', async () => {
+    const requestHeader = 'acct-workspace-boundary-fixture';
+    const store = memoryStore();
+    const port = tabHttpPort(7, async () => ({
+      ok: true, observed: true, workspace: requestHeader,
+    }), undefined, store);
+
+    const workspace = await port.chatgptWorkspace?.();
+    expect(workspace).toEqual({
+      ok: true,
+      workspace: `fp1:${await fingerprintFor(store, requestHeader)}`,
+      identity: {
+        value: await fingerprintFor(store, requestHeader), saltId: saltIdOf(store),
+        source: 'request-header-chatgpt-account-id',
+      },
+      observed: true,
+    });
+    expect(JSON.stringify(workspace)).not.toContain(requestHeader);
   });
 
   function chatGptPort(runStore: ReturnType<typeof memoryStore>, opts: {
@@ -730,7 +767,10 @@ describe('W303 · ChatGPT checks the request-local account header on every respo
     expect(storedHeader('chatgpt', scope, store.data).accountLease).toBeUndefined();
     expect(storedHeader('chatgpt', scope, store.data).suspended).toBeUndefined();
     expect(port.calls).toEqual([]);
-    expect(resolveChatGptWorkspace({ accountIds: [ACCOUNT_A, ACCOUNT_B] })).toEqual({
+    expect(resolveChatGptWorkspace({ identities: [
+      { value: 'a'.repeat(64), saltId: 'synthetic', source: 'request-header-chatgpt-account-id' },
+      { value: 'b'.repeat(64), saltId: 'synthetic', source: 'request-header-chatgpt-account-id' },
+    ] })).toEqual({
       ok: false, reason: 'workspace-ambiguous', observed: true,
     });
   });

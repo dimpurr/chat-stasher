@@ -17,9 +17,11 @@ const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
 import { CHATGPT_PLAN } from '../lib/backfill/enumerate';
 import {
   chatGptAccountIdFromRequest,
-  observeChatGptAccountId,
+  observeChatGptWorkspaceFingerprint,
   resolveChatGptWorkspace,
+  fingerprintedChatGptWorkspace,
 } from '../lib/backfill/chatgpt-workspace';
+import { CHATGPT_TEST_ACCOUNT_IDENTITY } from './chatgpt-lease-fixtures';
 
 describe('W233 ChatGPT enumeration', () => {
   it('parses project discovery and per-project pages without conflating their cursors', () => {
@@ -76,11 +78,13 @@ describe('W233 ChatGPT enumeration', () => {
       { headers: { 'ChatGPT-Account-Id': 'opaque-workspace-a' } },
       { headers: { 'chatgpt-account-id': 'opaque-workspace-b' } },
     )).toBe('opaque-workspace-b');
-    const one = observeChatGptAccountId({ accountIds: [] }, 'opaque-workspace-a');
+    const identityA = { ...CHATGPT_TEST_ACCOUNT_IDENTITY, value: 'a'.repeat(64) };
+    const identityB = { ...CHATGPT_TEST_ACCOUNT_IDENTITY, value: 'b'.repeat(64) };
+    const one = observeChatGptWorkspaceFingerprint({ identities: [] }, identityA);
     expect(resolveChatGptWorkspace(one)).toMatchObject({ ok: true, observed: true });
-    const two = observeChatGptAccountId(one, 'opaque-workspace-b');
+    const two = observeChatGptWorkspaceFingerprint(one, identityB);
     expect(resolveChatGptWorkspace(two)).toEqual({ ok: false, reason: 'workspace-ambiguous', observed: true });
-    expect(resolveChatGptWorkspace({ accountIds: [] })).toEqual({ ok: false, reason: 'workspace-unresolved', observed: false });
+    expect(resolveChatGptWorkspace({ identities: [] })).toEqual({ ok: false, reason: 'workspace-unresolved', observed: false });
   });
 
   it('walks main, archived, discovery, and per-project pages on separate resumable ticks', async () => {
@@ -152,7 +156,7 @@ describe('W233 ChatGPT enumeration', () => {
   });
 
   it('completes archived and project backfill under the canonical marked workspace scope', async () => {
-    const scope = `chatgpt:fp1:${'a'.repeat(64)}`;
+    const scope = `chatgpt:fp1:${CHATGPT_TEST_ACCOUNT_IDENTITY.value}`;
     const calls: string[] = [];
     const http = Object.assign(async (url: string) => {
       calls.push(url);
@@ -176,7 +180,7 @@ describe('W233 ChatGPT enumeration', () => {
       }
       throw new Error('unexpected synthetic route');
     }, {
-      chatgptWorkspace: async () => ({ ok: true as const, workspace: scope, observed: true as const }),
+      chatgptWorkspace: async () => ({ ok: true as const, workspace: fingerprintedChatGptWorkspace(CHATGPT_TEST_ACCOUNT_IDENTITY.value), identity: CHATGPT_TEST_ACCOUNT_IDENTITY, observed: true as const }),
     });
     const store = memoryStore();
     let report;
@@ -218,20 +222,20 @@ describe('W233 ChatGPT enumeration', () => {
   });
 
   it('refuses auxiliary IDs when the observed workspace changes during the request', async () => {
-    let workspace = 'opaque-workspace';
+    let identity = CHATGPT_TEST_ACCOUNT_IDENTITY;
     const calls: string[] = [];
     const http = Object.assign(async (url: string) => {
       calls.push(url);
       if (new URL(url).searchParams.get('is_archived') === 'true') {
-        workspace = 'other-workspace';
+        identity = { ...CHATGPT_TEST_ACCOUNT_IDENTITY, value: 'e'.repeat(64) };
         return { status: 200, text: JSON.stringify({ items: [{ id: 'foreign-archived' }] }) };
       }
       return { status: 200, text: JSON.stringify({ items: [] }) };
     }, {
-      chatgptWorkspace: async () => ({ ok: true as const, workspace, observed: true as const }),
+      chatgptWorkspace: async () => ({ ok: true as const, workspace: fingerprintedChatGptWorkspace(identity.value), identity, observed: true as const }),
     });
     const options = {
-      platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'chatgpt:opaque-workspace',
+      platform: 'chatgpt', origin: 'https://chatgpt.com', scope: `chatgpt:fp1:${CHATGPT_TEST_ACCOUNT_IDENTITY.value}`,
       store: memoryStore(), http,
       clock: { now: () => 1, sleep: async () => {} },
     } as const;

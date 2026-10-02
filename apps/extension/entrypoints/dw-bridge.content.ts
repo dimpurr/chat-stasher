@@ -28,7 +28,7 @@ import {
 } from '../lib/backfill/tab-port';
 import { installTabHello } from '../lib/backfill/tab-hello';
 import { backfillPlanFor } from '../lib/backfill/enumerate';
-import { observeChatGptAccountId, resolveChatGptWorkspace, type ChatGptWorkspaceObservation } from '../lib/backfill/chatgpt-workspace';
+import { observeChatGptWorkspaceFingerprint, resolveChatGptWorkspace, type ChatGptWorkspaceObservation, type FingerprintedChatGptIdentity } from '../lib/backfill/chatgpt-workspace';
 import { CHATGPT_WORKSPACE_REQUEST_MESSAGE } from '../lib/backfill/tab-port';
 import { createClaudePageScope } from '../lib/backfill/claude-page';
 import {
@@ -51,6 +51,7 @@ import {
   type FallbackHookVerification,
 } from '../lib/fallback-verification';
 import { createStaleLinkWarningGate } from '../lib/page-link';
+import type { AccountIdentity } from '../lib/backfill/types';
 
 /**
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
@@ -84,7 +85,13 @@ export default defineContentScript({
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
-    let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { accountIds: [] };
+    let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { identities: [] };
+    const isFingerprintAccountIdentity = (value: unknown): value is FingerprintedChatGptIdentity =>
+      !!value && typeof value === 'object'
+      && typeof (value as AccountIdentity).value === 'string'
+      && /^[0-9a-f]{64}$/.test((value as AccountIdentity).value)
+      && typeof (value as AccountIdentity).saltId === 'string'
+      && (value as AccountIdentity).source === 'request-header-chatgpt-account-id';
     let fallbackInjectionAttempted = false;
     let fallbackScriptAppended = false;
     let fallbackVerificationRequested = false;
@@ -237,7 +244,21 @@ export default defineContentScript({
         && (event.data as { type?: unknown }).type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
         const accountId = (event.data as { accountId?: unknown }).accountId;
         if (typeof accountId === 'string') {
-          chatGptWorkspaceObservation = observeChatGptAccountId(chatGptWorkspaceObservation, accountId);
+          // This callback forwards the transient raw value directly to the worker.
+          // Only the install-keyed reply is retained for ambiguity detection.
+          void browser.runtime.sendMessage({ type: CHATGPT_WORKSPACE_OBSERVED_MESSAGE, accountId })
+            .then((reply: unknown) => {
+              if (!reply || typeof reply !== 'object') return;
+              const identity = (reply as { identity?: unknown }).identity;
+              if (!isFingerprintAccountIdentity(identity)) return;
+              const safeIdentity: FingerprintedChatGptIdentity = {
+                value: identity.value,
+                saltId: identity.saltId,
+                source: 'request-header-chatgpt-account-id',
+              } as FingerprintedChatGptIdentity;
+              chatGptWorkspaceObservation = observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity);
+            })
+            .catch(() => undefined);
         }
         return;
       }
@@ -569,17 +590,11 @@ export default defineContentScript({
       //    Content-Type have already passed checkBackfillRequest's closed-set
       //    checks (serveBackfillFetch). Nothing is decided here, and nothing
       //    **may** be — the decision lives in exactly one place, that allowlist.
-      // 🔴 W303 · Bind the lease identity to this exact backfill request. The
-      //    request receives the page's single unambiguous observed value, and the
-      //    same value accompanies its response. Missing or ambiguous observation
-      //    stays null so the worker can refuse attribution. The raw value exists
-      //    only on this transient response path; the worker fingerprints it.
+      // 🔴 W303 · Bind the lease identity to this exact backfill request using
+      //    only the safe fingerprint returned by the first-worker boundary.
       const isChatGpt = findPlatformForUrl(url)?.id === 'chatgpt';
       const workspace = isChatGpt ? resolveChatGptWorkspace(chatGptWorkspaceObservation) : null;
-      const chatgptAccountIdHeader = workspace?.ok && workspace.observed ? workspace.workspace : null;
-      const accountHeader: Record<string, string> = chatgptAccountIdHeader === null
-        ? {}
-        : { 'ChatGPT-Account-Id': chatgptAccountIdHeader };
+      const chatgptAccountIdentity = workspace?.ok && workspace.observed ? workspace.identity : null;
       const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
@@ -587,13 +602,12 @@ export default defineContentScript({
             headers: {
               accept: 'application/json',
               ...(init.contentType ? { 'content-type': init.contentType } : {}),
-              ...accountHeader,
             },
             body: init.body,
           })
         : await authorizedFetch(url, {
             credentials: 'same-origin',
-            headers: { accept: 'application/json', ...accountHeader },
+            headers: { accept: 'application/json' },
           });
       // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
       //    the page but does not own a token, and a decision taken here would be a
@@ -612,7 +626,7 @@ export default defineContentScript({
         text: () => answer.response.text(),
         ...(answer.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
         retryAfter,
-        ...(isChatGpt && chatgptAccountIdHeader !== null ? { chatgptAccountIdHeader } : {}),
+        ...(isChatGpt && chatgptAccountIdentity !== null ? { chatgptAccountIdentity } : {}),
       };
     };
 
