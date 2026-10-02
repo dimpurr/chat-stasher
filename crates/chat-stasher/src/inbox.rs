@@ -1260,6 +1260,14 @@ fn write_shard_atomic(
     crate::test_identity_guard::refuse_fixture_write(&[id], stage)?;
     let dir = store::session_shard_dir(stage, machine, id);
     fs::create_dir_all(&dir)?;
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line.as_bytes());
+        raw.push(b'\n');
+    }
+    if let Some(existing) = store::find_duplicate_shard(stage, machine, id, &raw)? {
+        return Ok(existing);
+    }
     clean_stale_tmp(&dir)?;
     let seq = store::next_shard_seq(stage, machine, id)?;
     let final_path = store::shard_path_with_cap(stage, machine, id, seq, bucket_cap);

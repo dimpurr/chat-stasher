@@ -160,6 +160,50 @@ fn activity_index_then_push_then_overview_roundtrips() {
     );
 }
 
+#[test]
+fn activity_index_counts_an_identical_shard_once() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            cc_line("2025-01-15T12:34:56.789Z"),
+            cc_line("2025-01-15T13:45:07Z"),
+        ],
+    );
+    let shard_dir = stage
+        .join("sessions")
+        .join(machine)
+        .join(session)
+        .join("000");
+    let first = fs::read(shard_dir.join("000001.jsonl")).unwrap();
+    fs::write(shard_dir.join("000002.jsonl"), first).unwrap();
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}",
+        out.status
+    );
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(row["line_count"], 2, "duplicate shard lines count once");
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]

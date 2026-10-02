@@ -1371,7 +1371,20 @@ fn process_sqlite_snapshot(
             ));
         }
     }
-    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+    // A changed SQLite cursor proves a fresh source observation even when its
+    // exported bytes happen to match an earlier shard. Preserve that append;
+    // every other caller gets the writer's exact-repeat guard.
+    let shard_writer = if old.is_some_and(|entry| {
+        entry
+            .opencode
+            .as_ref()
+            .is_some_and(|previous| previous != &cursor)
+    }) {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap
+    } else {
+        store::write_sealed_shard_bytes_with_cap
+    };
+    let shard = Some(shard_writer(
         store::StageWriter::Collect,
         stage,
         machine,
@@ -1531,6 +1544,18 @@ fn process_jsonl(
     };
     let shard = if lines.is_empty() {
         None
+    } else if !data.reset && data.base_offset > 0 {
+        // A validated non-zero cursor proves these are newly appended source
+        // bytes. They may be byte-identical to an earlier turn (`a\n` followed
+        // by another real `a\n`) and still belong in the archive.
+        Some(store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &lines,
+            bucket_cap,
+        )?)
     } else {
         Some(store::write_sealed_shard_bytes_with_cap(
             store::StageWriter::Collect,
@@ -1611,7 +1636,19 @@ fn process_opencode(
         }
     }
     let lines = vec![snapshot.json_line];
-    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+    // As above, an advanced per-session cursor is a validated source delta;
+    // identical export bytes can still represent a new observation.
+    let shard_writer = if old.is_some_and(|entry| {
+        entry
+            .opencode
+            .as_ref()
+            .is_some_and(|previous| previous != &snapshot.cursor)
+    }) {
+        store::write_sealed_shard_bytes_allow_exact_repeat_with_cap
+    } else {
+        store::write_sealed_shard_bytes_with_cap
+    };
+    let shard = Some(shard_writer(
         store::StageWriter::Collect,
         stage,
         machine,

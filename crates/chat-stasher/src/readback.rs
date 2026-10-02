@@ -400,6 +400,15 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
+        self.read_cumulative_sessions_inner(mk, wanted, false)
+    }
+
+    fn read_cumulative_sessions_inner(
+        &self,
+        mk: &MasterKey,
+        wanted: Option<&BTreeSet<(String, String)>>,
+        collapse_duplicate_shards: bool,
+    ) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for read-all")?;
@@ -507,10 +516,15 @@ impl BackupStore {
                 let mut shard_bytes = Vec::with_capacity(shards.len());
                 let mut shard_run_duplicates = Vec::new();
                 let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
+                let mut seen_shard_hashes = BTreeSet::new();
                 for (shard, node) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
                         .with_context(|| format!("dump shard {shard}"))?;
+                    let digest: [u8; 32] = Sha256::digest(&buf).into();
+                    if collapse_duplicate_shards && !seen_shard_hashes.insert(digest) {
+                        continue;
+                    }
                     let current_index = shard_sha256.len();
                     for (start, offset) in shard_offsets.iter().copied().enumerate() {
                         let Some(end_offset) = offset.checked_add(buf.len()) else {
@@ -525,7 +539,7 @@ impl BackupStore {
                         }
                     }
                     shard_offsets.push(concat.len());
-                    shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+                    shard_sha256.push(hex_digest(&digest));
                     shard_bytes.push(buf.len() as u64);
                     concat.extend_from_slice(&buf);
                 }
@@ -561,7 +575,7 @@ impl BackupStore {
     /// Traverses all snapshots cumulatively, grouping sessions by their newest
     /// snapshot appearance (ADR-021).
     pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions(mk, None)
+        self.read_cumulative_sessions_inner(mk, None, true)
     }
 
     /// Dump the individual sealed shards of selected sessions of one machine
@@ -728,6 +742,7 @@ impl BackupStore {
                 }
                 shards.sort_by_key(|(seq, _)| *seq);
                 let mut concat = Vec::new();
+                let mut seen_hashes = BTreeSet::new();
                 for (_, node) in shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf).with_context(|| {
@@ -736,7 +751,10 @@ impl BackupStore {
                             crate::id::short_session_id(&session)
                         )
                     })?;
-                    concat.extend_from_slice(&buf);
+                    let digest: [u8; 32] = Sha256::digest(&buf).into();
+                    if seen_hashes.insert(digest) {
+                        concat.extend_from_slice(&buf);
+                    }
                 }
                 visit(&session, &concat)?;
                 out.sessions += 1;

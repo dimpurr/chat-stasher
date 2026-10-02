@@ -158,6 +158,72 @@ fn l3_names_a_repeated_shard_and_does_not_fail_on_it() {
     );
 }
 
+#[test]
+fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let line = r#"{"type":"user","message":{"role":"user","content":"synthetic"}}"#;
+    write_shard(&stage, 1, &format!("{line}\n"));
+    write_shard(&stage, 2, &format!("{line}\n"));
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let push = run(
+        sandbox,
+        &[
+            "push",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--machine",
+            MACHINE,
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(push.status.success(), "push failed: {:?}", push.status);
+    let snapshots_before = fs::read_dir(repo.join("snapshots")).unwrap().count();
+
+    let report = run(
+        sandbox,
+        &[
+            "repair-duplicates",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert!(
+        report.status.success(),
+        "repair-duplicates failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["machines"][0]["machine"], MACHINE);
+    assert_eq!(json["machines"][0]["duplicate_sessions"], 1);
+    assert_eq!(json["machines"][0]["duplicate_shards"], 1);
+    assert_eq!(
+        json["machines"][0]["duplicate_bytes"],
+        (line.len() + 1) as u64
+    );
+    assert!(json["physical_removal"]
+        .as_str()
+        .unwrap()
+        .contains("separate decision"));
+    assert_eq!(
+        fs::read_dir(repo.join("snapshots")).unwrap().count(),
+        snapshots_before,
+        "the report must not append or remove snapshots"
+    );
+}
+
 /// A normal incremental sequence: two different shards, no repeat, no noise.
 #[test]
 fn l3_does_not_cry_duplicate_over_a_normal_sequence() {

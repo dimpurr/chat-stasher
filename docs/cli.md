@@ -21,6 +21,7 @@ chat-stasher <command> --help
 | [`status`](#status) | Is the timer working? What does the scanner find? | No |
 | [`dest-init`](#dest-init) | Seeds a new destination with this machine's history | Stage, destination |
 | [`verify`](#verify) | Proves an archive is intact | No |
+| [`repair-duplicates`](#repair-duplicates) | Reports identical shard copies without changing the archive | No |
 | [`ui`](#ui) | Opens the local dashboard | No |
 | [`search`](#search) | Finds sessions by machine, tool, date or text | No |
 | [`export`](#export) | Writes selected sessions out as files | Files in `--out` |
@@ -103,7 +104,7 @@ Exit codes: `0` done · `1` a step did not finish · `2` missing parameter or ma
 
 ### `doctor`
 
-Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text.
+Read-only. Reports each AI tool on this machine, whether its settings delete old sessions, each declared destination (reached or not, with the reason), identical duplicate shards in the configured local stage, the browser host registration, local cache sizes, and the key files this machine holds — one per archive copy, with whether each is present here and whether you have declared a copy of it. Prints paths, counts, sizes and dates, never conversation text. To inspect archived destinations for duplicates, run [`repair-duplicates`](#repair-duplicates).
 
 | Flag | Meaning |
 |---|---|
@@ -192,17 +193,39 @@ A source destination that cannot be read makes the result incomplete, reported a
 
 L3 also names any session whose archived shard sequence repeats shards byte for
 byte. The three checks above cannot see that — a body stored twice is
-self-consistent — and it is what leaves `read` and `export` returning a
-conversation twice. It is reported as a **possible** duplicate seal and does not
-fail the run: a harness may legitimately append bytes identical to bytes already
-sealed, and the archive records no provenance that could tell the two apart. The
-count is carried in the `L3 verdict` line so a green run cannot hide it.
+self-consistent — and it is what leaves older versions' `read` and `export`
+returning a conversation twice. It is reported as a **possible** duplicate seal
+and does not fail the run. The count is carried in the `L3 verdict` line so a
+green run cannot hide it. Fixed versions collapse repeated same-session shard
+hashes in readers, but keep the stored shards and snapshots unchanged.
 
 Each report also names the shape, because the shapes are not equally suspicious.
 The repeat is either the whole body sealed before it — the shape a re-seal
 leaves, whether that body took one shard or several — or a block that recurs
 without beginning the sequence, which is the weakest of the three and the one
 least distinguishable from content that genuinely repeats.
+
+### `repair-duplicates`
+
+Read-only dry-run inventory of identical shard content in the newest archived
+body for each session and machine partition:
+
+```sh
+chat-stasher repair-duplicates --destination <name>
+chat-stasher repair-duplicates --destination <name> --json
+```
+
+The report gives duplicate session, shard, and byte counts per machine. A
+duplicate means a later shard in the same session has the same SHA-256 as an
+earlier shard; different hashes remain distinct. `--json` prints one object
+with `complete`, per-machine counts, and `dry_run: true`. Exit `0` means the
+archive was fully read, `3` means it was not fully read, `2` means the command or
+destination was invalid, and `1` means reading completed but report generation
+failed.
+
+This command never deletes shards or snapshots and never runs `forget`, `prune`,
+or `rewrite`. Physical removal is a separate decision; the append-only policy
+keeps the original data in place.
 
 ### `reclaim-stage`
 

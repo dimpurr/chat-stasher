@@ -522,6 +522,31 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
+    /// Read-only inventory of byte-identical shards in archived sessions.
+    /// This command never removes or rewrites snapshots or shards.
+    RepairDuplicates {
+        /// Named destination from the config. Required when multiple are declared.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Repository path override.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override.
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override.
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Print one machine-readable JSON object to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Keep ssh ControlMaster processes open after this run.
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
     /// Initialise a new destination as a *full extra copy* (ADR-013).
     ///
     /// Order is fixed: re-collect from the local sources first (they are the
@@ -1719,6 +1744,23 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
+        Command::RepairDuplicates {
+            destination,
+            repo,
+            key_file,
+            connections,
+            options,
+            json,
+            keep_ssh_masters,
+        } => cmd_repair_duplicates(
+            destination,
+            repo,
+            key_file,
+            connections,
+            &options,
+            json,
+            keep_ssh_masters,
+        ),
         Command::Ingest {
             inbox,
             stage,
@@ -2642,6 +2684,7 @@ fn rebuild_activity_index(
         use sha2::{Digest, Sha256};
         let mut lines: Vec<String> = Vec::new();
         let mut hasher = Sha256::new();
+        let mut seen_shard_hashes = BTreeSet::new();
         for (_, shard) in shards {
             let bytes = match fs::read(&shard) {
                 Ok(b) => b,
@@ -2653,6 +2696,10 @@ fn rebuild_activity_index(
                 }
             };
             hasher.update(&bytes);
+            let shard_hash: [u8; 32] = Sha256::digest(&bytes).into();
+            if !seen_shard_hashes.insert(shard_hash) {
+                continue;
+            }
             for line in String::from_utf8_lossy(&bytes).lines() {
                 lines.push(line.to_string());
             }
@@ -8120,6 +8167,159 @@ fn cmd_push(
     ExitCode::SUCCESS
 }
 
+#[derive(serde::Serialize)]
+struct DuplicateRepairMachine {
+    machine: String,
+    duplicate_sessions: usize,
+    duplicate_shards: usize,
+    duplicate_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct DuplicateRepairReport {
+    destination: String,
+    complete: bool,
+    dry_run: bool,
+    machines: Vec<DuplicateRepairMachine>,
+    warnings: Vec<String>,
+    physical_removal: &'static str,
+    exit_semantics: &'static str,
+}
+
+fn duplicate_repair_report(
+    destination: String,
+    archive: &readback::ReadAllReport,
+) -> anyhow::Result<DuplicateRepairReport> {
+    let mut machines = Vec::new();
+    for machine in &archive.machines {
+        let mut summary = DuplicateRepairMachine {
+            machine: machine.hostname.clone(),
+            duplicate_sessions: 0,
+            duplicate_shards: 0,
+            duplicate_bytes: 0,
+        };
+        for session in &machine.sessions {
+            let mut seen = BTreeSet::new();
+            let mut has_duplicates = false;
+            for (hash, bytes) in session.shard_sha256.iter().zip(&session.shard_bytes) {
+                if !seen.insert(hash) {
+                    has_duplicates = true;
+                    summary.duplicate_shards += 1;
+                    summary.duplicate_bytes = summary
+                        .duplicate_bytes
+                        .checked_add(*bytes)
+                        .context("duplicate byte count overflow")?;
+                }
+            }
+            if has_duplicates {
+                summary.duplicate_sessions += 1;
+            }
+        }
+        machines.push(summary);
+    }
+    Ok(DuplicateRepairReport {
+        destination,
+        complete: archive.complete(),
+        dry_run: true,
+        machines,
+        warnings: archive.warnings.clone(),
+        physical_removal:
+            "no shards or snapshots were removed; physical removal is a separate decision",
+        exit_semantics:
+            "0=complete report, 1=completed report failed, 2=usage error, 3=archive read incomplete",
+    })
+}
+
+fn cmd_repair_duplicates(
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    json: bool,
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let config = match config_or_refuse("repair-duplicates") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let destination = destination.or_else(|| {
+        (config.destinations.len() == 1)
+            .then(|| config.destinations.keys().next().cloned())
+            .flatten()
+    });
+    let destination_name = destination.clone().unwrap_or_else(|| "local".to_string());
+    let cfg = resolve_store_config(
+        &config,
+        destination.as_deref(),
+        repo,
+        key_file,
+        connections,
+        options,
+    );
+    let store = BackupStore::for_metadata_query(cfg.clone());
+    let mk = match store::load_key_file(&cfg) {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("repair-duplicates: {error}");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    let archive = match chat_stasher::reader_guard::catching_panic("repair-duplicates", || {
+        store.read_cumulative_sessions(&mk, None)
+    }) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("repair-duplicates: could not finish reading archive: {error}");
+            reap_remote(&cfg, keep_ssh_masters);
+            return ExitCode::from(3);
+        }
+    };
+    reap_remote(&cfg, keep_ssh_masters);
+    let report = match duplicate_repair_report(destination_name, &archive) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("repair-duplicates: could not build report: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if json {
+        match serde_json::to_writer(std::io::stdout(), &report) {
+            Ok(()) => println!(),
+            Err(error) => {
+                eprintln!("repair-duplicates: could not write JSON report: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        println!("[repair-duplicates] destination : {}", report.destination);
+        println!("[repair-duplicates] mode        : dry-run");
+        for machine in &report.machines {
+            println!(
+                "[repair-duplicates] machine={} duplicate_sessions={} duplicate_shards={} duplicate_bytes={}",
+                machine.machine,
+                machine.duplicate_sessions,
+                machine.duplicate_shards,
+                machine.duplicate_bytes
+            );
+        }
+        for warning in &report.warnings {
+            println!("[repair-duplicates] WARN: {warning}");
+        }
+        println!(
+            "[repair-duplicates] storage     : {}",
+            report.physical_removal
+        );
+    }
+    if report.complete {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("repair-duplicates: PARTIAL exit_code=3 — archive reading did not complete; the counts do not prove absence");
+        ExitCode::from(3)
+    }
+}
+
 fn cmd_read(
     stage: &Option<PathBuf>,
     session: &Option<String>,
@@ -8668,6 +8868,7 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 let sources = index_sources(&paths_by_id, &entries_all, &titles);
                 index.build(&sources, |id| {
                     use chat_stasher::fts::LoadFailure;
+                    use sha2::{Digest, Sha256};
                     let indexes = paths_by_id.get(id).ok_or_else(|| {
                         LoadFailure::new(
                             0,
@@ -8675,14 +8876,22 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                         )
                     })?;
                     let mut raw = Vec::new();
+                    let mut bytes_read = 0u64;
+                    let mut seen_shard_hashes = BTreeSet::new();
                     for idx in indexes {
-                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut raw) {
-                            // Whatever was read into `raw` before the read failed
-                            // was still read, and the build's volume counts it.
+                        let mut shard = Vec::new();
+                        if let Err(error) = repo.dump(&entries_all[*idx].1, &mut shard) {
+                            // Whatever was read from this shard before the read
+                            // failed was still read, and the build's volume counts it.
                             return Err(LoadFailure::new(
-                                raw.len() as u64,
+                                bytes_read + shard.len() as u64,
                                 anyhow::Error::new(error).context("read changed archived document"),
                             ));
+                        }
+                        bytes_read += shard.len() as u64;
+                        let digest: [u8; 32] = Sha256::digest(&shard).into();
+                        if seen_shard_hashes.insert(digest) {
+                            raw.extend_from_slice(&shard);
                         }
                     }
                     // The shard was read in full before it was handed to the
@@ -8691,7 +8900,6 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                     // returned as a failure: a shard in a format no reader of
                     // this build knows is a document state, and it must not put
                     // the rest of the archive out of reach (W255 C1).
-                    let bytes_read = raw.len() as u64;
                     let extracted = chat_stasher::fts::extract_index_document_for(
                         chat_stasher::fts::harness_of_document_id(id),
                         &raw,
@@ -16964,5 +17172,43 @@ mod schedule_platform_tests {
             !refusal.contains("could not be run"),
             "no tool was attempted, and the wording must not read as if one failed: {refusal}"
         );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_repair_report_tests {
+    use super::*;
+
+    #[test]
+    fn report_counts_repeated_hashes_once_per_session_and_keeps_other_content() {
+        let mut archive = readback::ReadAllReport::default();
+        archive.machines.push(readback::MachineMerge {
+            hostname: "machine-one".to_string(),
+            snapshot_id: "snapshot".to_string(),
+            snapshot_time: "time".to_string(),
+            snapshot_time_unix: 1,
+            sessions: vec![readback::SessionBackedUp {
+                machine: "machine-one".to_string(),
+                session_id: "session-one".to_string(),
+                shard_count: 3,
+                concat_bytes: 15,
+                sha256: "concat".to_string(),
+                shard_sha256: vec![
+                    "same".to_string(),
+                    "different".to_string(),
+                    "same".to_string(),
+                ],
+                shard_bytes: vec![5, 7, 5],
+                shard_run_duplicates: vec![(0, 2)],
+            }],
+        });
+
+        let report = duplicate_repair_report("destination-one".to_string(), &archive).unwrap();
+        assert!(report.complete);
+        assert!(report.dry_run);
+        assert_eq!(report.machines[0].duplicate_sessions, 1);
+        assert_eq!(report.machines[0].duplicate_shards, 1);
+        assert_eq!(report.machines[0].duplicate_bytes, 5);
+        assert!(report.physical_removal.contains("separate decision"));
     }
 }

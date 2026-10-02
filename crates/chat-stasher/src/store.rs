@@ -864,12 +864,15 @@ impl BackupStore {
 
         let mut concat = Vec::new();
         let mut hashes = Vec::new();
+        let mut seen_shard_hashes = BTreeSet::new();
         for (seq, _path, node) in entries {
             let mut buf = Vec::new();
             repo.dump(&node, &mut buf).context("dump shard")?;
-            concat.extend_from_slice(&buf);
-            let hash = hex_digest(&Sha256::digest(&buf));
-            hashes.push((shard_filename(seq), hash));
+            let digest: [u8; 32] = Sha256::digest(&buf).into();
+            if seen_shard_hashes.insert(digest) {
+                concat.extend_from_slice(&buf);
+                hashes.push((shard_filename(seq), hex_digest(&digest)));
+            }
         }
         Ok((concat, hashes))
     }
@@ -1136,12 +1139,17 @@ fn dump_shard_slots<S: rustic_core::IndexedFull>(
     );
     let mut concat = Vec::new();
     let mut hashes = Vec::new();
+    let mut seen = BTreeSet::new();
     for (_, idx, name) in shards {
         let mut buf = Vec::new();
         repo.dump(&entries[*idx].1, &mut buf)
             .context("dump shard for session content")?;
-        concat.extend_from_slice(&buf);
-        hashes.push((name.clone(), hex_digest(&Sha256::digest(&buf))));
+        let digest = Sha256::digest(&buf);
+        let digest_key: [u8; 32] = digest.into();
+        if seen.insert(digest_key) {
+            concat.extend_from_slice(&buf);
+            hashes.push((name.clone(), hex_digest(&digest_key)));
+        }
     }
     Ok((concat, hashes))
 }
@@ -1588,12 +1596,51 @@ pub fn write_sealed_shard_bytes_with_cap(
     lines: &[Vec<u8>],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
+    write_sealed_shard_bytes_with_repeat_policy(
+        writer, stage_root, machine, session_id, lines, bucket_cap, false,
+    )
+}
+
+/// Seal a verified source delta even when its bytes equal an earlier shard.
+/// JSONL collection uses this only when a validated non-zero cursor proves the
+/// bytes are newly appended source content; all other paths use the idempotent
+/// default writer.
+pub fn write_sealed_shard_bytes_allow_exact_repeat_with_cap(
+    writer: StageWriter,
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    lines: &[Vec<u8>],
+    bucket_cap: usize,
+) -> anyhow::Result<String> {
+    write_sealed_shard_bytes_with_repeat_policy(
+        writer, stage_root, machine, session_id, lines, bucket_cap, true,
+    )
+}
+
+fn write_sealed_shard_bytes_with_repeat_policy(
+    writer: StageWriter,
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    lines: &[Vec<u8>],
+    bucket_cap: usize,
+    allow_exact_repeat: bool,
+) -> anyhow::Result<String> {
     let mut raw = Vec::new();
     for line in lines {
         raw.extend_from_slice(line);
         raw.push(b'\n');
     }
-    write_sealed_shard_raw_with_cap(writer, stage_root, machine, session_id, &raw, bucket_cap)
+    write_sealed_shard_raw_with_policy(
+        writer,
+        stage_root,
+        machine,
+        session_id,
+        &raw,
+        bucket_cap,
+        allow_exact_repeat,
+    )
 }
 
 /// Install `raw` verbatim as the next sealed shard — no line framing is added.
@@ -1610,9 +1657,31 @@ pub fn write_sealed_shard_raw_with_cap(
     raw: &[u8],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
+    write_sealed_shard_raw_with_policy(
+        writer, stage_root, machine, session_id, raw, bucket_cap, false,
+    )
+}
+
+fn write_sealed_shard_raw_with_policy(
+    writer: StageWriter,
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    raw: &[u8],
+    bucket_cap: usize,
+    allow_exact_repeat: bool,
+) -> anyhow::Result<String> {
     assert_stage_writer_audited(writer)?;
     let dir = session_shard_dir(stage_root, machine, session_id);
     fs::create_dir_all(&dir)?;
+    // Restore reproduces the archive's physical shard set for reconciliation;
+    // it must retain repeated historical shards. Ingest/collect/seal are new
+    // writes, where an exact replay is idempotent.
+    if !allow_exact_repeat && writer != StageWriter::Restore {
+        if let Some(name) = find_duplicate_shard(stage_root, machine, session_id, raw)? {
+            return Ok(name);
+        }
+    }
     let seq = next_shard_seq(stage_root, machine, session_id)?;
     let path = shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
     fs::create_dir_all(path.parent().expect("shard path has bucket parent"))?;
@@ -1629,6 +1698,61 @@ pub fn write_sealed_shard_raw_with_cap(
     }
     fs::rename(&tmp, &path)?;
     Ok(shard_filename(seq))
+}
+
+/// Find an already sealed shard with the same SHA-256 in one session.
+pub fn find_duplicate_shard(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    raw: &[u8],
+) -> anyhow::Result<Option<String>> {
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    let mut existing = sealed_shard_entries(&dir)?;
+    existing.sort_by_key(|(seq, _)| *seq);
+    let wanted_hash = Sha256::digest(raw);
+    for (seq, path) in existing {
+        let existing_bytes = fs::read(&path).with_context(|| {
+            format!("read existing shard {} for duplicate check", path.display())
+        })?;
+        if Sha256::digest(&existing_bytes) == wanted_hash {
+            return Ok(Some(shard_filename(seq)));
+        }
+    }
+    Ok(None)
+}
+
+/// Indices of shard bodies that repeat an earlier SHA-256 within one session.
+///
+/// Sequence order is the caller's order. The first occurrence is retained and
+/// each later occurrence with the same digest is collapsed. Different content
+/// remains distinct, even when it shares lines with another shard.
+pub fn duplicate_shard_indices(shards: &[Vec<u8>]) -> Vec<usize> {
+    let mut seen = BTreeSet::new();
+    shards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, shard)| {
+            let digest: [u8; 32] = Sha256::digest(shard).into();
+            if seen.insert(digest) {
+                None
+            } else {
+                Some(index)
+            }
+        })
+        .collect()
+}
+
+/// Keep the first occurrence of each exact shard hash within one session.
+pub fn unique_shard_bodies(shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut seen = BTreeSet::new();
+    shards
+        .into_iter()
+        .filter(|shard| {
+            let digest: [u8; 32] = Sha256::digest(shard).into();
+            seen.insert(digest)
+        })
+        .collect()
 }
 
 /// Find sealed shards in both layouts: legacy files directly under the
@@ -2063,6 +2187,13 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_shard_hashes_collapse_only_later_exact_matches() {
+        let shards = vec![b"alpha\n".to_vec(), b"beta\n".to_vec(), b"alpha\n".to_vec()];
+        assert_eq!(duplicate_shard_indices(&shards), vec![2]);
+        assert!(duplicate_shard_indices(&[b"alpha\n".to_vec(), b"alpha".to_vec()]).is_empty());
+    }
+
+    #[test]
     fn shard_path_lays_out_partition() {
         let stage = Path::new("/tmp/stage");
         assert_eq!(
@@ -2084,6 +2215,39 @@ mod tests {
             );
             assert_stage_writer_audited(registration.writer).unwrap();
         }
+    }
+
+    #[test]
+    fn writing_an_identical_shard_for_the_same_session_is_a_noop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path().join("stage");
+        let first = write_sealed_shard_raw_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "machine-one",
+            "session-one",
+            b"same body\n",
+            20,
+        )
+        .unwrap();
+        let replay = write_sealed_shard_raw_with_cap(
+            StageWriter::Collect,
+            &stage,
+            "machine-one",
+            "session-one",
+            b"same body\n",
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(
+            replay, first,
+            "an identical replay names the existing shard"
+        );
+        let shards =
+            sealed_shard_entries(&session_shard_dir(&stage, "machine-one", "session-one")).unwrap();
+        assert_eq!(shards.len(), 1, "the writer must not append a duplicate");
+        assert_eq!(fs::read(&shards[0].1).unwrap(), b"same body\n");
     }
 
     /// W292: `push_only_if_changed` is the push-level half of the no-op check

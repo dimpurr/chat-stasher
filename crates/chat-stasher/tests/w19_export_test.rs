@@ -667,6 +667,74 @@ fn written_files_are_byte_identical_to_read_and_the_manifest_sha_matches() {
         .any(|v| v == "m-beta"));
 }
 
+#[test]
+fn read_and_export_collapse_an_exact_duplicate_shard() {
+    let (dir, repo, _key, mk) = build_fixture();
+    let root = dir.path();
+    let stage = stage_path(root, "m-alpha");
+    let session_dir = store::session_shard_dir(&stage, "m-alpha", CC_ONE);
+    let original = fs::read(store::shard_path(&stage, "m-alpha", CC_ONE, 1)).unwrap();
+    let duplicate_path = store::shard_path(&stage, "m-alpha", CC_ONE, 3);
+    fs::create_dir_all(duplicate_path.parent().unwrap()).unwrap();
+    fs::write(&duplicate_path, &original).unwrap();
+    let store = store_of(&repo, root, "m-alpha");
+    store.push(&stage, &mk).unwrap();
+
+    let (read_body, read_shards) = store.read_session_concat("m-alpha", CC_ONE, &mk).unwrap();
+    assert_eq!(read_shards.len(), 2, "read reports unique content shards");
+    assert_eq!(
+        std::str::from_utf8(&read_body).unwrap().lines().count(),
+        5,
+        "read body excludes the repeated shard"
+    );
+
+    let out = root.join("export-deduplicated");
+    let exported = export::export_sessions(
+        &store,
+        &mk,
+        &Selector::default(),
+        &export_opts(&out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(exported.exit_status(), 0);
+    let entry = manifest(&out)["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["session_id"] == CC_ONE)
+        .unwrap()
+        .clone();
+    let file = out.join(entry["relative_path"].as_str().unwrap());
+    let exported_body = fs::read(file).unwrap();
+    assert_eq!(
+        exported_body, read_body,
+        "export and read share normalized bytes"
+    );
+    assert_eq!(
+        std::str::from_utf8(&exported_body).unwrap().lines().count(),
+        5
+    );
+    let mut fts_source_lines = None;
+    store
+        .for_each_archived_session(&mk, "m-alpha", |id, body| {
+            if id == CC_ONE {
+                fts_source_lines = Some(std::str::from_utf8(body).unwrap().lines().count());
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fts_source_lines,
+        Some(5),
+        "FTS receives normalized session bytes"
+    );
+    assert!(
+        session_dir.exists(),
+        "the read-only repair leaves stage data in place"
+    );
+}
+
 // ------------------------------------------------------------------ test 3
 
 /// `--turns user`: applied where the format is certain, explicitly
