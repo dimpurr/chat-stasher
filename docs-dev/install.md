@@ -430,7 +430,7 @@ sentence the surrounding documents have to get right:
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:2102-2117`;
+  (`crates/chat-stasher/src/main.rs:2160-2175`;
   `crates/chat-stasher/src/nativehost.rs:2059-2134`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
