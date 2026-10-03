@@ -24,17 +24,109 @@
 //! The cell under test is read out of the shipped registry at run time, the
 //! same instrument `registry_default_path_shape_test` uses, so this test
 //! cannot drift from the data file it is about.
+//!
+//! Every test below states its location through process-global env vars and
+//! `harness_roots`, so they all run one at a time under [`ENV_LOCK`] and put
+//! the environment back through [`EnvRestore`] — a test that failed mid-way
+//! must not decide what environment the next test starts from. The branch CI
+//! failures this audit was opened for (w440) were a different cause —
+//! branches cut from main before the recursive `session_dir` rules, whose
+//! shipped data still declares the depth-one `session_*` pattern while this
+//! store nests sessions at `sessions/<workspaceId>/<sessionId>`, so the
+//! walk opened no session scope and every transcript came back `NotSession`
+//! with the probe root resolved exactly as expected — but the audit did
+//! find one real isolation gap: `unverified_platform_cells_are_not_scanned`
+//! read `CHAT_STASHER_REGISTRY` without the lock, one scheduling accident
+//! away from loading another test's planted one-harness registry instead of
+//! the shipped one. The lock order and the restore guard close that here.
 
 use chat_stasher::config::Config;
 use chat_stasher::models::HarnessSource;
 use chat_stasher::scanner;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Env mutation is process-global and cargo runs tests in parallel threads.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// The environment variables these tests state a location through: `HOME`
+/// and `USERPROFILE` carry the isolated home, `KIMI_CODE_HOME` is the kimi
+/// cell's declared override, and `CHAT_STASHER_REGISTRY` points the scanner
+/// at the planted one-harness registry. These are exactly the names the
+/// product consults on a scan (`config::home_from_env` for the first two,
+/// the cell's `env_override` and [`scanner::REGISTRY_ENV`] for the rest), so
+/// restoring them restores the whole scan-relevant environment.
+const MUTATED_ENV: [&str; 4] = [
+    "HOME",
+    "USERPROFILE",
+    "KIMI_CODE_HOME",
+    scanner::REGISTRY_ENV,
+];
+
+/// Put the [`MUTATED_ENV`] variables back to the values they carried at
+/// construction, even when the test panics while they are still mutated.
+/// The manual `set_var`/`remove_var` calls inside the tests narrow the window
+/// in which the environment is mutated for anything reading it — they cannot
+/// put anything back if an assertion fails between them; this guard can, and
+/// that is the invariant [`ENV_LOCK`] alone cannot give: the lock orders the
+/// mutations, this makes each one reversible.
+struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
+
+impl EnvRestore {
+    fn now() -> Self {
+        Self(
+            MUTATED_ENV
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (name, previous) in self.0.drain(..) {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// The analysis-test twin of [`ENV_LOCK`]: the lock serialises the
+/// env-mutating tests, and the snapshot undoes each one's bookkeeping at
+/// scope exit, panic or not.
+///
+/// Field order is the whole design, so both fields are held for their `Drop`
+/// alone — the leading underscores say exactly that. Rust drops struct
+/// fields in declaration order, so `_env` restores the environment *while
+/// the lock is still held*, and only then does `_lock` release it. A
+/// `(guard, restore)` tuple — or this struct with the fields swapped — would
+/// drop the lock first and hand it to the next waiting test before the
+/// environment was restored, letting the leak become *its* "incoming
+/// environment". The declaration order is what turns two half-guards into
+/// one correct guard.
+struct ScanEnv {
+    _env: EnvRestore,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl ScanEnv {
+    fn acquire() -> Self {
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let env = EnvRestore::now();
+        Self {
+            _lock: lock,
+            _env: env,
+        }
+    }
+}
 
 /// The machine component every id in this file must carry.
 const MACHINE: &str = "w37-fixture";
@@ -202,7 +294,7 @@ fn expected_id(session: &str) -> String {
 /// session, each identified by its own directory, all three distinct.
 #[test]
 fn ids_come_from_the_session_directory_and_are_distinct() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     let root = fixture_store(home.path());
 
@@ -293,7 +385,7 @@ fn ids_come_from_the_session_directory_and_are_distinct() {
 /// under it is claimed to be unreadable.
 #[test]
 fn the_probe_counts_the_sessions_and_claims_nothing_more() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     let root = fixture_store(home.path());
 
@@ -318,7 +410,7 @@ fn the_probe_counts_the_sessions_and_claims_nothing_more() {
 /// must not turn into "the store is empty".
 #[test]
 fn non_session_files_in_the_tree_are_not_counted() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     fixture_store(home.path());
 
@@ -348,7 +440,7 @@ fn non_session_files_in_the_tree_are_not_counted() {
 /// the shape the implementation allows, not one that was observed.)
 #[test]
 fn a_sub_agent_transcript_is_not_a_second_session() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     let root = fixture_store(home.path());
     write_file(
@@ -383,7 +475,7 @@ fn a_sub_agent_transcript_is_not_a_second_session() {
 /// stores grow stray files; the rule must not adopt them.
 #[test]
 fn a_transcript_without_a_session_directory_is_not_a_session() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     let root = fixture_store(home.path());
     write_file(
@@ -406,7 +498,7 @@ fn a_transcript_without_a_session_directory_is_not_a_session() {
 /// the assertion below is what fails if that changes.
 #[test]
 fn a_nested_session_directory_owns_its_transcript_under_its_own_id() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     let root = fixture_store(home.path());
     const OUTER: &str = "session_00000000-0000-4000-8000-00000000000d";
@@ -457,7 +549,7 @@ fn a_nested_session_directory_owns_its_transcript_under_its_own_id() {
 /// at all, so this test pins that it is honoured.
 #[test]
 fn kimi_code_home_env_override_moves_the_root() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _scan = ScanEnv::acquire();
     let home = isolated_home();
     // The default location stays empty; the override holds the store.
     let elsewhere = tempfile::tempdir().unwrap();
@@ -502,6 +594,16 @@ fn kimi_code_home_env_override_moves_the_root() {
 /// cell, asserted here so a future edit that quietly promotes them is caught.
 #[test]
 fn unverified_platform_cells_are_not_scanned() {
+    // Readers serialize with writers too (same as B97's `ENV_LOCK`):
+    // `load_registry_from_repo` consults the process-global
+    // `CHAT_STASHER_REGISTRY`, which every scanner test above briefly points
+    // at its planted one-harness copy. Without the lock this test passed only
+    // by scheduling luck — the planted copy happens to carry the same kimi
+    // entry — and a future test that plants a modified cell would turn this
+    // into an order-dependent failure.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let registry = scanner::load_registry_from_repo().expect("shipped registry must load");
     let kimi = registry
         .harnesses
