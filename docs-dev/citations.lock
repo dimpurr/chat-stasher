@@ -563,8 +563,14 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1011  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:2169-2219  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:439  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
+crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
+  <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
 crates/chat-stasher/src/collect.rs:1891-1931  b98ca2edc014  lines=41
   <- docs-dev/privacy.md:961  :: ));
+crates/chat-stasher/src/collect.rs:2062-2074  b2aceab89be4  lines=13
+  <- docs-dev/openclaw-scanner.md:46  :: let decoded = zstd::stream::decode_all(&compressed[..]).con…
+crates/chat-stasher/src/collect.rs:2196-2210  7d71d96ff7e2  lines=15
+  <- docs-dev/openclaw-scanner.md:46  :: fn complete_lines(bytes: &[u8]) -> (Vec<Vec<u8>>, usize) {
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
@@ -887,6 +893,8 @@ crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1226  :: }
 crates/chat-stasher/src/scanner.rs:1494-1609  3dd4c2c8f6ed  lines=116
   <- docs-dev/privacy.md:961  :: sqlite_layout: Some(layout),
+crates/chat-stasher/src/scanner.rs:1927-1936  6568826d10cf  lines=10
+  <- docs-dev/openclaw-scanner.md:32  :: if path.extension().and_then(|e| e.to_str()) != Some("zst")…
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:903  :: /// Resolve the executable that a persistent scheduler may …
 crates/chat-stasher/src/schedule.rs:197-301  0146bafd68ef  lines=105

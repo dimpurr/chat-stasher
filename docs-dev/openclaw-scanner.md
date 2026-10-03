@@ -27,17 +27,25 @@ digest before accepting it. Nullable timestamps and event JSON remain explicit
 unenumerable; unreadable rows are counted, and other stores and cold files
 continue to be scanned.
 
-Cold files under `sessions/` are considered when they are `.zst` files with a
-`.jsonl` name component. The part of the name before `.jsonl` supplies the
-session ID. A file is skipped when an identifiable SQLite archive row for the
+Cold files under `sessions/` are considered when the file name's extension is
+`.zst`; a `.jsonl` name component is not required
+(`crates/chat-stasher/src/scanner.rs:1927-1936`). The part of the name before
+the first `.jsonl` supplies the session ID — the whole file name when the name
+contains no `.jsonl` — and a file whose part before `.jsonl` is empty is
+skipped. A file is also skipped when an identifiable SQLite archive row for the
 same agent and session ID was enumerated. Discovery does not read or verify the
 archive blob, so this deduplication is based on row identity; collection later
 checks that the blob and digest are present and consistent. The filename has
 no generation, so an archive row for one generation can also suppress a cold
 file belonging to a sibling generation. A cold file without such an archive
-row is kept as its own source record. Its zstd stream is decompressed and the
-JSONL lines are preserved in the raw archive; the OpenClaw normalizer does not
-interpret that native line format, so those lines remain unrendered.
+row is kept as its own source record. Its zstd stream is decompressed in full
+and the complete JSONL lines — the ones terminated by a newline — are
+preserved in the raw archive; a trailing line still missing its final newline
+is held as in progress rather than sealed, and the first pass after the source
+gains that newline re-decodes and seals that tail in full
+(`crates/chat-stasher/src/collect.rs:2062-2074`, `:2196-2210`, `:25-34`). The
+OpenClaw normalizer does not interpret that native line format, so those lines
+remain unrendered.
 
 The agent directory name is part of each archived session ID, preventing
 collisions between agents. Rollover windows remain separate observations,
