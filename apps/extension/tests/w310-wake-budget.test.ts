@@ -14,19 +14,28 @@
  * brake. W309 measured the consequence: ChatGPT draining 7 107 conversations at
  * ~1.6–2 bodies/hour (~5 months).
  *
- * W310 divides the tick band by `m` (`[5, 10] ÷ 5 = [1, 2]`), so each platform's
- * *share* is back to the design's per-platform budget. This file simulates a
- * local day at both bands and pins the two facts that matter:
+ * W310 divides the tick band by `m` (`[5, 10] ÷ 5 = [1, 2]`). The alarm is
+ * re-armed after a tick, though, so the real cycle also includes the tick's
+ * request time and pacing gaps. This file simulates a local day at both bands
+ * with those costs included and pins the facts that remain true:
  *  1. the old band could not reach any cap, on its fastest possible day;
- *  2. the new band reaches the reachable cap bands, while the alarm still binds
- *     on a slow day — and every guard W310 was told not to touch still binds.
+ *  2. a fast new band can reach gentle's cap. At the upper-edge costs pinned
+ *     here — 7 s per request, 45 s between details — a floor-draw standard
+ *     day lands on 274 bodies, under the 300 cap floor, so standard's cap
+ *     cannot bind at those edges; and that is a property of the pinned
+ *     costs, not an absolute claim — at the quickest 20 s pacing the same
+ *     day reaches 342 bodies, past the floor, where a low cap draw still
+ *     binds. The alarm binds on a slow day; and every guard W310 was told
+ *     not to touch still binds.
  *
  * ## What "simulated" means here, and what is deliberately not simulated
  *
- * Time is drawn, never slept: a day is a loop over `drawTickDelayMinutes` with an
- * injected draw, and the per-request pacing is exercised through the real
- * `Pacer` on a fake clock. The machine-wide arbiter is **modelled** (it lives in
- * `crates/chat-stasher/src/nativehost.rs`, which a node test cannot run); the
+ * Time is drawn, never slept: each cycle adds the drawn one-shot alarm delay
+ * **after** a simulated tick duration (enumeration request + detail request
+ * times + 20–45 s pacing between details). The per-request pacing bounds are
+ * also exercised through the real `Pacer` on a fake clock. The machine-wide
+ * arbiter is **modelled** (it lives in `crates/chat-stasher/src/nativehost.rs`,
+ * which a node test cannot run); the
  * model is three lines and cites the Rust it mirrors, and the point it makes —
  * `faster`'s 600–800 band is cut to 400/day by the host, gentle and standard are
  * not — is a claim about the constants, not about the Rust's control flow.
@@ -50,6 +59,9 @@ import type { RandomFn } from '../lib/backfill/random';
 const DAY_MS = 86_400_000;
 /** The stable channel's registered platforms: chatgpt, claude, deepseek, gemini, grok. */
 const M_STABLE = 5;
+const REQUEST_MS = 7_000;
+const DETAIL_GAP_MAX_MS = 45_000;
+const DETAIL_GAP_MIN_MS = 20_000;
 
 /** The pre-W310 band, kept here as the control. A literal on purpose: the shipped
  * constants are the new ones, and the control must not move when they do. */
@@ -74,20 +86,31 @@ function fakeClock(startMs = Date.parse('2026-10-02T00:00:00.000Z')): Clock {
  * whose gap is drawn from `[floor, ceil]` with the injected draw. The draw is
  * pinned, so this is a deterministic count and not a sample.
  */
-function wakesInDay(draw: RandomFn, floorMin: number, ceilMin: number): number {
+function wakesInDay(draw: RandomFn, floorMin: number, ceilMin: number, tickDurationMs: number): number {
   let t = 0;
   let wakes = 0;
   for (;;) {
     const gapMs = (floorMin + draw() * (ceilMin - floorMin)) * 60_000;
-    t += gapMs;
+    // The one-shot is re-armed after the tick settles, so request and pacing
+    // time lengthen the interval between alarm fires.
+    t += tickDurationMs + gapMs;
     if (t >= DAY_MS) return wakes;
     wakes += 1;
   }
 }
 
-const newWakes = (draw: RandomFn): number =>
-  wakesInDay(draw, BACKFILL_TICK_DELAY_MIN_MINUTES, BACKFILL_TICK_DELAY_MAX_MINUTES);
-const oldWakes = (draw: RandomFn): number => wakesInDay(draw, OLD_TICK_FLOOR_MIN, OLD_TICK_CEIL_MIN);
+/** Upper-edge tick cost: all declared detail slots settle, each transport takes 7 s. */
+function tickDurationMs(preset: SpeedPreset, detailGapMs = DETAIL_GAP_MAX_MS): number {
+  const details = SPEED_PLANS[preset].tickDetails;
+  return REQUEST_MS // list request
+    + details * REQUEST_MS
+    + Math.max(0, details - 1) * detailGapMs;
+}
+
+const newWakes = (draw: RandomFn, preset: SpeedPreset, detailGapMs = DETAIL_GAP_MAX_MS): number =>
+  wakesInDay(draw, BACKFILL_TICK_DELAY_MIN_MINUTES, BACKFILL_TICK_DELAY_MAX_MINUTES, tickDurationMs(preset, detailGapMs));
+const oldWakes = (draw: RandomFn, preset: SpeedPreset): number =>
+  wakesInDay(draw, OLD_TICK_FLOOR_MIN, OLD_TICK_CEIL_MIN, tickDurationMs(preset));
 
 /**
  * The next cursor after one serve, mirroring `saveTickCursor`'s rule: rows
@@ -129,19 +152,17 @@ function perPlatformDay(preset: SpeedPreset, wakes: number, capDraw: RandomFn, a
 
 describe('W310-1 · the pre-W310 band was the brake, not the cap', () => {
   it('🔴 even its fastest possible day left every platform below every cap band', () => {
-    // The fastest day the old band can produce: every gap at the 5-minute floor.
-    const wakes = oldWakes(fixed(0));
-    expect(wakes).toBe(287);
-
-    const serves = Math.floor(wakes / M_STABLE);
-    expect(serves).toBe(57);
-
-    // gentle: 57 bodies against a 150–200 cap → the cap can never bind.
-    expect(serves * SPEED_PLANS.gentle.tickDetails).toBeLessThan(QUIET_DAILY_CAP_MIN);
-    // standard: 114 against 300–400 → same.
-    expect(serves * SPEED_PLANS.standard.tickDetails).toBeLessThan(300);
-    // And slower draws only make it worse: the whole band is under every cap.
-    expect(Math.floor(oldWakes(fixed(1)) / M_STABLE) * SPEED_PLANS.standard.tickDetails).toBeLessThan(300);
+    // Give every preset its own shortest cycle: alarm at five minutes, and each
+    // request/gap at the fastest declared duration. Even faster's highest body
+    // budget stays below its own cap band, while slower alarm draws only reduce it.
+    for (const preset of ['gentle', 'standard', 'faster'] as const) {
+      const plan = SPEED_PLANS[preset];
+      const wakes = oldWakes(fixed(0), preset);
+      const budget = Math.floor(wakes / M_STABLE) * plan.tickDetails;
+      expect(budget, `${preset} fastest old band`).toBeLessThan(plan.pace.detail.dailyCapBand!.min);
+      const slowBudget = Math.floor(oldWakes(fixed(1), preset) / M_STABLE) * plan.tickDetails;
+      expect(slowBudget, `${preset} slowest old band`).toBeLessThan(plan.pace.detail.dailyCapBand!.min);
+    }
   });
 });
 
@@ -149,35 +170,40 @@ describe('W310-1 · the pre-W310 band was the brake, not the cap', () => {
 // 2 · The new band reaches the caps, and both brakes still bite
 // ===========================================================================
 
-describe('W310-2 · the W310 band makes the platform cap the brake again', () => {
-  it('🔴 on a fast day the cap binds; on a slow day the alarm does — for gentle and standard', () => {
-    const fastWakes = newWakes(fixed(0));
-    const slowWakes = newWakes(fixed(1));
-    expect(fastWakes).toBe(1439);
-    expect(slowWakes).toBe(719);
-
-    const fastServes = Math.floor(fastWakes / M_STABLE);
-    const slowServes = Math.floor(slowWakes / M_STABLE);
-    expect(fastServes).toBe(287);
-    expect(slowServes).toBe(143);
-
+describe('W310-2 · alarm re-arm time includes the work the tick just did', () => {
+  it('🔴 gentle can reach its cap on a fast day; standard and every slow day remain alarm-limited', () => {
     for (const preset of ['gentle', 'standard'] as const) {
       const plan = SPEED_PLANS[preset];
       const band = plan.pace.detail.dailyCapBand!;
-      // The wake budget now overruns the cap on a fast day ⇒ the cap is the brake.
-      expect(fastServes * plan.tickDetails, `${preset} fast`).toBeGreaterThanOrEqual(band.max);
-      // …and underruns it on a slow day ⇒ the alarm is the brake. "Both brakes
-      // bite, neither alone" survives, now at the per-platform level.
-      expect(slowServes * plan.tickDetails, `${preset} slow`).toBeLessThan(band.min);
+      const fastWakes = newWakes(fixed(0), preset);
+      const slowWakes = newWakes(fixed(1), preset);
+      const fastBudget = Math.floor(fastWakes / M_STABLE) * plan.tickDetails;
+      const slowBudget = Math.floor(slowWakes / M_STABLE) * plan.tickDetails;
+      if (preset === 'gentle') {
+        expect(fastWakes).toBe(1167);
+        expect(fastBudget).toBeGreaterThanOrEqual(band.max);
+      } else {
+        expect(fastWakes).toBe(685);
+        // Two standard details, the 45 s inter-detail gap and request time
+        // leave the fast day below even the 300-body cap floor.
+        expect(fastBudget).toBe(274);
+        expect(fastBudget).toBeLessThan(band.min);
+      }
+      expect(slowBudget, `${preset} slow`).toBeLessThan(band.min);
     }
   });
 
-  it("🔴 the day's body count then equals the drawn cap, which lies in the band", () => {
-    const fastWakes = newWakes(fixed(0));
+  it("🔴 the day's gentle body count is capped, while standard stays below its cap", () => {
+    const fastWakes = newWakes(fixed(0), 'gentle');
     const { cap, band, bodies } = perPlatformDay('gentle', fastWakes, fixed(1), 400);
     expect(cap).toBe(band.max); // a draw of 1 rolls the top of the band
     expect(band.min).toBe(QUIET_DAILY_CAP_MIN);
     expect(bodies).toBe(cap);
+
+    const standardWakes = newWakes(fixed(0), 'standard');
+    const standard = perPlatformDay('standard', standardWakes, fixed(1), 400);
+    expect(standard.bodies).toBe(standard.budget);
+    expect(standard.bodies).toBeLessThan(standard.band.min);
   });
 
   it('🔴 the fair rotation still gives each platform exactly 1/m of the wakes', () => {
@@ -224,7 +250,9 @@ describe('W310-3 · every account guard is untouched', () => {
     // (machine, platform, account_key). It is per platform, so it does not
     // strangle a platform's own 300–400 cap — only `faster`'s 600–800 band.
     const ARBITER_DAILY_CAP = 400;
-    const fastServes = Math.floor(newWakes(fixed(0)) / M_STABLE);
+    // A fastest-pacing `faster` cycle (20 s detail gap) can exceed the host's
+    // 400/day bound; the arbiter remains a necessary independent brake.
+    const fastServes = Math.floor(newWakes(fixed(0), 'faster', DETAIL_GAP_MIN_MS) / M_STABLE);
 
     const faster = SPEED_PLANS.faster;
     const fasterBudget = fastServes * faster.tickDetails;
