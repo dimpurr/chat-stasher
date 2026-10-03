@@ -563,6 +563,8 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1011  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:2169-2219  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:439  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
+crates/chat-stasher/src/collect.rs:1682-1722  dee9861aad8f  lines=41
+  <- docs-dev/privacy.md:961  :: fn process_whole_file(
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
@@ -883,6 +885,8 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
   <- docs-dev/install.md:948  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1220  :: }
+crates/chat-stasher/src/scanner.rs:1393-1508  f4d1ab8b6fa3  lines=116
+  <- docs-dev/privacy.md:961  :: /// Additional raw usage files stored under
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:903  :: /// Resolve the executable that a persistent scheduler may …
 crates/chat-stasher/src/schedule.rs:197-301  0146bafd68ef  lines=105

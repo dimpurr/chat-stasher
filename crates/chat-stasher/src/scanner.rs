@@ -43,6 +43,7 @@ use crate::sqlite_probe::{
     SqliteSessionRow,
 };
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io;
@@ -863,7 +864,10 @@ pub fn scan_with_machine(config: &Config, machine: &str) -> io::Result<ScanRepor
     scan_with_registry_and_machine(config, &registry, machine)
 }
 
-fn scan_with_registry_and_machine(
+/// Registry-driven scan with an already-loaded registry and explicit machine
+/// identity. Useful to callers that need both a custom registry and a stable
+/// machine identifier without consulting the local hostname.
+pub fn scan_with_registry_and_machine(
     config: &Config,
     registry: &HarnessRegistry,
     machine: &str,
@@ -1112,14 +1116,28 @@ fn probe_harness(
                                                 SqliteSessionLayout::Grok,
                                             );
                                             let record_count = records.len();
+                                            let usage =
+                                                grok_usage_records(&root, &records, machine);
                                             report.records.extend(records);
+                                            let usage_count = usage.records.len();
+                                            report.records.extend(usage.records);
                                             probe.unreadable_count = enumeration_gap(
                                                 count,
                                                 record_count,
                                                 info.unreadable_count,
                                             );
+                                            if usage.unreadable_entries > 0 {
+                                                probe.unreadable_entry_count =
+                                                    Some(usage.unreadable_entries);
+                                            }
+                                            if usage.unreadable_files > 0 {
+                                                probe.note.push_str(&format!(
+                                                    "; usage.json unreadable={}",
+                                                    usage.unreadable_files
+                                                ));
+                                            }
                                             probe.note.push_str(&format!(
-                                                "; SessionRecord={record_count}"
+                                                "; SessionRecord={record_count}; usage files={usage_count}"
                                             ));
                                         }
                                         Err(error) => {
@@ -1370,6 +1388,123 @@ fn sqlite_records_from_rows(
             })
         })
         .collect()
+}
+
+/// Additional raw usage files stored under
+/// `sessions/<working-directory>/<session-id>/usage.json`. A usage record gets
+/// a stable `.usage` identity suffix and retains the original JSON bytes
+/// through the ordinary whole-file collector.
+#[derive(Debug, Default)]
+struct GrokUsageScan {
+    records: Vec<SessionRecord>,
+    unreadable_files: u64,
+    unreadable_entries: u64,
+}
+
+fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> GrokUsageScan {
+    let Some(root) = db.parent() else {
+        return GrokUsageScan::default();
+    };
+    let known: BTreeSet<String> = sessions
+        .iter()
+        .filter_map(|record| record.id.splitn(3, '.').nth(2).map(str::to_owned))
+        .collect();
+    let mut scan = GrokUsageScan::default();
+    let cwd_dirs = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            scan.unreadable_entries = 1;
+            return scan;
+        }
+    };
+
+    for cwd_entry in cwd_dirs {
+        let cwd_entry = match cwd_entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                scan.unreadable_entries += 1;
+                continue;
+            }
+        };
+        match cwd_entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(_) => {
+                scan.unreadable_entries += 1;
+                continue;
+            }
+        }
+        let session_dirs = match fs::read_dir(cwd_entry.path()) {
+            Ok(entries) => entries,
+            Err(_) => {
+                scan.unreadable_entries += 1;
+                continue;
+            }
+        };
+        for session_entry in session_dirs {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    scan.unreadable_entries += 1;
+                    continue;
+                }
+            };
+            let session_id = session_entry.file_name().to_string_lossy().into_owned();
+            if !known.contains(&session_id) {
+                continue;
+            }
+            match session_entry.file_type() {
+                Ok(kind) if kind.is_dir() => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    scan.unreadable_entries += 1;
+                    continue;
+                }
+            }
+            let path = session_entry.path().join("usage.json");
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    scan.unreadable_files += 1;
+                    continue;
+                }
+            };
+            let mtime = match metadata.modified() {
+                Ok(mtime) => mtime,
+                Err(_) => {
+                    scan.unreadable_files += 1;
+                    continue;
+                }
+            };
+            let parent_id = crate::id::SessionIdentity {
+                source_short: "grok",
+                machine: machine.to_string(),
+                native_id: session_id.clone(),
+            }
+            .id();
+            let usage_id = crate::id::SessionIdentity {
+                source_short: "grok",
+                machine: machine.to_string(),
+                native_id: format!("{session_id}.usage"),
+            }
+            .id();
+            // The suffix preserves an explicit, inspectable association while
+            // keeping the raw source bytes untouched in the shard.
+            debug_assert_eq!(usage_id, format!("{parent_id}.usage"));
+            scan.records.push(SessionRecord {
+                id: usage_id,
+                absolute_path: absolutize(&path),
+                byte_size: metadata.len(),
+                mtime,
+                source: HarnessSource::Grok,
+                compressed: false,
+                sqlite_layout: None,
+            });
+        }
+    }
+    scan
 }
 
 /// Sessions a probe knew about but never handed out as `SessionRecord`s.
@@ -2214,11 +2349,101 @@ fn absolutize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Sandbox;
     use std::sync::Mutex;
 
     /// Serialises tests that mutate process env vars — cargo runs tests in
     /// parallel threads and `set_var` is process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn synthetic_grok_registry() -> HarnessRegistry {
+        let cell = serde_json::json!({
+            "template": "~/.grok/sessions/session_search.sqlite",
+            "format": "sqlite",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture",
+            "sql_table": "session_docs",
+            "sql_id_column": "session_id",
+            "sql_required_columns": ["session_id", "updated_at"],
+            "sql_time_column": "updated_at",
+            "sql_time_value_is_seconds": true
+        });
+        let paths = match current_platform() {
+            "macos" => serde_json::json!({"macos": cell}),
+            "linux" => serde_json::json!({"linux": cell}),
+            "windows" => serde_json::json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{"id": "grok", "display_name": "Grok CLI fixture", "paths": paths}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn grok_usage_json_is_scanned_and_linked_to_its_sqlite_session() {
+        let sandbox = Sandbox::new();
+        let sessions = sandbox.home().join(".grok/sessions");
+        let db = sessions.join("session_search.sqlite");
+        fs::create_dir_all(&sessions).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, updated_at INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_docs VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "synthetic-session-001",
+                "/synthetic/work",
+                1_780_000_000_i64,
+                "synthetic title",
+                "synthetic body",
+                "synthetic hash"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Grok's session usage is a sidecar two directories below `sessions`.
+        let usage = sessions
+            .join("synthetic-cwd")
+            .join("synthetic-session-001")
+            .join("usage.json");
+        fs::create_dir_all(usage.parent().unwrap()).unwrap();
+        fs::write(
+            &usage,
+            br#"{"modelUsage":{"grok-test":{"inputTokens":12,"cachedReadTokens":7,"outputTokens":3,"totalTokens":15}}}"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            harness_roots: [("grok".to_string(), db.to_string_lossy().into())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let report = scan_with_registry_and_machine(
+            &config,
+            &synthetic_grok_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+
+        let sqlite_id = "grok.synthetic-machine.synthetic-session-001";
+        assert!(report.records.iter().any(|record| record.id == sqlite_id));
+        let usage_record = report
+            .records
+            .iter()
+            .find(|record| record.absolute_path == usage)
+            .expect(
+                "usage.json should be emitted as a separate raw-file record linked by session id",
+            );
+        assert_eq!(usage_record.id, format!("{sqlite_id}.usage"));
+        assert_eq!(usage_record.sqlite_layout, None);
+    }
 
     #[test]
     fn xdg_data_home_unset_falls_back_to_local_share() {
