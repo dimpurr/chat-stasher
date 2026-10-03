@@ -336,18 +336,17 @@ impl InteractiveWizard {
             .open(&slave_path)
             .unwrap_or_else(|error| panic!("open the pty slave for stdout: {error}"));
 
-        let mut command = sandbox.command(args);
-        command
-            .stdin(Stdio::from(slave_stdin))
-            .stdout(Stdio::from(slave_stdout))
-            .stderr(Stdio::piped());
-        let child = command
-            .spawn()
-            .unwrap_or_else(|error| panic!("run the wizard on the terminal: {error}"));
-
         let (sender, terminal) = mpsc::channel();
+        let (reader_ready_sender, reader_ready) = mpsc::sync_channel(0);
         std::thread::spawn(move || {
             let mut reader = master_read;
+            // Do not let the child start printing until a thread owns the
+            // master read and is about to enter its first blocking read. This
+            // makes the startup edge explicit instead of relying on the test
+            // thread getting scheduled after `spawn` returns.
+            if reader_ready_sender.send(()).is_err() {
+                return;
+            }
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
@@ -373,6 +372,18 @@ impl InteractiveWizard {
                 }
             }
         });
+        reader_ready
+            .recv()
+            .expect("start the pty reader before the wizard");
+
+        let mut command = sandbox.command(args);
+        command
+            .stdin(Stdio::from(slave_stdin))
+            .stdout(Stdio::from(slave_stdout))
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("run the wizard on the terminal: {error}"));
 
         InteractiveWizard {
             child,
