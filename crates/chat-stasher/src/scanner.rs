@@ -2443,26 +2443,18 @@ struct DirectoryScan {
 enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
-    /// First matching session-directory ancestor below the declared root:
-    /// its path, and its name — the native id. Descendants keep this scope.
+    /// Nearest matching ancestor: its path, and its name — the native id.
     In { dir: PathBuf, id: String },
 }
 
 /// The scope a child directory inherits: unchanged, or replaced when the
-/// child's own name matches.
+/// child completes the rule's pattern.
 fn descend_scope(
     parent: &SessionScope,
     dir: &Path,
     root: &Path,
     rule: Option<&SessionDirRule>,
 ) -> SessionScope {
-    // A broad rule such as `*` names the session directories immediately
-    // below the declared root. Once one is found, nested implementation
-    // directories (`.system_generated/logs`, for example) remain inside that
-    // same session rather than replacing its native id.
-    if matches!(parent, SessionScope::In { .. }) {
-        return parent.clone();
-    }
     let Some(rule) = rule else {
         return parent.clone();
     };
@@ -2478,8 +2470,21 @@ fn descend_scope(
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    if components.len() != pattern.len()
-        || !components
+    // Which components of the child are judged against the pattern. While no
+    // session is open the match is anchored at the declared root, so a
+    // pattern names exactly one depth (the `*` rule cannot reach an
+    // implementation directory one level further down). While a session is
+    // open the child is judged on its own trailing components, so a nested
+    // repeat of the pattern — a session directory inside another — takes
+    // over from the session it sits in, and an implementation directory that
+    // does not repeat it leaves that session alone.
+    let start = if matches!(parent, SessionScope::In { .. }) {
+        components.len().saturating_sub(pattern.len())
+    } else {
+        0
+    };
+    if components.len() - start != pattern.len()
+        || !components[start..]
             .iter()
             .zip(pattern)
             .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
@@ -3476,6 +3481,60 @@ mod tests {
         assert!(!matches_session_pattern("settings.json", Some("session-*")));
         assert!(!matches_session_pattern("state.json", Some("session-*")));
         assert!(!matches_session_pattern("config.json", Some("session-*")));
+    }
+
+    /// `descend_scope`'s two windows, pinned directly, on the same
+    /// root-relative pattern vocabulary the shipped kimi-code cell uses.
+    /// Beneath the root, only an exact `*/`-shaped slice names a session;
+    /// under a session that is already open, a directory is judged on its own
+    /// trailing components, so a nested repeat of the pattern takes over —
+    /// the nearest matching ancestor owns the file — while an implementation
+    /// directory that does not repeat it leaves the open session alone.
+    #[test]
+    fn descend_scope_replaces_only_when_the_pattern_repeats_below_a_match() {
+        fn session_id(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In { id, .. } => Some(id),
+            }
+        }
+        let rule = SessionDirRule {
+            pattern: "*/session_*".to_string(),
+            file: "agents/main/wire.jsonl".to_string(),
+        };
+        let root = Path::new("/fixture/root");
+
+        // One directory alone is not the two-component pattern.
+        let workspace = descend_scope(&SessionScope::Outside, &root.join("wd"), root, Some(&rule));
+        assert_eq!(session_id(&workspace), None);
+
+        // The workspace/session pair is one exact root-relative slice.
+        let session = descend_scope(
+            &workspace,
+            &root.join("wd").join("session_one"),
+            root,
+            Some(&rule),
+        );
+        assert_eq!(session_id(&session), Some("session_one"));
+
+        // An implementation directory does not repeat the pattern, so the
+        // session stays open through it.
+        let agents = descend_scope(
+            &session,
+            &root.join("wd").join("session_one").join("agents"),
+            root,
+            Some(&rule),
+        );
+        assert_eq!(session_id(&agents), Some("session_one"));
+
+        // A nested session directory does repeat it, and takes over.
+        let nested = descend_scope(
+            &session,
+            &root.join("wd").join("session_one").join("session_two"),
+            root,
+            Some(&rule),
+        );
+        assert_eq!(session_id(&nested), Some("session_two"));
     }
 
     #[test]
