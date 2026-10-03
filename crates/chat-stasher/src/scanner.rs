@@ -1837,6 +1837,14 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
         // `KIMI_CODE_HOME` is Kimi Code's data directory, i.e. the `.kimi-code`
         // layer itself; what hangs below it is the constant `sessions/`.
         ".kimi-code/"
+    } else if template.contains(".dsh/") {
+        // `DSH_HOME` is DeepSeek Harness's home directory, i.e. the `.dsh`
+        // layer itself; `sessions/` hangs below it. A cell that declares an
+        // env override this table does not know would resolve to the template
+        // instead, silently reading the default location while the registry
+        // claims the override works — which is what happened here until the
+        // real binary was run against a moved home.
+        ".dsh/"
     } else {
         return None;
     };
