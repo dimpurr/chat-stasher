@@ -914,6 +914,27 @@ fn probe_harness(
         note: String::new(),
     };
 
+    // grok-bot is the one harness whose source cannot exist off macOS: the
+    // Grok Bot desktop app has no Linux or Windows build, and the registry
+    // records a macOS cell only (the `no {platform} registry entry` note the
+    // generic path below would produce loses the more specific reason, so it
+    // is spelled here instead). The state word is B82's own for "the registry
+    // has no cell for this platform": `SkipWrongPlatform`, whose count is
+    // `not_applicable` and which must not be counted as an unlooked harness —
+    // there is nothing on this machine to have missed, which is a different
+    // claim from "did not look". `SkipUnresolvable` would word it as the
+    // latter and answer "unknown" — wrong for an app this platform cannot
+    // install. The platform gate outranks a configured root, so a grok-bot
+    // path written into the config on Linux or Windows does not turn the
+    // reader on there either.
+    if h.id == "grok-bot" && platform != "macos" {
+        return HarnessProbe {
+            state: ProbeState::SkipWrongPlatform,
+            note: "Grok Bot local persistence reader is supported on macOS only".to_string(),
+            ..base
+        };
+    }
+
     // 0. A configured root is the *user stating* where this harness lives. The
     // registry's template and its confidence gate both exist to keep us from
     // walking a path **we** guessed; neither has anything to say about a path
@@ -1300,6 +1321,11 @@ fn probe_harness(
             }
         }
     } else {
+        if h.id == "grok-bot" {
+            return probe_grok_bot_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         let recs = collect_records(
             &root,
             source,
@@ -1342,6 +1368,81 @@ fn probe_harness(
             recognized_files,
             note,
             ..base
+        }
+    }
+}
+
+fn probe_grok_bot_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    match crate::grok_bot::read_from_app_support(&root) {
+        Ok(agents) => {
+            let mut bytes = 0u64;
+            let mut recognized_files = Vec::new();
+            let mut record_count = 0usize;
+            let mut gap_count = 0usize;
+            let mut unreadable_count = 0usize;
+            for agent in agents {
+                let metadata = match fs::metadata(&agent.source_path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => {
+                        unreadable_count += 1;
+                        continue;
+                    }
+                };
+                let mtime = match metadata.modified() {
+                    Ok(mtime) => mtime,
+                    Err(_) => {
+                        unreadable_count += 1;
+                        continue;
+                    }
+                };
+                bytes = bytes.saturating_add(metadata.len());
+                gap_count += agent.sequence_gaps.len();
+                record_count += 1;
+                recognized_files.push(agent.source_path.clone());
+                report.records.push(SessionRecord {
+                    id: crate::id::SessionIdentity {
+                        source_short: source.short(),
+                        machine: machine.to_string(),
+                        native_id: agent.agent_id,
+                    }
+                    .id(),
+                    absolute_path: agent.source_path,
+                    byte_size: metadata.len(),
+                    mtime,
+                    source,
+                    compressed: false,
+                    sqlite_layout: Some(crate::models::SqliteSessionLayout::GrokBot),
+                });
+            }
+            base.root = Some(root);
+            base.confidence = confidence;
+            base.state = ProbeState::Scanned;
+            base.bytes = Some(bytes);
+            base.record_count = Some(record_count as u64);
+            base.candidate_count = Some(record_count as u64);
+            base.unreadable_count = Some(unreadable_count as u64);
+            base.recognized_files = recognized_files;
+            base.note = format!(
+                "{env_note}local persistence replicas; partial replica data, sequence gap metadata present (observed gaps={gap_count})"
+            );
+            base
+        }
+        Err(error) => {
+            report.indeterminate_roots.push(root.clone());
+            base.root = Some(root);
+            base.confidence = confidence;
+            base.state = ProbeState::Indeterminate;
+            base.unreadable_count = Some(1);
+            base.note = format!("{env_note}local replica read failed; count unknown ({error})");
+            base
         }
     }
 }

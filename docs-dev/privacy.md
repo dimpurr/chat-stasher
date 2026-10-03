@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1460-1680,1682-1697`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1461-1681,1683-1698`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -958,7 +958,7 @@ Retention on **your** machine is under your control:
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:683-769`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1430-1545`; `crates/chat-stasher/src/collect.rs:1708-1748`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:164-1316`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1531-1646`; `crates/chat-stasher/src/collect.rs:1917-1957`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:164-1316`). Selective per-conversation deletion inside an archive is not implemented. |
 
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox

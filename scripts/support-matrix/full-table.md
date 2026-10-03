@@ -20,6 +20,9 @@
 | Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
+| Grok Bot (desktop) | macOS | `~/Library/Application Support/Grok Bot/` | json | measured-locally | supported | - |
+| Grok Bot (desktop) | Linux | - | - | - | not supported | - |
+| Grok Bot (desktop) | Windows | - | - | - | not supported | - |
 | Grok (xAI CLI) | macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
@@ -64,6 +67,7 @@
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
 | Local | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
 | Local | Cursor | 2026-09-25 | normal | - |
+| Local | Grok Bot (desktop) | - | low | local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness |
 | Local | Grok (xAI CLI) | - | low | a real local store was read but no session has been archived end to end (git 2294f04) |
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
