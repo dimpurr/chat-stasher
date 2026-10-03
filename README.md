@@ -158,7 +158,7 @@ The first line is the verdict, for example `[run-once] Healthy: last run 12 minu
 
 ## Support at a glance
 
-These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the scanner reads, what the inbox accepts, and what the extension captures. **Supported** means a scanner path is documented, an inbox route accepts bundles, or the extension captures that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the date of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made. A date older than 90 days is shown as **needs re-check (DATE)** instead — the recorded run is real, but it has been long enough that nothing should rely on it being still true.
+These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the scanner reads or what the extension captures. **Supported** means a scanner path is documented with usable evidence, or the extension captures that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the date of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made. A date older than 90 days is shown as **needs re-check (DATE)** instead — the recorded run is real, but it has been long enough that nothing should rely on it being still true.
 
 <!-- support-matrix:short:start -->
 **5+ platforms.** Local AI tools, agent platforms, and web chats.
@@ -169,11 +169,11 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | OpenClaw | supported | - |
+| Agent platform | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | supported | - |
-| Agent platform | Grok Bot | supported | - |
+| Agent platform | Grok Bot | not supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |

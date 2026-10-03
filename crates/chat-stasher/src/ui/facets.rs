@@ -41,7 +41,7 @@ pub enum PlatformGroup {
     WebPlatforms,
     /// A terminal/editor coding agent: claude-code, codex, opencode, …
     CodingAgents,
-    /// A product agent platform with its own transcript export surface.
+    /// A desktop agent product with its own session and conversation model.
     AgentPlatforms,
     /// An id this build does not classify. A new platform's first sessions
     /// land here, and stay filterable on their own id meanwhile.
@@ -136,9 +136,8 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "zed",
 ];
 
-/// Product agent platforms. This is independent of delivery method: these
-/// transcripts currently arrive through the inbox, while future products may
-/// use another route without changing their dashboard group.
+/// Product agent platforms. This category describes the product, not the
+/// mechanism used to read or archive its local persistence.
 const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot"];
 
 /// Classify a harness id. Web platforms are matched **first**: `grok` lives

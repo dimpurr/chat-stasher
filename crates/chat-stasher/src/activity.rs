@@ -526,10 +526,10 @@ const KIMI_CODE_BOOKKEEPING_OPS: &[&str] = &[
 ];
 
 /// Web chat harnesses whose archived payload is an inbox bundle, not a message
-/// line. Their times live inside `raw.text` and are read by [`web_time`].
-/// `BUNDLE_HARNESSES` separately identifies every inbox-bundle framing for the
-/// normalization and index readers; web time/title semantics remain limited to
-/// this list.
+/// line. Their times live inside `raw.text` and are read by [`web_time`]. The
+/// reader uses this same list to decide which harnesses have the generic reader
+/// as their reader — see `normalize::is_web_bundle` — so the two can never
+/// disagree about which archived line is a bundle.
 pub(crate) const WEB_HARNESSES: &[&str] = &[
     "chatgpt",
     "deepseek",
@@ -538,20 +538,6 @@ pub(crate) const WEB_HARNESSES: &[&str] = &[
     "gemini",
     "perplexity",
     "kimi",
-];
-
-/// Harnesses whose archived rows are inbox bundles. Keep this classification
-/// separate from `WEB_HARNESSES`: web payload time/title extraction remains
-/// web-only, while normalization and indexing need to recognize both shapes.
-pub(crate) const BUNDLE_HARNESSES: &[&str] = &[
-    "chatgpt",
-    "deepseek",
-    "claude",
-    "grok",
-    "gemini",
-    "perplexity",
-    "kimi",
-    "grok-bot",
 ];
 
 /// The `how` recorded for bounds read from **numeric epoch** timestamps, whose
@@ -3172,26 +3158,6 @@ mod tests {
             "raw": { "text": body, "bytes": body.len() },
         })
         .to_string()
-    }
-
-    #[test]
-    fn grok_bot_bundle_classification_does_not_inherit_web_time_or_title_rules() {
-        assert_eq!(
-            BUNDLE_HARNESSES.len(),
-            WEB_HARNESSES.len() + 1,
-            "the bundle list is the web list plus the agent-platform id"
-        );
-        assert!(WEB_HARNESSES
-            .iter()
-            .all(|harness| BUNDLE_HARNESSES.contains(harness)));
-        assert!(BUNDLE_HARNESSES.contains(&"grok-bot"));
-        assert!(!WEB_HARNESSES.contains(&"grok-bot"));
-        assert!(WEB_HARNESSES.contains(&"grok"));
-        let line = r#"{"raw":{"text":"{\"messages\":[]}"},"captured_at":"2026-01-01T00:00:00Z"}"#;
-        let analysis = analyze_session("grok-bot", &[line]);
-        assert_eq!(analysis.line_count, 1);
-        assert!(matches!(analysis.time_source, TimeSource::Unknown { .. }));
-        assert_eq!(analysis.title, SessionTitle::NoLabelRecorded);
     }
 
     #[test]

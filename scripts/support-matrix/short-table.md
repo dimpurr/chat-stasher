@@ -6,11 +6,11 @@
 | Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | OpenClaw | supported | - |
+| Agent platform | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | supported | - |
-| Agent platform | Grok Bot | supported | - |
+| Agent platform | Grok Bot | not supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
