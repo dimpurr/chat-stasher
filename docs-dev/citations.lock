@@ -69,6 +69,8 @@ apps/extension/entrypoints/dw-bridge.content.ts:247-274  3a035d5fd708  lines=28
   <- docs-dev/privacy.md:584, docs-dev/threat-model.md:486  :: && (event.data as { type?: unknown }).type === CHATGPT_WORK…
 apps/extension/entrypoints/dw-bridge.content.ts:495-501  ff11500827ff  lines=7
   <- docs-dev/privacy.md:138  :: function readKimiAccessToken(): string | null {
+apps/extension/entrypoints/dw-bridge.content.ts:545-563  919d5b6c27ec  lines=19
+  <- docs-dev/privacy.md:47  :: function pullGeminiTokens(): Promise<GeminiBootstrapTokens …
 apps/extension/entrypoints/dw-bridge.content.ts:604-648  9b86953af727  lines=45
   <- docs-dev/privacy.md:584, docs-dev/threat-model.md:486  :: const pageFetch: FetchLike = async (url, init) => {
 apps/extension/entrypoints/dw-bridge.content.ts:682-710  142d62526a9c  lines=29
@@ -89,12 +91,12 @@ apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
   <- docs-dev/privacy.md:910  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:123-124  f33c73ac87e1  lines=2
   <- docs-dev/install.md:1085  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
-apps/extension/lib/backfill/alarm.ts:244  b9377ab9524d  lines=1
+apps/extension/lib/backfill/alarm.ts:244-245  426ffa0205af  lines=2
   <- docs-dev/privacy.md:482  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
-apps/extension/lib/backfill/alarm.ts:844-883  07c68e15fdf2  lines=40
-  <- docs-dev/privacy.md:482  :: /**
-apps/extension/lib/backfill/alarm.ts:894-1059  9f82be77b686  lines=166
+apps/extension/lib/backfill/alarm.ts:894-1001  1c2686bfa52a  lines=108
   <- docs-dev/privacy.md:483  :: /** The receipt of seats the `MAX_TARGET_ENTRIES` cap has t…
+apps/extension/lib/backfill/alarm.ts:1003-1058  46b1c40768ff  lines=56
+  <- docs-dev/privacy.md:483  :: /**
 apps/extension/lib/backfill/alarm.ts:1125-1135  99c311cb026d  lines=11
   <- docs-dev/privacy.md:666  :: export async function forgetTarget(
 apps/extension/lib/backfill/alarm.ts:1137-1239  d8f97d12ea24  lines=103
@@ -125,14 +127,8 @@ apps/extension/lib/backfill/claude-page.ts:97-116  9dc3a96cb85a  lines=20
   <- docs-dev/privacy.md:611  :: const fetchOrganizations = async (): Promise<string> => {
 apps/extension/lib/backfill/day-slow.ts:91  0d9fb0635f12  lines=1
   <- docs-dev/privacy.md:485  :: export const DAY_SLOW_KEY = 'cs_backfill_day_slow_v1';
-apps/extension/lib/backfill/day-slow.ts:148-151  38990a2cc15f  lines=4
-  <- docs-dev/privacy.md:485  :: export function localMidnightAfter(nowMs: number): number {
-apps/extension/lib/backfill/day-slow.ts:249-270  f076be2d2469  lines=22
-  <- docs-dev/privacy.md:485  :: export async function recordPlatformRateLimit(
 apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs-dev/privacy.md:484  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
-apps/extension/lib/backfill/debt-store.ts:111-130  c2b9b363b155  lines=20
-  <- docs-dev/privacy.md:484  :: export const BACKFILL_DB_VERSION = 2;
 apps/extension/lib/backfill/engine.ts:159-162  6cb56615d08b  lines=4
   <- docs-dev/privacy.md:710, docs-dev/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
 apps/extension/lib/backfill/engine.ts:1559-1603  f82e1f06b2ec  lines=45
@@ -243,6 +239,8 @@ apps/extension/lib/backfill/enumerate.ts:4907-4938  3de94e683edf  lines=32
   <- docs-dev/install.md:105, docs-dev/install.md:1166, docs-dev/privacy.md:730  :: export function unsupportedBackfillFor(platform: string): U…
 apps/extension/lib/backfill/enumerate.ts:4959-4983  043d98acfa1d  lines=25
   <- docs-dev/privacy.md:861, docs-dev/threat-model.md:325, docs-dev/threat-model.md:948  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
+apps/extension/lib/backfill/ledger.ts:738-749  649650412b1d  lines=12
+  <- docs-dev/privacy.md:484  :: /**
 apps/extension/lib/backfill/pace.ts:109-119  ef52be5dc265  lines=11
   <- docs-dev/install.md:1083  :: export const DEFAULT_ENUM_PACE: PacePlan = {
 apps/extension/lib/backfill/pace.ts:121-132  1e65e383924f  lines=12
@@ -269,8 +267,8 @@ apps/extension/lib/backfill/store.ts:18-27  226502892fc8  lines=10
   <- docs-dev/privacy.md:903  :: export interface BackfillStore {
 apps/extension/lib/backfill/store.ts:85-97  a2af158effd2  lines=13
   <- docs-dev/install.md:299, docs-dev/install.md:1102, docs-dev/privacy.md:903  :: function localArea(): LocalArea | null {
-apps/extension/lib/backfill/tab-port.ts:179  118cc6173392  lines=1
-  <- docs-dev/privacy.md:482  :: export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
+apps/extension/lib/backfill/tab-port.ts:178-181  81a2a6105e63  lines=4
+  <- docs-dev/privacy.md:482  :: /** The registry of live platform tabs. Same cs_* prefix fa…
 apps/extension/lib/backfill/tab-port.ts:223-242  b276ba1d32f7  lines=20
   <- docs-dev/privacy.md:586, docs-dev/threat-model.md:488  :: export type BackfillFetchReply =
 apps/extension/lib/backfill/tab-port.ts:439-478  593876bf3c4e  lines=40
@@ -293,6 +291,8 @@ apps/extension/lib/backfill/types.ts:1762-1779  c027777800d0  lines=18
   <- docs-dev/privacy.md:557, docs-dev/privacy.md:860, docs-dev/threat-model.md:324  :: export type ChatGptSource = 'main' | 'archived' | 'project';
 apps/extension/lib/backfill/types.ts:1895-1915  98be0bbf3348  lines=21
   <- docs-dev/privacy.md:484, docs-dev/threat-model.md:529  :: export interface AccountSuspension {
+apps/extension/lib/backfill/types.ts:1917-1957  c17882d86cfa  lines=41
+  <- docs-dev/privacy.md:484  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs-dev/install.md:478  :: export function badgeFor(state: OutboxSummary | null): Badg…
 apps/extension/lib/contract.ts:6-17  83c72435c321  lines=12
@@ -481,8 +481,10 @@ apps/extension/lib/platform-auth.ts:303-357  67ffa624d938  lines=55
   <- docs-dev/privacy.md:137, docs-dev/threat-model.md:279, docs-dev/threat-model.md:984  :: + ' because the page\'s own bearer token is attached to thi…
 apps/extension/lib/platform-auth.ts:313-350  03784069e1a6  lines=38
   <- docs-dev/install.md:109, docs-dev/install.md:1258, docs-dev/privacy.md:861, docs-dev/threat-model.md:325  :: export function createKimiAuthorizedFetch(
+apps/extension/lib/platform-auth.ts:590-628  880efefc5a3c  lines=39
+  <- docs-dev/privacy.md:47  :: * 🔴 W29 · **Gemini's `batchexecute` calls need three values…
 apps/extension/lib/platform-auth.ts:712-819  87b0dcc5df3b  lines=108
-  <- docs-dev/privacy.md:47, docs-dev/threat-model.md:283, docs-dev/threat-model.md:991  :: /** `true` when that response is the refusal this wrapper's…
+  <- docs-dev/threat-model.md:283, docs-dev/threat-model.md:991  :: /** `true` when that response is the refusal this wrapper's…
 apps/extension/lib/platform-auth.ts:724-824  9037a7e5f6b3  lines=101
   <- docs-dev/install.md:109  :: export function createGeminiAuthorizedFetch(
 apps/extension/lib/popup-view.ts:529-545  d83f51c8257a  lines=17
