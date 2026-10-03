@@ -36,7 +36,7 @@ apps/extension/entrypoints/background.ts:909-918  e84af6908271  lines=10
 apps/extension/entrypoints/background.ts:1263-1265  46f6e0774d37  lines=3
   <- docs-dev/install.md:121  :: * actually true on my side", with no inference.
 apps/extension/entrypoints/background.ts:1342-1372  0c2f86303f73  lines=31
-  <- docs-dev/privacy.md:655  :: /**
+  <- docs-dev/privacy.md:483, docs-dev/privacy.md:655  :: /**
 apps/extension/entrypoints/background.ts:1423-1479  2ad812f6a098  lines=57
   <- docs-dev/threat-model.md:523  :: */
 apps/extension/entrypoints/background.ts:1550-1566  f4ee93c9ca58  lines=17
@@ -93,14 +93,22 @@ apps/extension/lib/backfill/alarm.ts:123-124  f33c73ac87e1  lines=2
   <- docs-dev/install.md:1085  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
 apps/extension/lib/backfill/alarm.ts:244-245  426ffa0205af  lines=2
   <- docs-dev/privacy.md:482  :: export const BACKFILL_TARGETS_KEY = 'cs_backfill_targets_v1…
+apps/extension/lib/backfill/alarm.ts:729-744  b33fc25414e2  lines=16
+  <- docs-dev/privacy.md:483  :: export interface BackfillTarget {
+apps/extension/lib/backfill/alarm.ts:876-883  f392b12ebd34  lines=8
+  <- docs-dev/privacy.md:483  :: export function capEvictions(
 apps/extension/lib/backfill/alarm.ts:894-1001  1c2686bfa52a  lines=108
   <- docs-dev/privacy.md:483  :: /** The receipt of seats the `MAX_TARGET_ENTRIES` cap has t…
 apps/extension/lib/backfill/alarm.ts:1003-1058  46b1c40768ff  lines=56
   <- docs-dev/privacy.md:483  :: /**
+apps/extension/lib/backfill/alarm.ts:1062-1100  c2f6dc895cc1  lines=39
+  <- docs-dev/privacy.md:483  :: * Record one target (deduplicated by platform+scope, most r…
 apps/extension/lib/backfill/alarm.ts:1125-1135  99c311cb026d  lines=11
   <- docs-dev/privacy.md:666  :: export async function forgetTarget(
 apps/extension/lib/backfill/alarm.ts:1137-1239  d8f97d12ea24  lines=103
   <- docs-dev/privacy.md:658  :: /**
+apps/extension/lib/backfill/alarm.ts:1194-1239  b806aed4c522  lines=46
+  <- docs-dev/privacy.md:483  :: export async function rememberOrganizationScopedTarget(
 apps/extension/lib/backfill/alarm.ts:1577-1679  0ec9970a66d5  lines=103
   <- docs-dev/privacy.md:491  :: /**
 apps/extension/lib/backfill/alarm.ts:1682-1761  a89fbce85bd2  lines=80
@@ -118,7 +126,7 @@ apps/extension/lib/backfill/chatgpt-workspace.ts:94-96  db3a01cba923  lines=3
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs-dev/privacy.md:604  :: * ## Why this module exists at all
 apps/extension/lib/backfill/claude-org.ts:112-138  13f59996d45c  lines=27
-  <- docs-dev/privacy.md:654  :: /**
+  <- docs-dev/privacy.md:483, docs-dev/privacy.md:654  :: /**
 apps/extension/lib/backfill/claude-org.ts:219-273  042cd322b76d  lines=55
   <- docs-dev/privacy.md:626, docs-dev/threat-model.md:327, docs-dev/threat-model.md:969  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
 apps/extension/lib/backfill/claude-page.ts:71-158  74c521ddd738  lines=88
@@ -467,6 +475,8 @@ apps/extension/lib/page-hook.ts:758  c8304bee299e  lines=1
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:695, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: !platform.methods.includes(normalizedMethod) ||
 apps/extension/lib/page-hook.ts:765-799  45359f1a1af8  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
+apps/extension/lib/page-hook.ts:992-1035  994e4f465747  lines=44
+  <- docs-dev/privacy.md:47  :: /**
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:271  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
 apps/extension/lib/platform-auth.ts:61-71  5e4adeb00a65  lines=11
