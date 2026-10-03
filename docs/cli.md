@@ -234,6 +234,9 @@ from a replay inside longer content. In `--json` these are `collapsed_runs`; the
 text report prints one `collapsed-run` line per run. Sessions are labelled with
 the same privacy-safe short id `read` prints, never the raw id.
 
+For example, `chat-stasher repair-duplicates --destination backup --json`
+reports the runs readers would collapse without changing the destination.
+
 `--json` prints one object with `complete`, per-machine duplicate counts,
 `collapsed_runs`, `suspicious_kept_*` counts, and `dry_run: true`. Exit `0` means
 the archive was fully read, `3` means it was not fully read, `2` means the
@@ -364,14 +367,27 @@ Writes exactly the sessions `search` selects for the same flags, as `<out>/<mach
 |---|---|
 | `--out <dir>` | Required. Must be empty or absent, unless `--force`. Nothing is ever deleted. |
 | filters | As in `search`. |
-| `--turns all\|user` | `user` keeps only the person's own messages, where the tool's format makes that certain. Elsewhere every line is written, and the manifest says so. |
+| `--turns all\|user` | `user` keeps only the person's own messages for Claude Code. Other tools' formats do not prove which lines are the person's, so every line is written and the manifest records `turns_filter: "not-supported"`. |
 | `--trim-to-window` | With a date filter, also drop lines timestamped outside it. |
 | `--no-collapse` | Write every stored shard. By default a run that byte-for-byte replays the session's complete preceding shard sequence is collapsed to its first copy, because that is what a re-seal leaves. |
 | `--dry-run` | Print the plan and its cost. Writes nothing. |
 
 Exit codes: `0` wrote sessions and answered for everything · `1` selected nothing · `3` incomplete: what was written is real, and the manifest lists what is missing · `2` usage error. `--dry-run` reports the same exit code the real run would, so it is worth running first.
 
-`--turns user` answers "which lines did the person themselves send" only where the line's own format makes that certain, and the reason the answer is a filter and not a search is that most of what a session records is *not* the person: a tool's output arrives under the user role, and system notices are injected as user text. Claude Code qualifies. A person's message is a `type: "user"` record that is not a tool result and carries neither `isMeta` nor `isSidechain` nor `isCompactSummary`, **or** an `attachment` / `queued_command` record — a message typed while the agent was mid-turn, which older recipes that read only `type: "user"` miss entirely. Where a record carries `origin.kind`, that field decides and only `human` is the person; a record without it falls back to excluding text that opens as an injected notice. The same words recorded once mid-turn and once as a turn within fifteen minutes count once, and the text is never edited. For every other tool the flag is refused rather than guessed at: every line is written, and the session records `turns_filter: "not-supported"` in the manifest. The archived readers show why: Codex has per-message `response_item` roles and separate `event_msg` mirrors, but no explicit origin field in the recorded shape to prove that every user-role message is human; opencode has per-message `data.role` inside a whole-session record, Gemini CLI has `type` on messages inside its session documents, and Cursor has user/assistant bubble types, but those shapes expose roles without the human-versus-injected provenance needed by this filter. The Grok CLI's archived row has no sender. Kimi Code's journal carries `message.role`, `origin.kind`, and identifiable `turn.prompt` / `turn.steer` mirrors, so it is the next format to validate for this filter; it is not enabled yet.
+`--turns user` currently applies to Claude Code only. It keeps messages the archived
+format identifies as the person's own: qualifying `type: "user"` records and
+`attachment` / `queued_command` records typed mid-turn. Tool results, metadata,
+sidechain messages, compaction summaries, and injected notices are excluded.
+When `origin.kind` is present, only `human` qualifies; older records without
+that field use the injected-notice prefix check. Matching mid-turn and turn
+copies of the same message within fifteen minutes are written once. The message
+text is not edited. For every other tool, `--turns user` keeps every line and
+records `turns_filter: "not-supported"` in that session's manifest entry; it
+does not guess which lines are human. For example:
+
+```sh
+chat-stasher export --destination backup --out ./exported --harness claude-code --turns user
+```
 
 There are no text filters here: the flags are `search`'s, minus `--text`. Use a text search to decide whether the material is worth exporting, then select with machine, tool and dates. [Turn old conversations into a skill](use-cases/skill-from-history.md) is that workflow end to end.
 

@@ -377,7 +377,7 @@ chat-stasher export --destination offsite --machine 0123456789abcdef0123456789ab
 EXIT=3
 ```
 
-`export` writes exactly the sessions `search` selects for the same flags, into `<out>/<machine>/<tool>/<session-id>.jsonl`, in the tool's own format, plus a checksummed `manifest.json`. `--dry-run` prints the same plan and cost and writes nothing; run it first when the archive is large. `--turns user` keeps only your own messages, where the tool's format makes that certain, and every other file is written whole with the manifest saying so, so nothing is ever silently dropped.
+`export` writes exactly the sessions `search` selects for the same flags, into `<out>/<machine>/<tool>/<session-id>.jsonl`, in the tool's own format, plus a checksummed `manifest.json`. `--dry-run` prints the same plan and cost and writes nothing; run it first when the archive is large. `--turns user` filters Claude Code sessions to messages the format identifies as your own. For other tools, every line is written and that session's manifest entry records `turns_filter: "not-supported"`.
 
 **Exit `3` here is not a failure of the export.** Three sessions were written and their checksums are in the manifest; a fourth could not be placed in time, so it is absent, and the run says which filter had no answer for it. `0` means it wrote something and answered for everything, `1` means it read everything and selected nothing.
 
