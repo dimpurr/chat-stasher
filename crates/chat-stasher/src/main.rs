@@ -8257,6 +8257,9 @@ fn duplicate_repair_report(
     let mut machines = Vec::new();
     let mut collapsed_runs = Vec::new();
     for machine in &archive.machines {
+        if archive.incomplete_machines.contains(&machine.hostname) {
+            continue;
+        }
         let mut summary = DuplicateRepairMachine {
             machine: machine.hostname.clone(),
             duplicate_sessions: 0,
