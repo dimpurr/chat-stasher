@@ -1083,11 +1083,17 @@ confirmed in the code, not a temporary disclaimer.
   list pages (`apps/extension/lib/backfill/pace.ts:109-119`), and each round
   starts a random **1–2 minutes** after the previous one
   (`apps/extension/lib/backfill/alarm.ts:123-124`). A round serves **one**
-  platform, and that interval is divided by the number of platforms being
-  backfilled, so each platform receives about one round per interval on average
-  — which is what keeps the per-platform daily cap the brake rather than the
-  wake rate. At the *gentle* cap a thousand conversations take 5–6.7 days; at
-  *standard*, 2.5–3.3. This is deliberately slow, not a bug.
+  platform. The rounds rotate fairly across the platforms being backfilled,
+  so one round in five comes to each platform when all five stable ones are
+  registered — and the next interval is armed only after the previous
+  round's requests and pacing settle, which stretches the cycle further.
+  Counting that work, *gentle*'s daily cap stays the brake (a fast gentle
+  day overshoots it), while *standard* is mostly held by the wake cycle: on
+  a fast day it delivers 274–342 bodies against a drawn cap of 300–400, so
+  only the quickest days, with the lowest cap draws, see the cap bind at
+  all. At the *gentle* cap a thousand conversations take 5–6.7 days; at
+  *standard* the wake cycle delivers about 3–5.5. This is deliberately slow,
+  not a bug.
 
 - 🔴 **And every number above is per install, not per account.** The preset, the
   day's draw, the day's counter and the request anchors all live in that

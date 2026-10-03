@@ -19,9 +19,14 @@
  * request time and pacing gaps. This file simulates a local day at both bands
  * with those costs included and pins the facts that remain true:
  *  1. the old band could not reach any cap, on its fastest possible day;
- *  2. a fast new band can reach gentle's cap, while standard remains alarm-
- *     limited once tick time is included; the alarm binds on a slow day; and
- *     every guard W310 was told not to touch still binds.
+ *  2. a fast new band can reach gentle's cap. At the upper-edge costs pinned
+ *     here — 7 s per request, 45 s between details — a floor-draw standard
+ *     day lands on 274 bodies, under the 300 cap floor, so standard's cap
+ *     cannot bind at those edges; and that is a property of the pinned
+ *     costs, not an absolute claim — at the quickest 20 s pacing the same
+ *     day reaches 342 bodies, past the floor, where a low cap draw still
+ *     binds. The alarm binds on a slow day; and every guard W310 was told
+ *     not to touch still binds.
  *
  * ## What "simulated" means here, and what is deliberately not simulated
  *

@@ -104,12 +104,12 @@ export const BACKFILL_ALARM_NAME = 'cs-backfill-tick';
  *    consecutive gaps differ by up to a factor of 2 and the cadence is not a
  *    metronome.
  *
- *  · **Both brakes still bite, neither alone — now per platform.** A day that
- *    draws the floor arms 1440 wakes (1440/1) ⇒ 288 serves per platform at
- *    `m = 5`, past every preset's cap draw, so the **cap** binds; a day that
- *    draws the ceiling arms 720 ⇒ 144 serves per platform, under the gentle
- *    cap's floor, so the **alarm** binds. Which one leads still changes from day
- *    to day, which is the interleaving W16 asked for.
+ *  · **Both brakes still bite, neither alone — now per platform.** The re-arm
+ *    waits out the tick's own requests and pacing first, so a floor-draw day
+ *    arms at most 1167 wakes for gentle (⇒ 233 bodies — its cap binds) or,
+ *    at the 45 s pacing edge, 685 for standard (⇒ 274, under its 300 floor,
+ *    so its cap cannot bind; the quickest 20 s pacing yields 342 — past the
+ *    floor, where a low cap draw still binds). A slow day binds the **alarm**.
  *
  *  · **It still does not fight the per-item interval**: 60 seconds ≫ the
  *    20-second per-item minimum ⇒ the **first** body of a tick has a 0 wait when
