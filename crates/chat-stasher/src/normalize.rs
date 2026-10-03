@@ -15,6 +15,7 @@ use std::collections::HashMap;
 mod codex;
 mod cursor;
 mod gemini_cli;
+mod grok_cli;
 mod kimi_code;
 mod openclaw;
 mod opencode;
@@ -34,6 +35,8 @@ pub enum Role {
     Assistant,
     System,
     Tool,
+    /// The source carried text but did not preserve who said it.
+    Unknown,
 }
 
 impl Role {
@@ -43,6 +46,7 @@ impl Role {
             Role::Assistant => "Assistant",
             Role::System => "System",
             Role::Tool => "Tool",
+            Role::Unknown => "Speaker unknown",
         }
     }
 
@@ -252,6 +256,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "opencode"
             | "openclaw"
             | "cursor"
+            | "grok"
             | "chatgpt"
             | "deepseek"
             | "claude"
@@ -295,6 +300,9 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "opencode" => opencode::normalize_session(value, conversation),
         "openclaw" => openclaw::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
+        "grok" if grok_cli::is_session_docs_record(value) => {
+            grok_cli::normalize_session(value, conversation)
+        }
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),

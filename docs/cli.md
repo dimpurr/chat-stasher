@@ -430,6 +430,10 @@ The local full-text index behind `/search` and `search --text`. It is **plaintex
 one JSONL record per line for `claude-code`, `codex` and `kimi-code`, the
 pretty-printed document for `gemini-cli`, the exported SQLite row for
 `opencode`, `cursor`, `grok` and the rest, a markdown transcript for `aider`.
+Grok CLI's `session_docs` row carries searchable plain text and a title, but not
+message roles, turn boundaries, or per-message timestamps. The reader shows
+that text under `Speaker unknown`; the activity index uses only the row's
+session-level `updated_at` and title.
 Two states are kept apart, and `index check` and `search --text` both report
 the second one rather than folding it into the first:
 
