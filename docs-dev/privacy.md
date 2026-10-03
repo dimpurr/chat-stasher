@@ -471,6 +471,20 @@ out **decrypted**, one file per session, into the directory you name
 we keep no record of where they went, so deleting the directory is yours to do.
 The CLI writes no archive content anywhere you did not name.
 
+When `collect` reads a session, it also records a normalized **source-path
+class** in the stage metadata: `main` or, for a Claude Code subagent, `subagents`.
+The subagent row carries the parent session's native id as a reference. It does
+not store the source path, and collection leaves the session's raw bytes alone.
+The activity index carries these fields into the archive, and `search --json`
+returns them with each matched or unplaced session that has a provenance row;
+older archives without one omit the field
+(`crates/chat-stasher/src/activity.rs:128-209`,
+`crates/chat-stasher/src/collect.rs:1090-1102`,
+`crates/chat-stasher/src/main.rs:2696-2704,2754-2762`,
+`crates/chat-stasher/src/search.rs:743-783`). The parent id is still session
+metadata in plaintext in the stage and inside the encrypted archive; it can link
+a subagent to its parent conversation.
+
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
 so nothing here is synced to a browser account by this extension).

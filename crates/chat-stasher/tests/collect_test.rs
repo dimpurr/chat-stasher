@@ -10,6 +10,9 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 fn registry() -> HarnessRegistry {
     let cell = json!({
         "template": "~/.claude/projects",
@@ -149,6 +152,39 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
         fourth.reset_records,
         after_truncate.len()
     );
+}
+
+#[test]
+fn collect_records_subagent_provenance_and_preserves_raw_source_bytes() {
+    let sandbox = test_support::Sandbox::new();
+    let source_root = sandbox.root().join(".claude/projects");
+    let source = source_root.join("project-fixture/parent-fixture/subagents/agent-fixture.jsonl");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let raw = br#"{"type":"user","message":{"content":"synthetic fixture"}}"#;
+    let raw = [raw.as_slice(), b"\n"].concat();
+    fs::write(&source, &raw).unwrap();
+    let stage = sandbox.root().join("stage");
+    let state = sandbox.root().join("state");
+
+    let scan_report = scan(&source_root);
+    assert_eq!(scan_report.records.len(), 1);
+    let session_id = scan_report.records[0].id.clone();
+    collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20, &dest())
+        .unwrap();
+
+    let provenance =
+        chat_stasher::activity::load_session_provenance(&stage, "fixture-machine").unwrap();
+    let row = &provenance[&session_id];
+    assert_eq!(row.source_path_class, "subagents");
+    assert_eq!(row.parent_session_ref.as_deref(), Some("parent-fixture"));
+    assert_eq!(fs::read(&source).unwrap(), raw);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &session_id).unwrap(),
+        raw
+    );
+    let sidecar =
+        fs::read_to_string(stage.join("meta/fixture-machine/session-provenance-v1.jsonl")).unwrap();
+    assert!(!sidecar.contains(sandbox.root().to_string_lossy().as_ref()));
 }
 
 #[test]

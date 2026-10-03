@@ -77,6 +77,11 @@ pub struct ActivityRow {
     /// inside `captured` and is never converted to no-project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProjectProvenance>,
+    /// Collection-time source location class and parent-session reference.
+    /// Paths are reduced to a class before they leave the scanner; no absolute
+    /// source path is persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provenance: Option<SessionProvenance>,
     /// W219 · The account keys this session's records actually carry, deduped
     /// and sorted. Each is a **comparable** pair: the fingerprint value and the
     /// `saltId` that makes it comparable to another value.
@@ -118,6 +123,198 @@ pub struct ActivityRow {
     /// deserialize rather than failing the whole index read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_body: Option<MeasuredBody>,
+}
+
+/// Privacy-safe provenance captured from a source path during collection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProvenance {
+    /// Normalized source layout class, such as `main` or `subagents`.
+    pub source_path_class: String,
+    /// Native id of the parent session for a subagent session, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredSessionProvenance {
+    session_id: String,
+    #[serde(flatten)]
+    provenance: SessionProvenance,
+}
+
+/// Record privacy-safe source-path provenance at collection time. The source
+/// path itself is reduced to a layout class and is never written.
+pub fn record_session_provenance(
+    stage: &std::path::Path,
+    machine: &str,
+    session_id: &str,
+    source: crate::models::HarnessSource,
+    source_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::path::Component;
+
+    let components: Vec<String> = source_path
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let subagents = (source == crate::models::HarnessSource::ClaudeCode)
+        .then(|| components.iter().position(|part| part == "subagents"))
+        .flatten();
+    let provenance = SessionProvenance {
+        source_path_class: if subagents.is_some() {
+            "subagents"
+        } else {
+            "main"
+        }
+        .to_string(),
+        parent_session_ref: subagents
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| components.get(index).cloned()),
+    };
+
+    let path = stage
+        .join("meta")
+        .join(machine)
+        .join("session-provenance-v1.jsonl");
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("session provenance path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut rows = load_session_provenance(stage, machine)?;
+    if rows.get(session_id) == Some(&provenance) {
+        return Ok(());
+    }
+    rows.insert(session_id.to_string(), provenance);
+    let mut body = String::new();
+    for (id, provenance) in rows {
+        let row = StoredSessionProvenance {
+            session_id: id,
+            provenance,
+        };
+        body.push_str(&serde_json::to_string(&row)?);
+        body.push('\n');
+    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".session-provenance-")
+        .tempfile_in(parent)?;
+    use std::io::Write;
+    tmp.write_all(body.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(&path)
+        .map_err(|error| anyhow::anyhow!("publish session provenance: {}", error.error))?;
+    Ok(())
+}
+
+/// Read the collection-time provenance sidecar. Missing is the legacy state;
+/// a present but malformed file is an error, not an empty map.
+pub fn load_session_provenance(
+    stage: &std::path::Path,
+    machine: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, SessionProvenance>> {
+    let path = stage
+        .join("meta")
+        .join(machine)
+        .join("session-provenance-v1.jsonl");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut rows = std::collections::BTreeMap::new();
+    for (line, raw) in content.lines().enumerate() {
+        let row: StoredSessionProvenance = serde_json::from_str(raw).map_err(|error| {
+            anyhow::anyhow!("parse session provenance line {}: {error}", line + 1)
+        })?;
+        rows.insert(row.session_id, row.provenance);
+    }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod session_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn collection_records_subagent_parent_without_changing_source_bytes() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let source = sandbox
+            .root()
+            .join(".claude/projects/project-fixture/parent-fixture/subagents/agent-fixture.jsonl");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let raw = br#"{"fixture":"synthetic"}"#;
+        std::fs::write(&source, raw).unwrap();
+
+        record_session_provenance(
+            &sandbox.root().join("stage"),
+            "machine-fixture",
+            "claude-code.machine-fixture.agent-fixture",
+            crate::models::HarnessSource::ClaudeCode,
+            &source,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&source).unwrap(), raw);
+        let rows =
+            load_session_provenance(&sandbox.root().join("stage"), "machine-fixture").unwrap();
+        assert_eq!(
+            rows["claude-code.machine-fixture.agent-fixture"],
+            SessionProvenance {
+                source_path_class: "subagents".into(),
+                parent_session_ref: Some("parent-fixture".into()),
+            }
+        );
+        let sidecar_path = sandbox
+            .root()
+            .join("stage/meta/machine-fixture/session-provenance-v1.jsonl");
+        let sidecar = std::fs::read_to_string(&sidecar_path).unwrap();
+        assert!(!sidecar.contains(sandbox.root().to_string_lossy().as_ref()));
+        let unchanged_mtime = std::fs::metadata(&sidecar_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        record_session_provenance(
+            &sandbox.root().join("stage"),
+            "machine-fixture",
+            "claude-code.machine-fixture.agent-fixture",
+            crate::models::HarnessSource::ClaudeCode,
+            &source,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&sidecar_path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            unchanged_mtime,
+            "an unchanged collection must not touch the provenance sidecar"
+        );
+
+        let main_source = sandbox
+            .root()
+            .join(".claude/projects/project-fixture/main-fixture.jsonl");
+        std::fs::create_dir_all(main_source.parent().unwrap()).unwrap();
+        let main_raw = br#"{"fixture":"main"}"#;
+        std::fs::write(&main_source, main_raw).unwrap();
+        let main_id = "claude-code.machine-fixture.main-fixture";
+        record_session_provenance(
+            &sandbox.root().join("stage"),
+            "machine-fixture",
+            main_id,
+            crate::models::HarnessSource::ClaudeCode,
+            &main_source,
+        )
+        .unwrap();
+        let rows =
+            load_session_provenance(&sandbox.root().join("stage"), "machine-fixture").unwrap();
+        assert_eq!(rows[main_id].source_path_class, "main");
+        assert_eq!(rows[main_id].parent_session_ref, None);
+        assert_eq!(std::fs::read(main_source).unwrap(), main_raw);
+    }
 }
 
 /// The identity of one conversation body, as `manifest::SessionManifest` records
@@ -2085,6 +2282,7 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         source_zone: a.source_zone,
         title: Some(a.title),
         provenance: project_provenance(lines),
+        session_provenance: None,
         account_keys: account_keys(lines),
         // This function only ever sees lines, never the shard files they came
         // from, so it cannot record what it measured. A caller that read the

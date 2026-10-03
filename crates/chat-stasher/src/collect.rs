@@ -1097,6 +1097,19 @@ pub fn collect_scan_report(
             bucket_cap,
         ) {
             Ok(processed) => {
+                crate::activity::record_session_provenance(
+                    stage,
+                    machine,
+                    &record.id,
+                    record.source,
+                    &record.absolute_path,
+                )
+                .with_context(|| {
+                    format!(
+                        "record source-path provenance for {}",
+                        crate::id::short_session_id(&record.id)
+                    )
+                })?;
                 let outcome = processed.outcome;
                 // W286: a session is "changed" exactly when this pass handed
                 // new content to the archive — a sealed shard — or had to
