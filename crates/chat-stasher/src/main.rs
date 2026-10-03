@@ -6475,7 +6475,7 @@ fn print_collect_report(
         report.scanned_cursor_records
     );
     println!(
-        "[collect] grok records    : {} (one virtual SessionRecord per session_docs row)",
+        "[collect] grok records    : {} (session_docs rows plus linked usage.json files)",
         report.scanned_grok_records
     );
     println!(
