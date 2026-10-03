@@ -3,6 +3,7 @@
 //! Sandbox; rustic's metadata cache remains enabled and is pinned inside it
 //! (W289).
 
+use chat_stasher::activity;
 use chat_stasher::collect::{self, DestinationView};
 use chat_stasher::config::Config;
 use chat_stasher::scanner::{self, HarnessRegistry};
@@ -13,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[path = "../src/test_support.rs"]
 mod test_support;
@@ -246,8 +248,17 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
             }
         }
     });
+    let codex_followup_event = json!({
+        "id": "evt_codex_followup_w315", "type": "event_msg",
+        "timestamp": "2026-10-02T12:05:00.000Z",
+        "event_msg": {"type": "token_count", "turn_context": {"model": "codex-synthetic-v2"},
+            "info": {"last_token_usage": {"input_tokens": 33, "output_tokens": 2}}}
+    });
     let codex_path = root.join("sources/codex/2026/10/02/rollout-w315.jsonl");
-    let codex_bytes = write_jsonl(&codex_path, std::slice::from_ref(&codex_event));
+    let codex_bytes = write_jsonl(
+        &codex_path,
+        &[codex_event.clone(), codex_followup_event.clone()],
+    );
 
     let opencode_data = json!({
         "role": "assistant", "providerID": "provider-synthetic", "modelID": "opencode-synthetic-v3",
@@ -317,6 +328,42 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
         assert!(
             record.id.contains(native_id),
             "stable session identity for {path:?}"
+        );
+    }
+
+    // The activity row is useful for session selection, but it is not a
+    // message-audit source. Search exposes this same row; audit values below
+    // come from the restored body, never inferred from activity/search data.
+    let parent_record = scan
+        .records
+        .iter()
+        .find(|record| record.absolute_path == claude_parent_path)
+        .expect("scan found the Claude parent fixture");
+    let parent_lines: Vec<&str> = std::str::from_utf8(&claude_parent_bytes)
+        .expect("synthetic Claude fixture is UTF-8")
+        .lines()
+        .collect();
+    let activity_row = serde_json::to_value(activity::build_row(
+        &parent_record.id,
+        MACHINE,
+        parent_record.source.short(),
+        &parent_lines,
+    ))
+    .expect("activity row serializes");
+    for message_audit_field in [
+        "message",
+        "model",
+        "usage",
+        "rate_limits",
+        "providerID",
+        "error",
+        "tokens",
+        "isSidechain",
+        "parentUuid",
+    ] {
+        assert!(
+            activity_row.get(message_audit_field).is_none(),
+            "activity/search metadata is not a message-audit source for {message_audit_field}"
         );
     }
 
@@ -456,7 +503,15 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     );
 
     let codex = restored_value(&archive, &key, &id_for_path(&codex_path));
-    assert_eq!(codex, json!({"records": [codex_event]}));
+    assert_eq!(
+        codex,
+        json!({"records": [codex_event, codex_followup_event]})
+    );
+    assert_eq!(codex["records"][0]["id"], "evt_codex_usage_w315");
+    assert_eq!(
+        codex["records"][1]["id"], "evt_codex_followup_w315",
+        "Codex events retain source order and stable event keys"
+    );
     let rate_limits = &codex["records"][0]["event_msg"]["rate_limits"];
     assert_eq!(codex["records"][0]["id"], "evt_codex_usage_w315");
     assert_eq!(codex["records"][0]["type"], "event_msg");
@@ -515,6 +570,54 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     assert_eq!(restored_data["path"]["cwd"], "/synthetic/opencode-project");
     assert_eq!(restored_data["time"]["created"], 1_800_000_100_i64);
     assert_eq!(restored_data["time"]["completed"], 1_800_000_200_i64);
+
+    // A changed source is a new retained generation. The second collect seals
+    // its appended record, and the second snapshot preserves the complete
+    // latest generation while the first snapshot remains in the archive.
+    let claude_parent_followup = json!({
+        "type": "assistant", "userType": "external", "isSidechain": false,
+        "entrypoint": "cli", "timestamp": "2026-10-02T12:06:00.000Z",
+        "cwd": "/synthetic/project", "sessionId": "claude-parent-w315",
+        "message": {"id": "msg_claude_parent_followup_w315",
+                    "model": "claude-synthetic-v1",
+                    "usage": {"input_tokens": 2, "output_tokens": 1}}
+    });
+    let latest_parent_bytes = write_jsonl(
+        &claude_parent_path,
+        &[
+            claude_parent,
+            claude_api_error,
+            claude_tool_result,
+            claude_parent_followup.clone(),
+        ],
+    );
+    let next_collection =
+        collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &destination)
+            .expect("collect and seal the changed source generation");
+    assert_eq!(next_collection.changed_records, 1);
+    archive
+        .push(&stage, &key)
+        .expect("push the changed source generation to a second snapshot");
+    let (latest_parent, _) = archive
+        .read_session_concat(MACHINE, &id_for_path(&claude_parent_path), &key)
+        .expect("restore newest parent source generation");
+    assert_eq!(latest_parent, latest_parent_bytes);
+    assert_eq!(digest(&latest_parent), digest(&latest_parent_bytes));
+    let (repo, _) = archive.open_indexed(&key).expect("open generation archive");
+    assert_eq!(
+        repo.get_all_snapshots()
+            .expect("list source-generation snapshots")
+            .into_iter()
+            .filter(|snapshot| snapshot.hostname == MACHINE)
+            .count(),
+        2,
+        "both source generations remain in append-only archive snapshots"
+    );
+    let latest_parent_value = restored_value(&archive, &key, &id_for_path(&claude_parent_path));
+    assert_eq!(
+        latest_parent_value["records"][3], claude_parent_followup,
+        "record order is preserved in the latest source generation"
+    );
 }
 
 /// Step 2 adds archive source-path provenance. Keep the expected assertion in
@@ -562,6 +665,25 @@ fn subagents_source_path_provenance_is_retained() {
     let destination = DestinationView::unreachable("w315-provenance-fixture");
     collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &destination)
         .expect("collect and seal synthetic worker session");
+
+    let mut rebuild = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    rebuild.args([
+        "activity-index",
+        "--stage",
+        stage.to_str().expect("synthetic stage path is UTF-8"),
+        "--machine",
+        MACHINE,
+        "--rebuild",
+    ]);
+    sandbox.apply(&mut rebuild);
+    let output = rebuild
+        .output()
+        .expect("run synthetic activity-index rebuild");
+    assert!(
+        output.status.success(),
+        "activity-index rebuild failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let cfg = store_config(root);
     let key = rustic_core::repofile::MasterKey::new();
