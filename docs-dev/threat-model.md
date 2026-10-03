@@ -38,7 +38,7 @@ Understanding the roles below requires knowing the path the content takes.
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:769-819`;
-   `crates/chat-stasher/src/nativehost.rs:2965-2976`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:2992-3003`). The bundle leaves the
    outbox **only** on a matching `ack`
    (`apps/extension/lib/native-host.ts:1118-1127`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:3900-3934`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:3927-3961`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -589,12 +589,12 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:3900-3934`).
+  (`crates/chat-stasher/src/nativehost.rs:3927-3961`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:2067-2134`, `:2139-2168`).
+  (`crates/chat-stasher/src/nativehost.rs:2094-2161`, `:2166-2195`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
@@ -605,11 +605,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:2838-2847`;
+  (`crates/chat-stasher/src/nativehost.rs:2865-2874`;
   `apps/extension/lib/native-host.ts:1118-1127`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:2854-2860`).
+  (`crates/chat-stasher/src/nativehost.rs:2881-2887`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -703,7 +703,7 @@ They reach three different places, and the differences matter:
 - **A per-install status record**, written by the host into the stage as
   `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
-  `crates/chat-stasher/src/nativehost.rs:2545`, `:2570-2586`). It carries the
+  `crates/chat-stasher/src/nativehost.rs:2572`, `:2597-2613`). It carries the
   install id, browser, profile label, extension version, a report time, and one
   row per platform naming the platform, how many captures this browser
   confirmed, how many are still pending, why a leg is paused, and — for a row
@@ -751,18 +751,18 @@ number** — each doing so with its own random nonce. The host therefore compare
 the pair and not the number: a repeated pair is one allocation arriving twice, a
 sequence under a *different* nonce is two independent allocations of one number,
 and a report that merely arrived late, out of order or after a worker restart is
-neither (`crates/chat-stasher/src/nativehost.rs:1685-1702`, `:1806`). It keeps a
+neither (`crates/chat-stasher/src/nativehost.rs:1712-1729`, `:1833`). It keeps a
 bounded window of the newest 64 pairs per `(machine, install_id)` and accepts a
 sequence older than that window **without judging it**, rather than reporting a
 comparison it did not make (`crates/chat-stasher/src/nativehost.rs:1647`). The
 conflict flag is sticky: the only way out is a new install id, which is a new key
-and starts clean (`crates/chat-stasher/src/nativehost.rs:1816-1821`).
+and starts clean (`crates/chat-stasher/src/nativehost.rs:1843-1848`).
 
 **The repair is a user action in the popup, on each conflicting copy, and it
 rewrites nothing.** The popup asks the host whether this id is known to be shared
 — a read-only question that writes nothing, asked precisely because an install
 whose backfill is switched off never sends a status report at all
-(`crates/chat-stasher/src/nativehost.rs:1929-1935`, `:1981`) — and the card
+(`crates/chat-stasher/src/nativehost.rs:1956-1962`, `:1984-1985`) — and the card
 appears only when the host *says* the id is shared, never on a guess
 (`apps/extension/lib/popup-view.ts:529-545`, `:760-767`). Neither copy rotates
 automatically: that press is the only caller of the rekey, because an automatic
@@ -780,7 +780,7 @@ was lost, that history is not rewritten, and what the button does
 the same sequence, they are indistinguishable.** A copied profile whose two
 copies have never both reported looks exactly like one install, and the code says
 so instead of reporting a comparison it did not make
-(`crates/chat-stasher/src/nativehost.rs:1911-1913`). No further field can close
+(`crates/chat-stasher/src/nativehost.rs:1938-1940`). No further field can close
 that gap: a heartbeat, a timestamp or a token held in extension storage is copied
 along with everything else. What is **not** copied is the other copy's next
 random value — which is the allocation mechanism above, and is the whole of what
