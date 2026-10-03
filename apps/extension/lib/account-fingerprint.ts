@@ -225,24 +225,20 @@ export async function fingerprintAccountId(
  * The account id a capture makes visible, or the named fact that it makes none.
  * Pure: no storage, no network, no clock.
  *
- * 🔴 W128 · **Where the id comes from, per platform.** Two mechanisms, and the
- *    difference between them is the whole point of recording the source on the
- *    bundle rather than only the hash:
+ * 🔴 W128 · **Where the id comes from, per platform.** The input mechanisms carry
+ *    different evidence, which is why the bundle records the source as well as
+ *    the hash:
  *
- *  · **Claude — an organization, which is not an account, so this field says
- *    `organization-is-not-an-account` (🔴 W239, W128 step 3).** claude.ai addresses
- *    every conversation by organization and puts that id in the path of the page's own
- *    request — `request-url-organization`, verified and page-owned. It is nevertheless
- *    **not** recorded here, because the field's own contract requires something this
- *    value cannot do: two accounts can be members of one organization, and a value
- *    derived from the organization alone is **equal for both**. Recording it would not
- *    be "unknown" — it would be a positive, false statement that a conversation
- *    captured under B came from the same account as one captured under A, which is
- *    precisely the mis-attribution W128 exists to stop. The organization is not lost by
- *    this: it is in the bundle's own `url`, it is the scope every backfill header is
- *    filed under, and it is what `coordinationIdFromCapture` hands the native host. What
- *    it is not is an account. See `ORGANIZATION_SCOPED_PLATFORMS`
- *    (lib/backfill/enumerate.ts) for the full argument and its evidence.
+ *  · **Claude — a current-user id when the page exposes one (🔴 W337), otherwise
+ *    `organization-is-not-an-account` (🔴 W239).** Before delivery, the content bridge
+ *    asks the logged-in page's cache-disabled `/api/account` endpoint, then falls back
+ *    to the captured organization's Claude Code `user_settings.userId`. The transient
+ *    id is fingerprinted here and removed before anything is persisted or sent to the
+ *    native host. If neither endpoint supplies an id, the organization in the request
+ *    path is not substituted: two accounts can share one organization, so a value
+ *    derived from it would be equal for both and falsely attribute their captures. The
+ *    organization remains the bundle URL and the backfill/coordination scope. See
+ *    `ORGANIZATION_SCOPED_PLATFORMS` (lib/backfill/enumerate.ts) for that distinction.
  *
  *  · **ChatGPT, Gemini, Grok, DeepSeek, Perplexity — `response-body-platform-uid`,
  *    the ADR-002 account axis, labelled as exactly that.** These five expose no
@@ -285,6 +281,25 @@ export function accountIdFromCapture(captured: CapturedFetch, sessionId: string 
   const row = findPlatformForUrl(captured.url)
     ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   if (!row) return { kind: 'unknown', reason: 'platform-not-recognized' };
+
+  // 🔴 W337 · Claude's page-side cache-disabled identity probe supplies the
+  //    current user's id as a transient capture field. It precedes the old
+  //    generic body scan: Claude conversation responses carry organization ids,
+  //    which are containers and must remain an honest unknown account value.
+  if (row.id === 'claude') {
+    if (captured.claudeAccountId !== undefined) {
+      const id = typeof captured.claudeAccountId === 'string' ? captured.claudeAccountId.trim() : '';
+      return id.length > 0 && id.length <= 512
+        ? {
+            kind: 'id', id,
+            source: captured.claudeAccountIdSource ?? 'response-body-claude-whoami',
+          }
+        : { kind: 'unknown', reason: 'no-account-id-in-capture' };
+    }
+    if (captured.claudeAccountUnknownReason) {
+      return { kind: 'unknown', reason: captured.claudeAccountUnknownReason };
+    }
+  }
 
   if (backfillPlanFor(row.id)?.scopeInPath) {
     // 🔴 W239 · A path-carried scope is a container the platform addresses conversations

@@ -1032,6 +1032,8 @@ coverage:
     #    header rather than as "the page" — the same wording rule the other two follow:
     #    say the mechanism the value was read from, not a stronger claim about the person.
     sourceHeader: the request header on the captured request
+    sourceClaudeWhoami: Claude's cache-disabled who-am-I response
+    sourceClaudeSettings: Claude's organization user settings response
     # 🔴 W239 · The third fact, and it may not borrow `none`'s sentence: `none` says this
     #    build has never had an account to show, while here the limit is known in advance
     #    and by name. Keeping them apart is the difference between "we did not look" and
