@@ -22,6 +22,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { loadState, runBackfill, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { memoryStore, type BackfillStore } from '../lib/backfill/store';
 import { replaceDebtSet } from '../lib/backfill/debt-store';
 import { stateKey, type BackfillHeader } from '../lib/backfill/types';
@@ -222,7 +223,7 @@ describe('W98 · other platforms are untouched', () => {
       origin: 'https://chatgpt.com',
       scope,
       store,
-      http,
+      http: withChatGptLeaseIdentity(http),
       clock: fixedClock(Date.parse('2026-09-24T00:00:00.000Z')),
       pace: NO_WAIT,
       random: () => 0,

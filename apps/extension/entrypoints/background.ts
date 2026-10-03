@@ -6,6 +6,7 @@ import {
   findPlatformForUrl,
   getPlatformByOrigin,
   HOOK_STATUS_MESSAGE,
+  CHATGPT_WORKSPACE_OBSERVED_MESSAGE,
   isHookStatusMessage,
   PLATFORMS,
   type CapturedFetch,
@@ -109,7 +110,7 @@ import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/sp
 import { daySlowPlan, daySlowTriggeredBy, isPlatformDaySlowed, recordPlatformRateLimit } from '../lib/backfill/day-slow';
 import { runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
-import { chatGptUnresolvedScope, fingerprintedChatGptScope, fingerprintChatGptWorkspace, isChatGptFingerprint, isChatGptScope, isDefaultChatGptScope, isUnresolvedChatGptScope } from '../lib/backfill/chatgpt-workspace';
+import { chatGptUnresolvedScope, chatGptWorkspaceScope, fingerprintedChatGptScope, isChatGptFingerprint, isChatGptScope, isDefaultChatGptScope, isUnresolvedChatGptScope } from '../lib/backfill/chatgpt-workspace';
 import { migrateChatGptWorkspaceScopes } from '../lib/backfill/chatgpt-scope-migration';
 import { coordinationSegmentForRequest } from '../lib/backfill/coordination';
 import { accountSuspensionHolds, dayKeyOf, haltClassOf, haltStillApplies, isHaltRetry, isHeader, parseRetryAfterMs, readAccountLease, readAccountSuspension, stateKey, type AccountIdentity, type AccountSuspension, type HaltReason } from '../lib/backfill/types';
@@ -121,6 +122,7 @@ import {
   rememberTab,
   sweepUnregisteredTabs,
   tabHttpPort,
+  fingerprintChatGptIdentityAtWorkerBoundary,
   type TabSend,
   type TabSweepReport,
 } from '../lib/backfill/tab-port';
@@ -1098,7 +1100,7 @@ async function coordinatedTick(
       if (!workspace.ok || workspace.observed !== true) {
         throw new Error(workspace.reason === 'workspace-ambiguous' ? 'org-ambiguous' : 'org-unresolved');
       }
-      if (await fingerprintChatGptWorkspace(browserLocalStore(), workspace.workspace) !== accountId) throw new Error('scope-mismatch');
+      if (fingerprintedChatGptScope(workspace.identity.value) !== accountId) throw new Error('scope-mismatch');
     }
     const segment = coordinationSegmentForRequest(platform, url);
     const response = await lease.request(segment, () => http(url, init));
@@ -1112,19 +1114,34 @@ async function coordinatedTick(
      * and does, when the host is unreachable).
      */
     if (response.status === 403 || response.status === 429) {
-      if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter)))
+      if (response.status === 403) {
+        // 🔴 W303f · 403 is an account refusal the engine must see so it can
+        //    persist suspension. Sharing it with other installs is advisory;
+        //    an unavailable host cannot replace or block that suspension.
+        try {
+          if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter))) {
+            console.warn('[chat-stasher] the 403 could not be shared with the native host');
+          }
+        } catch (err) {
+          console.warn('[chat-stasher] the 403 could not be shared with the native host', (err as Error).message);
+        }
+      } else if (!(await reportPlatformRateLimit(lease, response.status, response.retryAfter))) {
         throw new Error('machine-wide rate-limit coordination unavailable');
+      }
     }
     return response;
   };
+  // 🔴 W303 · Preserve the pre-enumeration ChatGPT identity capability through
+  // the machine-wide request-budget wrapper. The identity is already keyed by
+  // tabHttpPort; this forwarding does not carry the raw page value.
+  if (platform === 'chatgpt' && http.chatgptAccountIdentity) {
+    coordinatedHttp.chatgptAccountIdentity = () => http.chatgptAccountIdentity!();
+  }
   if (workspaceScoped && http.chatgptWorkspace) {
     coordinatedHttp.chatgptWorkspace = async () => {
       const observed = await http.chatgptWorkspace!();
       if (!observed.ok) return observed;
-      const scope = await fingerprintChatGptWorkspace(browserLocalStore(), observed.workspace);
-      return scope
-        ? { ok: true as const, workspace: scope, observed: true as const }
-        : { ok: false as const, reason: 'workspace-unresolved' as const, observed: false };
+      return observed;
     };
   }
   try {
@@ -1231,13 +1248,14 @@ async function resolveHttpPort(origin: string, senderTabId?: number): Promise<Ht
   if (backfillTransport) return backfillTransport;
   const tabs = tabsApi();
   if (!tabs) return undefined;
+  const store = browserLocalStore();
   // On the live leg's path, the tab that sent the message **is open right now and
   // has just performed a real capture** — it is the most reliable fetch channel,
   // and there is no need to consult the registry again.
-  if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage);
-  const live = await pickLiveTab(browserLocalStore(), origin, (id) =>
+  if (senderTabId !== undefined) return tabHttpPort(senderTabId, tabs.sendMessage, undefined, store);
+  const live = await pickLiveTab(store, origin, (id) =>
     tabs.sendMessage(id, { type: BACKFILL_PING_MESSAGE }));
-  return live ? tabHttpPort(live.tabId, tabs.sendMessage) : undefined;
+  return live ? tabHttpPort(live.tabId, tabs.sendMessage, undefined, store) : undefined;
 }
 
 /**
@@ -1496,7 +1514,7 @@ async function patchScopeAccount(
   }
   const state = opened.state;
   state.suspended = next ?? undefined;
-  if (next === null && state.halted?.reason === 'account-changed') {
+  if (next === null && (state.halted?.reason === 'account-changed' || state.halted?.reason === 'refused-unknown')) {
     state.halted = null;
     state.haltRetried = undefined;
   }
@@ -2008,7 +2026,7 @@ export async function registerBackfillTargetHere(): Promise<
   let scope = platform === 'chatgpt' ? chatGptUnresolvedScope('workspace-unresolved') : UNRESOLVED_SCOPE;
   if (platform === 'chatgpt') {
     const tabs = tabsApi();
-    const pageHttp = live.tabId === null || !tabs ? undefined : tabHttpPort(live.tabId, tabs.sendMessage);
+    const pageHttp = live.tabId === null || !tabs ? undefined : tabHttpPort(live.tabId, tabs.sendMessage, undefined, store);
     let resolved: import('../lib/backfill/chatgpt-workspace').ChatGptWorkspaceResolution | undefined;
     try { resolved = await pageHttp?.chatgptWorkspace?.(); } catch { /* unresolved is recorded below */ }
     if (!resolved?.ok || resolved.observed !== true) {
@@ -2023,9 +2041,7 @@ export async function registerBackfillTargetHere(): Promise<
       await rememberScopedTarget(store, { platform, origin, scope, at: Date.now() });
       return { ok: false, reason };
     }
-    const fingerprintedScope = await fingerprintChatGptWorkspace(store, resolved.workspace);
-    if (!fingerprintedScope) return { ok: false, reason: 'org-unresolved' };
-    scope = fingerprintedScope;
+    scope = fingerprintedChatGptScope(resolved.identity.value);
   }
   const resolver = scopeResolverFor(platform);
   if (resolver) {
@@ -2147,9 +2163,7 @@ export async function kickBackfill(
       // The workspace refusal below records that this page supplied no usable evidence.
     }
     if (workspace) {
-      const fingerprintedScope = await fingerprintChatGptWorkspace(store, workspace);
-      if (!fingerprintedScope) return null;
-      target = { ...target, scope: fingerprintedScope };
+      target = { ...target, scope: chatGptWorkspaceScope(workspace) ?? target.scope };
     }
   }
   // Useful when the alarm wakes: record this target the user really did use, so
@@ -3214,6 +3228,19 @@ export function backgroundSetupSettled(): Promise<void> {
 export default defineBackground(() => {
   browser.runtime.onMessage.addListener(
     (message: { type?: string; payload?: CapturedFetch; profile_label?: string }, sender, sendResponse) => {
+      if (message?.type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
+        let origin = '';
+        try { origin = typeof sender.url === 'string' ? new URL(sender.url).origin : ''; } catch { /* invalid sender URL */ }
+        if (!PLATFORMS.some((platform) => platform.id === 'chatgpt' && platform.origins.includes(origin))) {
+          sendResponse({ ok: false });
+          return true;
+        }
+        fingerprintChatGptIdentityAtWorkerBoundary(
+          (message as { accountId?: unknown }).accountId, browserLocalStore(),
+        ).then((identity) => sendResponse(identity ? { ok: true, identity } : { ok: false }))
+          .catch(() => sendResponse({ ok: false }));
+        return true;
+      }
       // C18: the popup asks, when it opens, "is the fetch channel connected".
       // Since C19 that answer requires pinging a tab on the spot ⇒ it is async,
       // and it still returns true.

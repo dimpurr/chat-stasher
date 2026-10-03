@@ -58,7 +58,12 @@ import {
   TRANSIENT_RETRY_MAX_MS,
   transientRetryDelayMs,
 } from '../lib/backfill/types';
-import { runBackfill } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey } from '../lib/backfill/types';
 
@@ -493,10 +498,10 @@ async function boot(drawSource: RandomFn): Promise<any> {
     clock: runtimeClock,
     random: drawSource,
   });
-  mod.configureBackfillTransport(async () => {
+  mod.configureBackfillTransport(withChatGptLeaseIdentity(async () => {
     listCalls.push('list');
     return { status: 200, text: '{"items":[],"total":0}' };
-  });
+  }));
   expect(mod.default()).toBeUndefined();
   await mod.backgroundSetupSettled();
   return mod;

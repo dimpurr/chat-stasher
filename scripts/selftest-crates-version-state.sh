@@ -162,11 +162,11 @@ probe() {
     case "$want_err" in
       !*)
         forbidden="${want_err#!}"
-        if printf '%s' "$stderr" | grep -qF -e "$forbidden"; then
+        if grep -qF -e "$forbidden" <<<"$stderr"; then
           bad="${bad:+${bad} and }stderr mentioned ${forbidden}, which it must not"
         fi ;;
       *)
-        if ! printf '%s' "$stderr" | grep -qF -e "$want_err"; then
+        if ! grep -qF -e "$want_err" <<<"$stderr"; then
           bad="${bad:+${bad} and }stderr did not mention ${want_err}"
         fi ;;
     esac

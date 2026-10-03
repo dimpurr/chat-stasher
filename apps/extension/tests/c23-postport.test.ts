@@ -18,7 +18,12 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { runBackfill, type HttpPort, type HttpResponse } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw, type HttpPort, type HttpResponse } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey } from '../lib/backfill/types';
 import {

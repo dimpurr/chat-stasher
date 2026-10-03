@@ -40,6 +40,7 @@ import {
 } from '../lib/backfill/tab-port';
 import type { CapturedFetch } from '../lib/contract';
 import type { BackfillState } from '../lib/backfill/types';
+import { browserLocalStore } from '../lib/backfill/store';
 
 const ORIGIN = 'https://chatgpt.com';
 const LIST_PATH = '/backend-api/conversations';
@@ -192,11 +193,12 @@ function halfDeadPort() {
         ok: true,
         status: 200,
         text: JSON.stringify({ items: IDS.map((id) => ({ id })), total: IDS.length }),
+        chatgptAccountIdHeader: 'acct-fixture-1',
       };
     }
     detailAttempts.push(m.url ?? '');
     return new Promise(() => { /* never settles */ });
-  }, 50);
+  }, 50, browserLocalStore());
 }
 
 const fakeBrowser: any = {
@@ -403,9 +405,9 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
         return { ok: true, workspace: 'acct-fixture-1', observed: true };
       }
       if (m.url && new URL(m.url).pathname === LIST_PATH) {
-        return { ok: true, status: 200, text: JSON.stringify({ items: [], total: 0 }) };
+        return { ok: true, status: 200, text: JSON.stringify({ items: [], total: 0 }), chatgptAccountIdHeader: 'acct-fixture-1' };
       }
-      return { ok: true, status: 200, text: JSON.stringify({ mapping: {}, current_node: 'n0' }) };
+      return { ok: true, status: 200, text: JSON.stringify({ mapping: {}, current_node: 'n0' }), chatgptAccountIdHeader: 'acct-fixture-1' };
     }, 50));
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);

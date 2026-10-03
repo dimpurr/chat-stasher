@@ -44,6 +44,7 @@ import { describe, expect, it } from 'vitest';
 import { PLATFORMS } from '../lib/contract';
 import { runBackfill, type HttpResponse, type SinkOutcome } from '../lib/backfill/engine';
 import { memoryStore } from '../lib/backfill/store';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { KIMI_DETAIL_PATH, KIMI_LIST_PATH } from '../lib/backfill/enumerate';
 import { haltClassOf } from '../lib/backfill/types';
 import {
@@ -279,7 +280,9 @@ describe('W64b-2 · a Gemini 400 is a login refusal, and is transient', () => {
         origin: row.origins[0]!,
         scope: 'w64b',
         store: memoryStore(),
-        http: (async () => ({ status: 400, text: 'synthetic refusal' })) as never,
+        http: (platform === 'chatgpt'
+          ? withChatGptLeaseIdentity(async () => ({ status: 400, text: 'synthetic refusal' }))
+          : async () => ({ status: 400, text: 'synthetic refusal' })) as never,
         clock: fakeClock(),
         pace: NO_WAIT,
         sink: (captured): SinkOutcome => ({ saved: true, sessionId: captured.sessionId }),

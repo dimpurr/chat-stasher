@@ -1,9 +1,17 @@
+import type { AccountIdentity } from './types';
+
+/** Opaque, per-install workspace fingerprint. It is safe to retain after the worker boundary. */
+declare const chatGptWorkspaceFingerprintBrand: unique symbol;
+export type FingerprintedChatGptWorkspace = string & { readonly [chatGptWorkspaceFingerprintBrand]: true };
+declare const chatGptIdentityFingerprintBrand: unique symbol;
+export type FingerprintedChatGptIdentity = AccountIdentity & { readonly [chatGptIdentityFingerprintBrand]: true };
+
 /** Workspace identity observed from this page's own outgoing ChatGPT requests. */
 export type ChatGptWorkspaceResolution =
-  | { ok: true; workspace: string; observed: true }
+  | { ok: true; workspace: FingerprintedChatGptWorkspace; identity: AccountIdentity; observed: true }
   | { ok: false; reason: 'workspace-ambiguous' | 'workspace-unresolved'; observed: boolean };
 
-export interface ChatGptWorkspaceObservation { accountIds: string[] }
+export interface ChatGptWorkspaceObservation { identities: AccountIdentity[] }
 
 /** Canonical storage and comparison form for a ChatGPT workspace identity. */
 export function chatGptWorkspaceScope(workspace: unknown): string | null {
@@ -12,20 +20,19 @@ export function chatGptWorkspaceScope(workspace: unknown): string | null {
   return isFingerprintedChatGptScope(value) ? value : `chatgpt:${value}`;
 }
 
-export function observeChatGptAccountId(
+export function observeChatGptWorkspaceFingerprint(
   observation: ChatGptWorkspaceObservation,
-  value: string | null | undefined,
+  identity: AccountIdentity | null | undefined,
 ): ChatGptWorkspaceObservation {
-  const accountId = value?.trim();
-  if (!accountId || accountId.length > 512 || observation.accountIds.includes(accountId) || observation.accountIds.length >= 2) return observation;
-  return { accountIds: [...observation.accountIds, accountId] };
+  if (!identity || observation.identities.some((item) => item.value === identity.value) || observation.identities.length >= 2) return observation;
+  return { identities: [...observation.identities, identity] };
 }
 
 export function resolveChatGptWorkspace(observation: ChatGptWorkspaceObservation): ChatGptWorkspaceResolution {
-  if (observation.accountIds.length > 1) return { ok: false, reason: 'workspace-ambiguous', observed: true };
-  const workspace = observation.accountIds[0];
-  return workspace
-    ? { ok: true, workspace, observed: true }
+  if (observation.identities.length > 1) return { ok: false, reason: 'workspace-ambiguous', observed: true };
+  const identity = observation.identities[0];
+  return identity
+    ? { ok: true, workspace: fingerprintedChatGptWorkspace(identity.value), identity, observed: true }
     : { ok: false, reason: 'workspace-unresolved', observed: false };
 }
 
@@ -87,8 +94,8 @@ export function isFingerprintedChatGptScope(scope: string): boolean {
  */
 
 /** The workspace-value form of an already-computed fingerprint digest: `fp1:<digest>`. */
-export function fingerprintedChatGptWorkspace(fingerprint: string): string {
-  return `fp1:${fingerprint}`;
+export function fingerprintedChatGptWorkspace(fingerprint: string): FingerprintedChatGptWorkspace {
+  return `fp1:${fingerprint}` as FingerprintedChatGptWorkspace;
 }
 
 /** The marked scope for an already-computed fingerprint digest. */

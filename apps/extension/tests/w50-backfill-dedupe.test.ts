@@ -60,6 +60,7 @@ import { stateKey, type BackfillState } from '../lib/backfill/types';
 import { recoverLedgerLoss } from '../lib/backfill/ledger';
 import { replaceDebtSet } from '../lib/backfill/debt-store';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 
 // ---------------------------------------------------------------------------
 // The fake extension surface (the pattern of tests/c17-backfill-e2e.test.ts).
@@ -161,7 +162,7 @@ function makeServer(ids: string[], body: (id: string, fetchNumber: number) => st
     fetches.set(id, n);
     return { status: 200, text: body(id, n) };
   };
-  return { port, listUrls, detailUrls };
+  return { port: withChatGptLeaseIdentity(port), listUrls, detailUrls };
 }
 
 // ---------------------------------------------------------------------------

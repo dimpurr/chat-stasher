@@ -29,7 +29,12 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw, type HttpResponse } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore, type BackfillStore } from '../lib/backfill/store';
 import {
   openLedger,

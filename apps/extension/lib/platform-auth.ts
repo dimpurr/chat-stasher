@@ -11,8 +11,8 @@
  * Rules for the token, all enforced in this file:
  *  · it lives in this module's memory only — never storage, IndexedDB, logs, or
  *    anything sent to the native host;
- *  · it is attached only to a same-origin request under CHATGPT_DETAIL_PATH on a
- *    ChatGPT origin; every other request is sent exactly as before;
+ *  · it is attached only to same-origin ChatGPT list and conversation-body
+ *    requests; every other request is sent exactly as before;
  *  · a 401/403 drops it and fetches a fresh one once.
  *
  * ## 🔴 W22 · Kimi (measured in a logged-in Chrome, 2026-09-14)
@@ -25,7 +25,7 @@
  */
 import {
   CHATGPT_DETAIL_PATH,
-  CHATGPT_LIST_PATH,
+  CHATGPT_LIST_PATH, chatgptBackfillPathMatches,
   DEEPSEEK_DETAIL_PATH,
   DEEPSEEK_LIST_PATH,
   GEMINI_BATCHEXECUTE_PATH,
@@ -72,6 +72,8 @@ export function needsChatgptBearer(url: string, pageOrigin: string): boolean {
 export interface MinimalResponse {
   status: number;
   text: () => Promise<string>;
+  /** Raw value of the ChatGPT account header on this exact fetch attempt. */
+  chatgptAccountIdHeader?: string;
   /**
    * 🔴 W127 · The response's headers, when the underlying object is a real
    * `Response` — which the page's own `fetch` is. Optional because every synthetic
@@ -105,27 +107,70 @@ async function readSessionToken(pageOrigin: string, rawFetch: RawFetch): Promise
 }
 
 /**
- * A fetch that adds the bearer token to ChatGPT body requests and leaves every
- * other request untouched. One instance per content script (one page).
+ * A fetch that adds the bearer token to ChatGPT list/body requests and the
+ * request-local account header to every route declared by CHATGPT_PLAN. One
+ * instance per content script (one page).
  */
-export function createAuthorizedFetch(pageOrigin: string, rawFetch: RawFetch) {
+export function createAuthorizedFetch(
+  pageOrigin: string,
+  rawFetch: RawFetch,
+  options: { readChatgptAccountIdHeader?: () => { value: string | null; generation: number } } = {},
+) {
   let token: string | null = null;
 
-  const withToken = async (url: string, init: RequestInit): Promise<MinimalResponse> => {
-    if (token === null) token = await readSessionToken(pageOrigin, rawFetch);
+  const withToken = async (
+    url: string,
+    init: RequestInit,
+    requestHeader: { firstGeneration: number | null },
+    includeBearer: boolean,
+  ): Promise<MinimalResponse> => {
+    if (includeBearer && token === null) token = await readSessionToken(pageOrigin, rawFetch);
     // No token: send without it, so the caller sees the platform's real status
     // (404/401) and halts with a trace instead of us inventing an outcome.
-    if (token === null) return rawFetch(url, init);
-    const headers = { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` };
-    return rawFetch(url, { ...init, headers });
+    const headers = { ...(init.headers as Record<string, string> | undefined) };
+    if (includeBearer && token !== null) headers.authorization = `Bearer ${token}`;
+    if (needsChatgptAccountHeader(url, pageOrigin)) {
+      // 🔴 W303 · Read after every auth await, immediately before the attempt is
+      //    issued. Only this attempt's value travels back for worker fingerprinting.
+      const current = options.readChatgptAccountIdHeader?.();
+      if (!current) throw new Error('chatgpt-account-header-unavailable');
+      if (current.value === null) throw new Error('chatgpt-account-header-unavailable');
+      if (requestHeader.firstGeneration !== null && current.generation !== requestHeader.firstGeneration) {
+        throw new Error('chatgpt-account-header-changed-during-retry');
+      }
+      requestHeader.firstGeneration ??= current.generation;
+      headers['ChatGPT-Account-Id'] = current.value;
+      const response = await rawFetch(url, { ...init, headers });
+      return {
+        status: response.status,
+        text: () => response.text(),
+        ...(response.headers ? { headers: response.headers } : {}),
+        chatgptAccountIdHeader: current.value,
+      };
+    }
+    return rawFetch(url, includeBearer && token !== null ? { ...init, headers } : init);
   };
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
-    if (!needsChatgptBearer(url, pageOrigin)) return rawFetch(url, init);
-    const first = await withToken(url, init);
+    if (!needsChatgptBearer(url, pageOrigin)) {
+      return withToken(url, init, { firstGeneration: null }, false);
+    }
+    const requestHeader = { firstGeneration: null as number | null };
+    const first = await withToken(url, init, requestHeader, true);
     if (first.status !== 401 && first.status !== 403) return first;
     token = null;
-    return withToken(url, init);
+    // 🔴 W303 ruling 2 · Every bearer-bearing ChatGPT path in this wrapper is
+    //    also a backfill-plan path. Its first 401/403 is the platform's answer
+    //    for this request and must reach the engine so it can suspend the scope
+    //    with pending debt untouched. A refreshed retry here would hide that
+    //    refusal if it succeeded. Keep the token invalidated for a later run.
+    if (needsChatgptAccountHeader(url, pageOrigin)) return first;
+    try {
+      return await withToken(url, init, requestHeader, true);
+    } catch (error) {
+      if ((error as Error).message === 'chatgpt-account-header-changed-during-retry') return first;
+      throw error;
+    }
   };
 }
 
@@ -820,4 +865,17 @@ export function createSeenGate(windowMs: number, now: () => number = Date.now) {
     last.set(id, t);
     return true;
   };
+}
+
+/** Every ChatGPT backend route the backfill plan can issue needs its request-local account identity. */
+export function needsChatgptAccountHeader(url: string, pageOrigin: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === pageOrigin
+      && CHATGPT_ORIGINS.includes(parsed.origin)
+      && parsed.pathname.startsWith('/backend-api/')
+      && chatgptBackfillPathMatches(parsed.pathname);
+  } catch {
+    return false;
+  }
 }

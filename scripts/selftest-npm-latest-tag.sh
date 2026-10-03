@@ -258,7 +258,7 @@ probe() {
 
   bad=""
   [ "$rc" = "$want_rc" ] || bad="exit ${rc}, wanted ${want_rc}"
-  if [ "$want_text" != "-" ] && ! printf '%s' "$out" | grep -qF -e "$want_text"; then
+  if [ "$want_text" != "-" ] && ! grep -qF -e "$want_text" <<<"$out"; then
     bad="${bad:+${bad} and }output did not mention ${want_text}"
   fi
 
@@ -309,7 +309,7 @@ assert_eq() {
 assert_absent() {
   desc="$1"; hay="$2"; needle="$3"
   PROBES=$((PROBES + 1))
-  if printf '%s' "$hay" | grep -qF -e "$needle"; then
+  if grep -qF -e "$needle" <<<"$hay"; then
     FAILED=$((FAILED + 1))
     echo "FAIL: ${desc}: found '${needle}', which must not be there" >&2
   fi

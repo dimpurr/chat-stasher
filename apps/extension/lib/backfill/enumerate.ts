@@ -4539,9 +4539,10 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
  * that every row of the platform table lands on exactly one side.
  */
 /**
- * 🔴 W199 · **The plans whose run scope names an account AND whose account is visible
- *    in the traffic the run itself receives** — W128 step 2's run identity lease
- *    (lib/backfill/account-lease.ts).
+ * 🔴 W199 · **The plans whose run scope itself names an account AND whose account is
+ *    visible in the traffic the run receives** — W128 step 2's scope-derived lease
+ *    (lib/backfill/account-lease.ts). ChatGPT has a separate request-header lease in
+ *    engine.ts because its workspace scope is not used as the account identity.
  *
  * A table rather than a field on each of the four plans, and the reason is a fact about
  * this repository rather than a preference: the plans' own bodies are cited by line
@@ -4551,14 +4552,16 @@ export const CLAUDE_PLAN: BackfillEnumPlan = {
  * to decide about — and it is one screen from `PLANS`, so it cannot be missed by
  * someone editing the plan list.
  *
- * 🔴 **The four, and why not the other two.**
+ * 🔴 **The four, and why ChatGPT and Claude use separate paths.**
  *  · **DeepSeek · Perplexity · Gemini · Grok** — the ADR-002 account axis is readable out
  *    of the response body for these, and it is the same value the run scope is built
  *    from, so a fingerprint taken at run start and an account seen in a response are
  *    directly comparable.
- *  · **ChatGPT** is out because its stable id is the `ChatGPT-Account-Id` **request
- *    header** (ADR-031), which this build does not capture at all; W108 owns binding it.
- *    Declaring it here would lease a value the platform mostly does not put in its body.
+ *  · **ChatGPT** is not in this table because its stable id is the
+ *    `ChatGPT-Account-Id` request header (ADR-031), while its target scope is the
+ *    workspace namespace. W303 fingerprints the request's exact header value and
+ *    compares it separately in the engine; deriving a lease from the workspace scope
+ *    would conflate those two fields.
  *  · **Claude** is out because it addresses conversations by **organization**, and an
  *    organization is not a person. W239 (step 3) is where that stopped being a note and
  *    became the declaration below: `ORGANIZATION_SCOPED_PLATFORMS`. A lease over an
@@ -4998,4 +5001,15 @@ export function listPageUrl(origin: string, offset: number, limit = DEFAULT_LIST
 
 export function detailUrl(origin: string, conversationId: string): string {
   return chatgptDetailUrl(origin, conversationId);
+}
+
+/**
+ * Does a pathname match any request route declared by ChatGPT's backfill plan?
+ * Query construction remains on the plan's URL builders; this predicate shares
+ * its closed path set with the page-side send-time account-header check.
+ */
+export function chatgptBackfillPathMatches(pathname: string): boolean {
+  return pathname === CHATGPT_PLAN.listPath
+    || (CHATGPT_PLAN.listAuxPaths ?? []).some((route) => auxListPathMatches(route, pathname))
+    || (CHATGPT_PLAN.detailPath !== null && detailPathMatches(CHATGPT_PLAN.detailPath, pathname));
 }

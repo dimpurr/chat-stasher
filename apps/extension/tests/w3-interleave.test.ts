@@ -29,7 +29,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { loadState, runBackfill, type HttpResponse } from '../lib/backfill/engine';
+import { loadState, runBackfill as runBackfillRaw, type HttpResponse } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import { formatProgress, computeProgress, countsOf } from '../lib/backfill/progress';
 import { backfillPlanFor, canBackfillDetail } from '../lib/backfill/enumerate';

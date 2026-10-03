@@ -110,12 +110,15 @@
 
 import {
   currentReleaseChannel,
+  findPlatformForUrl,
   getPlatformByOrigin,
+  chatGptAccountIdHeaderValue,
   MAX_RAW_BYTES,
   type ReleaseChannel,
 } from '../contract';
+import { accountFingerprintFor } from '../account-fingerprint';
 import type { OrgResolution } from './claude-org';
-import type { ChatGptWorkspaceResolution } from './chatgpt-workspace';
+import { fingerprintedChatGptWorkspace, type ChatGptWorkspaceResolution, type FingerprintedChatGptIdentity, type FingerprintedChatGptWorkspace } from './chatgpt-workspace';
 import {
   backfillPlanFor,
   auxListPathMatches,
@@ -140,6 +143,7 @@ import {
 } from './enumerate';
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
+import type { AccountIdentity } from './types';
 import { TAB_HELLO_MIN_INTERVAL_MS } from './tab-hello';
 import { carryableRetryAfter } from './types';
 
@@ -226,7 +230,15 @@ export type BackfillFetchReply =
    * so that a reply from any other wrapper, and every existing reply shape, stays what
    * it was.
    */
-  | { ok: true; status: number; text: string; survivedCredentialReread?: boolean; retryAfter?: string }
+  | {
+      ok: true;
+      status: number;
+      text: string;
+      survivedCredentialReread?: boolean;
+      retryAfter?: string;
+      /** Untrusted transient request header; consumed only by the worker boundary. */
+      chatgptAccountIdHeader?: unknown;
+    }
   | { ok: false; error: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -798,6 +810,10 @@ export type FetchLike = (
    * it did before.
    */
   retryAfter?: string | null;
+  /** Untrusted transient request header; consumed only by the worker boundary. */
+  chatgptAccountIdHeader?: unknown;
+  /** Install-keyed identity already fingerprinted in the first worker boundary. */
+  chatgptAccountIdentity?: AccountIdentity | null;
 }>;
 
 /**
@@ -856,17 +872,31 @@ export async function serveBackfillFetch(
      */
     const status = res.status;
     const rateLimited = status === 429 || status === 503;
+    const carriesChatGptIdentity = findPlatformForUrl(verdict.url)?.id === 'chatgpt';
+    // 🔴 W303f · ChatGPT credential refusals must reach the engine even when the
+    //    page cannot read (or safely carry) the response body. The engine uses
+    //    401/403 to suspend the account scope; turning either into a transport
+    //    error would leave it eligible to retry as though the account were known.
+    const chatGptCredentialRefusal = carriesChatGptIdentity && (status === 401 || status === 403);
     const carryRetryAfter = retryAfter === null ? {} : { retryAfter };
+    const safeIdentity = carriesChatGptIdentity ? accountIdentityFromUnknown(res.chatgptAccountIdentity) : null;
+    const safeChatGptIdentity = safeIdentity ? { chatgptAccountIdentity: safeIdentity } : {};
+    const rawChatGptAccountId = carriesChatGptIdentity
+      ? chatGptAccountIdHeaderValue(res.chatgptAccountIdHeader)
+      : null;
+    const chatgptAccountIdHeader = rawChatGptAccountId === null
+      ? {}
+      : { chatgptAccountIdHeader: rawChatGptAccountId };
     let text: string;
     try {
       text = await res.text();
       if (new TextEncoder().encode(text).byteLength > MAX_RAW_BYTES) {
         // The same size red line as the live leg: an over-large response is not conversation JSON.
-        if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+        if (rateLimited || chatGptCredentialRefusal) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
         return { ok: false, error: 'refused: response exceeds MAX_RAW_BYTES' };
       }
     } catch (err) {
-      if (rateLimited) return { ok: true, status, text: '', ...carryRetryAfter };
+      if (rateLimited || chatGptCredentialRefusal) return { ok: true, status, text: '', ...carryRetryAfter, ...chatgptAccountIdHeader, ...safeChatGptIdentity };
       // Only the technical detail goes back, never the body.
       return { ok: false, error: (err as Error).message };
     }
@@ -879,6 +909,8 @@ export async function serveBackfillFetch(
       text,
       ...(res.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
       ...carryRetryAfter,
+      ...chatgptAccountIdHeader,
+      ...safeChatGptIdentity,
     };
   } catch (err) {
     // Only the technical detail goes back, never the body.
@@ -1043,6 +1075,7 @@ export function tabHttpPort(
   tabId: number,
   send: TabSend,
   timeoutMs: number = BACKFILL_TAB_REPLY_TIMEOUT_MS,
+  identityStore: BackfillStore | null = null,
 ): HttpPort {
   const port: HttpPort = async (url: string, init?: BackfillRequestInit): Promise<HttpResponse> => {
     // 🔴 The back-compat landing point: GET with no body ⇒ the message sent is
@@ -1067,17 +1100,43 @@ export function tabHttpPort(
     //    invented by the transport.
     // 🔴 W127 · Same rule for `Retry-After`: forwarded only when the page fetched a
     //    string. The engine reads it on a 429/503 only (`retryAfterMsFor`).
-    const response: HttpResponse = { status: reply.status, text: reply.text };
+    const response = await httpResponseFromBackfillReplyAtWorkerBoundary(
+      url, init, reply, identityStore,
+    );
     if (reply.survivedCredentialReread === true) response.survivedCredentialReread = true;
     if (typeof reply.retryAfter === 'string') response.retryAfter = reply.retryAfter;
     return response;
+  };
+  port.chatgptAccountIdentity = async (): Promise<AccountIdentity | null> => {
+    if (!identityStore) return null;
+    let reply: unknown;
+    try {
+      reply = await withReplyTimeout(
+        send(tabId, { type: CHATGPT_WORKSPACE_REQUEST_MESSAGE }), tabId, timeoutMs,
+        'the starting ChatGPT account identity',
+      );
+    } catch {
+      return null;
+    }
+    return startingChatGptIdentityAtWorkerBoundary(reply, identityStore);
   };
   port.chatgptWorkspace = async (): Promise<ChatGptWorkspaceResolution> => {
     const reply = await withReplyTimeout(
       send(tabId, { type: CHATGPT_WORKSPACE_REQUEST_MESSAGE }), tabId, timeoutMs, 'the ChatGPT workspace observation',
     );
-    if (isRecord(reply) && reply.ok === true && reply.observed === true && typeof reply.workspace === 'string') {
-      return { ok: true, workspace: reply.workspace, observed: true };
+    if (isRecord(reply) && reply.ok === true && reply.observed === true
+      && (isFingerprintedWorkspace(reply.workspace) || typeof reply.workspace === 'string')) {
+      const identity = accountIdentityFromUnknown(reply.identity)
+        ?? (!isFingerprintedWorkspace(reply.workspace)
+          ? await fingerprintChatGptIdentityAtWorkerBoundary(reply.workspace, identityStore)
+          : null);
+      if (!identity) return { ok: false, reason: 'workspace-unresolved', observed: false };
+      return {
+        ok: true,
+        workspace: fingerprintedChatGptWorkspace(identity.value),
+        identity,
+        observed: true,
+      };
     }
     if (isRecord(reply) && reply.ok === false
       && (reply.reason === 'workspace-ambiguous' || reply.reason === 'workspace-unresolved')) {
@@ -1086,6 +1145,79 @@ export function tabHttpPort(
     throw new Error(`tab ${tabId} gave an unrecognised ChatGPT workspace observation`);
   };
   return port;
+}
+
+/**
+ * 🔴 W303 · The one page-to-worker boundary for a raw ChatGPT header value.
+ * The raw value is inspected only in this call frame, fingerprinted with the
+ * installation key, and never returned. Fetch replies have the raw field removed
+ * by projection before the HttpResponse escapes; startup observations use the
+ * same fingerprinting helper and return only the keyed identity.
+ */
+async function httpResponseFromBackfillReplyAtWorkerBoundary(
+  url: string,
+  init: BackfillRequestInit | undefined,
+  reply: Record<string, unknown>,
+  identityStore: BackfillStore | null,
+): Promise<HttpResponse> {
+  const response: HttpResponse = {
+    status: reply.status as number,
+    text: reply.text as string,
+  };
+  if (findPlatformForUrl(url)?.id !== 'chatgpt') return response;
+  // 🔴 W303 amendment 2 · The request-local raw value is needed only long
+  //    enough to fingerprint the header that was actually sent. Remove the
+  //    transient reply copy before any async work; no response or engine state
+  //    retains it after this worker boundary.
+  const rawHeader = reply.chatgptAccountIdHeader;
+  delete reply.chatgptAccountIdHeader;
+  const safeIdentity = accountIdentityFromUnknown(reply.chatgptAccountIdentity);
+  response.chatgptAccountIdentity = safeIdentity
+    ?? (identityStore ? await fingerprintChatGptIdentityAtWorkerBoundary(rawHeader, identityStore) : null);
+  if (response.chatgptAccountIdentity === null) delete response.chatgptAccountIdentity;
+  return response;
+}
+
+async function startingChatGptIdentityAtWorkerBoundary(
+  reply: unknown,
+  identityStore: BackfillStore,
+): Promise<AccountIdentity | null> {
+  if (!isRecord(reply) || reply.ok !== true || reply.observed !== true) return null;
+  const identity = accountIdentityFromUnknown(reply.identity);
+  if (identity) return identity;
+  if (isFingerprintedWorkspace(reply.workspace)) return null;
+  return fingerprintChatGptIdentityAtWorkerBoundary(reply.workspace, identityStore);
+}
+
+/** The single raw-header crossing: returns a keyed identity, never the input value. */
+export async function fingerprintChatGptIdentityAtWorkerBoundary(
+  rawValue: unknown,
+  identityStore: BackfillStore | null,
+): Promise<FingerprintedChatGptIdentity | null> {
+  if (!identityStore) return null;
+  const raw = chatGptAccountIdHeaderValue(rawValue);
+  if (raw === null) return null;
+  const fingerprint = await accountFingerprintFor({
+    url: 'https://chatgpt.com/backend-api/conversations', method: 'GET',
+    status: 200, text: '', capturedAt: Date.now(), chatgptAccountIdHeader: raw,
+  }, identityStore, null);
+  return fingerprint.kind === 'fingerprint'
+    ? { value: fingerprint.value, saltId: fingerprint.saltId, source: fingerprint.source } as FingerprintedChatGptIdentity
+    : null;
+}
+
+function accountIdentityFromUnknown(value: unknown): FingerprintedChatGptIdentity | null {
+  if (!isRecord(value) || typeof value.value !== 'string' || !/^[0-9a-f]{64}$/.test(value.value)
+    || typeof value.saltId !== 'string' || value.source !== 'request-header-chatgpt-account-id') return null;
+  return {
+    value: value.value,
+    saltId: value.saltId,
+    source: 'request-header-chatgpt-account-id',
+  } as FingerprintedChatGptIdentity;
+}
+
+function isFingerprintedWorkspace(value: unknown): value is FingerprintedChatGptWorkspace {
+  return typeof value === 'string' && /^fp1:[0-9a-f]{64}$/.test(value);
 }
 
 /**

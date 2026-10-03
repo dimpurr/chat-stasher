@@ -9,6 +9,7 @@ import {
   HOOK_SELF_CHECK_INTERVAL_MS,
   HOOK_STATUS_MESSAGE,
   findPlatformForUrl,
+  chatGptAccountIdHeaderValue,
   isPageCaptureMessage,
   isGeminiTokensReply,
   isHookReportMessage,
@@ -28,7 +29,7 @@ import {
 } from '../lib/backfill/tab-port';
 import { installTabHello } from '../lib/backfill/tab-hello';
 import { backfillPlanFor } from '../lib/backfill/enumerate';
-import { observeChatGptAccountId, resolveChatGptWorkspace, type ChatGptWorkspaceObservation } from '../lib/backfill/chatgpt-workspace';
+import { observeChatGptWorkspaceFingerprint, resolveChatGptWorkspace, type ChatGptWorkspaceObservation, type FingerprintedChatGptIdentity } from '../lib/backfill/chatgpt-workspace';
 import { CHATGPT_WORKSPACE_REQUEST_MESSAGE } from '../lib/backfill/tab-port';
 import { createClaudePageScope } from '../lib/backfill/claude-page';
 import {
@@ -51,6 +52,7 @@ import {
   type FallbackHookVerification,
 } from '../lib/fallback-verification';
 import { createStaleLinkWarningGate } from '../lib/page-link';
+import type { AccountIdentity } from '../lib/backfill/types';
 
 /**
  * ISOLATED-world bridge. WHY ISOLATED: MAIN/page world has no extension API
@@ -84,7 +86,15 @@ export default defineContentScript({
   main() {
     const probeToken = makeProbeToken();
     let mainReady = false;
-    let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { accountIds: [] };
+    let chatGptWorkspaceObservation: ChatGptWorkspaceObservation = { identities: [] };
+    let chatGptCurrentRawHeader: string | null = null;
+    let chatGptObservationGeneration = 0;
+    const isFingerprintAccountIdentity = (value: unknown): value is FingerprintedChatGptIdentity =>
+      !!value && typeof value === 'object'
+      && typeof (value as AccountIdentity).value === 'string'
+      && /^[0-9a-f]{64}$/.test((value as AccountIdentity).value)
+      && typeof (value as AccountIdentity).saltId === 'string'
+      && (value as AccountIdentity).source === 'request-header-chatgpt-account-id';
     let fallbackInjectionAttempted = false;
     let fallbackScriptAppended = false;
     let fallbackVerificationRequested = false;
@@ -237,7 +247,29 @@ export default defineContentScript({
         && (event.data as { type?: unknown }).type === CHATGPT_WORKSPACE_OBSERVED_MESSAGE) {
         const accountId = (event.data as { accountId?: unknown }).accountId;
         if (typeof accountId === 'string') {
-          chatGptWorkspaceObservation = observeChatGptAccountId(chatGptWorkspaceObservation, accountId);
+          const nextHeader = chatGptAccountIdHeaderValue(accountId);
+          if (nextHeader !== chatGptCurrentRawHeader) chatGptObservationGeneration += 1;
+          chatGptCurrentRawHeader = nextHeader;
+          const generation = chatGptObservationGeneration;
+          if (chatGptCurrentRawHeader === null) return;
+          void browser.runtime.sendMessage({ type: CHATGPT_WORKSPACE_OBSERVED_MESSAGE, accountId })
+            .then((reply: unknown) => {
+              if (generation !== chatGptObservationGeneration || chatGptCurrentRawHeader === null) return;
+              if (!reply || typeof reply !== 'object') return;
+              const identity = (reply as { identity?: unknown }).identity;
+              if (!isFingerprintAccountIdentity(identity)) return;
+              const safeIdentity: FingerprintedChatGptIdentity = {
+                value: identity.value,
+                saltId: identity.saltId,
+                source: 'request-header-chatgpt-account-id',
+              } as FingerprintedChatGptIdentity;
+              chatGptWorkspaceObservation = observeChatGptWorkspaceFingerprint(chatGptWorkspaceObservation, safeIdentity);
+            })
+            .catch(() => undefined);
+        } else {
+          chatGptObservationGeneration += 1;
+          chatGptCurrentRawHeader = null;
+          chatGptWorkspaceObservation = { identities: [] };
         }
         return;
       }
@@ -534,7 +566,12 @@ export default defineContentScript({
     // The one fetch both legs use. ChatGPT body requests get the session's
     // bearer token (in memory only; lib/platform-auth.ts); every other request
     // is sent exactly as before.
-    const chatgptFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init));
+    const chatgptFetch = createAuthorizedFetch(pageOrigin, (url, init) => fetch(url, init), {
+      readChatgptAccountIdHeader: () => ({
+        value: chatGptCurrentRawHeader,
+        generation: chatGptObservationGeneration,
+      }),
+    });
     // 🔴 W22 · Kimi's two backfill paths need the page origin's own
     //    `access_token` as a bearer token. The wrapper reads it from localStorage
     //    **at request time**, keeps it in no variable of its own, attaches it only
@@ -569,6 +606,9 @@ export default defineContentScript({
       //    Content-Type have already passed checkBackfillRequest's closed-set
       //    checks (serveBackfillFetch). Nothing is decided here, and nothing
       //    **may** be — the decision lives in exactly one place, that allowlist.
+      // 🔴 W303 · Bind the lease identity to this exact backfill request using
+      //    the header actually sent; the worker fingerprints it at its boundary.
+      const isChatGpt = findPlatformForUrl(url)?.id === 'chatgpt';
       const answer = init && init.method === 'POST'
         ? await authorizedFetch(url, {
             method: 'POST',
@@ -581,7 +621,9 @@ export default defineContentScript({
           })
         : await authorizedFetch(url, {
             credentials: 'same-origin',
-            headers: { accept: 'application/json' },
+            headers: {
+              accept: 'application/json',
+            },
           });
       // 🔴 W64c · The credential fact is forwarded, not re-derived: this file runs in
       //    the page but does not own a token, and a decision taken here would be a
@@ -595,10 +637,24 @@ export default defineContentScript({
       //    header, so only the code holding the response can see it. The raw value is
       //    passed on; nothing is parsed or decided here.
       const retryAfter = answer.response.headers?.get('retry-after') ?? null;
-      return answer.survivedCredentialReread === true
-        ? { status: answer.response.status, text: () => answer.response.text(), survivedCredentialReread: true, retryAfter }
-        : { status: answer.response.status, text: () => answer.response.text(), retryAfter };
+      return {
+        status: answer.response.status,
+        text: () => answer.response.text(),
+        ...(answer.survivedCredentialReread === true ? { survivedCredentialReread: true as const } : {}),
+        retryAfter,
+        ...(isChatGpt && typeof answer.response.chatgptAccountIdHeader === 'string'
+          ? { chatgptAccountIdHeader: answer.response.chatgptAccountIdHeader }
+          : {}),
+      };
     };
+
+    const clearChatGptAccountHeader = (): void => {
+      chatGptObservationGeneration += 1;
+      chatGptCurrentRawHeader = null;
+      chatGptWorkspaceObservation = { identities: [] };
+    };
+    window.addEventListener('pagehide', clearChatGptAccountHeader);
+    window.addEventListener('unload', clearChatGptAccountHeader);
 
     /**
      * 🔴 W31c · **The page-side half of the organization resolver** — the caller

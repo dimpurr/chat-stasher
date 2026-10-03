@@ -1896,10 +1896,10 @@ export interface AccountSuspension {
   /** When the scope was suspended, ms since epoch. */
   at: number;
   /**
-   * The named cause. Always `'account-changed'` today, and written as a value rather
-   * than assumed so that a future cause cannot be read as this one.
+   * The named cause: a proven account switch or a ChatGPT request refusal that
+   * requires an agreeing account observation before another request is sent.
    */
-  reason: 'account-changed';
+  reason: 'account-changed' | 'request-refused';
   /**
    * The lease the scope was running under — absent when the scope had no comparable lease
    * at all.
@@ -2084,12 +2084,12 @@ export function readAccountSuspension(value: unknown): AccountSuspension | undef
   // 🔴 A cause this build does not know is not read as the one it does know: an
   //    unreadable suspension is "we cannot say", and the caller is told that rather
   //    than handed a `account-changed` it never wrote.
-  if (v.reason !== 'account-changed') return undefined;
+  if (v.reason !== 'account-changed' && v.reason !== 'request-refused') return undefined;
   const lease = readAccountLease(v.lease);
   const observed = isAccountIdentity(v.observed) ? v.observed : undefined;
   return {
     at: v.at,
-    reason: 'account-changed',
+    reason: v.reason,
     ...(lease ? { lease } : {}),
     ...(observed ? { observed } : {}),
   };

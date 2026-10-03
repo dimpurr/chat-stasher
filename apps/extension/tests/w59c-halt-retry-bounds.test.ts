@@ -36,10 +36,15 @@ import {
   LIST_PAGES_PER_TICK,
   loadState,
   markScopeRetried,
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpResponse,
   type HttpPort,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillHeader } from '../lib/backfill/types';
 import { DEFAULT_DETAIL_PACE, DEFAULT_ENUM_PACE, type Clock } from '../lib/backfill/pace';

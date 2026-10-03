@@ -17,10 +17,15 @@ import { describe, it, expect } from 'vitest';
 
 import {
   LIST_PAGES_PER_TICK,
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpResponse,
   type HttpPort,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import {
   RETRY_AFTER_MAX_MS,
@@ -262,14 +267,14 @@ describe('W127-A · a 429 with Retry-After replaces the ladder delay, a bare one
     expect(r503.halted?.reason).toBe('rate-limited');
     expect(r503.halted?.retryAt).toBe(r503.halted!.at + 45_000);
 
-    // 403 is classified `rate-limited` but is not a status Retry-After is defined
-    // for, so its header is ignored and the ladder decides.
+    // ChatGPT 403 suspends the request-header lease instead of entering the shared
+    // rate-limit ladder; Retry-After does not apply to this refusal.
     const store2 = memoryStore();
     const clock2 = stepClock(T0);
     const s403 = rateLimitedList(403, '45');
     const r403 = await runBackfill({ ...opts(store2, s403.http, clock2), scope: 'w127-ra-403', random: () => 0 });
-    expect(r403.halted?.reason).toBe('rate-limited');
-    expect(r403.halted?.retryAt).toBe(r403.halted!.at + 450_000);
+    expect(r403.halted?.reason).toBe('refused-unknown');
+    expect(r403.state.suspended?.reason).toBe('request-refused');
   });
 
   it('🔴 the body segment honours it too, not just the list', async () => {

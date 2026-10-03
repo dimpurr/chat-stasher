@@ -45,11 +45,16 @@ import {
   loadState,
   markScopeRetried,
   recordBackfillHalt,
-  runBackfill,
+  runBackfill as runBackfillRaw,
   type HttpResponse,
   type HttpPort,
   type RunReport,
 } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { memoryStore } from '../lib/backfill/store';
 import { stateKey, type BackfillHeader, type HaltReason } from '../lib/backfill/types';
 import {

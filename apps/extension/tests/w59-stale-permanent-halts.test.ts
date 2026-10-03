@@ -42,7 +42,12 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { runBackfill, recordBackfillHalt, loadState, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
+import { runBackfill as runBackfillRaw, recordBackfillHalt, loadState, type HttpResponse, type HttpPort } from '../lib/backfill/engine';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
+const runBackfill = (options: Parameters<typeof runBackfillRaw>[0]) =>
+  runBackfillRaw(options.platform === 'chatgpt' && options.http
+    ? { ...options, http: withChatGptLeaseIdentity(options.http) }
+    : options);
 import { backfillPlanFor, capabilityOf, type BackfillEnumPlan } from '../lib/backfill/enumerate';
 import { openLedger } from '../lib/backfill/ledger';
 import { readDebtSet } from '../lib/backfill/debt-store';

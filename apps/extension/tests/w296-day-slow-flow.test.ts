@@ -30,6 +30,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
+import { withChatGptLeaseIdentity } from './chatgpt-lease-fixtures';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
 import { DAY_SLOW_KEY, localMidnightAfter } from '../lib/backfill/day-slow';
 import type { CapturedFetch } from '../lib/contract';
@@ -186,7 +187,7 @@ beforeEach(async () => {
 describe('W296-D · a 429 on a real round arms the brake at the gateway', () => {
   it('🔴 the round stops on the 429 and storage carries the platform brake until the next local midnight', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(always(429));
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(429)));
 
     const tick = await runRound(mod);
     expect(tick?.report).toMatchObject({ halted: { reason: 'rate-limited' } });
@@ -205,16 +206,50 @@ describe('W296-D · a 429 on a real round arms the brake at the gateway', () => 
 
   it('🔴 a 403 is a refusal but not this brake: no record is written', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(always(403));
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(403)));
 
     const tick = await runRound(mod);
-    expect(tick?.report).toMatchObject({ halted: { reason: 'rate-limited' } });
+    expect(tick?.report).toMatchObject({ halted: { reason: 'refused-unknown' }, state: { suspended: { reason: 'request-refused' } } });
+    expect(store[DAY_SLOW_KEY]).toBeUndefined();
+  });
+
+  it('🔴 W303 ruling 2 · a ChatGPT 401 suspends the scope through a real background tick', async () => {
+    const mod = await bootBackground();
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(401)));
+
+    const tick = await runRound(mod);
+    expect(tick?.report).toMatchObject({
+      halted: { reason: 'refused-unknown' },
+      state: { suspended: { reason: 'request-refused' } },
+    });
+  });
+
+  it('🔴 W303f · a failed host 403 report cannot block the engine suspension', async () => {
+    const mod = await bootBackground();
+    const sendNativeMessage = host.sendNativeMessage;
+    let failedReports = 0;
+    host.sendNativeMessage = async (hostName, message) => {
+      const msg = message as { type?: string; mode?: string };
+      if (msg.type === 'coordination' && msg.mode === 'rate_limit') {
+        failedReports += 1;
+        throw new Error('synthetic host report failure');
+      }
+      return sendNativeMessage(hostName, message);
+    };
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(always(403)));
+
+    const tick = await runRound(mod);
+    expect(failedReports).toBe(1);
+    expect(tick?.report).toMatchObject({
+      halted: { reason: 'refused-unknown' },
+      state: { suspended: { reason: 'request-refused' } },
+    });
     expect(store[DAY_SLOW_KEY]).toBeUndefined();
   });
 
   it('🔴 a healthy round writes no brake at all', async () => {
     const mod = await bootBackground();
-    mod.configureBackfillTransport(healthy());
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(healthy()));
 
     const tick = await runRound(mod);
     expect(tick?.report?.halted ?? null).toBeNull();
@@ -226,7 +261,7 @@ describe('W296-E · the next round obeys the brake', () => {
   it('🔴 a `faster` install fetches four bodies a round, and one once the brake is armed', async () => {
     store['cs_backfill_speed_v1'] = 'faster';
     const mod = await bootBackground();
-    mod.configureBackfillTransport(healthy());
+    mod.configureBackfillTransport(withChatGptLeaseIdentity(healthy()));
 
     requests = [];
     await runRound(mod);
