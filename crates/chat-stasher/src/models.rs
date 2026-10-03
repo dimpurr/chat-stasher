@@ -112,4 +112,7 @@ pub struct SessionRecord {
     pub compressed: bool,
     /// Present for a virtual SQLite session; absent for ordinary files.
     pub sqlite_layout: Option<SqliteSessionLayout>,
+    /// Capture-time dimensions declared by the registry path that found this
+    /// source. This never changes the session identity or transcript bytes.
+    pub provenance: crate::provenance::SessionProvenance,
 }
