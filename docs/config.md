@@ -47,6 +47,7 @@ Tells the scanner where a tool keeps its sessions, when that is not where the bu
 | `opencode` | opencode | | `zed` | Zed |
 | `cursor` | Cursor | | `continue` | Continue |
 | `grok` | Grok (xAI CLI) | | `kimi-code` | Kimi Code |
+| `grok-bot` | Grok Bot desktop app | | | |
 
 ```toml
 [harness_roots]
@@ -55,6 +56,7 @@ opencode = "~/.local/share/opencode/opencode.db"
 ```
 
 - For a tool that stores one database file, give the file. For a tool that stores a folder of sessions, give the folder.
+- `grok-bot` accepts the app-support directory; its reader locates `sand-client-persistence` below it. It is available on macOS only and archives observed replica rows as partial data with sequence gaps recorded.
 - A path you write here is always looked at, even where the registry has no verified path for your system.
 - A path that does not exist is reported as *unknown*, never as "0 sessions".
 

@@ -677,6 +677,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("openclaw", FORMAT_SQLITE),
     ("cursor", FORMAT_SQLITE),
     ("grok", FORMAT_SQLITE),
+    ("grok-bot", FORMAT_JSON),
     ("github-copilot-cli", "jsonl"),
     ("aider", "markdown"),
     ("crush", FORMAT_SQLITE),
@@ -2700,8 +2701,8 @@ mod tests {
     /// (`data/harness-registry-v1.json`), in the shape that harness's own
     /// reader fixtures pin — synthetic, and no other project's text.
     ///
-    /// The table is the point of the change: before it, three of these twelve
-    /// arms existed, and a session in any of the other nine was indexed with an
+    /// The table is the point of the change: before it, three of these thirteen
+    /// arms existed, and a session in any of the other ten was indexed with an
     /// empty body and counted as indexed. Every row is one harness, so a
     /// harness whose format is not read fails here by name instead of
     /// disappearing into a coverage line that says the view is complete.
@@ -2765,6 +2766,11 @@ mod tests {
                 "grok",
                 br#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765}}"#,
                 Expected::Format(FORMAT_SQLITE),
+            ),
+            (
+                "grok-bot",
+                br#"{"seq":1,"kind":"message"}"#,
+                Expected::Format(FORMAT_JSON),
             ),
             (
                 "github-copilot-cli",
