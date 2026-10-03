@@ -2752,6 +2752,9 @@ mod tests {
             (
                 "openclaw",
                 br#"{"schema":"chat-stasher.openclaw.session.v1","agent_id":"synthetic-agent","window":{"session_id":"synthetic-window"},"events":[{"seq":1,"event":{"id":"synthetic-event","type":"message","message":{"role":"user","content":"synthetic question"}}}]}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
                 "hermes-agent",
                 br#"{"schema":"chat-stasher.hermes-agent.session.v1","session":{"id":"s1","model":"session-model"},"messages":[{"id":1,"session_id":"s1","role":"user","content":"synthetic question","active":0,"compacted":1}],"session_model_usage":[{"model":"session-model","billing_provider":"session-provider","input_tokens":7,"actual_cost_usd":0.4}]}"#,
                 Expected::Text("synthetic question"),

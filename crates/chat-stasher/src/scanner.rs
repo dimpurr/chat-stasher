@@ -40,7 +40,7 @@ use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
     enumerate_cursor_legacy_sessions, enumerate_openclaw_sessions, enumerate_opencode_sessions,
     enumerate_sqlite_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
-    CursorLegacySessionRow, OpenClawSessionEnumeration, SqliteSessionProbe, SqliteSessionRow,
+    CursorLegacySessionRow, SqliteSessionProbe, SqliteSessionRow,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;

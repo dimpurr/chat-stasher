@@ -1112,7 +1112,8 @@ pub fn read_openclaw_session(
         .map_err(|error| format!("failed to serialize OpenClaw archive: {error}"))?;
         return Ok(OpenClawSessionSnapshot {
             cursor: OpenCodeCursor {
-                session_time_updated: generation,
+                session_time_updated: Some(generation),
+                content_sha256: Some(blob_digest.clone()),
                 row_count: 1,
                 row_high_water: Some(OpenCodeHighWater {
                     time_updated: generation,
@@ -1176,10 +1177,11 @@ pub fn read_openclaw_session(
     let observation = hex_digest(&Sha256::digest(&json_line));
     let high_water = OpenCodeHighWater {
         time_updated: latest,
-        id: observation,
+        id: observation.clone(),
     };
     let cursor = OpenCodeCursor {
-        session_time_updated: latest,
+        session_time_updated: Some(latest),
+        content_sha256: Some(observation.clone()),
         row_count: event_count,
         row_high_water: Some(high_water.clone()),
         message_count: event_count,
