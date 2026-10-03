@@ -18,7 +18,17 @@
 //! * `session` — the header frame: `{version, id, createdAt, cwd, isSeeded,
 //!   delegationDepth, agentPreset, parentSession?, origin?}`. It is metadata,
 //!   not a message: it is recognised here and carries nothing to render.
-//! * `user/message` — `data = {content[], source, role, id}`.
+//! * `user/message` — `data = {content[], source, role, id}`, where
+//!   `data.source.kind` is the origin. Measured on this machine across every
+//!   `user/message` record: `user` 11, `agent-instructions` 8,
+//!   `runtime-context` 7, `skill-catalog` 7, `subagent-settled` 6,
+//!   `agent-message` 2 — so only 11 of 41 are the person's words, and the
+//!   other 30 are `dsh` injecting its own context into the transcript. `user`
+//!   renders as `User`; the five measured machine kinds stay visible as
+//!   `System` rather than being shown as if the human had typed them; any
+//!   other kind, or a record with no `source.kind`, is *unknown* and is
+//!   counted unrendered rather than guessed either way — the same rule
+//!   `kimi_code.rs` applies to `origin.kind`.
 //! * `assistant/message` — `data = {turn, step, message, usage, stream,
 //!   interrupted?}`, the text being `data.message.content[]` with
 //!   `data.message = {role, content[], source, id}`. `usage` (token counts) and
@@ -36,6 +46,28 @@
 //!   call** the `assistant/message` already carries as a `tool_use` part, matched
 //!   by `callId`. Rendering both would show one call twice, so it is recognised
 //!   and stays unrendered.
+//! * **packed chunk rows** — `text-chunks`, `reasoning-chunks` and
+//!   `tool-call-chunks`, shape `{type, seq0, time0, dt[], texts[]}` where
+//!   member `k` has `seq = seq0 + k`. These are what upstream
+//!   `session-persistence-jsonl` writes when `packChunks` is on (documented
+//!   default: true): a run of three or more consecutive assistant deltas
+//!   becomes one row instead of one record per delta, so a reader that knows
+//!   only the event-type table loses most assistant text, reasoning and
+//!   tool-argument fragments. **These three types were observed zero times on
+//!   this machine**: no packed row and no `assistant/chunk` record appears in
+//!   its archived sessions. The shape and the `seq0 + k` member rule
+//!   therefore come from upstream's documentation and a third-party
+//!   re-implementation, not from a local observation, and the mapping below
+//!   is deliberately conservative for exactly that reason: `text-chunks` and
+//!   `reasoning-chunks` render only when `texts` is an array of strings, and
+//!   `tool-call-chunks` is never rendered at all — what its members mean is
+//!   unmeasured here, so rendering them would fabricate tool calls that the
+//!   session may not contain. It is counted instead, as is any of the three
+//!   whose `texts` is missing or not an array of strings. The row's payload is
+//!   read from the record's own `texts` and, failing that, from `data.texts`:
+//!   upstream documents it beside `seq0`/`time0`, every other record in this
+//!   build keeps its payload under `data`, and with neither shape observed
+//!   here this reader accepts both rather than assume one.
 //! * every other measured record (`turn/start`, `step/start`, `step/end`,
 //!   `turn/end`, `session/title`, `assistant/attempt`, `request/header`,
 //!   `request/context`, `approval/policy`, `permission/preset`, `sandbox/mode`,
@@ -56,7 +88,7 @@
 //! records. ADR-035 keeps those two states apart, and
 //! [`super::message_time`] labels which of them this is.
 
-use super::{blocks_from_content, message_time, Conversation, Message, Role};
+use super::{blocks_from_content, message_time, Block, Conversation, Message, Role};
 use serde_json::Value;
 
 /// The measured `type` values that are records of this session rather than
@@ -86,6 +118,23 @@ const NON_MESSAGE_TYPES: &[&str] = &[
     "web/deepseek-search-llm-request",
 ];
 
+/// The measured `data.source.kind` values that mark a `user/message` as the
+/// harness injecting its own context rather than the person speaking. A kind
+/// that is neither `user` nor on this list is *unknown*, and an unknown origin
+/// is counted unrendered rather than guessed either way — the same rule
+/// `kimi_code.rs` applies to `origin.kind`.
+const MACHINE_SOURCE_KINDS: &[&str] = &[
+    "agent-instructions",
+    "runtime-context",
+    "skill-catalog",
+    "subagent-settled",
+    "agent-message",
+];
+
+/// The packed chunk row types. They share one shape, so they share one arm;
+/// `tool-call-chunks` is counted inside [`push_chunk`] rather than rendered.
+const PACKED_CHUNK_TYPES: &[&str] = &["text-chunks", "reasoning-chunks", "tool-call-chunks"];
+
 /// Read one archived `dsh` record. Returns nothing: everything the reader
 /// learned is in `conversation`.
 pub(super) fn record(value: &Value, conversation: &mut Conversation) {
@@ -97,7 +146,16 @@ pub(super) fn record(value: &Value, conversation: &mut Conversation) {
     };
     let data = value.get("data");
     let (role, content) = match kind {
-        "user/message" => (Role::User, data.and_then(|data| data.get("content"))),
+        "user/message" => {
+            let Some(role) = user_message_role(data) else {
+                // The origin kind is neither the human nor a measured machine
+                // kind, so who spoke is undetermined; the record is counted and
+                // stays reachable in the raw shards.
+                conversation.unrendered_lines += 1;
+                return;
+            };
+            (role, data.and_then(|data| data.get("content")))
+        }
         "assistant/message" => (
             Role::Assistant,
             data.and_then(|data| data.get("message"))
@@ -113,6 +171,13 @@ pub(super) fn record(value: &Value, conversation: &mut Conversation) {
             data.and_then(|data| data.get("message"))
                 .and_then(|message| message.get("content")),
         ),
+        // A packed chunk row carries no content part array: its text is the
+        // `texts` member list, so it is built and pushed here rather than
+        // routed through the content path below.
+        chunk if PACKED_CHUNK_TYPES.contains(&chunk) => {
+            push_chunk(chunk, value, conversation);
+            return;
+        }
         other if NON_MESSAGE_TYPES.contains(&other) => return,
         _ => {
             conversation.unrendered_lines += 1;
@@ -139,9 +204,79 @@ pub(super) fn record(value: &Value, conversation: &mut Conversation) {
     });
 }
 
+/// The role of one `user/message`, decided by the measured `source.kind`
+/// vocabulary. `None` means the origin is unknown, which the caller counts.
+fn user_message_role(data: Option<&Value>) -> Option<Role> {
+    match data
+        .and_then(|data| data.get("source"))
+        .and_then(|source| source.get("kind"))
+        .and_then(Value::as_str)
+    {
+        Some("user") => Some(Role::User),
+        Some(kind) if MACHINE_SOURCE_KINDS.contains(&kind) => Some(Role::System),
+        _ => None,
+    }
+}
+
+/// One packed chunk row, when `packChunks` grouped a run of assistant deltas
+/// into one record. The members are read only in the shape upstream documents
+/// — `texts` an array of strings — and each way of failing that shape is
+/// counted instead of guessed; see the module docs for why this is deliberately
+/// narrow and why `tool-call-chunks` renders nothing at all.
+fn push_chunk(kind: &str, value: &Value, conversation: &mut Conversation) {
+    if kind == "tool-call-chunks" {
+        // Not rendered because the members are unmeasured here. Counting keeps
+        // the text this reader declined to interpret visible; inventing a
+        // `ToolCall` block from it would claim a call the session may not hold.
+        conversation.unrendered_lines += 1;
+        return;
+    }
+    let Some(text) = joined_member_text(value) else {
+        conversation.unrendered_lines += 1;
+        return;
+    };
+    let block = if kind == "reasoning-chunks" {
+        Block::Thinking(text)
+    } else {
+        Block::Text(text)
+    };
+    conversation.push_message(Message {
+        role: Role::Assistant,
+        // A packed row stamps the batch, `time0` being the first member's
+        // clock; the envelope's own `time` wins where a writer kept it.
+        time: message_time(value.get("time").or_else(|| value.get("time0"))),
+        blocks: vec![block],
+    });
+}
+
+/// The `texts` members of one packed chunk row, joined into one string, or
+/// `None` when the row does not carry an array of strings (or carries no
+/// non-empty text at all).
+///
+/// The join has **no separator**: the members are consecutive deltas of one
+/// stream, so concatenation is what reconstructs the text, and any separator
+/// would insert a character the assistant never emitted.
+fn joined_member_text(value: &Value) -> Option<String> {
+    let texts = value
+        .get("texts")
+        .or_else(|| value.get("data").and_then(|data| data.get("texts")))?
+        .as_array()?;
+    let mut joined = String::new();
+    for member in texts {
+        joined.push_str(member.as_str()?);
+    }
+    // An empty `texts`, or members that are all empty strings, hold nothing to
+    // render: counted by the caller, never pushed as an empty message.
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{normalize, Provenance, Role};
+    use super::super::{normalize, Block, Provenance, Role};
     use serde_json::Value;
     use std::io::Write;
 
@@ -153,7 +288,7 @@ mod tests {
         "\n",
         r#"{"type":"turn/start","seq":1,"time":1791032332791,"data":{"turn":1}}"#,
         "\n",
-        r#"{"type":"user/message","seq":2,"time":1791032332798,"data":{"content":[{"type":"text","text":"hi"}],"source":{},"role":"user","id":"m1"}}"#,
+        r#"{"type":"user/message","seq":2,"time":1791032332798,"data":{"content":[{"type":"text","text":"hi"}],"source":{"kind":"user"},"role":"user","id":"m1"}}"#,
         "\n",
         r#"{"type":"assistant/message","seq":3,"time":1791032339953,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"tool_use","id":"c1","name":"read","arguments":{"path":"a"}}],"source":{},"id":"m2"},"usage":{"inputTokens":1,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":3},"stream":[]}}"#,
         "\n",
@@ -223,13 +358,132 @@ mod tests {
         );
     }
 
+    /// The harness writes its own context into `user/message` records: measured
+    /// on this machine, 30 of 41 such records were injections. A skill
+    /// catalogue is the sharpest case — rendered as `User` it reads as
+    /// something the person typed — so it stays visible as `System`.
+    #[test]
+    fn a_machine_sourced_user_message_renders_as_system_not_user() {
+        // `r##…##` because the fixture text itself contains a `"#` sequence.
+        let body = r##"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[{"type":"text","text":"# Skills"}],"source":{"kind":"skill-catalog"},"role":"user","id":"m1"}}"##;
+        let result = normalize("deepseek-harness", body);
+        assert_eq!(
+            result.messages.len(),
+            1,
+            "the injected context stays visible, not dropped"
+        );
+        assert_eq!(result.messages[0].role, Role::System);
+        assert_ne!(
+            result.messages[0].role,
+            Role::User,
+            "a skill catalogue must never be attributed to the human"
+        );
+        assert_eq!(
+            result.unrendered_lines, 0,
+            "a measured source kind is classified, not a gap"
+        );
+    }
+
+    /// The measured human origin still renders as the person's turn.
+    #[test]
+    fn a_human_sourced_user_message_renders_as_user() {
+        let body = r#"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[{"type":"text","text":"hi"}],"source":{"kind":"user"},"role":"user","id":"m1"}}"#;
+        let result = normalize("deepseek-harness", body);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, Role::User);
+        assert_eq!(result.unrendered_lines, 0);
+    }
+
+    /// A source kind this build does not know, and a record with no
+    /// `source.kind` at all, are *unknown* rather than machine or human: both
+    /// are counted and neither is rendered, so an unknown origin never becomes
+    /// a guess about who spoke.
+    #[test]
+    fn an_unrecognised_user_message_source_is_counted_not_guessed() {
+        let body = concat!(
+            r#"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[{"type":"text","text":"?"}],"source":{"kind":"future-origin"},"role":"user","id":"m1"}}"#,
+            "\n",
+            r#"{"type":"user/message","seq":2,"time":1791032332799,"data":{"content":[{"type":"text","text":"?"}],"role":"user","id":"m2"}}"#,
+        );
+        let result = normalize("deepseek-harness", body);
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(result.unrendered_lines, 2);
+        assert_eq!(
+            result.unrecognized_lines, 0,
+            "both records are valid JSON; they are unknown, not unreadable"
+        );
+    }
+
+    /// Packed chunk rows: `text-chunks` and `reasoning-chunks` carry their
+    /// members in `texts`, and the members are joined with no separator because
+    /// they are consecutive deltas of one stream. `tool-call-chunks` is counted
+    /// and rendered as nothing — see the module docs for why.
+    #[test]
+    fn packed_chunk_rows_render_their_text_and_count_tool_call_chunks() {
+        let body = concat!(
+            r#"{"type":"text-chunks","seq0":1,"time0":1791032332798,"dt":[1,1],"texts":["Hel","lo"]}"#,
+            "\n",
+            r#"{"type":"reasoning-chunks","seq0":3,"time0":1791032332799,"dt":[1],"texts":["weighing"]}"#,
+            "\n",
+            r#"{"type":"tool-call-chunks","seq0":4,"time0":1791032332800,"dt":[1],"texts":["{\"path\":\"/tmp/a\"}"]}"#,
+            "\n",
+            r#"{"type":"text-chunks","seq0":5,"time0":1791032332801,"dt":[1],"data":{"texts":["under data"]}}"#,
+        );
+        let result = normalize("deepseek-harness", body);
+        assert_eq!(
+            result.messages.len(),
+            3,
+            "the tool-call row renders nothing at all"
+        );
+        assert_eq!(result.messages[0].role, Role::Assistant);
+        assert_eq!(
+            result.messages[0].blocks,
+            vec![Block::Text("Hello".to_string())],
+            "the members are one stream, joined with no separator"
+        );
+        assert_eq!(
+            result.messages[1].blocks,
+            vec![Block::Thinking("weighing".to_string())]
+        );
+        assert_eq!(
+            result.messages[2].blocks,
+            vec![Block::Text("under data".to_string())],
+            "the payload is also read from `data.texts`, the envelope's own place"
+        );
+        assert_eq!(
+            result.unrendered_lines, 1,
+            "the unmeasured tool-call chunks stay counted"
+        );
+    }
+
+    /// The documented member shape is the only one that renders: `texts`
+    /// missing, not an array, holding a non-string member, or empty is counted
+    /// rather than read, so a row this reader cannot interpret never becomes a
+    /// message that looks authored.
+    #[test]
+    fn a_packed_chunk_row_without_readable_members_is_counted() {
+        let body = concat!(
+            r#"{"type":"text-chunks","seq0":1,"time0":1791032332798,"dt":[1]}"#,
+            "\n",
+            r#"{"type":"text-chunks","seq0":2,"time0":1791032332799,"dt":[1],"texts":"a string, not a list"}"#,
+            "\n",
+            r#"{"type":"text-chunks","seq0":3,"time0":1791032332800,"dt":[1],"texts":["ok",7]}"#,
+            "\n",
+            r#"{"type":"text-chunks","seq0":4,"time0":1791032332801,"dt":[1],"texts":[]}"#,
+        );
+        let result = normalize("deepseek-harness", body);
+        assert_eq!(result.messages.len(), 0);
+        assert_eq!(result.unrendered_lines, 4);
+        assert_eq!(result.unrecognized_lines, 0);
+    }
+
     /// A message record whose content holds nothing readable is counted. It must
     /// not become a message with no blocks, and the run must not read as a
     /// complete session with three messages and no gap.
     #[test]
     fn a_message_record_with_no_readable_part_is_counted_not_dropped() {
         let body = concat!(
-            r#"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[],"role":"user","id":"m1"}}"#,
+            r#"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[],"source":{"kind":"user"},"role":"user","id":"m1"}}"#,
             "\n",
             r#"{"type":"assistant/message","seq":2,"time":1791032339953,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text"}],"id":"m2"}}}"#,
         );
@@ -294,7 +548,7 @@ mod tests {
             "tool/result",
         ] {
             let record: Value = serde_json::from_str(&format!(
-                r#"{{"type":"{kind}","seq":1,"time":1791032332798,"data":{{"turn":1,"step":1,"content":[{{"type":"text","text":"x"}}],"message":{{"content":[{{"type":"text","text":"x"}}]}}}}}}"#
+                r#"{{"type":"{kind}","seq":1,"time":1791032332798,"data":{{"turn":1,"step":1,"source":{{"kind":"user"}},"content":[{{"type":"text","text":"x"}}],"message":{{"content":[{{"type":"text","text":"x"}}]}}}}}}"#
             ))
             .expect("the synthetic record is JSON");
             let mut conversation = super::super::Conversation::new("deepseek-harness");
