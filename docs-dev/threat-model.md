@@ -265,14 +265,18 @@ turns as you scroll, and a copy anchored anywhere but page 1 could look complete
 while holding only the oldest turns. **On ChatGPT it does add traffic:** when you move between conversations
 in the page, ChatGPT loads only a recent slice, and the extension requests the
 full conversation itself, with the access token it reads from the same origin's
-`/api/auth/session` (`apps/extension/lib/page-hook.ts:735-746` — the paged
+`/api/auth/session` (`apps/extension/lib/page-hook.ts:742-751` — the paged
 window the hook notices and refuses to archive;
-`apps/extension/entrypoints/dw-bridge.content.ts:682-710` — the extra request
-itself; `apps/extension/lib/platform-auth.ts:47`, `:92-107` — the token read
-from that endpoint, attached by `:111-130`). That is one extra request per
-conversation you open, at most once per 15 seconds per conversation. The token
-stays in the content script's memory; a script on the page itself could already
-read the same token, so this adds no new party who can see it. **Two other
+`apps/extension/entrypoints/dw-bridge.content.ts:331-335,682-710` — the seen
+conversation triggers the extra request;
+`apps/extension/lib/platform-auth.ts:47,91-107` — the session-token read;
+`:119-131` — the in-memory cache and bearer header). The full-conversation
+request is made at most once per 15 seconds per conversation
+(`apps/extension/lib/platform-auth.ts:858-867`); the first request also reads
+the session token once, which the content script then keeps in memory
+(`apps/extension/lib/platform-auth.ts:91-107,119-131`; `apps/extension/entrypoints/dw-bridge.content.ts:566-574`). A script on the page itself could
+already read the same token, so this adds no new party who can see it. **Two
+other
 platforms are places where the extension sends a credential rather than only
 cookies** (backfill requests, and on Gemini the live leg too): Kimi reads the page
 origin's own `localStorage.access_token` at request time, sends it to Kimi's two
