@@ -452,10 +452,11 @@
       "display_name": "Zed",
       "verified": {
         "date": "2026-10-03",
-        "scope": "all real sessions of this store are held by the real archive and read back and rendered by the reader"
+        "platform": "macos",
+        "scope": "all locally present macOS sessions collected, pushed, and read back with matching SHA-256; user and agent text, thinking, and tool calls render and index; other recorded event types remain in the raw archive and are counted"
       },
       "dev_priority": "low",
-      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
+      "known_issue": "image payloads, tool result contents, compaction summaries, per-message timestamps, and unrecognized content remain available in the raw archive and are not rendered",
       "paths": {
         "macos": {
           "template": "~/Library/Application Support/Zed/threads/threads.db",

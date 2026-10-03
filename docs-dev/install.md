@@ -1178,9 +1178,12 @@ confirmed in the code, not a temporary disclaimer.
   contains the same bodies. Other programs running as you can read all of it.
   (The "Security and privacy" section of `README.md` says the same.)
 
-- **Zed and Cursor conversation enumeration is not implemented** (see the
-  "What this does not do / current limits" section of `README.md` and the
-  `crates/chat-stasher/data/harness-registry-v1.json` it cites).
+- **The browser extension does not enumerate Zed or Cursor conversations.**
+  Local Zed session collection is implemented by the CLI; the source-shaped
+  archive remains complete when the reader encounters image payloads,
+  compaction records, tool results or message variants it does not render.
+  Those records stay available through the raw route and are counted as
+  unrendered (`crates/chat-stasher/data/harness-registry-v1.json`).
 
 - **`schedule` render-only mode does not install the timer**; use the explicit
   `schedule install` action to load a launchd agent on macOS or enable the

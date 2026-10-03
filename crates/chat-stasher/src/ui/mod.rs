@@ -3335,6 +3335,56 @@ mod tests {
         assert!(response.body.contains("time unknown"), "{}", response.body);
     }
 
+    #[test]
+    fn zed_sqlite_export_renders_known_turns_and_keeps_unknown_records_counted() {
+        struct ZedSource;
+        impl ContentSource for ZedSource {
+            fn fetch(&self, _machine: &str, _session_id: &str) -> Result<Content, String> {
+                let body = br#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"id":"synthetic-zed","data":{"messages":[{"User":{"id":"u1","content":[{"Text":"synthetic user turn"}] }},{"Agent":{"content":[{"Thinking":{"text":"synthetic reasoning"}},{"Text":"synthetic agent turn"},{"ToolUse":{"name":"synthetic tool","input":{"query":"synthetic"}}}]}},{"Compaction":{"Summary":"synthetic summary"}}]}}}"#;
+                Ok(Content::from_concat(body.to_vec(), Vec::new()))
+            }
+        }
+        let mut data = fixture::data();
+        data.sessions[0].harness = Some("zed".into());
+        let response = req("/reader?i=0", &data, &ZedSource);
+        assert_eq!(response.status, 200);
+        assert!(
+            response.body.contains("Showing messages 1–2 of 2"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("synthetic user turn"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("synthetic agent turn"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("synthetic reasoning"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("synthetic tool"),
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body.contains("Reader coverage"),
+            "{}",
+            response.body
+        );
+        assert!(
+            !response.body.contains("No reader for this harness"),
+            "{}",
+            response.body
+        );
+    }
+
     /// A named harness this build has no extractor for is the UIA-7 "raw view
     /// only" state: the reader says so and parses none of the body, so the
     /// zero-message sentences — each a claim about the archive or about a

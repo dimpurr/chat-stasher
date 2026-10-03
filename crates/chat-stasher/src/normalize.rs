@@ -18,6 +18,7 @@ mod gemini_cli;
 mod kimi_code;
 mod openclaw;
 mod opencode;
+mod zed;
 
 pub const DEFAULT_WINDOW: usize = 50;
 pub const MAX_WINDOW: usize = 200;
@@ -252,6 +253,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "opencode"
             | "openclaw"
             | "cursor"
+            | "zed"
             | "chatgpt"
             | "deepseek"
             | "claude"
@@ -295,6 +297,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "opencode" => opencode::normalize_session(value, conversation),
         "openclaw" => openclaw::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
+        "zed" => zed::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),

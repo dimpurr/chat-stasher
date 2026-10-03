@@ -68,7 +68,7 @@
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
-| Local | Zed | 2026-10-03 | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | Zed | 2026-10-03 | low | image payloads, tool result contents, compaction summaries, per-message timestamps, and unrecognized content remain available in the raw archive and are not rendered |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | - | normal | a real local store was read but no session has been archived end to end (git 2294f04) |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |

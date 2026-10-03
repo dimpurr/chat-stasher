@@ -2779,7 +2779,11 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             ("crush", sqlite_bytes, Expected::Format(FORMAT_SQLITE)),
-            ("zed", sqlite_bytes, Expected::Format(FORMAT_SQLITE)),
+            (
+                "zed",
+                br#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"id":"s1","data":{"messages":[{"User":{"id":"u1","content":[{"Text":"synthetic Zed question"}]}}]}}}"#,
+                Expected::Text("synthetic Zed question"),
+            ),
             (
                 "continue",
                 br#"{"messages":[{"role":"user","content":"synthetic question"}]}"#,
@@ -2824,6 +2828,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn zed_export_indexes_user_and_agent_turn_text() {
+        let shard = br#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"id":"synthetic-zed","data":{"messages":[{"User":{"id":"u1","content":[{"Text":"synthetic question"}] }},{"Agent":{"content":[{"Text":"synthetic answer"}]}}]}}}"#;
+        let extracted = extract_index_document_for("zed", shard).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic question"));
+        assert!(extracted.body.contains("synthetic answer"));
+        assert!(!extracted.body.contains("synthetic-zed"));
     }
 
     /// The browser-extension platforms are not in the registry's *local*
