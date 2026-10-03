@@ -7,6 +7,22 @@ use std::collections::BTreeMap;
 use std::fs;
 
 const AGENT: &str = "11111111-2222-4333-8444-555555555555";
+const ACCOUNT: &str = "grok%7Cuser_synthetic-0000";
+
+fn blob_name(leaf: &str) -> String {
+    format!(
+        "{}.blob",
+        test_support::grok_bot_blob_name(&format!("sand.client.slice.account.{ACCOUNT}.{leaf}"))
+    )
+}
+
+fn wrapped(value: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "value": value
+    }))
+    .unwrap()
+}
 
 #[test]
 fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
@@ -15,8 +31,43 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
     let persistence = app_support.join("profile").join("sand-client-persistence");
     fs::create_dir_all(&persistence).unwrap();
     fs::write(
-        persistence.join(format!("transcript.replicas.{AGENT}")),
-        br#"[{"seq":1,"kind":"message","content":"synthetic-one"},{"seq":3,"kind":"message","content":"synthetic-three"}]"#,
+        persistence.join(".migrated-from-local-storage"),
+        b"migrated-sentinel-24byte",
+    )
+    .unwrap();
+    // Entry key names from W321: id/kind/message/seq/timestampMs, with the
+    // W319b message keys (role/content) nested inside. Sequences start at 2,
+    // so the report also has to count the head gap at 1.
+    fs::write(
+        persistence.join(blob_name(&format!("transcript.replicas.{AGENT}"))),
+        wrapped(serde_json::json!({
+            "acceptedSequenceHint": 0,
+            "entries": [
+                {
+                    "id": "synthetic-2",
+                    "kind": "message",
+                    "message": {"content": "synthetic-two", "role": "user"},
+                    "seq": 2,
+                    "timestampMs": 1780000000000u64
+                },
+                {
+                    "id": "synthetic-4",
+                    "kind": "message",
+                    "message": {"content": "synthetic-four", "role": "user"},
+                    "seq": 4,
+                    "timestampMs": 1780000000200u64
+                },
+            ],
+            "epochHint": "synthetic-epoch",
+            "persistedAt": 1780000000000u64
+        })),
+    )
+    .unwrap();
+    // A non-replica state key (W321 lists the selection key among the ten
+    // state blobs); it must not produce an agent record.
+    fs::write(
+        persistence.join(blob_name("selection.last-agent")),
+        wrapped(serde_json::json!({"agentId": AGENT})),
     )
     .unwrap();
 
@@ -57,7 +108,8 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
             .unwrap();
         assert_eq!(probe.record_count, Some(1));
         assert!(probe.note.contains("partial replica"));
-        assert!(probe.note.contains("observed gaps=1"));
+        // Sequences 2 and 4 leave 1 and 3 missing, head position included.
+        assert!(probe.note.contains("observed gaps=2"));
     } else {
         assert!(report.records.is_empty());
         let probe = report

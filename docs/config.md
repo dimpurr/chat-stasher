@@ -56,7 +56,7 @@ opencode = "~/.local/share/opencode/opencode.db"
 ```
 
 - For a tool that stores one database file, give the file. For a tool that stores a folder of sessions, give the folder.
-- `grok-bot` accepts the app-support directory; its reader locates `sand-client-persistence` below it. It is available on macOS only and archives observed replica rows as partial data with sequence gaps recorded.
+- `grok-bot` accepts the app-support directory; its reader locates `sand-client-persistence` below it, decodes the app's base32-named state blobs, and archives observed replica rows as partial data with sequence gaps recorded (positions before the first observed row included). It is available on macOS only. A row the app rewrites in place is archived as an additional variant of that sequence, never as a replacement.
 - A path you write here is always looked at, even where the registry has no verified path for your system.
 - A path that does not exist is reported as *unknown*, never as "0 sessions".
 

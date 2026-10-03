@@ -120,9 +120,12 @@ pub struct OffsetEntry {
     /// from turning every session into "changed".
     #[serde(default)]
     pub store_fingerprint: Option<String>,
-    /// Grok Bot sequence numbers already delivered to this destination.
+    /// Grok Bot rows already delivered to this destination, keyed by the
+    /// SHA-256 of their canonical raw JSON — one entry per archived row, so
+    /// a sequence observed again with changed content still delivers the new
+    /// variant once, and an identical replay delivers nothing.
     #[serde(default)]
-    pub grok_bot_sequences: Option<Vec<u64>>,
+    pub grok_bot_row_digests: Option<Vec<String>>,
 }
 
 /// The evidence a cursor has to produce on demand: the sealed shard set it is
@@ -566,7 +569,7 @@ fn stage_prefix_entry(
             compressed: true,
             opencode: None,
             store_fingerprint: None,
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         }));
     }
 
@@ -605,7 +608,7 @@ fn stage_prefix_entry(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         }));
     }
 
@@ -634,7 +637,7 @@ fn stage_prefix_entry(
         compressed: false,
         opencode: None,
         store_fingerprint: None,
-        grok_bot_sequences: None,
+        grok_bot_row_digests: None,
     }))
 }
 
@@ -1234,6 +1237,22 @@ struct GrokBotUnionState {
     records: Vec<crate::grok_bot::ReplicaRecord>,
 }
 
+// Version 2 of the union state: records may carry more than one variant of
+// one sequence (a position re-observed with changed content is kept as an
+// additional row). The wire shape — `{version, records:[{sequence, raw}]}` —
+// is unchanged; unknown fields such as version 1's per-record
+// `sequence_gaps` are ignored on read.
+const GROK_BOT_UNION_STATE_VERSION: u32 = 2;
+
+/// Delivery identity of one Grok Bot union row: the SHA-256 of its
+/// canonical raw JSON. Rows are content-addressed because a sequence number
+/// alone cannot say whether a position carries one archived observation or
+/// several variants.
+fn grok_bot_row_digest(record: &crate::grok_bot::ReplicaRecord) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&record.raw).context("serialize Grok Bot raw record")?;
+    Ok(sha256_hex(&bytes))
+}
+
 fn process_grok_bot(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
@@ -1265,30 +1284,42 @@ fn process_grok_bot(
             let state: GrokBotUnionState = serde_json::from_slice(&bytes).with_context(|| {
                 format!("parse Grok Bot union state ({})", path_digest(&union_path))
             })?;
-            if state.version != 1 {
+            if state.version != 1 && state.version != GROK_BOT_UNION_STATE_VERSION {
                 bail!("unsupported Grok Bot union state version {}", state.version);
             }
+            // Version 1 held at most one record per sequence — a valid
+            // variant list, so it merges as-is. No version 1 state file can
+            // exist outside a test run: the version 1 reader never matched a
+            // real replica blob on disk (W329b).
             state.records
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error).context("read Grok Bot union state"),
     };
-    let union = crate::grok_bot::merge_replica_records(previous, observed.records.clone())?;
-    let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
-    let destination_sequences: std::collections::BTreeSet<u64> = old
-        .and_then(|entry| entry.grok_bot_sequences.as_ref())
+    let union = crate::grok_bot::merge_replica_records(previous, observed.records.clone());
+    let delivered: std::collections::BTreeSet<String> = old
+        .and_then(|entry| entry.grok_bot_row_digests.as_ref())
         .into_iter()
         .flatten()
-        .copied()
-        .collect();
-    let deliver_all =
-        force_reset || old.is_none() || old.is_some_and(|entry| entry.grok_bot_sequences.is_none());
-    let rows_to_deliver: Vec<crate::grok_bot::ReplicaRecord> = union
-        .iter()
-        .filter(|item| deliver_all || !destination_sequences.contains(&item.sequence))
         .cloned()
         .collect();
-    if rows_to_deliver.is_empty() && old.is_some() && !force_reset {
+    let deliver_all = force_reset
+        || old.is_none()
+        || old.is_some_and(|entry| entry.grok_bot_row_digests.is_none());
+    let mut payload = Vec::new();
+    let mut rows_written = 0usize;
+    let mut delivered_now = delivered.clone();
+    for item in &union {
+        let digest = grok_bot_row_digest(item)?;
+        if deliver_all || !delivered.contains(&digest) {
+            serde_json::to_writer(&mut payload, &item.raw)
+                .context("serialize Grok Bot raw record")?;
+            payload.push(b'\n');
+            delivered_now.insert(digest);
+            rows_written += 1;
+        }
+    }
+    if rows_written == 0 && old.is_some() && !force_reset {
         let source_bytes = fs::metadata(&record.absolute_path)
             .with_context(|| {
                 format!(
@@ -1312,12 +1343,8 @@ fn process_grok_bot(
             },
         });
     }
+    let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
     let gaps = crate::grok_bot::sequence_gaps(union_sequences.iter().copied());
-    let mut payload = Vec::new();
-    for item in &rows_to_deliver {
-        serde_json::to_writer(&mut payload, &item.raw).context("serialize Grok Bot raw record")?;
-        payload.push(b'\n');
-    }
     let metadata = serde_json::json!({
         "_chat_stasher": {
             "source": "grok-bot",
@@ -1343,7 +1370,7 @@ fn process_grok_bot(
     )?);
 
     let state = GrokBotUnionState {
-        version: 1,
+        version: GROK_BOT_UNION_STATE_VERSION,
         records: union,
     };
     let encoded = serde_json::to_vec(&state).context("serialize Grok Bot union state")?;
@@ -1359,20 +1386,16 @@ fn process_grok_bot(
             )
         })?
         .len();
-    let delivered_sequences: std::collections::BTreeSet<u64> = destination_sequences
-        .into_iter()
-        .chain(rows_to_deliver.iter().map(|item| item.sequence))
-        .collect();
     let digest = sha256_hex(&serde_json::to_vec(&state.records)?);
     Ok(Processed {
         state: OffsetEntry {
-            offset: delivered_sequences.len() as u64,
+            offset: delivered_now.len() as u64,
             prefix_len: source_bytes,
             prefix_sha256: digest,
             compressed: false,
             opencode: None,
             store_fingerprint: None,
-            grok_bot_sequences: Some(delivered_sequences.into_iter().collect()),
+            grok_bot_row_digests: Some(delivered_now.into_iter().collect()),
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1380,9 +1403,9 @@ fn process_grok_bot(
             source_bytes,
             bytes_read: source_bytes,
             prefix_bytes_validated: 0,
-            lines_written: rows_to_deliver.len() + 1,
+            lines_written: rows_written + 1,
             shard,
-            reset: old.is_some_and(|entry| entry.grok_bot_sequences.is_none()),
+            reset: old.is_some_and(|entry| entry.grok_bot_row_digests.is_none()),
             compressed: false,
         },
     })
@@ -1657,7 +1680,7 @@ fn process_sqlite_snapshot(
             compressed: false,
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1720,7 +1743,7 @@ fn unchanged_content_sqlite(
             compressed: false,
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1797,7 +1820,7 @@ fn process_jsonl(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         })
     } else {
         plain_state(&record.absolute_path, new_offset)?
@@ -1924,7 +1947,7 @@ fn process_opencode(
             compressed: false,
             opencode: Some(snapshot.cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1991,7 +2014,7 @@ fn process_whole_file(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
-            grok_bot_sequences: None,
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -2067,7 +2090,7 @@ fn process_compressed(
         compressed: true,
         opencode: None,
         store_fingerprint: None,
-        grok_bot_sequences: None,
+        grok_bot_row_digests: None,
     };
     Ok(Processed {
         state,
@@ -2195,7 +2218,7 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
         compressed: false,
         opencode: None,
         store_fingerprint: None,
-        grok_bot_sequences: None,
+        grok_bot_row_digests: None,
     })
 }
 

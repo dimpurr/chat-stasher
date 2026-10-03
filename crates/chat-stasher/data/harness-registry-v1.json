@@ -289,10 +289,10 @@
           "template": "~/Library/Application Support/Grok Bot/",
           "format": "json",
           "confidence": "measured-locally",
-          "source": "measured locally (W321): sand-client-persistence contains transcript.replicas.<agent-uuid> blobs and a roster blob"
+          "source": "measured locally (W321): blobs are named by the unpadded lowercase base32 of their state keys; replica keys end in transcript.replicas.<agent-uuid>; a roster blob carries agent names"
         }
       },
-      "notes": "Read-only app persistence adapter. The persistence directory is located below the app support root. Replica rows are retained raw, merged by sequence across reads, and always marked partial; missing sequence values remain metadata.",
+      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness.",
       "seal_policy": "not-applicable",
       "seal_source": "read-only replica blobs are never renamed or modified",
       "reference": {
