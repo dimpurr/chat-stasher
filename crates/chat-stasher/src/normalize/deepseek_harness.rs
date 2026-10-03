@@ -308,7 +308,11 @@ mod tests {
             matches!(result.provenance, Provenance::Known { .. }),
             "the harness has a reader, so it is not RawOnly"
         );
-        assert_eq!(result.messages.len(), 3, "user, assistant and the tool result");
+        assert_eq!(
+            result.messages.len(),
+            3,
+            "user, assistant and the tool result"
+        );
         assert!(matches!(result.messages[0].role, Role::User));
         assert!(matches!(result.messages[1].role, Role::Assistant));
         assert!(matches!(result.messages[2].role, Role::Tool));
