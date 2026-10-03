@@ -152,7 +152,7 @@ The first line is the verdict, for example `[run-once] Healthy: last run 12 minu
 
 ## Support at a glance
 
-These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the tool actually scans and registers. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the date of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made. A date older than 90 days is shown as **needs re-check (DATE)** instead — the recorded run is real, but it has been long enough that nothing should rely on it being still true.
+These tables are generated from the registry that ships inside the CLI and from the extension's own platform list, so they cannot drift from what the tool actually scans and registers. **Supported** means the scanner or the extension acts on that tool. **Experimental** means the platform is enabled in the development build only. A date in **Last verified** appears only where a real session was archived end to end on a maintainer's machine, with the date of that check recorded; every other row shows a dash, because these tools change their storage without notice and a permanent checkmark would be a claim nobody has re-made. For local tools, the full table scopes a verification to the OS where it was run; other OS cells keep their own confidence-based status. A date older than 90 days is shown as **needs re-check (DATE)** instead — the recorded run is real, but it has been long enough that nothing should rely on it being still true.
 
 <!-- support-matrix:short:start -->
 **5+ platforms.** Local AI coding tools and web chats, archived the same way.
@@ -172,7 +172,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | crush | supported | - |
 | Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
-| Local | Kimi Code | supported | - |
+| Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
 | Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |

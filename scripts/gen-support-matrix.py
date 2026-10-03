@@ -31,9 +31,12 @@ Status vocabulary. The whole point of this script is that "we have a source for
 the path" and "a real session was archived end to end" are TWO different facts
 and must not collapse into one glyph:
 
-    verified end-to-end (DATE)   an explicit `verified: {date, version, scope}`
+    verified end-to-end (DATE)   an explicit `verified: {date, version?, scope}`
                                  record on the harness — a human archived a real
                                  session on a real machine and wrote down when.
+                                 Optional `platform` scopes the claim to one OS
+                                 cell; without it, the historical row-wide
+                                 meaning is retained.
     supported                    the registry will scan this harness (at least
                                  one OS cell is source-confirmed / official-docs
                                  / measured-locally), or the extension ships the
@@ -52,14 +55,16 @@ Editorial overlay (SB-1). Both sources also carry three hand-written fields
 per row — one vocabulary under each spelling — and all three are validated by
 this script before any table is rendered from them:
 
-    `verified` (harnesses) /    `{date, version?, scope}`. Recorded only from
+    `verified` (harnesses) /    `{date, version?, scope, platform?}`. Recorded only from
     `lastVerified` (platforms)  dated public evidence that a real conversation
                                was archived end to end on a real machine: a
                                commit message, a release note, or a document in
                                this repository. NEVER inferred from `confidence`
                                or `credibility`, which say where the routes were
-                               read from, not that an archive ever ran. Absent
-                               means no such run is recorded, and renders as
+                               read from, not that an archive ever ran. For a
+                               harness, `platform` is `macos`, `linux` or
+                               `windows` and limits the claim to that cell.
+                               Absent means no such run is recorded, and renders as
                                ABSENT — not as "never worked".
     `dev_priority` /           one of `high` / `normal` / `low`: an editorial
     `devPriority`              statement of where maintainer attention is,
@@ -279,7 +284,15 @@ def validated_verified(owner: str, value: Any) -> dict[str, Any] | None:
     version = value.get("version")
     if version is not None and not isinstance(version, str):
         raise SupportMatrixError(f"{owner}: `verified.version` must be a string or absent")
-    return {"date": d, "version": version, "scope": scope}
+    platform = value.get("platform")
+    if platform is not None and platform not in OS_ORDER:
+        raise SupportMatrixError(
+            f"{owner}: `verified.platform` must be one of {list(OS_ORDER)}, not {platform!r}"
+        )
+    normalized = {"date": d, "version": version, "scope": scope}
+    if platform is not None:
+        normalized["platform"] = platform
+    return normalized
 
 
 def validated_dev_priority(owner: str, value: Any) -> str | None:
@@ -559,8 +572,14 @@ def harness_verified(h: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def cell_status(cell: dict[str, Any] | None, verified: dict[str, Any] | None) -> str:
-    if verified is not None:
+def cell_status(
+    cell: dict[str, Any] | None,
+    verified: dict[str, Any] | None,
+    platform: str | None = None,
+) -> str:
+    if verified is not None and (
+        verified.get("platform") is None or verified.get("platform") == platform
+    ):
         return f"{STATUS_VERIFIED} ({verified['date']})"
     if cell is None:
         return STATUS_UNSUPPORTED
@@ -594,7 +613,7 @@ def harness_status(h: dict[str, Any]) -> str:
     best = STATUS_UNSUPPORTED
     for os_name in OS_ORDER:
         cell = paths.get(os_name)
-        st = cell_status(cell, None)
+        st = cell_status(cell, verified, os_name)
         if status_rank(st) > status_rank(best):
             best = st
     return best
@@ -738,7 +757,7 @@ def render_full(
         ref = (h.get("reference") or {}).get("source_url", "")
         for os_name in OS_ORDER:
             cell = paths.get(os_name)
-            status = cell_status(cell, verified)
+            status = cell_status(cell, verified, os_name)
             if cell is None:
                 out.append(
                     f"| {esc(name)} | {OS_LABEL[os_name]} | {ABSENT} | {ABSENT} | {ABSENT} "
@@ -1125,14 +1144,21 @@ _SELFTEST_REGISTRY = {
         {
             "id": "delta",
             "display_name": "Delta",
-            "verified": {"date": "2026-09-15", "version": "1.2.3", "scope": "one real session"},
+            "verified": {
+                "date": "2026-09-15",
+                "version": "1.2.3",
+                "scope": "one real session",
+                "platform": "macos",
+            },
             "paths": {
                 "macos": {
                     "template": "~/.delta/<id>.jsonl",
                     "format": "jsonl",
                     "confidence": "source-confirmed",
                     "source": "https://example.com/delta",
-                }
+                },
+                "linux": {"template": "~/.delta", "format": "jsonl", "confidence": "unascertained", "source": "not read"},
+                "windows": {"template": "%USERPROFILE%\\.delta", "format": "jsonl", "confidence": "unascertained", "source": "not read"},
             },
         },
     ],
@@ -1237,6 +1263,10 @@ def selftest() -> int:
         probe(
             "verified record wins and carries its date",
             harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
+        )
+        probe(
+            "OS-scoped verification does not promote an unascertained cell",
+            cell_status(by_id["delta"]["paths"]["linux"], by_id["delta"]["verified"]) == STATUS_UNSUPPORTED,
         )
         web = {p["id"]: p for p in platforms}
         probe(
@@ -1534,6 +1564,10 @@ def selftest() -> int:
         no_scope["harnesses"][3]["verified"] = {"date": "2026-09-15"}
         _scaffold(tmp, registry=no_scope)
         probe("a verified record with no scope is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        bad_platform = json.loads(json.dumps(_SELFTEST_REGISTRY))
+        bad_platform["harnesses"][3]["verified"]["platform"] = "plan9"
+        _scaffold(tmp, registry=bad_platform)
+        probe("a verified record with an unknown platform is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace("devPriority: 'low'", "devPriority: 'urgent'"))
         probe("an unknown devPriority in the contract is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace(

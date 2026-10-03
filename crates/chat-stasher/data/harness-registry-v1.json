@@ -570,7 +570,7 @@
       "id": "kimi-code",
       "display_name": "Kimi Code",
       "dev_priority": "normal",
-      "known_issue": "a real local store was read but no session has been archived end to end (git 2294f04)",
+      "known_issue": "Activity bounds are inferred and partial when unrecognised wire operation types occur.",
       "paths": {
         "macos": {
           "template": "~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",
@@ -618,6 +618,11 @@
         "source_url": "unascertained",
         "license_url": "unascertained",
         "verification": "No public repository or documentation was read for this entry. The evidence is the implementation shipped inside the installed CLI bundle, which is not part of this repository and is version-pinned by <KIMI_CODE_HOME>/updates/latest.json (0.39.1). Treat it as measured-at-a-version, not as a citable public source."
+      },
+      "verified": {
+        "date": "2026-10-03",
+        "scope": "Read-only copies of all 8 real sessions were collected, staged, pushed and read back with matching SHA-256; all 8 were indexed and rendered by the normalized reader (tested code git f636b57).",
+        "platform": "macos"
       }
     }
   ],
