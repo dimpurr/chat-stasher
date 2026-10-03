@@ -76,19 +76,26 @@ export interface Extension {
  * `chromium-headless-shell`, which **does not load extensions at all** —
  * measured on this branch: `context.serviceWorkers()` came back empty, so there
  * was no worker to read the outbox from. `channel: 'chromium'` selects the full
- * Chromium build with the new headless mode, and there the extension loads and
- * its MV3 service worker starts (measured in the same run).
+ * Chromium build. The default launch pins `--headless=new` explicitly, which
+ * loads the extension and starts its MV3 service worker without opening a
+ * browser window. Set `CS_E2E_HEADED=1` to launch a visible browser while
+ * debugging.
  *
  * That is why these specs need no `xvfb` on a machine with no display: the
  * extension is exercised in a real headless browser, not with the capture path
  * faked out.
  */
 export async function launchExtension(options: { host?: NativeHost } = {}): Promise<Extension> {
+  const headed = process.env.CS_E2E_HEADED === '1';
   const userDataDir = mkdtempSync(join(tmpdir(), 'chat-stasher-e2e-'));
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: true,
+    headless: !headed,
     channel: 'chromium',
+    // Playwright's generic `--headless` is omitted so Chromium receives the
+    // explicit new-headless switch. Headed debugging gets neither switch.
+    ignoreDefaultArgs: headed ? undefined : ['--headless'],
     args: [
+      ...(!headed ? ['--headless=new', '--disable-gpu'] : []),
       `--disable-extensions-except=${EXTENSION_DIR}`,
       `--load-extension=${EXTENSION_DIR}`,
     ],
