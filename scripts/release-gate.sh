@@ -241,7 +241,7 @@ if ! out=$("$BIN" push --stage "$STAGE" --repo "$REPO" --key-file "$KEY" \
   echo "$out"; echo "[gate] push failed"; fail_gate
 fi
 echo "$out" | sed 's/^/  /'
-if ! echo "$out" | grep -q 'INIT'; then
+if [[ "$out" != *INIT* ]]; then
   echo "[gate] first push did not init a fresh repository"; fail_gate
 fi
 gate "step 2 OK · repo created, masterkey persisted"
