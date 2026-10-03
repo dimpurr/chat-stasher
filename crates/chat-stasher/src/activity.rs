@@ -999,8 +999,26 @@ fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
         "cursor" => cursor_time(value),
         "gemini-cli" => gemini_time(value),
         "kimi-code" => kimi_code_time(value),
+        "zed" => zed_time(value),
         _ => LineTime::NoTimestampField,
     }
+}
+
+/// zed: the CLI archives one `threads` SQLite row per session as
+/// `{schema, table:"threads", session:{…, updated_at, created_at}}`, where `updated_at`
+/// and `created_at` are ISO 8601 strings.
+fn zed_time(value: &serde_json::Value) -> LineTime {
+    if let Some(updated) = value.get("session").and_then(|session| {
+        session
+            .get("updated_at")
+            .or_else(|| session.get("created_at"))
+    }) {
+        return match one_ts_value(updated) {
+            Some((t, rfc3339)) => local_time(t, t, rfc3339),
+            None => LineTime::Invalid,
+        };
+    }
+    LineTime::Absent
 }
 
 /// kimi-code: the agent journal `<sessionDir>/agents/main/wire.jsonl`, one

@@ -40,7 +40,7 @@ use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
     enumerate_cursor_legacy_sessions, enumerate_openclaw_sessions, enumerate_opencode_sessions,
     enumerate_sqlite_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
-    CursorLegacySessionRow, OpenClawSessionEnumeration, SqliteSessionProbe, SqliteSessionRow,
+    CursorLegacySessionRow, SqliteSessionProbe, SqliteSessionRow,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -367,7 +367,7 @@ pub struct RegistryCell {
     #[serde(default)]
     pub sql_value_column: Option<String>,
     /// Column holding a per-session epoch timestamp.
-    #[serde(default)]
+    #[serde(default, alias = "sql_timestamp_column")]
     pub sql_time_column: Option<String>,
     /// JSON path (e.g. `$.createdAt`) into `sql_value_column`, epoch millis.
     #[serde(default)]
@@ -375,6 +375,12 @@ pub struct RegistryCell {
     /// True when `sql_time_column` holds Unix seconds instead of millis.
     #[serde(default)]
     pub sql_time_value_is_seconds: bool,
+    /// True when `sql_time_column` holds ISO 8601 strings instead of numbers.
+    #[serde(default)]
+    pub sql_time_is_iso8601: bool,
+    /// Optional timestamp format indicator (e.g. "iso8601").
+    #[serde(default)]
+    pub sql_time_format: Option<String>,
     /// Optional named qualification rule for JSON key/value stores.
     #[serde(default)]
     pub sql_qualification: Option<String>,
@@ -1144,6 +1150,37 @@ fn probe_harness(
                                             }
                                             probe.note.push_str(&format!(
                                                 "; SessionRecord={record_count}; usage files={usage_count}"
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            probe.unreadable_count =
+                                                enumeration_gap(count, 0, info.unreadable_count);
+                                            probe.note.push_str(&format!(
+                                                "; SessionRecord enumeration failed ({error})"
+                                            ));
+                                        }
+                                    }
+                                }
+                            } else if h.id == "zed" {
+                                if let Some(spec) = spec.as_ref() {
+                                    match enumerate_sqlite_sessions(&root, spec) {
+                                        Ok(rows) => {
+                                            let records = sqlite_records_from_rows(
+                                                rows,
+                                                &root,
+                                                source,
+                                                machine,
+                                                SqliteSessionLayout::Zed,
+                                            );
+                                            let record_count = records.len();
+                                            report.records.extend(records);
+                                            probe.unreadable_count = enumeration_gap(
+                                                count,
+                                                record_count,
+                                                info.unreadable_count,
+                                            );
+                                            probe.note.push_str(&format!(
+                                                "; SessionRecord={record_count}"
                                             ));
                                         }
                                         Err(error) => {

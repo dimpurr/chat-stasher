@@ -768,6 +768,7 @@ fn export_reader(raw: &str) -> Option<String> {
             match value.get("table").and_then(serde_json::Value::as_str) {
                 Some("cursorDiskKV") => Some("cursor".to_string()),
                 Some("session_docs") => Some("grok".to_string()),
+                Some("threads") => Some("zed".to_string()),
                 _ => None,
             }
         }
@@ -1771,7 +1772,7 @@ impl Index {
         }
         match fs::rename(&staging, self.root.join(MARKER)) {
             Ok(()) => Ok(()),
-            Err(error) if self.marker_is_ours()? => {
+            Err(_) if self.marker_is_ours()? => {
                 // On Windows rename does not replace an existing destination.
                 // A sibling that published this same fixed marker won the
                 // race, which is the successful outcome we need.

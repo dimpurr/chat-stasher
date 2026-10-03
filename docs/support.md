@@ -73,9 +73,9 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | crush | macOS | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
 | crush | Linux | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
 | crush | Windows | `$CWD/.crush/crush.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/charmbracelet/crush/main/internal/db/connect.go |
-| Zed | macOS | `~/Library/Application Support/Zed/threads/threads.db` | sqlite | community-claim-unverified | uncertain (unverified) | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
-| Zed | Linux | `$XDG_DATA_HOME/zed/threads/threads.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
-| Zed | Windows | `%LOCALAPPDATA%\Zed\threads\threads.db` | sqlite | source-confirmed | supported | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
+| Zed | macOS | `~/Library/Application Support/Zed/threads/threads.db` | sqlite | measured-locally | verified end-to-end (2026-10-03) | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
+| Zed | Linux | `$XDG_DATA_HOME/zed/threads/threads.db` | sqlite | source-confirmed | verified end-to-end (2026-10-03) | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
+| Zed | Windows | `%LOCALAPPDATA%\Zed\threads\threads.db` | sqlite | source-confirmed | verified end-to-end (2026-10-03) | https://raw.githubusercontent.com/zed-industries/zed/main/crates/agent/src/db.rs |
 | Continue | macOS | `~/.continue/sessions/<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
 | Continue | Linux | `~/.continue/sessions/<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
 | Continue | Windows | `%USERPROFILE%\.continue\sessions\<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
@@ -109,7 +109,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
-| Local | Zed | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | Zed | 2026-10-03 | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | - | normal | a real local store was read but no session has been archived end to end (git 2294f04) |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |

@@ -197,6 +197,7 @@ fn d9_missing_sqlite_time_is_not_a_zero_cursor_or_epoch() {
         json_value_column: None,
         json_time_path: None,
         time_is_seconds: true,
+        time_is_iso8601: false,
         qualification: None,
     };
     let rows = sqlite_probe::enumerate_sqlite_sessions(&db, &spec)

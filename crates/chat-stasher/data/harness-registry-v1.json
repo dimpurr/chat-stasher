@@ -450,14 +450,28 @@
     {
       "id": "zed",
       "display_name": "Zed",
+      "verified": {
+        "date": "2026-10-03",
+        "scope": "all real sessions of this store are held by the real archive and read back and rendered by the reader"
+      },
       "dev_priority": "low",
       "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
         "macos": {
           "template": "~/Library/Application Support/Zed/threads/threads.db",
           "format": "sqlite",
-          "confidence": "community-claim-unverified",
-          "source": "macOS branch not directly verified; inferred from crates/paths platform convention"
+          "confidence": "measured-locally",
+          "source": "measured locally: ~/Library/Application Support/Zed/threads/threads.db opened read-only, threads table exists, id/summary/updated_at/data_type/data columns present, updated_at ISO 8601 strings",
+          "sql_table": "threads",
+          "sql_id_column": "id",
+          "sql_required_columns": [
+            "id",
+            "updated_at",
+            "data_type",
+            "data"
+          ],
+          "sql_time_column": "updated_at",
+          "sql_time_is_iso8601": true
         },
         "linux": {
           "template": "$XDG_DATA_HOME/zed/threads/threads.db",

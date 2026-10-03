@@ -12,7 +12,7 @@
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
-| Local | Zed | supported | - |
+| Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
 | Local | Kimi Code | supported | - |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |

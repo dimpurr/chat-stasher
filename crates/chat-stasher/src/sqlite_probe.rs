@@ -68,6 +68,8 @@ pub struct SqliteSchemaSpec<'a> {
     /// When `time_column` stores Unix **seconds** (Grok's `updated_at` is
     /// seconds; opencode `time_created` and Cursor `createdAt` are millis).
     pub time_is_seconds: bool,
+    /// When `time_column` stores ISO 8601 / RFC 3339 strings (e.g. Zed's `updated_at`).
+    pub time_is_iso8601: bool,
     /// Optional named qualification rule for JSON key/value stores.
     /// `cursor_composer` excludes archived/empty composers after the raw key
     /// prefix count, so callers can report both numbers.
@@ -86,6 +88,7 @@ pub fn opencode_schema() -> SqliteSchemaSpec<'static> {
         json_value_column: None,
         json_time_path: None,
         time_is_seconds: false,
+        time_is_iso8601: false,
         qualification: None,
     }
 }
@@ -104,6 +107,7 @@ pub fn cursor_global_schema() -> SqliteSchemaSpec<'static> {
         json_value_column: Some("value"),
         json_time_path: Some("$.createdAt"),
         time_is_seconds: false,
+        time_is_iso8601: false,
         qualification: Some("cursor_composer"),
     }
 }
@@ -120,6 +124,24 @@ pub fn grok_schema() -> SqliteSchemaSpec<'static> {
         json_value_column: None,
         json_time_path: None,
         time_is_seconds: true,
+        time_is_iso8601: false,
+        qualification: None,
+    }
+}
+
+/// Export-side schema for Zed's locally measured `threads` store.
+pub fn zed_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "threads",
+        id_column: Some("id"),
+        required_columns: vec!["id", "updated_at", "data_type", "data"],
+        key_column: None,
+        key_prefix: None,
+        time_column: Some("updated_at"),
+        json_value_column: None,
+        json_time_path: None,
+        time_is_seconds: false,
+        time_is_iso8601: true,
         qualification: None,
     }
 }
@@ -151,6 +173,13 @@ pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchem
             .map(String::as_str)
             .collect()
     };
+    let time_is_iso8601 = cell.sql_time_is_iso8601
+        || cell
+            .sql_time_format
+            .as_deref()
+            .map(|f| f.eq_ignore_ascii_case("iso8601") || f.eq_ignore_ascii_case("rfc3339"))
+            // reason: default to false when sql_time_format is omitted or unspecified
+            .unwrap_or(false);
     Some(SqliteSchemaSpec {
         table,
         id_column: cell.sql_id_column.as_deref(),
@@ -161,6 +190,7 @@ pub fn spec_from_cell(cell: &crate::scanner::RegistryCell) -> Option<SqliteSchem
         json_value_column: cell.sql_value_column.as_deref(),
         json_time_path: cell.sql_time_json_path.as_deref(),
         time_is_seconds: cell.sql_time_value_is_seconds,
+        time_is_iso8601,
         qualification: cell.sql_qualification.as_deref(),
     })
 }
@@ -1206,13 +1236,27 @@ pub fn enumerate_sqlite_sessions(
     let rows = statement
         .query_map([], |row| {
             let raw_id: String = row.get(0)?;
-            let time_value: Option<i64> = row.get(1)?;
-            Ok((raw_id, time_value))
+            let (time_value, mtime) = match row.get_ref(1)? {
+                ValueRef::Null => (None, None),
+                ValueRef::Integer(v) => (Some(v), convert_epoch(v, spec.time_is_seconds)),
+                ValueRef::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    if let Some(st) = parse_sqlite_timestamp_text(&s) {
+                        (system_time_to_millis(st), Some(st))
+                    } else if let Ok(v) = s.parse::<i64>() {
+                        (Some(v), convert_epoch(v, spec.time_is_seconds))
+                    } else {
+                        (None, None)
+                    }
+                }
+                _ => (None, None),
+            };
+            Ok((raw_id, time_value, mtime))
         })
         .map_err(|error| format!("failed to enumerate {} session rows: {error}", spec.table))?;
     let mut result = Vec::new();
     for row in rows {
-        let (raw_id, time_value) =
+        let (raw_id, time_value, mtime) =
             row.map_err(|error| format!("failed to read session row: {error}"))?;
         let id = native_session_id(spec, &raw_id);
         if id.is_empty() {
@@ -1221,7 +1265,7 @@ pub fn enumerate_sqlite_sessions(
         result.push(SqliteSessionRow {
             id,
             time_value,
-            mtime: time_value.and_then(|value| convert_epoch(value, spec.time_is_seconds)),
+            mtime,
         });
     }
     Ok(result)
@@ -1262,8 +1306,22 @@ pub fn sqlite_session_cursor(
                 "SELECT {expr} FROM \"{}\"{where_sql} LIMIT 1",
                 quote_identifier(spec.table)
             );
-            conn.query_row(&sql, [&storage_id], |row| row.get::<_, Option<i64>>(0))
-                .map_err(|error| format!("failed to read {} session time: {error}", spec.table))
+            conn.query_row(&sql, [&storage_id], |row| match row.get_ref(0)? {
+                ValueRef::Null => Ok(None),
+                ValueRef::Integer(v) => Ok(Some(v)),
+                ValueRef::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    if let Some(st) = parse_sqlite_timestamp_text(&s) {
+                        Ok(system_time_to_millis(st))
+                    } else if let Ok(v) = s.parse::<i64>() {
+                        Ok(Some(v))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                _ => Ok(None),
+            })
+            .map_err(|error| format!("failed to read {} session time: {error}", spec.table))
         })
         .transpose()?
         .flatten()
@@ -1324,6 +1382,103 @@ pub fn read_sqlite_session(
     let json_line = serde_json::to_vec(&envelope)
         .map_err(|error| format!("failed to serialize SQLite session: {error}"))?;
     Ok(OpenCodeSessionSnapshot { cursor, json_line })
+}
+
+/// Export one Zed session from `threads` table as one JSON line.
+/// Decompresses the zstd BLOB in `data` to a JSON object.
+pub fn read_zed_session(
+    db: &Path,
+    spec: &SqliteSchemaSpec<'_>,
+    session_id: &str,
+) -> Result<OpenCodeSessionSnapshot, String> {
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_registry_schema(&conn, spec)?;
+    let id_column = spec
+        .id_column
+        .ok_or_else(|| "SQLite schema does not declare a session id column".to_string())?;
+    let storage_id = storage_session_id(spec, session_id);
+    let id_where = format!("\"{}\" = ?1", quote_identifier(id_column));
+    let where_sql = qualification_where_sql(spec, &format!(" WHERE {id_where}"));
+    let sql = format!(
+        "SELECT * FROM \"{}\"{where_sql} LIMIT 1",
+        quote_identifier(spec.table)
+    );
+    let row = conn
+        .query_row(&sql, [&storage_id], |row| zed_row_to_json_object(row))
+        .map_err(|error| format!("failed to read {} session rows: {error}", spec.table))?;
+    let cursor = sqlite_session_cursor(db, spec, session_id)?;
+    let envelope = serde_json::json!({
+        "schema": "chat-stasher.sqlite.session.v1",
+        "table": spec.table,
+        "session": row,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("failed to serialize Zed session: {error}"))?;
+    Ok(OpenCodeSessionSnapshot { cursor, json_line })
+}
+
+fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let mut object = Map::new();
+    let statement = row.as_ref();
+    let mut data_type = String::new();
+    for index in 0..statement.column_count() {
+        if statement.column_name(index)? == "data_type" {
+            if let ValueRef::Text(bytes) = row.get_ref(index)? {
+                data_type = String::from_utf8_lossy(bytes).into_owned();
+            }
+            break;
+        }
+    }
+    for index in 0..statement.column_count() {
+        let name = statement.column_name(index)?.to_string();
+        let val_ref = row.get_ref(index)?;
+        if name == "data" {
+            let data_json = match val_ref {
+                ValueRef::Blob(bytes) => {
+                    if data_type == "zstd" {
+                        match zstd::decode_all(bytes) {
+                            Ok(decompressed) => {
+                                match serde_json::from_slice::<Value>(&decompressed) {
+                                    Ok(json) => json,
+                                    Err(_) => Value::String(
+                                        String::from_utf8_lossy(&decompressed).into_owned(),
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                return Err(rusqlite::Error::FromSqlConversionFailure(
+                                    index,
+                                    rusqlite::types::Type::Blob,
+                                    Box::new(e),
+                                ));
+                            }
+                        }
+                    } else {
+                        let text = String::from_utf8_lossy(bytes);
+                        match serde_json::from_str(&text) {
+                            Ok(json) => json,
+                            Err(_) => Value::String(format!("hex:{}", hex_digest(bytes))),
+                        }
+                    }
+                }
+                ValueRef::Text(bytes) => {
+                    let text = String::from_utf8_lossy(bytes).into_owned();
+                    match serde_json::from_str(&text) {
+                        Ok(json) => json,
+                        Err(_) => Value::String(text),
+                    }
+                }
+                ValueRef::Null => Value::Null,
+                _ => sqlite_value_to_json(val_ref, false),
+            };
+            object.insert(name, data_json);
+        } else {
+            object.insert(name, sqlite_value_to_json(val_ref, false));
+        }
+    }
+    Ok(Value::Object(object))
 }
 
 /// Enumerate qualified composers in Cursor's legacy workspaceStorage. Each
@@ -1823,12 +1978,39 @@ pub fn probe_sqlite_sessions_with(db: &Path, spec: &SqliteSchemaSpec) -> SqliteS
     };
     let (earliest, latest) = match time_sql {
         Some(sql) => match conn.query_row(&sql, [], |row| {
-            Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))
+            let t0 = match row.get_ref(0)? {
+                ValueRef::Null => None,
+                ValueRef::Integer(v) => convert_epoch(v, spec.time_is_seconds),
+                ValueRef::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    if spec.time_is_iso8601 {
+                        parse_sqlite_timestamp_text(&s)
+                    } else if let Ok(v) = s.parse::<i64>() {
+                        convert_epoch(v, spec.time_is_seconds)
+                    } else {
+                        parse_sqlite_timestamp_text(&s)
+                    }
+                }
+                _ => None,
+            };
+            let t1 = match row.get_ref(1)? {
+                ValueRef::Null => None,
+                ValueRef::Integer(v) => convert_epoch(v, spec.time_is_seconds),
+                ValueRef::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    if spec.time_is_iso8601 {
+                        parse_sqlite_timestamp_text(&s)
+                    } else if let Ok(v) = s.parse::<i64>() {
+                        convert_epoch(v, spec.time_is_seconds)
+                    } else {
+                        parse_sqlite_timestamp_text(&s)
+                    }
+                }
+                _ => None,
+            };
+            Ok((t0, t1))
         }) {
-            Ok((earliest, latest)) => (
-                earliest.and_then(|v| convert_epoch(v, spec.time_is_seconds)),
-                latest.and_then(|v| convert_epoch(v, spec.time_is_seconds)),
-            ),
+            Ok((earliest, latest)) => (earliest, latest),
             Err(e) => {
                 return SqliteSessionProbe::ReadFailed {
                     error: format!("failed to read {} table time stats: {e}", spec.table),
@@ -1985,6 +2167,34 @@ pub fn sqlite_millis_to_system_time(millis: i64) -> Option<SystemTime> {
         UNIX_EPOCH.checked_add(duration)
     } else {
         UNIX_EPOCH.checked_sub(duration)
+    }
+}
+
+pub fn parse_sqlite_timestamp_text(s: &str) -> Option<SystemTime> {
+    let trimmed = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(SystemTime::from(dt));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S"))
+    {
+        return Some(SystemTime::from(naive.and_utc()));
+    }
+    if let Ok(v) = trimmed.parse::<i64>() {
+        return convert_epoch(v, false);
+    }
+    None
+}
+
+pub fn system_time_to_millis(time: SystemTime) -> Option<i64> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(dur) => i64::try_from(dur.as_millis()).ok(),
+        Err(e) => {
+            let millis = e.duration().as_millis();
+            i64::try_from(millis).ok().map(|m| -m)
+        }
     }
 }
 
@@ -2223,6 +2433,7 @@ mod tests {
             json_value_column: Some("value"),
             json_time_path: Some("$.createdAt"),
             time_is_seconds: false,
+            time_is_iso8601: false,
             qualification: Some("cursor_composer"),
         };
         let info = probe_sqlite_store_with(&db, &spec);
@@ -2311,6 +2522,7 @@ mod tests {
             json_value_column: None,
             json_time_path: None,
             time_is_seconds: true,
+            time_is_iso8601: false,
             qualification: None,
         };
         let info = probe_sqlite_store_with(&db, &spec);
@@ -2387,6 +2599,7 @@ mod tests {
             json_value_column: None,
             json_time_path: None,
             time_is_seconds: true,
+            time_is_iso8601: false,
             qualification: None,
         };
         let info = probe_sqlite_store_with(&db, &spec);
@@ -2738,5 +2951,122 @@ mod openclaw_tests {
             "the failure must name the integrity column that made the blob unverifiable, got: {error}"
         );
         drop(conn);
+    }
+}
+
+#[cfg(test)]
+mod zed_tests {
+    use super::*;
+    use crate::test_support::Sandbox;
+
+    #[test]
+    fn zed_probe_and_export_decompresses_zstd_payload() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        let raw_json =
+            br#"{"title":"synthetic-title","messages":[{"role":"user","text":"hello"}]}"#;
+        let compressed = zstd::encode_all(&raw_json[..], 3).unwrap();
+
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "synthetic-zed-1",
+                "synthetic-summary",
+                "2026-10-03T10:00:00.000000+00:00",
+                "zstd",
+                compressed,
+                Option::<String>::None,
+                "/path/to/folder",
+                Option::<String>::None,
+                "2026-10-03T09:00:00.000000+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let probe = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            probe.sessions,
+            SqliteSessionProbe::Known {
+                count: 1,
+                candidate_count: 1,
+                ..
+            }
+        ));
+
+        let rows = enumerate_sqlite_sessions(&db, &spec).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "synthetic-zed-1");
+        assert!(rows[0].mtime.is_some());
+
+        let snapshot = read_zed_session(&db, &spec, "synthetic-zed-1").unwrap();
+        let val: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(val["schema"], "chat-stasher.sqlite.session.v1");
+        assert_eq!(val["table"], "threads");
+        assert_eq!(val["session"]["id"], "synthetic-zed-1");
+        assert_eq!(val["session"]["summary"], "synthetic-summary");
+        assert_eq!(val["session"]["data"]["title"], "synthetic-title");
+        assert_eq!(val["session"]["data"]["messages"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn zed_corrupt_zstd_fails_closed() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "corrupt-zed-1",
+                "synthetic-summary",
+                "2026-10-03T10:00:00+00:00",
+                "zstd",
+                vec![0xDEu8, 0xAD, 0xBE, 0xEF],
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                "2026-10-03T09:00:00+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let result = read_zed_session(&db, &spec, "corrupt-zed-1");
+        assert!(result.is_err(), "corrupt zstd blob must fail closed");
     }
 }

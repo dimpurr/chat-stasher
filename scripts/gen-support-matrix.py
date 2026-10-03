@@ -1632,6 +1632,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Render and check the chat-stasher support matrix")
     ap.add_argument("--root", default=default_root(), help="repository root (default: this checkout)")
     ap.add_argument("--emit", choices=["short", "full", "both"], default="both")
+    ap.add_argument("--apply", action="store_true", help="update fixtures, README.md, and docs/support.md")
     ap.add_argument("--update-fixtures", action="store_true", help="rewrite the committed tables")
     ap.add_argument("--write-readme", metavar="PATH", help="replace the short block in this file")
     ap.add_argument("--write-docs", metavar="PATH", help="replace the full block in this file")
@@ -1652,6 +1653,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.selftest:
             return selftest()
+        if args.apply:
+            rc = update_fixtures(root)
+            if rc != 0:
+                return rc
+            rc = write_into_file(root, "README.md", "short")
+            if rc != 0:
+                return rc
+            return write_into_file(root, "docs/support.md", "full")
         if args.update_fixtures:
             return update_fixtures(root)
         if args.write_readme:

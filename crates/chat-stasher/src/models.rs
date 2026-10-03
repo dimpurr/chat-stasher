@@ -36,6 +36,7 @@ pub enum SqliteSessionLayout {
     CursorGlobal,
     CursorLegacy,
     Grok,
+    Zed,
 }
 
 impl HarnessSource {

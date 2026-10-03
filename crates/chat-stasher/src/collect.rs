@@ -68,8 +68,8 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-    read_openclaw_session, read_opencode_session, read_sqlite_session, sqlite_session_cursor,
-    sqlite_store_fingerprint, OpenCodeCursor,
+    read_openclaw_session, read_opencode_session, read_sqlite_session, read_zed_session,
+    sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, Context};
@@ -1316,6 +1316,32 @@ fn process_sqlite(
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
                 .map_err(|error| anyhow!("failed to read Grok session snapshot: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+                &store_fingerprint,
+            )
+        }
+        SqliteSessionLayout::Zed => {
+            let session_id = native_session_id(record, "Zed")?;
+            let spec = zed_schema();
+            let cursor = sqlite_session_cursor(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("failed to read Zed session cursor: {error}"))?;
+            if !force_reset && old.is_some_and(|entry| entry.opencode.as_ref() == Some(&cursor)) {
+                return Ok(unchanged_sqlite(
+                    record,
+                    old.expect("checked above"),
+                    &store_fingerprint,
+                ));
+            }
+            let snapshot = read_zed_session(&record.absolute_path, &spec, &session_id)
+                .map_err(|error| anyhow!("failed to read Zed session snapshot: {error}"))?;
             process_sqlite_snapshot(
                 record,
                 old,
