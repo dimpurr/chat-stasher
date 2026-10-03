@@ -20,7 +20,6 @@ import {
   PAGE_HOOK_STATE_KEY,
   PAGE_HOOK_VERSION,
   PLATFORMS,
-  WS_OBSERVED_MESSAGE,
   type ChatPlatform,
 } from './contract';
 import { CHATGPT_PAGED_DETAIL_PATTERN, CONVERSATION_SEEN_MESSAGE } from './platform-auth';
@@ -46,8 +45,6 @@ export interface PageHookOptions {
   readyMessage: string;
   stateKey: string;
   fetchMarkerKey: string;
-  /** Page message name for an observed WebSocket frame (not a capture). */
-  wsObservedMessage: string;
   version: string;
   /** Platform table; the hook matches against the CURRENT page's own origin. */
   platforms: ChatPlatform[];
@@ -110,7 +107,6 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
   readyMessage: MAIN_READY_MESSAGE,
   stateKey: PAGE_HOOK_STATE_KEY,
   fetchMarkerKey: PAGE_HOOK_FETCH_MARKER,
-  wsObservedMessage: WS_OBSERVED_MESSAGE,
   version: PAGE_HOOK_VERSION,
   platforms: PLATFORMS.map((platform) => ({
     ...platform,
@@ -570,18 +566,39 @@ export function installPageFetchHook(options: PageHookOptions): void {
   }
 
   const eventSourceConstructor = pageWindow.EventSource;
+  const eventSourcePlatform = options.platforms.find(
+    (platform) => platform.origins.includes(pageOrigin) && platform.eventSourceCapture === true,
+  ) ?? null;
   if (typeof eventSourceConstructor === 'function') {
     const eventSourceProxy = new Proxy(eventSourceConstructor, {
       construct(target, args, newTarget) {
         const source = Reflect.construct(target, args, newTarget) as EventSource;
         const url = String(args[0]);
-        const warn = () => warnUnsupportedTransport('sse', url);
-        source.addEventListener('open', warn, { once: true });
-        source.addEventListener('message', warn, { once: true });
+        if (!eventSourcePlatform) {
+          const warn = () => warnUnsupportedTransport('sse', url);
+          source.addEventListener('open', warn, { once: true });
+          source.addEventListener('message', warn, { once: true });
+          return source;
+        }
+        source.addEventListener('message', (event: MessageEvent) => {
+          try {
+            if (typeof event?.data !== 'string') return;
+            // EventSource exposes each event's data, not the HTTP response body.
+            // Capture only events that are themselves complete, response-shaped
+            // documents; deltas and protocol fragments are not assembled by guess.
+            captureCandidate(url, 'GET', 200, event.data);
+          } catch {
+            // Observation must never surface as a page-visible error.
+          }
+        });
         return source;
       },
     });
-    pageWindow.EventSource = eventSourceProxy;
+    try {
+      pageWindow.EventSource = eventSourceProxy;
+    } catch {
+      // Best-effort, with the failed patch reported below.
+    }
     // 🔴 W43 · Read back, for the same reason the fetch patch is read back: a
     //    refused assignment is silent in this bundle, and an EventSource the page
     //    kept is a transport we would otherwise claim to have covered.
@@ -592,9 +609,8 @@ export function installPageFetchHook(options: PageHookOptions): void {
 
   // ---- WebSocket ----------------------------------------------------------
   // Opt-in per platform row and OFF everywhere else: an origin only gets its
-  // frames looked at when its own row says webSocketCapture. Everything below
-  // is observation only — we never send a frame, never replace onmessage/send,
-  // and never keep the page from seeing its own events.
+  // frames looked at when its own row says webSocketCapture. We never send a
+  // frame, replace onmessage/send, or keep the page from seeing its own events.
   const wsUninstalledWarning =
     '[chat-stasher] websocket hook not installed on a websocket-declared origin';
   const wsPlatform =
@@ -602,7 +618,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
       (platform) => platform.origins.includes(pageOrigin) && platform.webSocketCapture === true,
     ) ?? null;
 
-  /** Returns true when the frame was observed, so the caller skips the "unsupported" warn. */
+  /** Captures complete response-shaped text frames; protocol fragments stay ignored. */
   const observeWebSocketFrame = (url: string, data: unknown): boolean => {
     if (!wsPlatform) return false;
     try {
@@ -618,17 +634,10 @@ export function installPageFetchHook(options: PageHookOptions): void {
       // "hooked it but parsed it wrong" failure this capability is meant to avoid.
       if (typeof data !== 'string' || data.length === 0) return false;
       if (new TextEncoder().encode(data).byteLength > options.maxRawBytes) return false;
-      post({
-        type: options.wsObservedMessage,
-        payload: {
-          platformId: wsPlatform.id,
-          url: parsed.href,
-          text: data,
-          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
-          observedAt: Date.now(),
-        },
-      });
-      return true;
+      // The capture contract names HTTP(S) platform origins. Map the socket
+      // scheme to its corresponding page origin before applying that contract.
+      captureCandidate(`${candidateOrigin}${parsed.pathname}${parsed.search}`, 'GET', 200, data);
+      return matchesShape(wsPlatform, data);
     } catch {
       return false;
     }
