@@ -79,7 +79,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Continue | macOS | `~/.continue/sessions/<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
 | Continue | Linux | `~/.continue/sessions/<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
 | Continue | Windows | `%USERPROFILE%\.continue\sessions\<id>.json + sessions.json` | json | source-confirmed | supported | https://raw.githubusercontent.com/continuedev/continue/main/core/util/paths.ts |
-| Kimi Code | macOS | `~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | source-confirmed | supported | - |
+| Kimi Code | macOS | `~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-10-03) | - |
 | Kimi Code | Linux | `$HOME/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | unascertained | not supported | - |
 | Kimi Code | Windows | `%USERPROFILE%\.kimi-code\sessions\<workspaceId>\<sessionId>\agents\main\wire.jsonl` | jsonl | unascertained | not supported | - |
 
@@ -111,7 +111,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Zed | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
-| Local | Kimi Code | - | normal | a real local store was read but no session has been archived end to end (git 2294f04) |
+| Local | Kimi Code | 2026-10-03 | normal | Activity bounds are inferred and partial when unrecognised wire operation types occur. |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |
