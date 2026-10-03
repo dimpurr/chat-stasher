@@ -906,9 +906,10 @@ fn build_risks(
         }
     }
 
-    // --- opencode / cursor / grok (single-SQLite stores, registry-driven) ----
+    // --- opencode / hermes-agent / cursor / grok (single-SQLite stores) -----
     for (fp_name, label) in [
         ("opencode", "opencode"),
+        ("hermes-agent", "Hermes Agent"),
         ("cursor", "Cursor"),
         ("grok", "Grok"),
     ] {
@@ -1799,15 +1800,16 @@ pub fn run() -> DoctorReport {
             .filter(|r| r.source == crate::models::HarnessSource::GeminiCli),
     ));
 
-    // opencode, Cursor and Grok are single-SQLite stores driven by the registry: their
+    // OpenCode, Hermes Agent, Cursor and Grok are single-SQLite stores driven by the registry: their
     // footprint rows are built straight from the registry probe results, so
     // the two tables can never disagree on count/bytes/times.
-    for id in ["opencode", "cursor", "grok"] {
+    for id in ["opencode", "hermes-agent", "cursor", "grok"] {
         match scan.probes.iter().find(|p| p.id == id) {
             Some(probe) => footprints.push(footprint_from_sqlite_probe(probe)),
             None => {
                 let root = match id {
                     "opencode" => scanner::xdg_data_home().join("opencode/opencode.db"),
+                    "hermes-agent" => home.join(".hermes/state.db"),
                     "cursor" => home
                         .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
                     _ => home.join(".grok/sessions/session_search.sqlite"),

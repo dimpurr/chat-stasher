@@ -14,6 +14,7 @@ pub enum HarnessSource {
     Codex,
     GeminiCli,
     OpenCode,
+    HermesAgent,
     Cursor,
     Grok,
     CopilotCli,
@@ -31,6 +32,7 @@ pub enum HarnessSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqliteSessionLayout {
     OpenCode,
+    HermesAgent,
     CursorGlobal,
     CursorLegacy,
     Grok,
@@ -45,6 +47,7 @@ impl HarnessSource {
             HarnessSource::Codex => "codex",
             HarnessSource::GeminiCli => "gemini-cli",
             HarnessSource::OpenCode => "opencode",
+            HarnessSource::HermesAgent => "hermes-agent",
             HarnessSource::Cursor => "cursor",
             HarnessSource::Grok => "grok",
             HarnessSource::CopilotCli => "github-copilot-cli",
@@ -65,6 +68,7 @@ impl HarnessSource {
             "codex" => Some(HarnessSource::Codex),
             "gemini-cli" => Some(HarnessSource::GeminiCli),
             "opencode" => Some(HarnessSource::OpenCode),
+            "hermes-agent" => Some(HarnessSource::HermesAgent),
             "cursor" => Some(HarnessSource::Cursor),
             "grok" => Some(HarnessSource::Grok),
             "github-copilot-cli" => Some(HarnessSource::CopilotCli),

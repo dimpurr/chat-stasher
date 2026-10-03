@@ -674,6 +674,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("codex", "jsonl"),
     ("gemini-cli", "json"),
     ("opencode", FORMAT_SQLITE),
+    ("hermes-agent", FORMAT_SQLITE),
     ("cursor", FORMAT_SQLITE),
     ("grok", FORMAT_SQLITE),
     ("github-copilot-cli", "jsonl"),
@@ -761,6 +762,7 @@ fn export_reader(raw: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(first).ok()?;
     match export_schema(&value)? {
         "chat-stasher.opencode.session.v1" => Some("opencode".to_string()),
+        "chat-stasher.hermes-agent.session.v1" => Some("hermes-agent".to_string()),
         "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
         "chat-stasher.sqlite.session.v1" => {
             match value.get("table").and_then(serde_json::Value::as_str) {
@@ -2743,6 +2745,11 @@ mod tests {
             (
                 "opencode",
                 br#"{"schema":"chat-stasher.opencode.session.v1","session":{"id":"s1","time_created":1770000000000,"time_updated":1770000000001},"messages":[{"id":"m1","session_id":"s1","time_created":1770000000000,"time_updated":1770000000000,"data":{"role":"user"},"parts":[{"id":"p1","message_id":"m1","session_id":"s1","time_created":1770000000000,"time_updated":1770000000000,"data":{"type":"text","text":"synthetic question"}}]}],"orphan_parts":[]}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                "hermes-agent",
+                br#"{"schema":"chat-stasher.hermes-agent.session.v1","session":{"id":"s1","model":"session-model"},"messages":[{"id":1,"session_id":"s1","role":"user","content":"synthetic question","active":0,"compacted":1}],"session_model_usage":[{"model":"session-model","billing_provider":"session-provider","input_tokens":7,"actual_cost_usd":0.4}]}"#,
                 Expected::Text("synthetic question"),
             ),
             (

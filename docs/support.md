@@ -36,6 +36,21 @@ The generated tables also carry three columns that no capture run fills in for y
 
 If a tool keeps its sessions somewhere else on your machine, set its path under `[harness_roots]` ([config.md](config.md#harness_roots)). A path you set is always scanned, whatever the table says.
 
+## Hermes Agent
+
+The CLI scanner reads `~/.hermes/state.db` through a SQLite read-only
+connection. SQLite resolves committed WAL records as part of that read, so the
+scanner does not rely on copying only the main database file. Sessions and
+messages are exported as source-shaped records, including inactive and
+compacted messages. The `session_model_usage` rows are preserved separately as
+session-level provider, model, token, and cost metadata; they are not assigned
+to individual messages.
+
+For older installations, `~/.hermes/sessions/*.json` and `*.jsonl` are also
+scanned. Files with a native session ID already present in `state.db` are
+deduplicated against the database session. SQLite schema mismatches and read
+errors remain visible as scan uncertainty rather than an empty session list.
+
 ## The support matrix
 
 <!-- support-matrix:full:start -->
@@ -55,6 +70,9 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | opencode | macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
 | opencode | Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
 | opencode | Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
+| Hermes Agent | macOS | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
+| Hermes Agent | Linux | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
+| Hermes Agent | Windows | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
 | Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
@@ -100,6 +118,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Local | OpenAI Codex CLI | 2026-09-25 | normal | - |
 | Local | Gemini CLI | 2026-09-25 | normal | the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often |
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
+| Local | Hermes Agent | - | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |
 | Local | Grok (xAI CLI) | - | low | a real local store was read but no session has been archived end to end (git 2294f04) |
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |

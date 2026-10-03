@@ -49,7 +49,7 @@
 # so this script cannot drift from the data file it is about. On Linux the
 # shipped cells leave five harnesses seedable:
 #
-#   claude-code · codex · gemini-cli · opencode · cursor
+#   claude-code · codex · gemini-cli · opencode · hermes-agent · cursor
 #
 # `codex` needs one configured line on Linux/Windows and this script writes it
 # (see the CODEX note at the init step). The other seven are *not* seeded, each
@@ -347,6 +347,33 @@ def plant_opencode(root, n):
     conn.commit(); conn.close()
 
 
+def plant_hermes(root, n):
+    # src/sqlite_probe.rs (hermes_snapshot_keeps_inactive_messages_and_separate_session_usage):
+    # preserve all message rows and session-level usage aggregates. The usage
+    # row stays separate because Hermes does not attribute model/provider to
+    # individual message rows.
+    conn = sqlite_at(root)
+    conn.executescript(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT);"
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT,"
+        " content TEXT, timestamp TEXT, active INTEGER, compacted INTEGER, _compressed_summary TEXT);"
+        "CREATE TABLE session_model_usage (session_id TEXT, model TEXT, billing_provider TEXT,"
+        " input_tokens INTEGER, output_tokens INTEGER, actual_cost_usd REAL);"
+    )
+    for i in range(n):
+        session_id = f"hermes-session-{i}"
+        conn.execute("INSERT INTO sessions VALUES (?,?,?)", (session_id, "cli", "model-fixture"))
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
+            (i + 1, session_id, "user", "synthetic Hermes prompt", "2026-01-01T00:00:00Z", 0, 1, "synthetic summary"),
+        )
+        conn.execute(
+            "INSERT INTO session_model_usage VALUES (?,?,?,?,?,?)",
+            (session_id, "model-fixture", "provider-fixture", 11, 7, 0.25),
+        )
+    conn.commit(); conn.close()
+
+
 def plant_cursor(root, n):
     # tests/doctor_consistency_test.rs (plant_cursor_db): cursorDiskKV with
     # `composerData:%` keys and a `createdAt` inside the JSON value.
@@ -400,6 +427,7 @@ RECIPES = {
     "codex": (1, plant_codex),
     "gemini-cli": (2, plant_gemini),
     "opencode": (3, plant_opencode),
+    "hermes-agent": (1, plant_hermes),
     "cursor": (2, plant_cursor),
     "grok": (1, plant_grok),
     "kimi-code": (1, plant_kimi),
