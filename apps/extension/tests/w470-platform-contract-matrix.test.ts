@@ -10,7 +10,7 @@ import {
 
 const CAPTURED_AT = 1;
 
-function bodyWithPaths(paths: readonly string[]): Record<string, unknown> {
+function bodyWithPaths(paths: readonly string[], leaf: unknown = 'x'): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   for (const path of paths) {
     const parts = path.split('.');
@@ -22,7 +22,7 @@ function bodyWithPaths(paths: readonly string[]): Record<string, unknown> {
       }
       current = current[part] as Record<string, unknown>;
     }
-    current[parts.at(-1)!] = 'x';
+    current[parts.at(-1)!] = leaf;
   }
   return body;
 }
@@ -36,7 +36,12 @@ function minimumResponse(platform: ChatPlatform): string {
     ...(shape.requiredPaths ?? []),
     ...((shape.requiredAnyPaths ?? []).slice(0, 1)),
   ];
-  return JSON.stringify(bodyWithPaths(paths));
+  const body = {
+    ...bodyWithPaths(paths),
+    // An array path is satisfied by an EMPTY array: `[]` is a measurement.
+    ...bodyWithPaths(shape.requiredArrayPaths ?? [], []),
+  };
+  return JSON.stringify(body);
 }
 
 function missingRequiredResponse(platform: ChatPlatform): string {
