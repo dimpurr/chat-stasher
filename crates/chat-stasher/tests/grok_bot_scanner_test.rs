@@ -118,5 +118,16 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
             .find(|probe| probe.id == "grok-bot")
             .unwrap();
         assert!(probe.note.contains("macOS only"));
+        // Grok Bot has no cell for this platform and no app that could run
+        // here, so the probe must land on B82's "no cell for this platform"
+        // state — `not_applicable`, not "unknown" ("might exist, we did not
+        // look"), and never inside the unlooked-harness count.
+        assert_eq!(probe.state, scanner::ProbeState::SkipWrongPlatform);
+        assert!(!probe.not_probed_p());
+        let count = scanner::probe_session_count(probe);
+        assert!(matches!(
+            count,
+            chat_stasher::json_out::CountState::NotApplicable { .. }
+        ));
     }
 }

@@ -908,8 +908,22 @@ fn probe_harness(
         note: String::new(),
     };
 
+    // grok-bot is the one harness whose source cannot exist off macOS: the
+    // Grok Bot desktop app has no Linux or Windows build, and the registry
+    // records a macOS cell only (the `no {platform} registry entry` note the
+    // generic path below would produce loses the more specific reason, so it
+    // is spelled here instead). The state word is B82's own for "the registry
+    // has no cell for this platform": `SkipWrongPlatform`, whose count is
+    // `not_applicable` and which must not be counted as an unlooked harness —
+    // there is nothing on this machine to have missed, which is a different
+    // claim from "did not look". `SkipUnresolvable` would word it as the
+    // latter and answer "unknown" — wrong for an app this platform cannot
+    // install. The platform gate outranks a configured root, so a grok-bot
+    // path written into the config on Linux or Windows does not turn the
+    // reader on there either.
     if h.id == "grok-bot" && platform != "macos" {
         return HarnessProbe {
+            state: ProbeState::SkipWrongPlatform,
             note: "Grok Bot local persistence reader is supported on macOS only".to_string(),
             ..base
         };
