@@ -552,10 +552,17 @@
     {
       "id": "grok-bot",
       "display_name": "Grok Bot",
-      "surface": "agent-platform",
-      "ingest": "inbox",
-      "paths": {},
-      "notes": "Transcript bundles are supplied by the Grok Bot and ingested through the inbox. No local session-store path is scanned."
+      "product_group": "agent-platforms",
+      "known_issue": "local transcript replicas are partial and may contain sequence gaps; completeness is not established",
+      "paths": {
+        "macos": {
+          "template": "~/Library/Application Support/Grok Bot/",
+          "format": "json",
+          "confidence": "unascertained",
+          "source": "Option 1 measurement: app-local sand-client-persistence stores transcript.replicas.<agent-uuid>; the local reader path is not implemented in this change."
+        }
+      },
+      "notes": "Option 1 uses the Grok Bot desktop app's local persistence on disk. Replica data is a partial observation and is not read through an inbox bundle."
     },
     {
       "id": "github-copilot-cli",

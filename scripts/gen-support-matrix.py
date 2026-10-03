@@ -41,10 +41,7 @@ and must not collapse into one glyph:
                                  one OS cell is source-confirmed / official-docs
                                  / measured-locally), or the extension ships the
                                  platform in its stable channel with source-backed
-                                 capture, or a pathless `surface: agent-platform`,
-                                 `ingest: inbox` harness accepts bundles. The
-                                 scanner path cells remain absent for that row.
-                                 End-to-end is not claimed.
+                                 capture. End-to-end is not claimed.
     experimental                 registered, but enabled only in the extension's
                                  dev build (`channel: experimental`).
     uncertain (unverified)       registered on a community claim only, or the
@@ -746,7 +743,7 @@ def render_short(
     for h in harnesses:
         st = harness_status(h)
         cell = last_verified_cell(harness_verified(h), as_of)
-        surface = "Agent platform" if h.get("surface") == "agent-platform" else "Local"
+        surface = "Agent platform" if h.get("product_group") == "agent-platforms" else "Local"
         out.append(
             f"| {surface} | {esc(h.get('display_name') or h['id'])} | {esc(st)} | {esc(cell)} |"
         )
@@ -789,7 +786,6 @@ def render_full(
         name = h.get("display_name") or h["id"]
         verified = harness_verified(h)
         ref = (h.get("reference") or {}).get("source_url", "")
-<<<<<<< HEAD
         for root_name, paths in harness_root_entries(h):
             for os_name in OS_ORDER:
                 cell = paths.get(os_name)
@@ -802,16 +798,6 @@ def render_full(
                     )
                     continue
                 source = first_url(cell.get("source", "")) or first_url(ref)
-=======
-        for os_name in OS_ORDER:
-            cell = paths.get(os_name)
-            status = (
-                harness_status(h)
-                if cell is None and is_pathless_inbox_agent(h)
-                else cell_status(cell, verified)
-            )
-            if cell is None:
->>>>>>> 87db56f (Add Grok Bot registry and agent platform group)
                 out.append(
                     "| {name} | {os} | {template} | {fmt} | {conf} | {status} | {src} |".format(
                         name=esc(label),
@@ -848,7 +834,7 @@ def render_full(
     out.append("| Surface | Tool or platform | Last verified | Dev priority | Known issue |")
     out.append("|---|---|---|---|---|")
     for h in harnesses:
-        surface = "Agent platform" if h.get("surface") == "agent-platform" else "Local"
+        surface = "Agent platform" if h.get("product_group") == "agent-platforms" else "Local"
         out.append(
             "| {surface} | {name} | {when} | {prio} | {issue} |".format(
                 surface=surface,
@@ -1213,8 +1199,15 @@ _SELFTEST_REGISTRY = {
         {
             "id": "agent-fixture",
             "display_name": "Agent fixture",
-            "surface": "agent-platform",
-            "ingest": "inbox",
+            "product_group": "agent-platforms",
+            "paths": {
+                "macos": {
+                    "template": "~/Library/Application Support/Agent fixture/",
+                    "format": "json",
+                    "confidence": "unascertained",
+                    "source": "synthetic fixture",
+                }
+            },
         },
     ],
 }
@@ -1315,14 +1308,7 @@ def selftest() -> int:
         probe("source-confirmed cell is supported", harness_status(by_id["alpha"]) == STATUS_SUPPORTED)
         probe("community-only cell is uncertain", harness_status(by_id["beta"]) == STATUS_UNCERTAIN)
         probe("all-unascertained cell is not supported", harness_status(by_id["gamma"]) == STATUS_UNSUPPORTED)
-        probe("pathless inbox agent is supported before end-to-end evidence", harness_status(by_id["agent-fixture"]) == STATUS_SUPPORTED)
-        probe(
-            "an inbox agent with scanner paths does not borrow pathless support",
-            harness_status({
-                **by_id["agent-fixture"],
-                "paths": {"linux": {"confidence": "unascertained"}},
-            }) == STATUS_UNSUPPORTED,
-        )
+        probe("unascertained agent platform is not supported", harness_status(by_id["agent-fixture"]) == STATUS_UNSUPPORTED)
         probe(
             "verified record wins and carries its date",
             harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
@@ -1471,16 +1457,10 @@ def selftest() -> int:
         ))
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
         probe("full table carries the verified date", "(2026-09-15)" in full)
-        probe(
-            "pathless inbox agent has no scanner paths but remains supported",
-            all(
-                f"| Agent fixture | {os_label} | {ABSENT} | {ABSENT} | {ABSENT} | supported | {ABSENT} |" in full
-                for os_label in OS_LABEL.values()
-            ),
-        )
+        probe("agent platform path remains explicitly unascertained", "| Agent fixture | macOS | `~/Library/Application Support/Agent fixture/` | json | unascertained | not supported | - |" in full)
         verified_agent = {**by_id["agent-fixture"], "verified": {"date": "2026-09-25", "scope": "synthetic probe"}}
         probe(
-            "pathless inbox agent reports verification only after dated evidence",
+            "agent-platform verification still requires dated evidence",
             harness_status(verified_agent) == f"{STATUS_VERIFIED} (2026-09-25)",
         )
         probe(

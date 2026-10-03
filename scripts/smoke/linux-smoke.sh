@@ -682,7 +682,7 @@ step "2/8 · doctor on a machine with nothing configured"
 # This run is the honest-absence half of the smoke. Nothing is configured yet, so
 # the registry alone decides which harnesses get looked at — and the invariant
 # this repository exists for has to hold here: a harness the registry declines to
-# probe never gets a measured zero. Its count stays unknown or not applicable.
+# probe is `unknown`, and an unknown is never rendered as `0`.
 DOCTOR_JSON="$WORK/doctor-pristine.json"
 rc=0; "$INSTALLED" doctor --json >"$DOCTOR_JSON" 2>"$WORK/doctor-pristine.err" || rc=$?
 check "doctor --json exits 0" 0 "$rc"
@@ -704,13 +704,9 @@ missing = [h["id"] for h in registry["harnesses"] if h["id"] not in probes]
 if missing:
     bad.append(f"registry harnesses absent from the probe table: {missing}")
 
-# Invariant 1, applied to the smoke itself: a skip must never carry a count,
-# and the two skip shapes say different things — `unknown` ("did not look")
-# versus `not_applicable` ("no cell for this platform, nothing here to count").
-# Either direction can break, and either break would make every number below
-# mean nothing: a skip rendered as 0 turns "did not scan" into "checked and
-# empty", and a no-cell harness rendered as `unknown` says "might have missed
-# something" about an app this platform cannot install.
+# A skip must never carry a count, and the two skip shapes say different
+# things — `unknown` ("did not look") versus `not_applicable` ("no cell for
+# this platform, nothing here to count").
 SKIP_COUNT_KIND = {
     "skip_unascertained": "unknown",
     "skip_unresolvable": "unknown",
@@ -913,9 +909,6 @@ for hid, want in sorted(seeded.items()):
 # asserted rather than left implicit.
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
-    # A pathless inbox product such as Grok Bot has no scanner root to check.
-    # Keep it explicitly skipped for this platform with a not-applicable count.
-    "no_cell_for_platform": "skip_wrong_platform",
     "template_unresolvable": "skip_unresolvable",
     "cell_rejects_json": "missing",
     "id_not_keyable": "missing",

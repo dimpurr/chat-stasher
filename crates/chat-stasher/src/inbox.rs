@@ -1580,13 +1580,19 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     Ok(out)
 }
 
-/// `grok-bot-<sessionId>.json` -> (`grok-bot`, `<sessionId>`), with the same
-/// fallback for every bundle platform. An unknown prefix remains `unknown`;
-/// malformed content must never be relabelled as DeepSeek by default.
+/// `grok-<sessionId>.json` -> (`grok`, `<sessionId>`), with the same fallback
+/// for every web bundle platform. An unknown prefix remains `unknown`;
+/// malformed content must never be relabelled as a supported platform.
 fn native_identity_from_name(name: &str) -> (String, String) {
     let name = name.strip_suffix(PART_SUFFIX).unwrap_or(name);
     let stem = name.strip_suffix(".json").unwrap_or(name);
-    let platform = crate::activity::BUNDLE_HARNESSES
+    // `grok-bot-` shares the `grok-` web-bundle prefix. Keep the desktop
+    // product out of inbox routing rather than interpreting its files as web
+    // bundles with a `bot-…` session id.
+    if stem.starts_with("grok-bot-") {
+        return ("unknown".to_string(), stem.to_string());
+    }
+    let platform = crate::activity::WEB_HARNESSES
         .iter()
         .copied()
         .filter(|platform| stem.starts_with(&format!("{platform}-")))
@@ -2222,16 +2228,21 @@ mod tests {
     }
 
     #[test]
-    fn non_json_filename_fallback_keeps_grok_bot_and_unknown_prefixes_honest() {
-        let grok = parse_bundle("grok-bot-x.json", b"not json").unwrap();
-        assert_eq!(grok.platform, "grok-bot");
+    fn malformed_bundle_fallback_keeps_web_platform_and_unknown_prefixes_honest() {
+        let grok = parse_bundle("grok-x.json", b"not json").unwrap();
+        assert_eq!(grok.platform, "grok");
         assert_eq!(grok.session_id, "x");
-        assert_eq!(grok.id, "grok-bot.x");
+        assert_eq!(grok.id, "grok.x");
 
         let unknown = parse_bundle("mystery-x.json", b"not json").unwrap();
         assert_eq!(unknown.platform, "unknown");
         assert_eq!(unknown.session_id, "mystery-x");
         assert_eq!(unknown.id, "unknown.mystery-x");
+
+        let grok_bot = parse_bundle("grok-bot-x.json", b"not json").unwrap();
+        assert_eq!(grok_bot.platform, "unknown");
+        assert_eq!(grok_bot.session_id, "grok-bot-x");
+        assert_eq!(grok_bot.id, "unknown.grok-bot-x");
     }
 
     #[test]

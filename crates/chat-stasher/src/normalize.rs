@@ -243,8 +243,8 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
 }
 
 /// The harnesses this build reads as a conversation. This is the registry: one
-/// arm per extractor file, one row for the bundle ids whose archived line is
-/// an inbox envelope (see [`is_bundle`], whose reader is the generic one),
+/// arm per extractor file, one row for the web-platform ids whose archived line
+/// is an inbox bundle (see [`is_web_bundle`], whose reader is the generic one),
 /// and the `""` row that carries no harness id at all (it keeps the structural
 /// attempt and its distinct provenance-unknown state). Every other id — the
 /// registry harnesses with no extractor yet (github-copilot-cli, aider, crush,
@@ -267,7 +267,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "deepseek"
             | "claude"
             | ""
-    ) || is_bundle(harness)
+    ) || is_web_bundle(harness)
 }
 
 /// A harness whose archived line is an inbox bundle rather than a message line:
@@ -279,10 +279,10 @@ fn harness_has_a_reader(harness: &str) -> bool {
 /// whose `raw.text` is not JSON is a body this reader cannot read at all, and
 /// stays counted.
 ///
-/// `activity::BUNDLE_HARNESSES` is the same list the capture side uses, so
-/// this rule cannot drift away from the archived line shape it names.
-fn is_bundle(harness: &str) -> bool {
-    crate::activity::BUNDLE_HARNESSES.contains(&harness)
+/// `activity::WEB_HARNESSES` is the same list the capture side and the time
+/// reader use, so this rule cannot drift away from the line shape it names.
+fn is_web_bundle(harness: &str) -> bool {
+    crate::activity::WEB_HARNESSES.contains(&harness)
 }
 
 fn mark_raw_view_only(harness: &str, conversation: &mut Conversation) {
@@ -319,11 +319,13 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         // claim, the provenance-unknown state is already recorded, and the
         // envelope probe below is the only honest structural attempt left.
         "" => normalize_generic(value, conversation),
-        // A bundle harness with no extractor of its own lands here: its
-        // archived line is an inbox envelope rather than the platform's body,
-        // so the body is unwrapped and read by the generic reader. Platforms
-        // with dedicated extractors are matched above and never reach this arm.
-        _ if is_bundle(harness) => match payload(value) {
+        // A web platform with no extractor of its own lands here: its archived
+        // line is an inbox bundle rather than the platform's body, so the body
+        // is unwrapped and read by the generic reader — the platform is read
+        // rather than counted as one unreadable bundle. The three web platforms
+        // that do have an extractor of their own are matched above and never
+        // reach this arm.
+        _ if is_web_bundle(harness) => match payload(value) {
             Some(body) => normalize_generic(&body, conversation),
             None => conversation.unrendered_lines += 1,
         },
@@ -982,21 +984,6 @@ mod tests {
             "the `\"message\": null` root carries no message at all, so it is a \
              mapping node with nothing to render — not a line the reader lost"
         );
-    }
-
-    #[test]
-    fn grok_bot_uses_the_bundle_reader_without_web_time_classification() {
-        let payload = r#"{"messages":[{"role":"user","content":"synthetic prompt"},{"role":"assistant","content":"synthetic reply"}]}"#;
-        let line = serde_json::json!({ "raw": { "text": payload } }).to_string();
-        let result = normalize("grok-bot", &line);
-        assert_eq!(result.messages.len(), 2);
-        assert!(matches!(
-            result.provenance,
-            Provenance::Known { ref source } if source == "grok-bot"
-        ));
-        assert!(is_bundle("grok-bot"));
-        assert!(!crate::activity::WEB_HARNESSES.contains(&"grok-bot"));
-        assert!(crate::activity::WEB_HARNESSES.contains(&"grok"));
     }
 
     #[test]
