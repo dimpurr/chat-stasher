@@ -40,7 +40,7 @@ use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
     enumerate_cursor_legacy_sessions, enumerate_openclaw_sessions, enumerate_opencode_sessions,
     enumerate_sqlite_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
-    CursorLegacySessionRow, OpenClawSessionEnumeration, SqliteSessionProbe, SqliteSessionRow,
+    CursorLegacySessionRow, SqliteSessionProbe, SqliteSessionRow,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -429,7 +429,12 @@ pub struct RegistryCell {
 pub struct SessionDirRule {
     /// Root-relative directory glob for the session directory. Slash-separated
     /// components support patterns such as `*` and `*/*`; each component uses
-    /// the same `*` glob syntax as [`RegistryCell::session_pattern`].
+    /// the same `*` glob syntax as [`RegistryCell::session_pattern`]. A
+    /// leading `**` component matches zero or more whole directories, so a
+    /// rule like `**/session_*` recognizes a session directory at any depth
+    /// below the root — for harnesses whose session directories can nest
+    /// inside one another. Without `**` the pattern names one exact depth,
+    /// and a directory inside a matched session keeps that session's id.
     pub pattern: String,
     /// Literal path from that directory to the transcript file, `/`-separated
     /// on every platform (compared component by component, so a Windows
@@ -2443,8 +2448,9 @@ struct DirectoryScan {
 enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
-    /// First matching session-directory ancestor below the declared root:
-    /// its path, and its name — the native id. Descendants keep this scope.
+    /// Nearest matching session-directory ancestor below the declared root:
+    /// its path, and its name — the native id. A descendant that matches the
+    /// rule itself replaces the scope; one that does not inherits it unchanged.
     In { dir: PathBuf, id: String },
 }
 
@@ -2456,13 +2462,15 @@ fn descend_scope(
     root: &Path,
     rule: Option<&SessionDirRule>,
 ) -> SessionScope {
-    // A broad rule such as `*` names the session directories immediately
-    // below the declared root. Once one is found, nested implementation
-    // directories (`.system_generated/logs`, for example) remain inside that
-    // same session rather than replacing its native id.
-    if matches!(parent, SessionScope::In { .. }) {
-        return parent.clone();
-    }
+    // A pattern without `**` names one exact depth below the root, so a
+    // directory inside a matched session sits deeper than the pattern, can
+    // never match again, and inherits the enclosing session's id — which is
+    // what keeps implementation directories (`.system_generated/logs`, for
+    // example) inside the session that owns them. A leading `**` component
+    // matches zero or more whole directories, so a rule like
+    // `**/session_*` recognizes a session directory at any depth — the shape
+    // a harness whose session directories can nest inside one another needs,
+    // because there the inner directory owns its transcript.
     let Some(rule) = rule else {
         return parent.clone();
     };
@@ -2478,11 +2486,22 @@ fn descend_scope(
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    if components.len() != pattern.len()
-        || !components
-            .iter()
-            .zip(pattern)
-            .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
+    let (depth_free, literal): (bool, &[&str]) = match pattern.split_first() {
+        Some((&"**", rest)) => (true, rest),
+        _ => (false, pattern.as_slice()),
+    };
+    if components.len() < literal.len() || (literal.is_empty() && !depth_free) {
+        return parent.clone();
+    }
+    let window: &[String] = if depth_free {
+        &components[components.len() - literal.len()..]
+    } else {
+        &components
+    };
+    if !window
+        .iter()
+        .zip(literal)
+        .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
     {
         return parent.clone();
     }
