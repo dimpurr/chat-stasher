@@ -275,6 +275,8 @@ export interface ResponseShape {
   encoding: 'json' | 'text';
   /** Every listed path must be present for JSON responses. */
   requiredPaths?: readonly string[];
+  /** Every listed path must resolve to an array for JSON responses. */
+  requiredArrayPaths?: readonly string[];
   /** At least one listed path must be present for JSON responses. */
   requiredAnyPaths?: readonly string[];
   /** Every listed marker must be present for text responses. */
@@ -668,7 +670,7 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       // warning. Required (not "any of"): a body without `messages` is the drift
       // case, so it must fail the shape gate and be warned about rather than
       // pass through as an empty-looking capture.
-      requiredPaths: ['messages'],
+      requiredArrayPaths: ['messages'],
     },
     // 🔴 Measured 2026-09-14: chat ids appear in `/chat/<id>`, and the ids seen
     // have more than one shape (one hex-like, one alphanumeric), so the character
@@ -1080,9 +1082,11 @@ export function matchesResponseShape(platform: ChatPlatform, text: string): bool
     return false;
   }
   const requiredPaths = shape.requiredPaths ?? [];
+  const requiredArrayPaths = shape.requiredArrayPaths ?? [];
   const requiredAnyPaths = shape.requiredAnyPaths ?? [];
   return (
     requiredPaths.every((path) => hasUsablePath(body, path)) &&
+    requiredArrayPaths.every((path) => Array.isArray(getJsonPath(body, path))) &&
     (requiredAnyPaths.length === 0 || requiredAnyPaths.some((path) => hasUsablePath(body, path)))
   );
 }

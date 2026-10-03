@@ -1,0 +1,1 @@
+{"messages":[{"id":"fixture-message-01","parentId":"","role":"assistant","status":"MESSAGE_STATUS_COMPLETED","blocks":[{"blockType":"BLOCK_TYPE_TEXT","text":"opaque-fixture-payload"}],"scenario":"SCENARIO_K2","createTime":"2026-09-01T00:00:00.000Z","isGoal":false}]}

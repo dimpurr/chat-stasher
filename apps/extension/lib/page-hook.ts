@@ -121,6 +121,9 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
     responseShape: {
       ...platform.responseShape,
       requiredPaths: platform.responseShape.requiredPaths ? [...platform.responseShape.requiredPaths] : undefined,
+      requiredArrayPaths: platform.responseShape.requiredArrayPaths
+        ? [...platform.responseShape.requiredArrayPaths]
+        : undefined,
       requiredAnyPaths: platform.responseShape.requiredAnyPaths ? [...platform.responseShape.requiredAnyPaths] : undefined,
       requiredTextIncludes: platform.responseShape.requiredTextIncludes
         ? [...platform.responseShape.requiredTextIncludes]
@@ -296,9 +299,11 @@ export function installPageFetchHook(options: PageHookOptions): void {
       return false;
     }
     const requiredPaths = shape.requiredPaths ?? [];
+    const requiredArrayPaths = shape.requiredArrayPaths ?? [];
     const requiredAnyPaths = shape.requiredAnyPaths ?? [];
     return (
       requiredPaths.every((path) => hasUsablePath(body, path)) &&
+      requiredArrayPaths.every((path) => Array.isArray(getJsonPath(body, path))) &&
       (requiredAnyPaths.length === 0 || requiredAnyPaths.some((path) => hasUsablePath(body, path)))
     );
   };
