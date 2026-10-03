@@ -15,6 +15,7 @@ mod antigravity;
 /// [`harness_has_a_reader`] — and never a generic guess about its shape.
 mod codex;
 mod cursor;
+mod deepseek_harness;
 mod gemini_cli;
 mod grok_cli;
 mod hermes_agent;
@@ -265,6 +266,11 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "grok"
             | "chatgpt"
             | "deepseek"
+            // The local DeepSeek Harness (`dsh`) is a different harness from the
+            // `deepseek` web platform above: one archives a session log on this
+            // machine, the other an inbox bundle from deepseek.com. The ids are
+            // deliberately not abbreviable to `deepseek`.
+            | "deepseek-harness"
             | "claude"
             | ""
     ) || is_web_bundle(harness)
@@ -301,6 +307,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
     match harness {
         "claude-code" => normalize_cli_line(harness, value, conversation),
         "codex" => codex::normalize_line(value, conversation),
+        "deepseek-harness" => deepseek_harness::record(value, conversation),
         "gemini-cli" => gemini_cli::document(value, conversation),
         "google-antigravity" => antigravity::normalize_line(value, conversation),
         "kimi-code" => kimi_code::record_or_count(value, conversation),
