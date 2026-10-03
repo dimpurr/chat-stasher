@@ -308,6 +308,10 @@ export interface ChatPlatform {
   methods: readonly string[];
   status: { min: number; max: number };
   responseShape: ResponseShape;
+  /** Optional JSON paths that identify a stream snapshot's turn and completion state. */
+  streamTurnIdPaths?: readonly string[];
+  /** A snapshot is archived only when one configured path is `true` or a done status. */
+  streamCompletionPaths?: readonly string[];
   /** Regex source strings; the first capture group is the session id. */
   sessionIdPatterns: readonly string[];
   /** Source-backed is not the same as live verified. */
