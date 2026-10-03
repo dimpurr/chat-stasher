@@ -283,7 +283,8 @@
       "id": "grok-bot",
       "display_name": "Grok Bot (desktop)",
       "dev_priority": "low",
-      "known_issue": "local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness",
+      "product_group": "agent-platforms",
+      "known_issue": "local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness",
       "paths": {
         "macos": {
           "template": "~/Library/Application Support/Grok Bot/",
@@ -292,7 +293,7 @@
           "source": "measured locally (W321): blobs are named by the unpadded lowercase base32 of their state keys; replica keys end in transcript.replicas.<agent-uuid>; a roster blob carries agent names"
         }
       },
-      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness.",
+      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness. This local persistence is read through the macOS Grok Bot adapter, not an inbox bundle; the partial replicas do not establish complete history.",
       "seal_policy": "not-applicable",
       "seal_source": "read-only replica blobs are never renamed or modified",
       "reference": {
@@ -351,21 +352,6 @@
         "license_url": "unascertained",
         "verification": "candidate upstream repo URL returned HTTP 404 in this curl round; did not write the locally measured file as an upstream file."
       }
-    },
-    {
-      "id": "grok-bot",
-      "display_name": "Grok Bot",
-      "product_group": "agent-platforms",
-      "known_issue": "local transcript replicas are partial and may contain sequence gaps; completeness is not established",
-      "paths": {
-        "macos": {
-          "template": "~/Library/Application Support/Grok Bot/",
-          "format": "json",
-          "confidence": "unascertained",
-          "source": "Option 1 measurement: app-local sand-client-persistence stores transcript.replicas.<agent-uuid>; the local reader path is not implemented in this change."
-        }
-      },
-      "notes": "Option 1 uses the Grok Bot desktop app's local persistence on disk. Replica data is a partial observation and is not read through an inbox bundle."
     },
     {
       "id": "github-copilot-cli",

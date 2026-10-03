@@ -129,7 +129,6 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "cursor",
     "gemini-cli",
     "github-copilot-cli",
-    "grok-bot",
     "kimi-code",
     "opencode",
     "openclaw",
@@ -507,7 +506,6 @@ mod tests {
         // And an id this build has never heard of — the new-platform case the
         // TODO's fixture asks for — is ungrouped, not guessed.
         assert_eq!(group_of("omega-web"), PlatformGroup::Ungrouped);
-        assert_eq!(group_of("grok-bot"), PlatformGroup::CodingAgents);
         assert_eq!(
             group_of("brand-new-platform-from-the-extension"),
             PlatformGroup::Ungrouped

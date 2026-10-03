@@ -171,9 +171,8 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Agent platform | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | Grok Bot (desktop) | supported | - |
+| Agent platform | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | supported | - |
-| Agent platform | Grok Bot | not supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
