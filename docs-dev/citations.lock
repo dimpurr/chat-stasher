@@ -613,12 +613,12 @@ crates/chat-stasher/src/doctor.rs:2364-2425  7c29760692b2  lines=62
   <- docs-dev/install.md:1009  :: pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndex…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1460-1680  b6dd6f684adc  lines=221
-  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1682-1697  c572ae968c6b  lines=16
-  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: pub fn clear(&self) -> Result<bool> {
-crates/chat-stasher/src/fts.rs:2131-2140  64fcac75f933  lines=10
-  <- docs-dev/threat-model.md:921  :: #[cfg(unix)]
+crates/chat-stasher/src/fts.rs:1460-1680  fad1760f626c  lines=221
+  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: /// reason and the rest of the archive is still indexed (C1…
+crates/chat-stasher/src/fts.rs:1682-1697  2428133f3fc6  lines=16
+  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: Ok(stats)
+crates/chat-stasher/src/fts.rs:2131-2140  301a0d9e1768  lines=10
+  <- docs-dev/threat-model.md:921  :: .context("set FTS index lock timeout")?;
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
   <- docs-dev/privacy.md:465, docs-dev/privacy.md:955  :: /// Subdirectory of the inbox where consumed files are reti…
 crates/chat-stasher/src/inbox.rs:59-60  c69ecbc73d8e  lines=2
