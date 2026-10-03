@@ -275,6 +275,8 @@ export interface ResponseShape {
   encoding: 'json' | 'text';
   /** Every listed path must be present for JSON responses. */
   requiredPaths?: readonly string[];
+  /** Every listed path must resolve to an array for JSON responses. */
+  requiredArrayPaths?: readonly string[];
   /** At least one listed path must be present for JSON responses. */
   requiredAnyPaths?: readonly string[];
   /** Every listed marker must be present for text responses. */
@@ -447,7 +449,7 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // measurement, not a missing field. One source spells the same array
     // `messages` as a fallback; that name reaches one source only, so it is not
     // required here (naming both would accept a body neither source agrees on).
-    responseShape: { encoding: 'json', requiredPaths: ['entries'] },
+    responseShape: { encoding: 'json', requiredArrayPaths: ['entries'] },
     // 🔴 Where the session id comes from, and why this order.
     // The thread's identity on the wire is the SLUG: the page URL is
     // /search/<slug>, the list response carries `slug` on each record, and the
@@ -1080,9 +1082,11 @@ export function matchesResponseShape(platform: ChatPlatform, text: string): bool
     return false;
   }
   const requiredPaths = shape.requiredPaths ?? [];
+  const requiredArrayPaths = shape.requiredArrayPaths ?? [];
   const requiredAnyPaths = shape.requiredAnyPaths ?? [];
   return (
     requiredPaths.every((path) => hasUsablePath(body, path)) &&
+    requiredArrayPaths.every((path) => Array.isArray(getJsonPath(body, path))) &&
     (requiredAnyPaths.length === 0 || requiredAnyPaths.some((path) => hasUsablePath(body, path)))
   );
 }
