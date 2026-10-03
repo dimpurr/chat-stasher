@@ -814,10 +814,10 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:1625-1632`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:1708-1715`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2259-2309`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2342-2393`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:389,480-481`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by

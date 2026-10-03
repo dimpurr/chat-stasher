@@ -64,8 +64,8 @@ actually claims (each is derived from code in `docs-dev/threat-model.md`):
 2. The extension capturing traffic outside its declared platform origins
    (`apps/extension/lib/contract.ts:310-349`, `:880-893`).
 3. The CLI writing to, or otherwise mutating, a harness's own session store,
-   which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
-   `:1625-1632`).
+   which is opened read-only    (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
+   `:1708-1715`).
 4. `push` creating a snapshot that silently drops content it cannot account for
    (`crates/chat-stasher/src/main.rs:7950-7957,7974-7978`).
 
