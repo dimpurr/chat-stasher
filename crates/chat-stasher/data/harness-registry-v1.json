@@ -283,7 +283,7 @@
       "id": "grok",
       "display_name": "Grok (xAI CLI)",
       "dev_priority": "low",
-      "known_issue": "a real local store was read but no session has been archived end to end (git 2294f04)",
+      "known_issue": "the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time",
       "paths": {
         "macos": {
           "template": "~/.grok/sessions/session_search.sqlite",
@@ -324,6 +324,11 @@
         "source_url": "https://github.com/xai-org/grok-cli",
         "license_url": "unascertained",
         "verification": "candidate upstream repo URL returned HTTP 404 in this curl round; did not write the locally measured file as an upstream file."
+      },
+      "verified": {
+        "date": "2026-10-03",
+        "platform": "macos",
+        "scope": "real sessions read back and rendered from the real archive on a real machine; 9 session_docs rows matched read-back SHA-256s, FTS indexed all 9, activity matched all 9 updated_at values and 8 titles, and the remaining empty title stayed unlabeled (reader/render implementation commit 7e7ef29)"
       }
     },
     {
