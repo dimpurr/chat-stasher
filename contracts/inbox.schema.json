@@ -193,6 +193,17 @@
         "archived": { "type": "boolean" }
       }
     },
+    "dimensions": {
+      "type": "object",
+      "description": "Optional normalized session provenance. Each dimension contains observed values only; an empty array means no value was recorded, while the literal unknown remains explicit.",
+      "properties": {
+        "surface": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "tenant": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "container": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "status": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
     "provenanceSupplement": {
       "type": "object",
       "description": "Append-only later observation. Consumers retain provenance.project as the original capture fact.",

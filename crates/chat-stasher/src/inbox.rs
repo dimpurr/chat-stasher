@@ -460,6 +460,7 @@ struct Bundle {
     provenance: Option<serde_json::Value>,
     #[serde(rename = "provenanceSupplement")]
     provenance_supplement: Option<serde_json::Value>,
+    dimensions: Option<crate::provenance::SessionProvenance>,
 }
 
 /// Record stored inside each sealed shard (one JSONL line per bundle).
@@ -522,6 +523,8 @@ struct ShardRecord {
     #[serde(rename = "provenanceSupplement")]
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance_supplement: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<crate::provenance::SessionProvenance>,
     /// W50c · The **content fingerprint** the delivery was made under — the
     /// extension's "same conversation, volatile fields aside" key
     /// (`apps/extension/lib/recapture.ts`), which the byte-level `file_sha256`
@@ -880,6 +883,7 @@ pub fn seal_payload(
         machine: machine.to_string(),
         provenance: parsed.provenance,
         provenance_supplement: parsed.provenance_supplement,
+        dimensions: parsed.dimensions,
         fingerprint: fingerprint.map(str::to_string),
     };
     let line = serde_json::to_string(&record)
@@ -1394,6 +1398,7 @@ struct ParseOutcome {
     fingerprint: Option<String>,
     provenance: Option<serde_json::Value>,
     provenance_supplement: Option<serde_json::Value>,
+    dimensions: Option<crate::provenance::SessionProvenance>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
@@ -1424,6 +1429,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         fingerprint: None,
         provenance: None,
         provenance_supplement: None,
+        dimensions: None,
     };
 
     let bundle: Bundle = match serde_json::from_slice(bytes) {
@@ -1437,6 +1443,30 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
             return Ok(out);
         }
     };
+
+    if bundle
+        .dimensions
+        .as_ref()
+        .is_some_and(|dimensions| !dimensions.is_valid())
+    {
+        // Never trust malformed normalized metadata. Preserve the complete
+        // source bytes as a raw record so the invalid claim remains auditable.
+        out.raw = Some(RawEnvelope {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            bytes: bytes.len() as u64,
+        });
+        out.parsed = Some(ParsedEnvelope {
+            has_json: Some(true),
+            keys: serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect())
+                }),
+        });
+        return Ok(out);
+    }
 
     // These are required identity axes. Falling back here changes both the
     // partition directory and the shard-local dedup scope, so an absent axis
@@ -1546,6 +1576,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
             out.provenance_supplement = Some(v.clone());
         }
     }
+    out.dimensions = bundle.dimensions.clone();
     Ok(out)
 }
 
@@ -2424,7 +2455,8 @@ mod tests {
                 "project": {"id": "project-fixture", "name": "Synthetic Project"},
                 "source": "project-list",
                 "observedAt": "2026-09-25T12:00:00.000Z"
-            }
+            },
+            "dimensions": {"surface": ["cli", "app"], "tenant": [], "container": [], "status": []}
         });
         fs::write(
             inbox.join("chatgpt-session-fixture.json"),
@@ -2444,6 +2476,32 @@ mod tests {
         assert_eq!(
             record["provenanceSupplement"]["observedAt"],
             "2026-09-25T12:00:00.000Z"
+        );
+        assert_eq!(
+            record["dimensions"]["surface"],
+            serde_json::json!(["cli", "app"])
+        );
+    }
+
+    #[test]
+    fn malformed_dimensions_are_preserved_raw_and_never_accepted_as_provenance() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "deepseek",
+            "sessionId": "malformed-dimensions",
+            "raw": {"text": "{}", "bytes": 2},
+            "dimensions": {
+                "surface": ["app", "app"],
+                "unexpected": ["untrusted"]
+            }
+        }))
+        .unwrap();
+        let parsed = parse_bundle("deepseek-malformed-dimensions.json", &bytes).unwrap();
+        assert_eq!(parsed.kind, "raw");
+        assert!(parsed.dimensions.is_none());
+        assert_eq!(
+            parsed.raw.as_ref().map(|raw| raw.text.as_bytes()),
+            Some(bytes.as_slice())
         );
     }
 

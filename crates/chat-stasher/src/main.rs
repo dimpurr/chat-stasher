@@ -11724,6 +11724,7 @@ mod decision_surface_tests {
             source: chat_stasher::models::HarnessSource::OpenCode,
             compressed: false,
             sqlite_layout: Some(chat_stasher::models::SqliteSessionLayout::OpenCode),
+            provenance: Default::default(),
         });
         let output = render_archive_gap_notice(&report);
         assert!(
@@ -11744,6 +11745,7 @@ mod decision_surface_tests {
                     source: chat_stasher::models::HarnessSource::ClaudeCode,
                     compressed: false,
                     sqlite_layout: None,
+                    provenance: Default::default(),
                 })
                 .collect(),
             missing_roots: Vec::new(),

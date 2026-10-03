@@ -40,6 +40,7 @@ DOC_FILES = [
     "CONTRIBUTING.md",
     "docs-dev/install.md",
     "docs-dev/node-metadata.md",
+    "docs-dev/openclaw-scanner.md",
     "docs-dev/orphan-packs.md",
     "docs-dev/privacy.md",
     "docs-dev/threat-model.md",

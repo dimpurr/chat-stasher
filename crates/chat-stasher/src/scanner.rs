@@ -269,6 +269,15 @@ pub struct RegistryHarness {
     pub product_group: Option<String>,
     #[serde(default)]
     pub paths: RegistryPaths,
+    /// Optional independent source roots for one stable harness identity.
+    /// Each root may contribute a different provenance observation while its
+    /// records still share the same `<harness>.<machine>.<session>` identity.
+    #[serde(default)]
+    pub source_roots: Vec<RegistrySourceRoot>,
+    /// Dimensions this harness can record. Values are declared at the source
+    /// root or measured from the source; this block is descriptive only.
+    #[serde(default)]
+    pub dimensions: RegistryDimensions,
     #[serde(default)]
     pub notes: Option<String>,
     /// Active-file sealing policy for this harness: `rename` / `no-rename` /
@@ -284,6 +293,26 @@ pub struct RegistryHarness {
     /// so an uncredited harness can never be rename-sealed.
     #[serde(default)]
     pub seal_source: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryDimensions {
+    #[serde(default)]
+    pub supported: Vec<String>,
+    #[serde(default)]
+    pub surfaces: Vec<String>,
+    #[serde(default)]
+    pub tenant_label: Option<String>,
+    #[serde(default)]
+    pub container_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistrySourceRoot {
+    pub id: String,
+    pub paths: RegistryPaths,
+    #[serde(default)]
+    pub provenance: crate::provenance::SessionProvenance,
 }
 
 /// The three platform cells. Missing keys deserialize to `None`.
@@ -398,8 +427,9 @@ pub struct RegistryCell {
 /// directory instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionDirRule {
-    /// Basename glob for the session directory — the same `*`-only syntax as
-    /// [`RegistryCell::session_pattern`].
+    /// Root-relative directory glob for the session directory. Slash-separated
+    /// components support patterns such as `*` and `*/*`; each component uses
+    /// the same `*` glob syntax as [`RegistryCell::session_pattern`].
     pub pattern: String,
     /// Literal path from that directory to the transcript file, `/`-separated
     /// on every platform (compared component by component, so a Windows
@@ -908,6 +938,27 @@ fn probe_harness(
         note: String::new(),
     };
 
+    // grok-bot is the one harness whose source cannot exist off macOS: the
+    // Grok Bot desktop app has no Linux or Windows build, and the registry
+    // records a macOS cell only (the `no {platform} registry entry` note the
+    // generic path below would produce loses the more specific reason, so it
+    // is spelled here instead). The state word is B82's own for "the registry
+    // has no cell for this platform": `SkipWrongPlatform`, whose count is
+    // `not_applicable` and which must not be counted as an unlooked harness —
+    // there is nothing on this machine to have missed, which is a different
+    // claim from "did not look". `SkipUnresolvable` would word it as the
+    // latter and answer "unknown" — wrong for an app this platform cannot
+    // install. The platform gate outranks a configured root, so a grok-bot
+    // path written into the config on Linux or Windows does not turn the
+    // reader on there either.
+    if h.id == "grok-bot" && platform != "macos" {
+        return HarnessProbe {
+            state: ProbeState::SkipWrongPlatform,
+            note: "Grok Bot local persistence reader is supported on macOS only".to_string(),
+            ..base
+        };
+    }
+
     // 0. A configured root is the *user stating* where this harness lives. The
     // registry's template and its confidence gate both exist to keep us from
     // walking a path **we** guessed; neither has anything to say about a path
@@ -1085,6 +1136,7 @@ fn probe_harness(
                                                     sqlite_layout: Some(
                                                         SqliteSessionLayout::OpenCode,
                                                     ),
+                                                    provenance: Default::default(),
                                                 })
                                             })
                                             .collect();
@@ -1263,6 +1315,11 @@ fn probe_harness(
             }
         }
     } else {
+        if h.id == "grok-bot" {
+            return probe_grok_bot_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         let recs = collect_records(
             &root,
             source,
@@ -1305,6 +1362,82 @@ fn probe_harness(
             recognized_files,
             note,
             ..base
+        }
+    }
+}
+
+fn probe_grok_bot_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    match crate::grok_bot::read_from_app_support(&root) {
+        Ok(agents) => {
+            let mut bytes = 0u64;
+            let mut recognized_files = Vec::new();
+            let mut record_count = 0usize;
+            let mut gap_count = 0usize;
+            let mut unreadable_count = 0usize;
+            for agent in agents {
+                let metadata = match fs::metadata(&agent.source_path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => {
+                        unreadable_count += 1;
+                        continue;
+                    }
+                };
+                let mtime = match metadata.modified() {
+                    Ok(mtime) => mtime,
+                    Err(_) => {
+                        unreadable_count += 1;
+                        continue;
+                    }
+                };
+                bytes = bytes.saturating_add(metadata.len());
+                gap_count += agent.sequence_gaps.len();
+                record_count += 1;
+                recognized_files.push(agent.source_path.clone());
+                report.records.push(SessionRecord {
+                    id: crate::id::SessionIdentity {
+                        source_short: source.short(),
+                        machine: machine.to_string(),
+                        native_id: agent.agent_id,
+                    }
+                    .id(),
+                    absolute_path: agent.source_path,
+                    byte_size: metadata.len(),
+                    mtime,
+                    source,
+                    compressed: false,
+                    sqlite_layout: Some(crate::models::SqliteSessionLayout::GrokBot),
+                    provenance: Default::default(),
+                });
+            }
+            base.root = Some(root);
+            base.confidence = confidence;
+            base.state = ProbeState::Scanned;
+            base.bytes = Some(bytes);
+            base.record_count = Some(record_count as u64);
+            base.candidate_count = Some(record_count as u64);
+            base.unreadable_count = Some(unreadable_count as u64);
+            base.recognized_files = recognized_files;
+            base.note = format!(
+                "{env_note}local persistence replicas; partial replica data, sequence gap metadata present (observed gaps={gap_count})"
+            );
+            base
+        }
+        Err(error) => {
+            report.indeterminate_roots.push(root.clone());
+            base.root = Some(root);
+            base.confidence = confidence;
+            base.state = ProbeState::Indeterminate;
+            base.unreadable_count = Some(1);
+            base.note = format!("{env_note}local replica read failed; count unknown ({error})");
+            base
         }
     }
 }
@@ -1391,6 +1524,7 @@ fn sqlite_records_from_rows(
                 source,
                 compressed: false,
                 sqlite_layout: Some(layout),
+                provenance: Default::default(),
             })
         })
         .collect()
@@ -1507,6 +1641,7 @@ fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> G
                 source: HarnessSource::Grok,
                 compressed: false,
                 sqlite_layout: None,
+                provenance: Default::default(),
             });
         }
     }
@@ -1631,6 +1766,7 @@ fn cursor_legacy_records_from_rows(
                 source,
                 compressed: false,
                 sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
+                provenance: Default::default(),
             })
         })
         .collect()
@@ -1740,6 +1876,7 @@ fn probe_openclaw_agents(
                                 source,
                                 compressed: false,
                                 sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
+                                provenance: Default::default(),
                             });
                         }
                         known += row_count;
@@ -1855,6 +1992,7 @@ fn scan_openclaw_cold_files(
                         source,
                         compressed: true,
                         sqlite_layout: None,
+                        provenance: Default::default(),
                     });
                 }
                 Err(_) => *unreadable += 1,
@@ -2305,24 +2443,52 @@ struct DirectoryScan {
 enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
-    /// Nearest matching ancestor: its path, and its name — the native id.
+    /// First matching session-directory ancestor below the declared root:
+    /// its path, and its name — the native id. Descendants keep this scope.
     In { dir: PathBuf, id: String },
 }
 
 /// The scope a child directory inherits: unchanged, or replaced when the
 /// child's own name matches.
-fn descend_scope(parent: &SessionScope, dir: &Path, rule: Option<&SessionDirRule>) -> SessionScope {
+fn descend_scope(
+    parent: &SessionScope,
+    dir: &Path,
+    root: &Path,
+    rule: Option<&SessionDirRule>,
+) -> SessionScope {
+    // A broad rule such as `*` names the session directories immediately
+    // below the declared root. Once one is found, nested implementation
+    // directories (`.system_generated/logs`, for example) remain inside that
+    // same session rather than replacing its native id.
+    if matches!(parent, SessionScope::In { .. }) {
+        return parent.clone();
+    }
     let Some(rule) = rule else {
         return parent.clone();
     };
-    // reason: `dir` is a directory pushed from `read_dir`, so it always has a
-    // final component; a path without one cannot match a basename glob anyway.
-    let Some(name) = dir.file_name().map(|n| n.to_string_lossy().to_string()) else {
+    let Ok(relative) = dir.strip_prefix(root) else {
         return parent.clone();
     };
-    if !matches_session_pattern(&name, Some(&rule.pattern)) {
+    let components: Vec<String> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let pattern: Vec<&str> = rule
+        .pattern
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if components.len() != pattern.len()
+        || !components
+            .iter()
+            .zip(pattern)
+            .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
+    {
         return parent.clone();
     }
+    let Some(name) = components.last().cloned() else {
+        return parent.clone();
+    };
     SessionScope::In {
         dir: dir.to_path_buf(),
         id: name,
@@ -2381,7 +2547,7 @@ fn collect_records(
                 }
             };
             if file_type.is_dir() {
-                let child = descend_scope(&scope, &path, session_dir);
+                let child = descend_scope(&scope, &path, root, session_dir);
                 stack.push((path, child));
                 continue;
             }
@@ -2561,6 +2727,7 @@ fn build_record(
         source,
         compressed,
         sqlite_layout: None,
+        provenance: Default::default(),
     })
 }
 

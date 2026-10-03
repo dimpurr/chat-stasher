@@ -76,6 +76,12 @@ curl -fsSL https://chatstasher.com/install.sh | sh
 
 The script downloads a pinned release and checks its SHA-256 before installing. It puts `chat-stasher` in `~/.local/bin`, never uses `sudo`, and prints the one line to add if that folder is not on your `PATH`.
 
+Once the Homebrew tap formula has been merged and verified with a clean Mac install, use:
+
+```sh
+brew install dimpurr/tap/chat-stasher
+```
+
 **Linux and Windows:** there is no prebuilt binary in a stable release yet. Both arrive with 0.5.0, a statically linked Linux binary for x86-64 and arm64 and an `.exe` for Windows. Until then, build from source with `cargo build --release`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
 
 ### The browser extension
@@ -165,6 +171,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |

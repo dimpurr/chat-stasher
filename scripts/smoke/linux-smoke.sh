@@ -51,11 +51,22 @@
 #
 #   claude-code · codex · gemini-cli · opencode · cursor · openclaw
 #
-# `codex` needs one configured line on Linux/Windows and this script writes it
-# (see the CODEX note at the init step). The other seven are *not* seeded, each
-# for a reason this script names out loud, rather than by planting a shape the
-# tool would then mis-read:
+# on macOS, where the Grok Bot desktop app's persistence lives, grok-bot is
+# seedable too — one replica blob, the same shape the scanner test plants.
 #
+# `codex` needs one configured line on Linux/Windows and this script writes it
+# (see the CODEX note at the init step). The remaining eight are *not* seeded
+# on Linux, each for a reason this script names out loud, rather than by
+# planting a shape the tool would then mis-read:
+#
+#   grok-bot           the registry has no linux (or windows) cell at all: the
+#                      Grok Bot desktop app is a macOS-only source, so there
+#                      is nothing on this platform to have missed. Doctor must
+#                      report `cross-platform` with a session count of
+#                      `not_applicable` — B82's third state, distinct both
+#                      from a measured `0` and from the `unknown` of a look
+#                      that did not happen. (On macOS this harness *is*
+#                      seeded; see the recipes below.)
 #   grok, kimi-code    the Linux cell's confidence is `unascertained`, so the
 #                      tool refuses to scan that path at all — the registry
 #                      declines to guess, and `doctor` must report `unknown`,
@@ -82,17 +93,19 @@
 #                      mishandles.
 #
 # Each of those is asserted below as a *state*, not left implicit, and the count
-# is asserted with it. Two shapes are lawful and they are not the same claim: a
+# is asserted with it. Three shapes are lawful, and no two are the same claim: a
 # harness the registry declines to scan has to come back `unknown` (the script
-# fails if it ever comes back as a claimed `0`), while one whose cell does anchor
-# comes back `missing` with a measured `0` — the path was checked and is not
-# there, which is a different statement from never having looked.
+# fails if it ever comes back as a claimed `0`), one whose app cannot run on
+# this platform comes back `not_applicable` (there is nothing here to have
+# counted), and one whose cell does anchor comes back `missing` with a measured
+# `0` — the path was checked and is not there, which is a different statement
+# from never having looked.
 #
 # The assertions read `doctor --json`, not the human table. The JSON is the
 # documented interface, and its tri-state tags are precisely what is being
-# checked (`{"kind":"known","count":N}` vs `{"kind":"unknown","why":...}`);
-# grepping the pretty table would re-implement that distinction with string
-# matching and lose it in the process.
+# checked (`{"kind":"known","count":N}` vs `{"kind":"unknown","why":...}` vs
+# `{"kind":"not_applicable","why":...}`); grepping the pretty table would
+# re-implement that distinction with string matching and lose it in the process.
 
 set -euo pipefail
 
@@ -197,6 +210,15 @@ registry = json.load(open(src))
 for harness in registry["harnesses"]:
     cells = harness["paths"]
     if sim not in cells:
+        # The simulated platform has no cell for this harness (grok-bot when
+        # simulating linux: the Grok Bot desktop app is macOS-only), so the
+        # simulation must remove the real platform's cell from the slot this
+        # build reads — otherwise the binary, which really runs on the real
+        # platform, would probe this harness against a template the simulated
+        # seeding never plants and report `missing`, where the simulated
+        # platform cannot have the app at all (`skip_wrong_platform` /
+        # `not_applicable`, the state the assertions below expect).
+        cells.pop(real, None)
         continue
     borrow = {k: v for k, v in (cells.get(real) or {}).items() if k.startswith("sql_")}
     if borrow:
@@ -430,6 +452,49 @@ def plant_kimi(root, n):
         )
 
 
+def plant_grok_bot(root, n):
+    # tests/grok_bot_scanner_test.rs + src/test_support.rs
+    # (grok_bot_blob_name): the Grok Bot desktop app names each persistence
+    # state after the unpadded lowercase base32 of its state key plus a
+    # `.blob` suffix, and parks the persistence directory somewhere below its
+    # app-support root; one `…transcript.replicas.<agent-uuid>` key is one
+    # agent, one session. Sequences 1 and 3 leave one gap, so the shard also
+    # carries the partial-replica metadata this reader exists to record.
+    import base64
+
+    def blob_name(state_key):
+        return base64.b32encode(state_key.encode()).decode().rstrip("=").lower() + ".blob"
+
+    persistence = pathlib.Path(root) / "profile" / "sand-client-persistence"
+    persistence.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        agent = f"00000000-0000-4000-8000-{i:012}"
+        key = f"sand.client.slice.account.grok%7Cuser_synthetic-0000.transcript.replicas.{agent}"
+        entries = [
+            {
+                "id": f"synthetic-{seq}",
+                "kind": "message",
+                "message": {"content": f"synthetic-{seq}", "role": "user"},
+                "seq": seq,
+                "timestampMs": 1780000000000 + seq * 100,
+            }
+            for seq in (1, 3)
+        ]
+        (persistence / blob_name(key)).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "value": {
+                        "acceptedSequenceHint": 0,
+                        "entries": entries,
+                        "epochHint": "synthetic-epoch",
+                        "persistedAt": 1780000000000,
+                    },
+                }
+            )
+        )
+
+
 # harness id -> (sessions the recipe plants, the planting function)
 RECIPES = {
     "claude-code": (2, plant_claude_code),
@@ -440,6 +505,7 @@ RECIPES = {
     "cursor": (2, plant_cursor),
     "grok": (1, plant_grok),
     "kimi-code": (1, plant_kimi),
+    "grok-bot": (1, plant_grok_bot),
 }
 
 # Harnesses with no recipe, each with the reason it has none.
@@ -536,10 +602,15 @@ SEEDED_IDS="$(awk -F'\t' '$2=="seeded"{print $1}' "$WORK/seeded.tsv" | tr '\n' '
 SEEDED_TOTAL="$(awk -F'\t' '$2=="seeded"{s+=$3} END{print s+0}' "$WORK/seeded.tsv")"
 [ -n "$SEEDED_IDS" ] || fail_now "no harness could be seeded — the recipes and the registry have diverged"
 # A floor on coverage, so a recipe cannot be dropped (or a cell's confidence
-# flipped) and take the smoke's reach with it silently. These five are the
-# harnesses this smoke is expected to cover on Linux; if one drops out, that is
-# a change to look at, not a quieter smoke.
-for required in claude-code codex gemini-cli opencode openclaw; do
+# flipped) and take the smoke's reach with it silently. Four seedable harnesses
+# are expected everywhere; Linux also covers openclaw, and macOS covers grok-bot
+# because that is the platform whose registry cell can anchor the desktop app.
+REQUIRED="claude-code codex gemini-cli opencode"
+case "$PLATFORM" in
+  linux) REQUIRED="$REQUIRED openclaw" ;;
+  macos) REQUIRED="$REQUIRED grok-bot" ;;
+esac
+for required in $REQUIRED; do
   echo " $SEEDED_IDS " | grep -q " $required " \
     || fail_now "required harness $required could not be seeded on $PLATFORM — coverage would silently shrink"
 done
@@ -573,15 +644,28 @@ missing = [h["id"] for h in registry["harnesses"] if h["id"] not in probes]
 if missing:
     bad.append(f"registry harnesses absent from the probe table: {missing}")
 
-# Invariant 1, applied to the smoke itself: a skipped probe must stay `unknown`,
-# and a probe that ran must carry a real count. Either direction can break, and
-# either break would make every number below mean nothing.
+# Invariant 1, applied to the smoke itself: a skip must never carry a count,
+# and the two skip shapes say different things — `unknown` ("did not look")
+# versus `not_applicable` ("no cell for this platform, nothing here to count").
+# Either direction can break, and either break would make every number below
+# mean nothing: a skip rendered as 0 turns "did not scan" into "checked and
+# empty", and a no-cell harness rendered as `unknown` says "might have missed
+# something" about an app this platform cannot install.
+SKIP_COUNT_KIND = {
+    "skip_unascertained": "unknown",
+    "skip_unresolvable": "unknown",
+    "skip_wrong_platform": "not_applicable",
+}
 for hid, p in sorted(probes.items()):
     state = p["state"]
     sc = p["session_count"]
     if state.startswith("skip"):
-        if sc["kind"] != "unknown":
-            bad.append(f"{hid}: state={state} yet session_count={sc} (a skip must stay unknown)")
+        want = SKIP_COUNT_KIND.get(state)
+        if want is None:
+            bad.append(f"{hid}: state={state} carries no known count kind — "
+                       "name it in SKIP_COUNT_KIND to assert it")
+        elif sc["kind"] != want:
+            bad.append(f"{hid}: state={state} yet session_count={sc} (this skip must stay {want})")
     elif sc["kind"] != "known":
         bad.append(f"{hid}: state={state} yet session_count={sc} (a probe that ran must count)")
 
@@ -591,7 +675,7 @@ if bad:
     for line in bad:
         print(f"[smoke]   FAIL · {line}")
     sys.exit(1)
-print("[smoke]   PASS · every registry harness has a probe row; skip states stay 'unknown', never 0")
+print("[smoke]   PASS · every registry harness has a probe row; skip states stay 'unknown' or 'not_applicable', never a count")
 PY
 assert "doctor's own invariants hold on an unconfigured machine" "$rc"
 
@@ -743,13 +827,19 @@ for hid, want in sorted(seeded.items()):
     else:
         print(f"[smoke]   PASS · {hid:22} detected · sessions={sc['count']} · state={p['state']}")
 
-# The gaps, asserted as states — every one of them, and the count with it. Two
+# The gaps, asserted as states — every one of them, and the count with it. Three
 # dispositions are lawful for a harness this script did not seed, and each makes
 # its own demand on the count:
 #
 #   * the registry declined to look (an `unascertained` cell) or its template
 #     could not be anchored — the count must stay `unknown`. "We did not look"
 #     must never come back dressed as "there was nothing there".
+#   * the registry has no cell for this platform at all (grok-bot everywhere
+#     but macOS: the Grok Bot desktop app is a macOS-only source) — the count
+#     is `not_applicable`. That is a third claim, not a spelling of the first:
+#     `unknown` says "might exist here, we did not check", and a harness whose
+#     app cannot run on this platform has nothing here to check. Doctor must
+#     say so with B82's own words, `skip_wrong_platform` and `not_applicable`.
 #   * the cell does anchor (under this throwaway HOME, which is fresh), so the
 #     probe ran and the path is genuinely absent. `missing` is the disposition,
 #     and 0 is a measurement there rather than a fallback — doctor.rs keeps 0 for
@@ -762,9 +852,19 @@ for hid, want in sorted(seeded.items()):
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
     "template_unresolvable": "skip_unresolvable",
+    "no_cell_for_platform": "skip_wrong_platform",
     "cell_rejects_json": "missing",
     "id_not_keyable": "missing",
     "no_schema_in_build": "missing",
+}
+# The count kind that must ride along with each expected state — part of the
+# expected state, not an afterthought: the whole distinction this step exists
+# to pin is which non-number (or which honest 0) each state carries.
+EXPECTED_COUNT_KIND = {
+    "skip_unascertained": "unknown",
+    "skip_unresolvable": "unknown",
+    "skip_wrong_platform": "not_applicable",
+    "missing": "known",
 }
 for hid, reason in sorted(not_seeded.items()):
     p = probes.get(hid)
@@ -776,20 +876,30 @@ for hid, reason in sorted(not_seeded.items()):
         bad.append(f"{hid}: not seeded ({reason}) and this smoke has no expected state "
                    f"for that reason — add one to EXPECTED_STATE, or say in the script "
                    f"why the state cannot be asserted")
-    elif p["state"] != want:
+        continue
+    if p["state"] != want:
         bad.append(f"{hid}: not seeded because {reason}, yet doctor reports state={p['state']}")
-    elif want.startswith("skip"):
-        if p["session_count"]["kind"] != "unknown":
-            bad.append(f"{hid}: state={want} yet session_count={p['session_count']} (must stay unknown)")
-        else:
-            print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and 'unknown'")
-    else:
-        sc = p["session_count"]
+        continue
+    want_kind = EXPECTED_COUNT_KIND.get(want)
+    sc = p["session_count"]
+    if want_kind is None:
+        bad.append(f"{hid}: expected state {want} has no count kind in "
+                   f"EXPECTED_COUNT_KIND — the state and its count are asserted together")
+        continue
+    if want_kind == "known":
+        # `missing`: the cell anchored, the probe ran, the path is not there —
+        # 0 is earned here. Nothing was planted, so any other count is a
+        # number for something this smoke never seeded.
         if sc["kind"] != "known" or sc["count"] != 0:
             bad.append(f"{hid}: state={want} yet session_count={sc} — nothing was planted "
                        f"here, so the count has to be a measured 0")
         else:
             print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and a measured 0")
+    elif sc["kind"] != want_kind:
+        expect = ("not applicable" if want_kind == "not_applicable" else "unknown")
+        bad.append(f"{hid}: state={want} yet session_count={sc} (must stay {expect})")
+    else:
+        print(f"[smoke]   PASS · {hid:22} not seeded ({reason}) · doctor reports {want} and '{want_kind}'")
 
 gaps = report.get("archive_gaps") or []
 if gaps:
@@ -800,7 +910,7 @@ if bad:
         print(f"[smoke]   FAIL · {line}")
     sys.exit(1)
 print("[smoke]   PASS · every seeded harness is detected with the count that was planted")
-print("[smoke]   PASS · every unseeded harness is reported as skipped/unknown, and no archive gap remains")
+print("[smoke]   PASS · every unseeded harness is reported as skipped/unknown, not-applicable or a measured 0, and no archive gap remains")
 PY
 assert "seeded harnesses detected; unseeded ones honestly reported" "$rc"
 

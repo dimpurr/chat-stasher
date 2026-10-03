@@ -227,6 +227,31 @@ pub fn rustic_cache_root(sandbox: &std::path::Path) -> std::path::PathBuf {
     sandbox.join("cache").join("rustic")
 }
 
+/// Names a Grok Bot persistence state key the way the app names its blobs on
+/// disk: the unpadded, lowercase RFC 4648 base32 of the UTF-8 key, plus a
+/// `.blob` suffix (W321 measured the shape locally). Production code only
+/// *decodes* these names, so the inverse lives here, for fixtures only —
+/// every key a test passes must be synthetic.
+pub fn grok_bot_blob_name(state_key: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut buffer = 0u16;
+    let mut bits = 0u16;
+    let mut encoded = String::with_capacity(state_key.len() * 8 / 5 + 3);
+    for byte in state_key.as_bytes() {
+        buffer = (buffer << 8) | u16::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            encoded.push(ALPHABET[usize::from((buffer >> bits) & 31)] as char);
+        }
+        buffer &= (1 << bits) - 1;
+    }
+    if bits > 0 {
+        encoded.push(ALPHABET[usize::from((buffer << (5 - bits)) & 31)] as char);
+    }
+    encoded.to_ascii_lowercase()
+}
+
 /// Writes `body` to `path` as an executable script, without this process ever
 /// holding a descriptor open on `path`.
 ///
