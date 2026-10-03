@@ -290,10 +290,16 @@ export function installPageFetchHook(options: PageHookOptions): void {
     }
   };
 
-  // Repeated complete snapshots are common on both stream transports. Scope
-  // this exact-body dedupe to the stream instance so a later reconnect can
-  // still report the same conversation. Keep it bounded for long-lived pages.
-  const seenStreamEvents = new WeakMap<object, { bodies: Map<string, number>; bytes: number }>();
+  // Stream snapshots can evolve while a turn is in progress. When the platform
+  // declares turn identity and completion paths, hold those snapshots until the
+  // completion marker and archive only the first completed version. Otherwise,
+  // preserve exact-body suppression. Both caches are scoped to the stream and
+  // bounded for long-lived pages.
+  const seenStreamEvents = new WeakMap<object, {
+    bodies: Map<string, number>;
+    turns: Map<string, true>;
+    bytes: number;
+  }>();
   const captureStreamEvent = (
     source: object,
     url: string,
@@ -303,10 +309,48 @@ export function installPageFetchHook(options: PageHookOptions): void {
     if (!matchesShape(platform, text)) return false;
     const eventBytes = new TextEncoder().encode(text).byteLength;
     if (eventBytes > options.maxRawBytes) return false;
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    const turnIdPaths = platform.streamTurnIdPaths ?? [];
+    const completionPaths = platform.streamCompletionPaths ?? [];
+    let turnId: string | undefined;
+    for (const path of turnIdPaths) {
+      const value = getJsonPath(body, path);
+      if ((typeof value === 'string' && value.length > 0) || (typeof value === 'number' && Number.isFinite(value))) {
+        turnId = String(value);
+        break;
+      }
+    }
+    let turnComplete = false;
+    for (const path of completionPaths) {
+      const value = getJsonPath(body, path);
+      if (
+        value === true ||
+        (typeof value === 'string' && ['complete', 'completed', 'done'].includes(value.toLowerCase()))
+      ) {
+        turnComplete = true;
+        break;
+      }
+    }
     let seen = seenStreamEvents.get(source);
     if (!seen) {
-      seen = { bodies: new Map<string, number>(), bytes: 0 };
+      seen = { bodies: new Map<string, number>(), turns: new Map<string, true>(), bytes: 0 };
       seenStreamEvents.set(source, seen);
+    }
+    if (turnId !== undefined) {
+      if (!turnComplete) return true;
+      if (seen.turns.has(turnId)) return true;
+      if (!captureCandidate(url, 'GET', 200, text, undefined, false, true)) return false;
+      seen.turns.set(turnId, true);
+      if (seen.turns.size > 256) {
+        const oldest = seen.turns.keys().next().value;
+        if (oldest !== undefined) seen.turns.delete(oldest);
+      }
+      return true;
     }
     if (seen.bodies.has(text)) return true;
     if (!captureCandidate(url, 'GET', 200, text, undefined, false, true)) return false;

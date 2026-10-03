@@ -59,6 +59,8 @@ function declaredOptions(): PageHookOptions {
         methods: ['GET'],
         status: { min: 200, max: 299 },
         responseShape: { encoding: 'json', requiredPaths: ['chat_messages'] },
+        streamTurnIdPaths: ['turn_id'],
+        streamCompletionPaths: ['is_complete'],
         sessionIdPatterns: ['/chathub/([0-9a-fA-F-]{8,})'],
         credibility: 'unverified',
         channel: 'experimental',
@@ -199,6 +201,46 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
       status: 200,
       text: '{"chat_messages":[]}',
     });
+  });
+
+  it('captures only the completed snapshot once per turn on both stream transports', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const posted: unknown[] = [];
+    const fakeWindow = makeWindow(WS_ORIGIN, {
+      EventSource: class FakeEventSource {
+        private listeners: Record<string, Array<(event: unknown) => void>> = {};
+        constructor(readonly url: string) {}
+        addEventListener(name: string, listener: (event: unknown) => void): void {
+          (this.listeners[name] ??= []).push(listener);
+        }
+        emit(name: string, event: unknown): void {
+          for (const listener of this.listeners[name] ?? []) listener(event);
+        }
+      },
+      postMessage: (message: unknown) => posted.push(message),
+    });
+
+    vi.stubGlobal('window', fakeWindow);
+    installPageFetchHook(declaredOptions());
+
+    const draft = JSON.stringify({ turn_id: 'turn-a', is_complete: false, chat_messages: ['draft'] });
+    const final = JSON.stringify({ turn_id: 'turn-a', is_complete: true, chat_messages: ['final'] });
+    const nextTurn = JSON.stringify({ turn_id: 'turn-b', is_complete: true, chat_messages: ['next'] });
+
+    const socket = new fakeWindow.WebSocket('wss://ws.example.test/chathub');
+    socket.emit('message', { data: draft });
+    socket.emit('message', { data: final });
+    socket.emit('message', { data: JSON.stringify({ ...JSON.parse(final), chat_messages: ['late duplicate'] }) });
+    socket.emit('message', { data: nextTurn });
+
+    const source = new fakeWindow.EventSource('https://ws.example.test/chathub');
+    source.emit('message', { data: draft });
+    source.emit('message', { data: final });
+    source.emit('message', { data: JSON.stringify({ ...JSON.parse(final), chat_messages: ['late duplicate'] }) });
+    source.emit('message', { data: nextTurn });
+
+    const captures = posted.filter((message: any) => message?.type === CAPTURE_MESSAGE);
+    expect(captures.map((message: any) => message.payload.text)).toEqual([final, nextTurn, final, nextTurn]);
   });
 
   it('③ leaves a trace when a declared origin does NOT get the wrapper installed', () => {
