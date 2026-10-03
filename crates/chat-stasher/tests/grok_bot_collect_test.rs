@@ -58,6 +58,7 @@ fn record(path: &std::path::Path) -> SessionRecord {
         source: HarnessSource::GrokBot,
         compressed: false,
         sqlite_layout: Some(SqliteSessionLayout::GrokBot),
+        provenance: Default::default(),
     }
 }
 

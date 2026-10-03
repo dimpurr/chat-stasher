@@ -345,33 +345,33 @@ apps/extension/lib/contract.ts:880-893  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
 apps/extension/lib/contract.ts:914  93f15da49cac  lines=1
   <- docs-dev/privacy.md:829  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1059-1078  795529bbf806  lines=20
+apps/extension/lib/contract.ts:1067-1086  795529bbf806  lines=20
   <- docs-dev/privacy.md:827  :: }
-apps/extension/lib/contract.ts:1078-1121  700be002c03e  lines=44
+apps/extension/lib/contract.ts:1079-1121  4f0f947ee305  lines=43
+  <- docs-dev/privacy.md:111, docs-dev/privacy.md:827  :: } catch {
+apps/extension/lib/contract.ts:1086-1130  406bd0c50dee  lines=45
   <- docs-dev/threat-model.md:556  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1079-1121  4118a9052f8b  lines=43
-  <- docs-dev/privacy.md:111, docs-dev/privacy.md:827  :: );
-apps/extension/lib/contract.ts:1100-1101  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1108-1109  d72720cd403e  lines=2
   <- docs-dev/privacy.md:444  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1138-1148  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1147-1157  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:555  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1162-1167  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1171-1176  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:368  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1230-1238  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1239-1247  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:425  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1257-1266  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1266-1275  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:280, docs-dev/threat-model.md:412  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1285-1289  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1294-1298  91a5d6065664  lines=5
   <- docs-dev/privacy.md:490, docs-dev/threat-model.md:369, docs-dev/threat-model.md:409  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1293-1302  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1302-1311  b3b4db645114  lines=10
   <- docs-dev/privacy.md:276  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1316-1319  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1325-1328  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:686  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1379-1407  c5391b602b5e  lines=29
+apps/extension/lib/contract.ts:1390-1418  c5391b602b5e  lines=29
   <- docs-dev/install.md:94  :: /**
-apps/extension/lib/contract.ts:1428-1431  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1439-1442  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:351  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1481-1497  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1492-1508  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:528, docs-dev/threat-model.md:351  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:695, docs-dev/privacy.md:756, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
@@ -547,7 +547,7 @@ apps/extension/wxt.config.ts:148  84787b717b3c  lines=1
   <- docs-dev/privacy.md:251  :: data_collection_permissions: { required: ['none'] },
 contracts/inbox.schema.json:177-195  7f9e999f1a3a  lines=19
   <- docs-dev/privacy.md:432  :: "provenance": {
-contracts/inbox.schema.json:196-208  1c6b2383bb93  lines=13
+contracts/inbox.schema.json:207-219  1c6b2383bb93  lines=13
   <- docs-dev/privacy.md:439  :: "provenanceSupplement": {
 crates/chat-stasher/Cargo.toml:1-6  3398bf09821c  lines=6
   <- docs-dev/install.md:248  :: [package]
@@ -563,7 +563,7 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1011  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:2169-2219  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:439  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
-crates/chat-stasher/src/collect.rs:1891-1931  b98ca2edc014  lines=41
+crates/chat-stasher/src/collect.rs:1902-1942  b98ca2edc014  lines=41
   <- docs-dev/privacy.md:961  :: ));
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…
@@ -627,43 +627,43 @@ crates/chat-stasher/src/inbox.rs:66-68  3935abac04cb  lines=3
   <- docs-dev/install.md:531, docs-dev/threat-model.md:597  :: pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
 crates/chat-stasher/src/inbox.rs:447-452  bcce48fa0bc4  lines=6
   <- docs-dev/privacy.md:361  :: /// account fingerprint is computed from state outside the …
-crates/chat-stasher/src/inbox.rs:484-489  ff3901193121  lines=6
+crates/chat-stasher/src/inbox.rs:485-490  ff3901193121  lines=6
   <- docs-dev/threat-model.md:368, docs-dev/threat-model.md:368  :: /// existing bytes. It is *stored* but deliberately does NO…
-crates/chat-stasher/src/inbox.rs:490-508  b083a5c4da2a  lines=19
+crates/chat-stasher/src/inbox.rs:491-509  b083a5c4da2a  lines=19
   <- docs-dev/threat-model.md:369  :: /// 🔴 W128 step 1 · The account fingerprint envelope, prese…
-crates/chat-stasher/src/inbox.rs:508-516  602333abb239  lines=9
+crates/chat-stasher/src/inbox.rs:509-517  602333abb239  lines=9
   <- docs-dev/privacy.md:362  :: account: Option<serde_json::Value>,
-crates/chat-stasher/src/inbox.rs:509-519  6639dea3f5dd  lines=11
+crates/chat-stasher/src/inbox.rs:510-520  6639dea3f5dd  lines=11
   <- docs-dev/privacy.md:349  :: /// W218 · comparable account key derived by the native hos…
-crates/chat-stasher/src/inbox.rs:512  04f9dff3458f  lines=1
+crates/chat-stasher/src/inbox.rs:513  04f9dff3458f  lines=1
   <- docs-dev/threat-model.md:370  :: account_key: Option<String>,
-crates/chat-stasher/src/inbox.rs:514-519  d4cd0be9ef23  lines=6
+crates/chat-stasher/src/inbox.rs:515-520  d4cd0be9ef23  lines=6
   <- docs-dev/threat-model.md:694  :: install_id: Option<String>,
-crates/chat-stasher/src/inbox.rs:519  5bd2902af347  lines=1
+crates/chat-stasher/src/inbox.rs:520  5bd2902af347  lines=1
   <- docs-dev/threat-model.md:688  :: machine: String,
-crates/chat-stasher/src/inbox.rs:525-547  46292023761e  lines=23
+crates/chat-stasher/src/inbox.rs:528-550  46292023761e  lines=23
   <- docs-dev/privacy.md:428  :: /// W50c · The **content fingerprint** the delivery was mad…
-crates/chat-stasher/src/inbox.rs:550-555  028e2a170cf7  lines=6
+crates/chat-stasher/src/inbox.rs:553-558  028e2a170cf7  lines=6
   <- docs-dev/threat-model.md:368  :: /// The `identity` envelope — the account axis an `inbox@2`…
-crates/chat-stasher/src/inbox.rs:756-764  5d580cdaac0c  lines=9
+crates/chat-stasher/src/inbox.rs:759-767  5d580cdaac0c  lines=9
   <- docs-dev/threat-model.md:728  :: /// item-scope, non-retryable `install-conflict`, whose `de…
-crates/chat-stasher/src/inbox.rs:836-846  87d5599f8f90  lines=11
+crates/chat-stasher/src/inbox.rs:839-849  87d5599f8f90  lines=11
   <- docs-dev/privacy.md:368, docs-dev/threat-model.md:728  :: if let (Some(install_id), Some(browser), Some(profile_label…
-crates/chat-stasher/src/inbox.rs:876-878  824a84722be5  lines=3
+crates/chat-stasher/src/inbox.rs:879-881  824a84722be5  lines=3
   <- docs-dev/privacy.md:349  :: account_key: account_key.map(str::to_string),
-crates/chat-stasher/src/inbox.rs:876  663d372c8179  lines=1
+crates/chat-stasher/src/inbox.rs:879  663d372c8179  lines=1
   <- docs-dev/threat-model.md:370  :: account_key: account_key.map(str::to_string),
-crates/chat-stasher/src/inbox.rs:877-880  488fcbe9c4c7  lines=4
+crates/chat-stasher/src/inbox.rs:880-883  488fcbe9c4c7  lines=4
   <- docs-dev/privacy.md:362  :: install_id: parsed.install_id,
-crates/chat-stasher/src/inbox.rs:914-975  10351a7dbb65  lines=62
+crates/chat-stasher/src/inbox.rs:918-979  10351a7dbb65  lines=62
   <- docs-dev/privacy.md:368  :: /// profile yet (schema: `contracts/inbox.schema.json`, `pr…
-crates/chat-stasher/src/inbox.rs:920-975  b3743335944f  lines=56
+crates/chat-stasher/src/inbox.rs:924-979  b3743335944f  lines=56
   <- docs-dev/threat-model.md:728  :: fn names_a_profile(label: &str) -> bool {
-crates/chat-stasher/src/inbox.rs:1188-1216  81d263fdddc2  lines=29
+crates/chat-stasher/src/inbox.rs:1192-1220  81d263fdddc2  lines=29
   <- docs-dev/install.md:531, docs-dev/threat-model.md:597  :: /// Take the stage write lock, waiting at most [`STAGE_LOCK…
-crates/chat-stasher/src/inbox.rs:1441-1449  f6aba9ee7e33  lines=9
+crates/chat-stasher/src/inbox.rs:1471-1479  f6aba9ee7e33  lines=9
   <- docs-dev/threat-model.md:371  :: // These are required identity axes. Falling back here chan…
-crates/chat-stasher/src/inbox.rs:2002-2024  b73a1c5a7abb  lines=23
+crates/chat-stasher/src/inbox.rs:2033-2055  b73a1c5a7abb  lines=23
   <- docs-dev/threat-model.md:387  :: fn host_derived_account_key_is_stored_in_shard_metadata_onl…
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
@@ -743,23 +743,23 @@ crates/chat-stasher/src/main.rs:7974-7978  c1c01a085bde  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:845  :: // This guard used to refuse any shard-less stage: while re…
 crates/chat-stasher/src/main.rs:8462-8623  2a0d8c306156  lines=162
   <- docs-dev/threat-model.md:906  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:12431-12439  78f23654916e  lines=9
+crates/chat-stasher/src/main.rs:12433-12441  78f23654916e  lines=9
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12449-12472  3f797bdc8c26  lines=24
+crates/chat-stasher/src/main.rs:12451-12474  3f797bdc8c26  lines=24
   <- docs-dev/install.md:271  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:13609-13623  af69d09d53a2  lines=15
+crates/chat-stasher/src/main.rs:13611-13625  af69d09d53a2  lines=15
   <- docs-dev/install.md:591  :: fn setup_refused_awaiting_declaration_why(destination_step_…
-crates/chat-stasher/src/main.rs:14046-14053  e5a9c1eb5374  lines=8
+crates/chat-stasher/src/main.rs:14048-14055  e5a9c1eb5374  lines=8
   <- docs-dev/install.md:590  :: fn setup_create_repo_and_key(config: &Config) -> Result<std…
-crates/chat-stasher/src/main.rs:16576-16610  2b9ef8eaa940  lines=35
+crates/chat-stasher/src/main.rs:16578-16612  2b9ef8eaa940  lines=35
   <- docs-dev/install.md:986  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:16629-16657  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:16631-16659  563498443d71  lines=29
   <- docs-dev/install.md:947  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:16898-16903  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:16900-16905  00bb766bbeb7  lines=6
   <- docs-dev/install.md:976  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:16917-16919  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:16919-16921  28b586b3526e  lines=3
   <- docs-dev/install.md:942  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:16919-17052  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:16921-17054  9b25725da3b1  lines=134
   <- docs-dev/install.md:963  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:414, docs-dev/threat-model.md:701  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -885,7 +885,7 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
   <- docs-dev/install.md:948  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1226  :: }
-crates/chat-stasher/src/scanner.rs:1494-1609  3dd4c2c8f6ed  lines=116
+crates/chat-stasher/src/scanner.rs:1526-1642  099b52c62352  lines=117
   <- docs-dev/privacy.md:961  :: sqlite_layout: Some(layout),
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:903  :: /// Resolve the executable that a persistent scheduler may …
