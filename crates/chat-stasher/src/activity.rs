@@ -13,8 +13,8 @@
 //! first user line, capped at [`TITLE_CAP_CHARS`] characters. That label is
 //! conversation-derived text by declared design — the one place the metadata
 //! tier is allowed to carry any — and it is the only other thing this module
-//! keeps: everything about a line beyond its timestamp and (for claude-code)
-//! that one candidate label is read and thrown away, and never printed.
+//! keeps: everything about a line beyond its timestamp and, for harnesses
+//! with a title reader, that one candidate label is read and thrown away.
 //!
 //! The hard rule of this module: a time we cannot get is [`TimeSource::Unknown`]
 //! with an explicit `why`. We never fabricate `0`, never use "now", and never
@@ -243,9 +243,9 @@ pub const TITLE_CAP_CHARS: usize = 100;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TitleSource {
-    /// The harness's own title: a claude-code `ai-title` line, a `summary` line
-    /// when the session has no title, or the label a web platform's own archived
-    /// body carries for the conversation.
+    /// The harness's own title: a claude-code `ai-title` or `summary` line, a Grok
+    /// CLI `session_docs.title`, or the label a web platform's archived body
+    /// carries for the conversation.
     HarnessTitle,
     /// The head of the session's first user line, capped at
     /// [`TITLE_CAP_CHARS`] and flagged when the cap cut anything.
@@ -287,12 +287,13 @@ pub enum SessionTitle {
 /// The label candidates one scan picked up, before the priority order decides
 /// which of them becomes the row's title.
 ///
-/// Two harness families have candidates: claude-code, whose title lines and
-/// prompt shape this module knows (`{"type":"ai-title","aiTitle":…}` and
-/// `{"type":"summary","summary":…}`, measured shapes in the W156 report), and
-/// the web platforms whose own archived body carries the conversation's label
-/// (see [`web_title`]). Every other harness records
-/// [`SessionTitle::NoLabelRecorded`] by design.
+/// Explicit title readers supply candidates for claude-code, Grok CLI, and the
+/// web platforms whose own archived body carries the conversation's label.
+/// Claude Code title lines are `{"type":"ai-title","aiTitle":…}` and
+/// `{"type":"summary","summary":…}` (measured shapes in the W156 report);
+/// Grok CLI titles are read from its `session_docs` row; web labels use
+/// [`web_title`]. Every other harness records [`SessionTitle::NoLabelRecorded`]
+/// by design.
 #[derive(Default)]
 struct TitleCandidates {
     /// The harness's own title, from `ai-title` lines. The **last** one wins:
@@ -633,7 +634,7 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
     let mut conversation_without_time = 0u64;
     let mut conversation_invalid_time = 0u64;
 
-    // The label candidates (claude-code only — see [`TitleCandidates`]).
+    // The label candidates for the harnesses with an explicit title reader.
     let mut titles = TitleCandidates::default();
 
     for line in lines {
@@ -652,6 +653,11 @@ pub fn analyze_session(harness: &str, lines: &[&str]) -> TimeAnalysis {
         };
         if harness == "claude-code" {
             titles.fold(&value);
+        } else if harness == "grok" {
+            // Grok CLI SQLite rows and Grok web inbox records share a registry
+            // ID. Prefer the CLI's exact envelope, then retain the existing
+            // web-title reader for inbox records.
+            titles.fold_web(grok_cli_title(&value).or_else(|| web_title(harness, &value)));
         } else if WEB_HARNESSES.contains(&harness) {
             titles.fold_web(web_title(harness, &value));
         }
@@ -1063,6 +1069,25 @@ fn grok_time(value: &serde_json::Value) -> LineTime {
         };
     }
     web_time("grok", value)
+}
+
+/// Grok CLI's SQLite export carries its harness title in the same
+/// `session_docs` row as `updated_at`. Require that exact envelope so a title
+/// from an unrelated object is never attributed to this session.
+fn grok_cli_title(value: &serde_json::Value) -> Option<String> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("chat-stasher.sqlite.session.v1")
+        || value.get("table").and_then(serde_json::Value::as_str) != Some("session_docs")
+    {
+        return None;
+    }
+    value
+        .get("session")?
+        .get("title")?
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse one timestamp value (RFC 3339 string, numeric epoch string, or numeric
@@ -3079,13 +3104,43 @@ mod tests {
     #[test]
     fn grok_cli_updated_at_is_inferred() {
         let envelope = format!(
-            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{{"session_id":"s1","updated_at":{T2},"title":"t","content":"x"}}}}"#
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{{"session_id":"s1","updated_at":{T2},"title":"synthetic Grok title","content":"synthetic body"}}}}"#
         );
         let lines = [envelope.as_str()];
         let a = analyze_session("grok", &lines);
         assert_eq!(a.first_unix, Some(T2));
         assert_eq!(a.last_unix, Some(T2));
         assert!(matches!(a.time_source, TimeSource::Inferred { .. }));
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "synthetic Grok title".to_string(),
+                source: TitleSource::HarnessTitle,
+                truncated: false,
+            }
+        );
+    }
+
+    #[test]
+    fn grok_cli_title_requires_a_session_docs_record_and_trims_whitespace() {
+        let envelope = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"opaque","updated_at":1789384914,"title":"  synthetic title  ","content":"synthetic body"}}"#;
+        let a = analyze_session("grok", &[envelope]);
+        assert_eq!(
+            a.title,
+            SessionTitle::Known {
+                text: "synthetic title".to_string(),
+                source: TitleSource::HarnessTitle,
+                truncated: false,
+            }
+        );
+
+        // A web payload or an unrelated envelope must not lend its title to
+        // the Grok CLI reader merely because it has a top-level `title` key.
+        let unrelated = r#"{"title":"synthetic unrelated title","content":"synthetic body"}"#;
+        assert_eq!(
+            analyze_session("grok", &[unrelated]).title,
+            SessionTitle::NoLabelRecorded
+        );
     }
 
     #[test]

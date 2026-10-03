@@ -2760,13 +2760,12 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
-                // The CLI's row is a SQLite search-index row: the conversation
-                // body lives in a separate per-session directory this archive
-                // does not hold, so there is no text here to index — and that
-                // is a format this build cannot read, not an empty session.
+                // Grok's exported SQLite row carries the search document as
+                // plain text. Its roles are not stored, so normalization can
+                // index/render the text without assigning a speaker.
                 "grok",
-                br#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765}}"#,
-                Expected::Format(FORMAT_SQLITE),
+                br#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765,"title":"synthetic title","content":"synthetic question"}}"#,
+                Expected::Text("synthetic question"),
             ),
             (
                 "grok-bot",

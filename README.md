@@ -166,7 +166,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok Bot (desktop) | supported | - |
-| Local | Grok (xAI CLI) | supported | - |
+| Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
