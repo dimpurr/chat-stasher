@@ -849,6 +849,7 @@ for hid, want in sorted(seeded.items()):
 # asserted rather than left implicit.
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
+    "no_cell_for_platform": "skip_wrong_platform",
     "template_unresolvable": "skip_unresolvable",
     "cell_rejects_json": "missing",
     "id_not_keyable": "missing",
