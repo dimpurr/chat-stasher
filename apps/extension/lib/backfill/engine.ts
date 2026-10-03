@@ -40,6 +40,7 @@ import {
 import { accountFingerprintFor, accountIdFromCapture } from '../account-fingerprint';
 import { chatGptScopeWorkspace, chatGptUnresolvedScope, chatGptWorkspaceScope, fingerprintedChatGptWorkspace, isChatGptScope, isIdentitylessChatGptScope, isUnresolvedChatGptScope } from './chatgpt-workspace';
 import type { AccountIdentity } from './types';
+import { withClaudeAccountReading, type ClaudeAccountReading } from '../claude-account';
 import { isClaudeOrgId } from './claude-org';
 import { recordDebtTimes } from './debt-store';
 import { dropDebt, enqueueDebts, nextDebt, settleDebt } from './debts';
@@ -149,6 +150,7 @@ export interface HttpResponse {
 export type HttpPort = ((url: string, init?: BackfillRequestInit) => Promise<HttpResponse>) & {
   chatgptWorkspace?: () => Promise<import('./chatgpt-workspace').ChatGptWorkspaceResolution>;
   chatgptAccountIdentity?: () => Promise<AccountIdentity | null>;
+  claudeAccountIdentity?: (captureUrl: string) => Promise<ClaudeAccountReading>;
 };
 
 /** 🔴 GET with no body ⇒ fall back to the old call `http(url)`, byte for byte. This line is the back-compat landing point. */
@@ -3357,7 +3359,7 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
       continue;
     }
 
-    const captured: CapturedFetch = {
+    let captured: CapturedFetch = {
       // 🔴 W21: the URL and method of the request that actually produced this
       //    body. On a one-step plan that is step 1's, byte-for-byte as before; on
       //    a two-step plan it is step 2's, which is the one that carries the
@@ -3387,6 +3389,15 @@ export async function runBackfill(opts: BackfillOptions): Promise<RunReport> {
         },
       } : {}),
     };
+    if (opts.platform === 'claude' && http.claudeAccountIdentity) {
+      let reading: ClaudeAccountReading;
+      try {
+        reading = await http.claudeAccountIdentity(deliveredUrl);
+      } catch {
+        reading = { kind: 'unknown', reason: 'account-id-unreadable' };
+      }
+      captured = withClaudeAccountReading(captured, reading);
+    }
     // 🔴 C20 · This fix's landing point: **the sink's result decides.**
     //
     // The product owner's words: "losing something" and "losing something but

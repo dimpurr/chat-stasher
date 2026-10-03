@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { readClaudeAccountId } from '../lib/claude-account';
+import { readClaudeAccountId, withClaudeAccountReading } from '../lib/claude-account';
 import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
 import { ACCOUNT_SALT_KEY } from '../lib/account-fingerprint';
 import type { CapturedFetch } from '../lib/contract';
 import { memoryStore } from '../lib/backfill/store';
+import { runBackfill, type HttpPort, type HttpResponse } from '../lib/backfill/engine';
+import { CLAUDE_ACCOUNT_IDENTITY_MESSAGE, tabHttpPort } from '../lib/backfill/tab-port';
+import type { Clock } from '../lib/backfill/pace';
 
 const ORIGIN = 'https://claude.ai';
 const ORG = 'aaaaaaaa-1111-2222-3333-444444444444';
@@ -69,5 +72,71 @@ describe('W337 · Claude current-user identity', () => {
     expect(one.source).toBe('response-body-claude-whoami');
     expect(JSON.stringify(one)).not.toContain(USER_A);
     expect(JSON.stringify(store.data[ACCOUNT_SALT_KEY])).not.toContain(USER_A);
+  });
+
+  it('discards page-supplied Claude identity when the trusted lookup is unknown', async () => {
+    const pageCapture: CapturedFetch = {
+      url: URL, method: 'GET', status: 200, text: '{}', capturedAt: 1,
+      claudeAccountId: USER_B,
+      claudeAccountIdSource: 'response-body-claude-whoami',
+    };
+    const trusted = withClaudeAccountReading(pageCapture, { kind: 'unknown', reason: 'no-account-id-in-capture' });
+    expect(trusted).not.toHaveProperty('claudeAccountId');
+    expect(trusted).not.toHaveProperty('claudeAccountIdSource');
+    expect(trusted.claudeAccountUnknownReason).toBe('no-account-id-in-capture');
+    expect(accountIdFromCapture(trusted, SID)).toEqual({ kind: 'unknown', reason: 'no-account-id-in-capture' });
+  });
+
+  it('asks the owning tab for a Claude identity through the dedicated message', async () => {
+    const messages: unknown[] = [];
+    const port = tabHttpPort(7, async (tabId, message) => {
+      expect(tabId).toBe(7);
+      messages.push(message);
+      return { kind: 'id', id: USER_A, source: 'response-body-claude-whoami' };
+    });
+    expect(await port.claudeAccountIdentity?.(URL)).toEqual({
+      kind: 'id', id: USER_A, source: 'response-body-claude-whoami',
+    });
+    expect(messages).toEqual([{ type: CLAUDE_ACCOUNT_IDENTITY_MESSAGE, url: URL }]);
+  });
+
+  it('asks the page identity port for Claude backfill captures before the archive sink', async () => {
+    const store = memoryStore();
+    const lookedUpUrls: string[] = [];
+    const captures: CapturedFetch[] = [];
+    const detailUrl = `${ORIGIN}/api/organizations/${ORG}/chat_conversations/${SID}?tree=True&rendering_mode=messages&render_all_tools=true`;
+    const body = JSON.stringify({
+      uuid: SID,
+      name: 'synthetic conversation',
+      model: 'synthetic-model',
+      current_leaf_message_uuid: 'message-fixture-1',
+      chat_messages: [{ uuid: 'message-fixture-1', index: 0, sender: 'human', content: [{ type: 'text', text: 'synthetic body' }] }],
+    });
+    const http: HttpPort = async (url): Promise<HttpResponse> => {
+      if (url.startsWith(`${ORIGIN}/api/organizations/${ORG}/chat_conversations?`)) {
+        return { status: 200, text: JSON.stringify([{ uuid: SID, name: 'synthetic conversation' }]) };
+      }
+      if (url.startsWith(`${ORIGIN}/api/organizations/${ORG}/chat_conversations/${SID}?`)) return { status: 200, text: body };
+      throw new Error(`unexpected synthetic URL: ${new globalThis.URL(url).pathname}`);
+    };
+    http.claudeAccountIdentity = async (captureUrl) => {
+      lookedUpUrls.push(captureUrl);
+      return { kind: 'id', id: USER_A, source: 'response-body-claude-whoami' };
+    };
+    let now = 1_790_000_000_000;
+    const clock: Clock = { now: () => now++, async sleep() { /* no waiting */ } };
+    const report = await runBackfill({
+      platform: 'claude', origin: ORIGIN, scope: ORG, store, http, clock,
+      pace: { enumerate: { minIntervalMs: 0, maxPerDay: null }, detail: { minIntervalMs: 0, maxPerDay: null } },
+      random: () => 0, maxDetails: 1,
+      sink: (captured) => { captures.push(captured); return { saved: true, sessionId: SID }; },
+    });
+    expect(report.halted).toBeNull();
+    expect(lookedUpUrls).toEqual([detailUrl]);
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({
+      claudeAccountId: USER_A,
+      claudeAccountIdSource: 'response-body-claude-whoami',
+    });
   });
 });
