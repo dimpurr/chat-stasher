@@ -2421,7 +2421,27 @@ pub fn to_jsonl(row: &ActivityRow) -> String {
     // Cannot fail for this shape: plain strings, an Option<i64>, an int, and
     // internally-tagged enums of strings and one capped-text struct. No NaN /
     // recursion involved.
-    serde_json::to_string(row).expect("ActivityRow serializes to JSON") + "\n"
+    let mut json = serde_json::to_string(row).expect("ActivityRow serializes to JSON");
+    // Keep the path-fragment field consumed by older activity-index readers
+    // alongside the structured W323 object. It is a fixed class label plus a
+    // slash, never a source path; the structured value remains authoritative.
+    if let Some(provenance) = &row.session_provenance {
+        let legacy_class = match provenance.source_path_class.as_str() {
+            "main" => Some("main/"),
+            "subagents" => Some("subagents/"),
+            _ => None,
+        };
+        if let Some(legacy_class) = legacy_class {
+            let object_end = json
+                .rfind('}')
+                .expect("ActivityRow JSON serializes as an object");
+            json.insert_str(
+                object_end,
+                &format!(",\"source_path_class\":{legacy_class:?}"),
+            );
+        }
+    }
+    json + "\n"
 }
 
 #[cfg(test)]
