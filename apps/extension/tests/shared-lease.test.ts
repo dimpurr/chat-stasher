@@ -5,8 +5,9 @@ type Lease = { account: string; release(): Promise<void> };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 describe('account-scoped shared backfill leases', () => {
@@ -54,6 +55,36 @@ describe('account-scoped shared backfill leases', () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(second?.account).toBe('account-a');
     await second?.release();
+  });
+
+  it('shares a rejected acquire, keeps other accounts independent, and retries the failed account', async () => {
+    const leases = new Map<string, SharedLeaseState<Lease>>();
+    const acquiring = deferred<Lease | null>();
+    const failure = new Error('synthetic lease refusal');
+    const createA = vi.fn(() => acquiring.promise);
+    const releaseB = vi.fn(async () => undefined);
+    const createB = vi.fn(async (): Promise<Lease> => ({ account: 'account-b', release: releaseB }));
+    const keyA = backfillLeaseKey('claude', 'account-a');
+    const first = acquireSharedLease(leases, keyA, createA);
+    const second = acquireSharedLease(leases, keyA, createA);
+    const other = await acquireSharedLease(leases, backfillLeaseKey('claude', 'account-b'), createB);
+    const firstFailure = expect(first).rejects.toBe(failure);
+    const secondFailure = expect(second).rejects.toBe(failure);
+
+    expect(createA).toHaveBeenCalledTimes(1);
+    expect(other?.account).toBe('account-b');
+    expect(createB).toHaveBeenCalledTimes(1);
+
+    acquiring.reject(failure);
+    await Promise.all([firstFailure, secondFailure]);
+
+    const releaseA = vi.fn(async () => undefined);
+    const retry = await acquireSharedLease(leases, keyA, async () => ({ account: 'account-a', release: releaseA }));
+    expect(retry?.account).toBe('account-a');
+    await retry?.release();
+    await other?.release();
+    expect(releaseA).toHaveBeenCalledTimes(1);
+    expect(releaseB).toHaveBeenCalledTimes(1);
   });
 
   it('keeps missing and unresolved accounts in platform scope', () => {

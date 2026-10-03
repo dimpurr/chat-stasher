@@ -30,8 +30,14 @@ export async function acquireSharedLease<T extends ReleasableLease>(
 
   const shared: SharedLeaseState<T> = { holders: 1, ready: Promise.resolve(null) };
   leases.set(key, shared);
-  shared.ready = create();
-  const lease = await shared.ready;
+  let lease: T | null;
+  try {
+    shared.ready = create();
+    lease = await shared.ready;
+  } catch (error) {
+    if (leases.get(key) === shared) leases.delete(key);
+    throw error;
+  }
   if (!lease) {
     if (leases.get(key) === shared) leases.delete(key);
     return null;
