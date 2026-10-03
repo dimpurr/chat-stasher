@@ -38,9 +38,9 @@ use crate::config::Config;
 use crate::json_out;
 use crate::models::{HarnessSource, SessionRecord, SqliteSessionLayout};
 use crate::sqlite_probe::{
-    enumerate_cursor_legacy_sessions, enumerate_opencode_sessions, enumerate_sqlite_sessions,
-    probe_sqlite_store, sqlite_millis_to_system_time, CursorLegacySessionRow, SqliteSessionProbe,
-    SqliteSessionRow,
+    enumerate_cursor_legacy_sessions, enumerate_openclaw_sessions, enumerate_opencode_sessions,
+    enumerate_sqlite_sessions, probe_sqlite_store, sqlite_millis_to_system_time,
+    CursorLegacySessionRow, SqliteSessionProbe, SqliteSessionRow,
 };
 use serde::Deserialize;
 use std::env;
@@ -264,6 +264,8 @@ pub struct HarnessRegistry {
 pub struct RegistryHarness {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub product_group: Option<String>,
     #[serde(default)]
     pub paths: RegistryPaths,
     #[serde(default)]
@@ -996,6 +998,10 @@ fn probe_harness(
             .unwrap_or_default()
     };
 
+    if h.id == "openclaw" {
+        return probe_openclaw_agents(base, confidence, root, env_note, source, machine, report);
+    }
+
     let schema = schema_cell(h, cell);
 
     // Cursor's old layout is a directory of workspace databases, not the
@@ -1498,6 +1504,210 @@ fn cursor_legacy_records_from_rows(
 /// Probe Cursor's current global store and, when it cannot yield a qualified
 /// composer count, its legacy workspaceStorage stores. This keeps the fallback
 /// source visible in doctor output while preserving one Cursor footprint row.
+fn probe_openclaw_agents(
+    mut probe: HarnessProbe,
+    confidence: Confidence,
+    agents_root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    probe.root = Some(agents_root.clone());
+    probe.confidence = confidence;
+    probe.state = ProbeState::Scanned;
+    probe.record_count = Some(0);
+    probe.unreadable_count = Some(0);
+    probe.bytes = Some(0);
+    let agents = match fs::read_dir(&agents_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return HarnessProbe {
+                state: ProbeState::Missing,
+                record_count: None,
+                unreadable_count: None,
+                bytes: None,
+                note: format!("{env_note}agent root absent"),
+                ..probe
+            };
+        }
+        Err(error) => {
+            return HarnessProbe {
+                state: ProbeState::Indeterminate,
+                record_count: None,
+                unreadable_count: None,
+                note: format!("{env_note}agent root unreadable: {error}"),
+                ..probe
+            }
+        }
+    };
+    let mut known = 0_u64;
+    let mut unreadable = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut bytes_complete = true;
+    let mut agents_seen = 0_u64;
+    for entry in agents {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        let agent_id = entry.file_name().to_string_lossy().into_owned();
+        let agent_dir = entry.path();
+        let db = agent_dir.join("agent").join("openclaw-agent.sqlite");
+        let mut archive_ids = std::collections::HashSet::new();
+        match fs::metadata(&db) {
+            Ok(metadata) if metadata.is_file() => {
+                agents_seen += 1;
+                let info = probe_sqlite_store(&db);
+                match info.total_bytes {
+                    Some(bytes) => total_bytes = total_bytes.saturating_add(bytes),
+                    None => {
+                        bytes_complete = false;
+                        unreadable += 1;
+                    }
+                }
+                match enumerate_openclaw_sessions(&db) {
+                    Ok(rows) => {
+                        known += rows.len() as u64;
+                        archive_ids = rows
+                            .iter()
+                            .filter(|row| row.generation.is_some())
+                            .map(|row| row.session_id.clone())
+                            .collect();
+                        let mtime = match metadata.modified() {
+                            Ok(mtime) => mtime,
+                            Err(_) => {
+                                unreadable += rows.len() as u64;
+                                continue;
+                            }
+                        };
+                        for row in rows {
+                            let base_id =
+                                crate::sqlite_probe::openclaw_native_id(&agent_id, &row.session_id);
+                            let native = match row.generation {
+                                Some(generation) => format!("{base_id}~g{generation}"),
+                                None => base_id,
+                            };
+                            report.records.push(SessionRecord {
+                                id: crate::id::SessionIdentity {
+                                    source_short: source.short(),
+                                    machine: machine.to_string(),
+                                    native_id: native,
+                                }
+                                .id(),
+                                absolute_path: db.clone(),
+                                byte_size: 0,
+                                mtime,
+                                source,
+                                compressed: false,
+                                sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
+                            });
+                        }
+                    }
+                    Err(_) => unreadable += 1,
+                }
+                probe.recognized_files.push(db);
+            }
+            Ok(_) => unreadable += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => unreadable += 1,
+        }
+        scan_openclaw_cold_files(
+            &agent_id,
+            &agent_dir,
+            &archive_ids,
+            source,
+            machine,
+            report,
+            &mut known,
+            &mut unreadable,
+            &mut total_bytes,
+        );
+    }
+    probe.record_count = Some(known);
+    probe.unreadable_count = Some(unreadable);
+    probe.bytes = bytes_complete.then_some(total_bytes);
+    probe.note = format!("{env_note}OpenClaw read-only per-agent SQLite scan; {agents_seen} agent database(s), cold session archives deduplicated against archive rows");
+    report.records.sort_by(|a, b| a.id.cmp(&b.id));
+    probe
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_openclaw_cold_files(
+    agent_id: &str,
+    agent_dir: &Path,
+    sqlite_archive_ids: &std::collections::HashSet<String>,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+    known: &mut u64,
+    unreadable: &mut u64,
+    total_bytes: &mut u64,
+) {
+    let sessions_dir = agent_dir.join("sessions");
+    let files = match fs::read_dir(sessions_dir) {
+        Ok(files) => files,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(_) => {
+            *unreadable += 1;
+            return;
+        }
+    };
+    for file in files {
+        let file = match file {
+            Ok(file) => file,
+            Err(_) => {
+                *unreadable += 1;
+                continue;
+            }
+        };
+        let path = file.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("zst") {
+            continue;
+        }
+        let name = file.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.split(".jsonl").next() else {
+            continue;
+        };
+        if stem.is_empty() || sqlite_archive_ids.contains(stem) {
+            continue;
+        }
+        match file.metadata() {
+            Ok(metadata) if metadata.is_file() => {
+                *known += 1;
+                *total_bytes = total_bytes.saturating_add(metadata.len());
+                let mtime = match metadata.modified() {
+                    Ok(mtime) => mtime,
+                    Err(_) => {
+                        *unreadable += 1;
+                        continue;
+                    }
+                };
+                report.records.push(SessionRecord {
+                    id: crate::id::SessionIdentity {
+                        source_short: source.short(),
+                        machine: machine.to_string(),
+                        native_id: crate::sqlite_probe::openclaw_cold_native_id(
+                            agent_id, stem, &name,
+                        ),
+                    }
+                    .id(),
+                    absolute_path: path,
+                    byte_size: metadata.len(),
+                    mtime,
+                    source,
+                    compressed: true,
+                    sqlite_layout: None,
+                });
+            }
+            _ => *unreadable += 1,
+        }
+    }
+}
+
 fn probe_cursor_harness(
     base: HarnessProbe,
     confidence: Confidence,
@@ -2219,6 +2429,108 @@ mod tests {
     /// Serialises tests that mutate process env vars — cargo runs tests in
     /// parallel threads and `set_var` is process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn openclaw_scans_multiple_agents_and_deduplicates_sqlite_cold_archive_files() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let agents = sandbox.root().join("agents");
+        let db = agents.join("synthetic-agent/agent/openclaw-agent.sqlite");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::create_dir_all(agents.join("synthetic-agent/sessions")).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, started_at TEXT);
+             INSERT INTO session_windows VALUES ('live-window', 'logical-session', '2026-01-01T00:00:00Z');
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             INSERT INTO transcript_events VALUES ('live-window', 1, '{\"id\":\"synthetic-event\",\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"provider\":\"synthetic-provider\",\"model\":\"synthetic-model\",\"usage\":{\"input\":2}}}', '2026-01-01T00:00:01Z');
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);
+             INSERT INTO session_transcript_archives VALUES ('cold-db', 3, 'logical-cold', 'deleted', 'zstd', X'00', '6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d', 'cold-db.jsonl.zst', '2026-01-02T00:00:00Z', NULL);",
+        ).unwrap();
+        drop(conn);
+        fs::write(
+            agents.join("synthetic-agent/sessions/cold-db.jsonl.deleted.synthetic.zst"),
+            b"duplicate cold archive",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("synthetic-agent/sessions/cold-file.jsonl.deleted.synthetic.zst"),
+            b"unmatched cold archive",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("synthetic-agent/sessions/cold-file.jsonl.deleted.synthetic-later.zst"),
+            b"another generation of the same cold session",
+        )
+        .unwrap();
+        let second_db = agents.join("synthetic-child/agent/openclaw-agent.sqlite");
+        fs::create_dir_all(second_db.parent().unwrap()).unwrap();
+        let second = rusqlite::Connection::open(second_db).unwrap();
+        second.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-child');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, started_at TEXT);
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);",
+        ).unwrap();
+        drop(second);
+        fs::create_dir_all(agents.join("synthetic-archive-only/sessions")).unwrap();
+        fs::write(
+            agents.join("synthetic-archive-only/sessions/cold-only.jsonl.deleted.synthetic.zst"),
+            b"synthetic cold archive without database",
+        )
+        .unwrap();
+
+        let registry = parse_registry(&format!(r#"{{"schema_version":1,"generated":"synthetic","harnesses":[{{"id":"openclaw","display_name":"OpenClaw","product_group":"agent-platforms","paths":{{"macos":{{"template":"~/agents","format":"sqlite","confidence":"official-docs","source":"synthetic"}},"linux":{{"template":"~/agents","format":"sqlite","confidence":"official-docs","source":"synthetic"}},"windows":{{"template":"~/agents","format":"sqlite","confidence":"official-docs","source":"synthetic"}}}}}}]}}"#), "synthetic registry").unwrap();
+        let config = Config {
+            harness_roots: [(
+                "openclaw".to_string(),
+                agents.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let report =
+            scan_with_registry_and_machine(&config, &registry, "synthetic-machine").unwrap();
+        assert_eq!(
+            registry.harnesses[0].product_group.as_deref(),
+            Some("agent-platforms")
+        );
+        let ids: Vec<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 5, "one live window, its SQLite archive, and three unmatched cold files; the matching SQLite file is excluded");
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            ids.len(),
+            "separate cold archive files for one native session must not collide"
+        );
+        let prefix = crate::sqlite_probe::openclaw_native_id("synthetic-agent", "");
+        assert!(ids
+            .iter()
+            .any(|id| id.ends_with(&format!("{prefix}6c6976652d77696e646f77"))));
+        assert!(ids
+            .iter()
+            .any(|id| id.ends_with(&format!("{prefix}636f6c642d6462~g3"))));
+        let cold_file_prefix = format!("{prefix}636f6c642d66696c65~cold-");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| id.contains(&cold_file_prefix))
+                .count(),
+            2,
+            "both files for the same native session are retained"
+        );
+        let archive_only_prefix =
+            crate::sqlite_probe::openclaw_native_id("synthetic-archive-only", "cold-only");
+        assert!(ids
+            .iter()
+            .any(|id| id.contains(&format!("{archive_only_prefix}~cold-"))));
+        assert_eq!(report.probes[0].record_count, Some(5));
+    }
 
     #[test]
     fn xdg_data_home_unset_falls_back_to_local_share() {

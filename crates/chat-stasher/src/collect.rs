@@ -68,8 +68,8 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-    read_opencode_session, read_sqlite_session, sqlite_session_cursor, sqlite_store_fingerprint,
-    OpenCodeCursor,
+    read_openclaw_session, read_opencode_session, read_sqlite_session, sqlite_session_cursor,
+    sqlite_store_fingerprint, OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, Context};
@@ -1250,6 +1250,15 @@ fn process_sqlite(
             bucket_cap,
             &store_fingerprint,
         ),
+        SqliteSessionLayout::OpenClaw => process_openclaw(
+            record,
+            old,
+            force_reset,
+            stage,
+            machine,
+            bucket_cap,
+            &store_fingerprint,
+        ),
         SqliteSessionLayout::CursorLegacy => {
             let session_id = native_session_id(record, "Cursor legacy")?;
             let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id).map_err(
@@ -1320,6 +1329,71 @@ fn process_sqlite(
             )
         }
     }
+}
+
+fn process_openclaw(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+    store_fingerprint: &str,
+) -> anyhow::Result<Processed> {
+    let native = record
+        .id
+        .splitn(3, '.')
+        .nth(2)
+        .ok_or_else(|| anyhow!("invalid OpenClaw session id"))?;
+    let (native, generation) = match native.rsplit_once("~g") {
+        Some((native, generation)) => (
+            native,
+            Some(
+                generation
+                    .parse::<i64>()
+                    .map_err(|_| anyhow!("invalid OpenClaw archive generation"))?,
+            ),
+        ),
+        None => (native, None),
+    };
+    let encoded = native
+        .strip_prefix("oc-")
+        .ok_or_else(|| anyhow!("invalid OpenClaw agent/session id"))?;
+    let (agent_id, session_id) = encoded
+        .split_once('-')
+        .ok_or_else(|| anyhow!("invalid OpenClaw agent/session id"))?;
+    if agent_id.is_empty() {
+        return Err(anyhow!("invalid OpenClaw agent identity"));
+    }
+    let session_id = decode_openclaw_id_component(session_id)?;
+    let snapshot = read_openclaw_session(&record.absolute_path, &session_id, generation)
+        .map_err(|error| anyhow!("failed to read OpenClaw session snapshot: {error}"))?;
+    process_sqlite_snapshot(
+        record,
+        old,
+        force_reset,
+        stage,
+        machine,
+        bucket_cap,
+        snapshot.cursor,
+        snapshot.json_line,
+        store_fingerprint,
+    )
+}
+
+fn decode_openclaw_id_component(encoded: &str) -> anyhow::Result<String> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(anyhow!("invalid OpenClaw session identity encoding"));
+    }
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).map_err(anyhow::Error::from)?;
+            u8::from_str_radix(pair, 16).map_err(anyhow::Error::from)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    String::from_utf8(bytes).map_err(|_| anyhow!("OpenClaw session identity is not UTF-8"))
 }
 
 fn process_sqlite_snapshot(

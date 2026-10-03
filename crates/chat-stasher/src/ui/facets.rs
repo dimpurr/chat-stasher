@@ -125,6 +125,7 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "github-copilot-cli",
     "kimi-code",
     "opencode",
+    "openclaw",
     "zed",
 ];
 
