@@ -15,6 +15,7 @@ use std::collections::HashMap;
 mod codex;
 mod cursor;
 mod gemini_cli;
+mod hermes_agent;
 mod kimi_code;
 mod openclaw;
 mod opencode;
@@ -251,6 +252,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "kimi-code"
             | "opencode"
             | "openclaw"
+            | "hermes-agent"
             | "cursor"
             | "chatgpt"
             | "deepseek"
@@ -294,6 +296,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "kimi-code" => kimi_code::record_or_count(value, conversation),
         "opencode" => opencode::normalize_session(value, conversation),
         "openclaw" => openclaw::normalize_session(value, conversation),
+        "hermes-agent" => hermes_agent::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),

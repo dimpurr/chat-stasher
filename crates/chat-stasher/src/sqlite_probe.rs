@@ -251,7 +251,12 @@ pub struct OpenCodeHighWater {
 /// can no longer be asked by accident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenCodeCursor {
-    pub session_time_updated: i64,
+    #[serde(default)]
+    pub session_time_updated: Option<i64>,
+    /// Full source-shaped snapshot key for stores whose logical high-water
+    /// columns do not reveal in-place metadata updates.
+    #[serde(default)]
+    pub content_sha256: Option<String>,
     /// Generic logical high-water data for one-row SQLite stores such as
     /// Cursor/Grok. For opencode these remain at their default values and the
     /// message/part fields below carry the existing three-table cursor.
@@ -336,6 +341,147 @@ fn encode_openclaw_component(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// One Hermes source export. Message rows and session-level usage rows are
+/// kept in separate arrays because the source has no per-message model or
+/// provider attribution.
+#[derive(Debug, Clone)]
+pub struct HermesSessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+}
+
+/// Read one Hermes session and every message/usage row in a WAL-aware,
+/// read-only SQLite transaction. `mode=ro` still lets SQLite read committed
+/// WAL content; no database or sidecar is opened for writing.
+pub fn read_hermes_session(db: &Path, session_id: &str) -> Result<HermesSessionSnapshot, String> {
+    ensure_hermes_wal_readable(db)?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_hermes_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
+    let session = conn
+        .query_row(
+            "SELECT * FROM sessions WHERE id = ?1",
+            [session_id],
+            hermes_row_to_json_object,
+        )
+        .map_err(|error| format!("failed to read Hermes session row: {error}"))?;
+    let messages = read_hermes_rows(&conn, "messages", session_id)?;
+    let usage = read_hermes_rows(&conn, "session_model_usage", session_id)?;
+    let message_count = messages.len() as u64;
+    let usage_count = usage.len() as u64;
+    let envelope = serde_json::json!({
+        "schema": "chat-stasher.hermes-agent.session.v1",
+        "session": session,
+        "messages": messages,
+        "session_model_usage": usage,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("failed to serialize Hermes session: {error}"))?;
+    let cursor = OpenCodeCursor {
+        session_time_updated: None,
+        content_sha256: Some(hex_digest(&Sha256::digest(&json_line))),
+        row_count: 1,
+        row_high_water: None,
+        message_count,
+        message_high_water: None,
+        part_count: usage_count,
+        part_high_water: None,
+    };
+    Ok(HermesSessionSnapshot { cursor, json_line })
+}
+
+fn ensure_hermes_schema(conn: &Connection) -> Result<(), String> {
+    for (table, required) in [
+        ("sessions", &["id"][..]),
+        ("messages", &["id", "session_id", "role"][..]),
+        (
+            "session_model_usage",
+            &["session_id", "model", "billing_provider"][..],
+        ),
+    ] {
+        let mut statement = conn
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+            .map_err(|error| format!("failed to inspect Hermes {table} schema: {error}"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| format!("failed to inspect Hermes {table} schema: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("failed to inspect Hermes {table} schema: {error}"))?;
+        if required
+            .iter()
+            .any(|column| !columns.iter().any(|actual| actual == column))
+        {
+            return Err(format!(
+                "Hermes schema mismatch: table={table} columns={}",
+                columns.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate all three tables the Hermes export requires without materialising
+/// any message content. A partial or changed schema must not look like an
+/// empty archive.
+pub fn validate_hermes_schema(db: &Path) -> Result<(), String> {
+    ensure_hermes_wal_readable(db)?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_hermes_schema(&conn)
+}
+
+fn ensure_hermes_wal_readable(db: &Path) -> Result<(), String> {
+    if db_is_wal(db) && sidecar(db, "-wal").exists() && !sidecar(db, "-shm").exists() {
+        return Err(
+            "WAL database has no shared-memory sidecar; refusing an incomplete read-only snapshot"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn read_hermes_rows(
+    conn: &Connection,
+    table: &str,
+    session_id: &str,
+) -> Result<Vec<Value>, String> {
+    let sql = format!("SELECT * FROM \"{table}\" WHERE session_id = ?1 ORDER BY rowid");
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("failed to read Hermes {table} rows: {error}"))?;
+    let rows = statement
+        .query_map([session_id], hermes_row_to_json_object)
+        .map_err(|error| format!("failed to enumerate Hermes {table} rows: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to read Hermes {table} rows: {error}"))
+}
+
+fn hermes_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let statement = row.as_ref();
+    let mut object = Map::new();
+    for index in 0..statement.column_count() {
+        let name = statement.column_name(index)?.to_string();
+        object.insert(name, hermes_sqlite_value_to_json(row.get_ref(index)?));
+    }
+    Ok(Value::Object(object))
+}
+
+fn hermes_sqlite_value_to_json(value: ValueRef<'_>) -> Value {
+    match value {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => Value::from(value),
+        ValueRef::Real(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ValueRef::Text(value) => Value::String(String::from_utf8_lossy(value).into_owned()),
+        ValueRef::Blob(value) => Value::Array(value.iter().copied().map(Value::from).collect()),
+    }
 }
 
 /// Metadata-only row returned by a registry-declared SQLite session table.
@@ -1281,7 +1427,8 @@ pub fn sqlite_session_cursor(
         id: session_id.to_string(),
     });
     Ok(OpenCodeCursor {
-        session_time_updated: time_value,
+        session_time_updated: Some(time_value),
+        content_sha256: None,
         row_count: count as u64,
         row_high_water: high_water,
         message_count: 0,
@@ -1411,7 +1558,8 @@ pub fn read_cursor_legacy_session(
         .and_then(Value::as_i64)
         .ok_or_else(|| "Cursor composer createdAt missing, cannot establish cursor".to_string())?;
     let cursor = OpenCodeCursor {
-        session_time_updated: created_at,
+        session_time_updated: Some(created_at),
+        content_sha256: None,
         row_count: 1,
         row_high_water: Some(OpenCodeHighWater {
             time_updated: created_at,
@@ -1598,7 +1746,8 @@ fn opencode_session_cursor_with_conn(
     let part_count = count_rows(conn, "part", session_id)?;
     let part_high_water = high_water(conn, "part", session_id)?;
     Ok(OpenCodeCursor {
-        session_time_updated,
+        session_time_updated: Some(session_time_updated),
+        content_sha256: None,
         row_count: 0,
         row_high_water: None,
         message_count,
@@ -2040,6 +2189,57 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn hermes_snapshot_keeps_inactive_messages_and_separate_session_usage() {
+        let sandbox = crate::test_support::Sandbox::new();
+        sandbox.ensure_dirs();
+        let db = sandbox.root().join("home/.hermes/state.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at TEXT, ended_at TEXT, archived INTEGER, input_tokens INTEGER);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT, token_count INTEGER, active INTEGER, compacted INTEGER, _compressed_summary TEXT);
+             CREATE TABLE session_model_usage (session_id TEXT, model TEXT, billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT, task TEXT, api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER, estimated_cost_usd REAL, actual_cost_usd REAL, cost_status TEXT, cost_source TEXT, first_seen TEXT, last_seen TEXT);
+             INSERT INTO sessions VALUES ('hermes-s1','cli','model-a','2026-01-01','2026-01-02',1,99);
+             INSERT INTO messages VALUES (1,'hermes-s1','user','synthetic prompt','2026-01-01T00:00:00Z',3,0,1,'synthetic summary');
+             INSERT INTO messages VALUES (2,'hermes-s1','assistant','synthetic reply','2026-01-01T00:00:01Z',5,1,0,NULL);
+             INSERT INTO session_model_usage VALUES ('hermes-s1','model-a','provider-a','https://a.invalid','default','chat',1,10,5,2,1,4,0.25,0.2,'priced','fixture','a','b');
+             INSERT INTO session_model_usage VALUES ('hermes-s1','model-b','provider-b','https://b.invalid','fallback','tool',2,20,6,0,0,1,0.5,0.4,'priced','fixture','c','d');",
+        )
+        .unwrap();
+        let snapshot = read_hermes_session(&db, "hermes-s1").unwrap();
+        let value: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(value["schema"], "chat-stasher.hermes-agent.session.v1");
+        assert_eq!(value["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(value["messages"][0]["active"], 0);
+        assert_eq!(value["messages"][0]["compacted"], 1);
+        assert_eq!(
+            value["messages"][0]["_compressed_summary"],
+            "synthetic summary"
+        );
+        assert_eq!(value["session_model_usage"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["session_model_usage"][1]["billing_provider"],
+            "provider-b"
+        );
+        assert_eq!(value["session_model_usage"][1]["input_tokens"], 20);
+        assert_eq!(value["session_model_usage"][1]["actual_cost_usd"], 0.4);
+        assert!(value["messages"][1].get("model").is_none());
+        assert!(value["messages"][1].get("provider").is_none());
+        assert!(db.with_extension("db-wal").exists() || db.with_file_name("state.db-wal").exists());
+        conn.execute(
+            "UPDATE session_model_usage SET actual_cost_usd = 0.7 WHERE session_id = 'hermes-s1' AND model = 'model-b'",
+            [],
+        )
+        .unwrap();
+        let updated = read_hermes_session(&db, "hermes-s1").unwrap();
+        assert_ne!(
+            snapshot.cursor.content_sha256, updated.cursor.content_sha256,
+            "in-place session usage changes must advance the session cursor"
+        );
+    }
 
     fn write(path: &Path, content: &str) {
         if let Some(p) = path.parent() {

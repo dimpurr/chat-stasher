@@ -224,6 +224,53 @@
       }
     },
     {
+      "id": "hermes-agent",
+      "display_name": "Hermes Agent",
+      "product_group": "agent-platforms",
+      "dev_priority": "normal",
+      "paths": {
+        "macos": {
+          "template": "~/.hermes/state.db",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "Hermes Agent session storage documentation: https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md",
+          "sql_table": "sessions",
+          "sql_id_column": "id",
+          "sql_required_columns": [
+            "id"
+          ]
+        },
+        "linux": {
+          "template": "~/.hermes/state.db",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "Hermes Agent session storage documentation: https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md",
+          "sql_table": "sessions",
+          "sql_id_column": "id",
+          "sql_required_columns": [
+            "id"
+          ]
+        },
+        "windows": {
+          "template": "~/.hermes/state.db",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "Hermes Agent session storage documentation: https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md",
+          "sql_table": "sessions",
+          "sql_id_column": "id",
+          "sql_required_columns": [
+            "id"
+          ]
+        }
+      },
+      "legacy_roots": [
+        "~/.hermes/sessions"
+      ],
+      "notes": "Reads the canonical state.db read-only, including WAL content. Legacy JSON/JSONL files are scanned as compatibility sources and deduplicated by native session id. Session model/provider/token/cost aggregates remain session-level metadata; they are not assigned to messages.",
+      "seal_policy": "not-applicable",
+      "seal_source": "SQLite source; no active JSONL file to rename."
+    },
+    {
       "id": "cursor",
       "display_name": "Cursor",
       "verified": {
@@ -586,9 +633,15 @@
       "display_name": "Chrome",
       "source": "https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -596,8 +649,12 @@
       "display_name": "Chromium",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
         "windows": {
           "tier": "supported",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -609,9 +666,15 @@
       "display_name": "Edge",
       "source": "https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -619,9 +682,15 @@
       "display_name": "Brave",
       "source": "https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -647,8 +716,12 @@
       "display_name": "Chrome Beta",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
         "windows": {
           "tier": "unverified",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -660,8 +733,12 @@
       "display_name": "Chrome Canary",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
         "windows": {
           "tier": "unverified",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -673,9 +750,15 @@
       "display_name": "Opera",
       "source": "https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
-        "windows": {"tier": "unverified"}
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
+        "windows": {
+          "tier": "unverified"
+        }
       }
     },
     {
@@ -683,9 +766,15 @@
       "display_name": "Vivaldi",
       "source": "https://github.com/vergenzt/TabFS/blob/master/install.sh",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
-        "windows": {"tier": "unverified"}
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
+        "windows": {
+          "tier": "unverified"
+        }
       }
     },
     {
@@ -693,9 +782,15 @@
       "display_name": "Firefox",
       "source": "https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     }
   ]

@@ -265,10 +265,17 @@ pub struct HarnessRegistry {
 pub struct RegistryHarness {
     pub id: String,
     pub display_name: String,
+    /// Product taxonomy is independent from the collector that reads a
+    /// harness (for example, disk scanners and extension capture can belong
+    /// to distinct groups).
     #[serde(default)]
     pub product_group: Option<String>,
     #[serde(default)]
     pub paths: RegistryPaths,
+    /// Additional compatibility roots scanned alongside the primary source.
+    /// Hermes uses this for its pre-database session files.
+    #[serde(default)]
+    pub legacy_roots: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
     /// Active-file sealing policy for this harness: `rename` / `no-rename` /
@@ -878,10 +885,105 @@ pub fn scan_with_registry_and_machine(
     let mut report = ScanReport::default();
 
     for h in &registry.harnesses {
-        let probe = probe_harness(config, h, platform, &machine, &mut report);
+        let mut probe = probe_harness(config, h, platform, &machine, &mut report);
+        if h.id == "hermes-agent" {
+            match scan_hermes_legacy(h, machine, &report.records) {
+                Ok(records) => {
+                    let count = records.len() as u64;
+                    let legacy_bytes = records.iter().map(|record| record.byte_size).sum::<u64>();
+                    probe.bytes = probe.bytes.map(|bytes| bytes.saturating_add(legacy_bytes));
+                    probe
+                        .recognized_files
+                        .extend(records.iter().map(|record| record.absolute_path.clone()));
+                    report.records.extend(records);
+                    if let Some(value) = probe.record_count.as_mut() {
+                        *value += count;
+                    }
+                    if let Some(value) = probe.candidate_count.as_mut() {
+                        *value += count;
+                    }
+                    probe.note.push_str(&format!(
+                        "; legacy JSON/JSONL sessions={count} after ID deduplication"
+                    ));
+                }
+                Err(path) => report.indeterminate_roots.push(path),
+            }
+        }
         report.probes.push(probe);
     }
     Ok(report)
+}
+
+fn scan_hermes_legacy(
+    harness: &RegistryHarness,
+    machine: &str,
+    existing: &[SessionRecord],
+) -> Result<Vec<SessionRecord>, PathBuf> {
+    let home = crate::config::home_dir();
+    let mut records = Vec::new();
+    for template in &harness.legacy_roots {
+        let Some((root, _)) = static_prefix_root(template) else {
+            continue;
+        };
+        let root = if template.starts_with("~/") {
+            home.join(&template[2..])
+        } else {
+            root
+        };
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(root),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| root.clone())?;
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                // reason: A non-UTF-8 extension cannot match either supported suffix.
+                .unwrap_or_default();
+            if !matches!(ext, "json" | "jsonl") {
+                continue;
+            }
+            let metadata = fs::metadata(&path).map_err(|_| path.clone())?;
+            if !metadata.is_file() {
+                continue;
+            }
+            let native_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| path.clone())?
+                .to_string();
+            if native_id.is_empty() {
+                continue;
+            }
+            let id = crate::id::SessionIdentity {
+                source_short: "hermes-agent",
+                machine: machine.to_string(),
+                native_id,
+            }
+            .id();
+            if existing.iter().any(|record| record.id == id)
+                || records.iter().any(|record: &SessionRecord| record.id == id)
+            {
+                continue;
+            }
+            let Ok(mtime) = metadata.modified() else {
+                return Err(path);
+            };
+            records.push(SessionRecord {
+                id,
+                absolute_path: path,
+                byte_size: metadata.len(),
+                mtime,
+                source: HarnessSource::HermesAgent,
+                compressed: false,
+                sqlite_layout: None,
+            });
+        }
+    }
+    Ok(records)
 }
 
 fn probe_harness(
@@ -1037,10 +1139,15 @@ fn probe_harness(
                     // The schema spec also comes from the registry cell, so
                     // the scan and the doctor enumerate with the same query.
                     let spec = crate::sqlite_probe::spec_from_cell(schema);
-                    let info = match &spec {
+                    let mut info = match &spec {
                         Some(spec) => crate::sqlite_probe::probe_sqlite_store_with(&root, spec),
                         None => probe_sqlite_store(&root),
                     };
+                    if h.id == "hermes-agent" {
+                        if let Err(actual) = crate::sqlite_probe::validate_hermes_schema(&root) {
+                            info.sessions = SqliteSessionProbe::SchemaMismatch { actual };
+                        }
+                    }
                     probe.bytes = info.total_bytes;
                     let expected = spec
                         .as_ref()
@@ -1110,17 +1217,24 @@ fn probe_harness(
                                         ));
                                     }
                                 }
-                            } else if h.id == "grok" {
+                            } else if h.id == "hermes-agent" || h.id == "grok" {
                                 if let Some(spec) = spec.as_ref() {
                                     match enumerate_sqlite_sessions(&root, spec) {
                                         Ok(rows) => {
-                                            let records = sqlite_records_from_rows(
-                                                rows,
-                                                &root,
-                                                source,
-                                                machine,
-                                                SqliteSessionLayout::Grok,
-                                            );
+                                            let layout = if h.id == "hermes-agent" {
+                                                SqliteSessionLayout::HermesAgent
+                                            } else {
+                                                SqliteSessionLayout::Grok
+                                            };
+                                            let records = if h.id == "hermes-agent" {
+                                                hermes_records_from_rows(
+                                                    rows, &root, source, machine,
+                                                )
+                                            } else {
+                                                sqlite_records_from_rows(
+                                                    rows, &root, source, machine, layout,
+                                                )
+                                            };
                                             let record_count = records.len();
                                             let usage =
                                                 grok_usage_records(&root, &records, machine);
@@ -1511,6 +1625,33 @@ fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> G
         }
     }
     scan
+}
+
+fn hermes_records_from_rows(
+    rows: Vec<SqliteSessionRow>,
+    db: &Path,
+    source: HarnessSource,
+    machine: &str,
+) -> Vec<SessionRecord> {
+    let Ok(modified) = fs::metadata(db).and_then(|metadata| metadata.modified()) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .map(|row| SessionRecord {
+            id: crate::id::SessionIdentity {
+                source_short: source.short(),
+                machine: machine.to_string(),
+                native_id: row.id,
+            }
+            .id(),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime: row.mtime.unwrap_or(modified),
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::HermesAgent),
+        })
+        .collect()
 }
 
 /// Sessions a probe knew about but never handed out as `SessionRecord`s.

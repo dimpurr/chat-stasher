@@ -164,6 +164,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | OpenClaw | supported | - |
+| Local | Hermes Agent | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok (xAI CLI) | supported | - |
 | Local | GitHub Copilot CLI | supported | - |

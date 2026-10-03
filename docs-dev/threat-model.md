@@ -818,6 +818,10 @@ machine:
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
   asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2342-2393`).
+  (`crates/chat-stasher/src/sqlite_probe.rs:1522-1525`). The module states the
+  intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
+  (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2210-2256`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:389,480-481`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
@@ -919,6 +923,7 @@ a real limitation of the current code.
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
    (`crates/chat-stasher/src/fts.rs:1-6,1459-1679,1681-1696,2130-2139`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1459-1678,1680-1695,2130-2139`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

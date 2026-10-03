@@ -488,7 +488,11 @@ fn a_cursor_that_advanced_over_identical_bytes_writes_no_shard() {
     // Move the *stored* cursor ahead of the live one so the per-session
     // comparison has to say "changed" and the session is read for real.
     edit_state(&fx, SESSION_A, |entry| {
-        entry["cursor"]["opencode"]["session_time_updated"] = json!(live.session_time_updated + 1);
+        entry["cursor"]["opencode"]["session_time_updated"] = json!(
+            live.session_time_updated
+                .expect("OpenCode records a session time")
+                + 1
+        );
     });
     write_unrelated(&fx.db);
 
@@ -506,7 +510,7 @@ fn a_cursor_that_advanced_over_identical_bytes_writes_no_shard() {
     let stored = fx.read_state();
     assert_eq!(
         state_entry(&stored, SESSION_A)["cursor"]["opencode"]["session_time_updated"].as_i64(),
-        Some(live.session_time_updated),
+        live.session_time_updated,
         "the stored cursor must advance to the value the pass just read"
     );
     println!(
@@ -515,6 +519,7 @@ fn a_cursor_that_advanced_over_identical_bytes_writes_no_shard() {
         fx.shard_count(&id_a),
         a_before.len(),
         live.session_time_updated
+            .expect("OpenCode records a session time")
     );
 }
 
@@ -531,7 +536,11 @@ fn an_unavailable_previous_export_hash_still_writes_a_shard() {
     let live = sqlite_probe::opencode_session_cursor(&fx.db, SESSION_A).unwrap();
 
     edit_state(&fx, SESSION_A, |entry| {
-        entry["cursor"]["opencode"]["session_time_updated"] = json!(live.session_time_updated + 1);
+        entry["cursor"]["opencode"]["session_time_updated"] = json!(
+            live.session_time_updated
+                .expect("OpenCode records a session time")
+                + 1
+        );
         // An absent / unreadable previous hash, not a hash that happens to
         // match: the net has nothing to compare against.
         entry["cursor"]["prefix_sha256"] = json!("");

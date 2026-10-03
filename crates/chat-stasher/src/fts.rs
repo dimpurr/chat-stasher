@@ -675,6 +675,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("gemini-cli", "json"),
     ("opencode", FORMAT_SQLITE),
     ("openclaw", FORMAT_SQLITE),
+    ("hermes-agent", FORMAT_SQLITE),
     ("cursor", FORMAT_SQLITE),
     ("grok", FORMAT_SQLITE),
     ("github-copilot-cli", "jsonl"),
@@ -763,6 +764,7 @@ fn export_reader(raw: &str) -> Option<String> {
     match export_schema(&value)? {
         "chat-stasher.opencode.session.v1" => Some("opencode".to_string()),
         "chat-stasher.openclaw.session.v1" => Some("openclaw".to_string()),
+        "chat-stasher.hermes-agent.session.v1" => Some("hermes-agent".to_string()),
         "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
         "chat-stasher.sqlite.session.v1" => {
             match value.get("table").and_then(serde_json::Value::as_str) {
@@ -2750,6 +2752,8 @@ mod tests {
             (
                 "openclaw",
                 br#"{"schema":"chat-stasher.openclaw.session.v1","agent_id":"synthetic-agent","window":{"session_id":"synthetic-window"},"events":[{"seq":1,"event":{"id":"synthetic-event","type":"message","message":{"role":"user","content":"synthetic question"}}}]}"#,
+                "hermes-agent",
+                br#"{"schema":"chat-stasher.hermes-agent.session.v1","session":{"id":"s1","model":"session-model"},"messages":[{"id":1,"session_id":"s1","role":"user","content":"synthetic question","active":0,"compacted":1}],"session_model_usage":[{"model":"session-model","billing_provider":"session-provider","input_tokens":7,"actual_cost_usd":0.4}]}"#,
                 Expected::Text("synthetic question"),
             ),
             (
