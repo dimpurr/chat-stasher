@@ -273,6 +273,71 @@ pub struct OpenCodeSessionSnapshot {
     pub json_line: Vec<u8>,
 }
 
+/// One OpenClaw history window or retained deletion/reset archive. The
+/// nullable timestamp column (`session_windows.started_at`,
+/// `session_transcript_archives.created_at`) surfaces as `None` — never a
+/// guessed or empty value — so legacy-import rows without it stay
+/// enumerable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenClawSessionRow {
+    pub session_id: String,
+    pub generation: Option<i64>,
+    pub timestamp: Option<String>,
+}
+
+/// The rows one OpenClaw agent store yielded plus the candidates it did not.
+/// Rows whose identity is unknown (a NULL `session_id`, a NULL archive
+/// `generation`, or a value that is not the declared type) are counted in
+/// `unreadable_rows` instead of aborting the enumeration; the rest of the
+/// store is still enumerated, so one malformed row cannot blind the scan
+/// the way a `collect` short-circuit over `rusqlite::Result` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenClawSessionEnumeration {
+    /// Every window and archive row that could be identified.
+    pub rows: Vec<OpenClawSessionRow>,
+    /// Candidate rows skipped because an identity column was NULL or had the
+    /// wrong type. A counted number, never a silent drop.
+    pub unreadable_rows: u64,
+}
+
+/// One immutable OpenClaw window/archive export. The archive blob is preserved
+/// as hexadecimal bytes when it is not already JSON; it is never decompressed
+/// or interpreted during collection.
+#[derive(Debug, Clone)]
+pub struct OpenClawSessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+}
+
+/// Filesystem-safe, collision-free native ID for an OpenClaw agent/session
+/// pair. Both components are UTF-8 hex encoded so slashes, colons and dots in
+/// upstream identifiers cannot become path separators or identity delimiters.
+pub fn openclaw_native_id(agent_id: &str, session_id: &str) -> String {
+    format!(
+        "oc-{}-{}",
+        encode_openclaw_component(agent_id),
+        encode_openclaw_component(session_id)
+    )
+}
+
+/// Include the cold file name in its identity so distinct archive generations
+/// of one native session cannot collapse into the same source slot.
+pub fn openclaw_cold_native_id(agent_id: &str, session_id: &str, file_name: &str) -> String {
+    format!(
+        "{}~cold-{}",
+        openclaw_native_id(agent_id, session_id),
+        encode_openclaw_component(file_name)
+    )
+}
+
+fn encode_openclaw_component(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Metadata-only row returned by a registry-declared SQLite session table.
 /// The row body is not carried during scanning; it is loaded only after
 /// `collect` has decided that this session's logical cursor changed.
@@ -738,6 +803,284 @@ pub fn enumerate_opencode_sessions(db: &Path) -> Result<Vec<OpenCodeSessionRow>,
         .map_err(|error| format!("failed to enumerate session rows: {error}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| format!("failed to read session rows: {error}"))
+}
+
+/// Enumerate OpenClaw transcript windows plus deletion/reset archives. The
+/// same session can occur in both tables; the caller uses `(session_id,
+/// generation)` and the archive digest to collapse that duplicate. A NULL in
+/// one row never aborts the enumeration: rows whose identity cannot be read
+/// are counted in [`OpenClawSessionEnumeration::unreadable_rows`] so the
+/// caller can report them, while the tables' other rows — including every
+/// archive row behind the cold-file dedup — are still enumerated.
+pub fn enumerate_openclaw_sessions(db: &Path) -> Result<OpenClawSessionEnumeration, String> {
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_openclaw_schema(&conn)?;
+    let mut rows = Vec::new();
+    let mut unreadable_rows = 0_u64;
+    {
+        let mut statement = conn.prepare(
+            "SELECT session_id, started_at FROM session_windows ORDER BY started_at, session_id",
+        ).map_err(|error| format!("failed to read OpenClaw windows: {error}"))?;
+        let mapped = statement
+            .query_map([], openclaw_window_row)
+            .map_err(|error| format!("failed to enumerate OpenClaw windows: {error}"))?;
+        for candidate in mapped {
+            match candidate {
+                Ok(row) => rows.push(row),
+                Err(_) => unreadable_rows += 1,
+            }
+        }
+    }
+    {
+        let mut statement = conn.prepare(
+            "SELECT session_id, generation, created_at FROM session_transcript_archives ORDER BY created_at, session_id, generation",
+        ).map_err(|error| format!("failed to read OpenClaw archive index: {error}"))?;
+        let mapped = statement
+            .query_map([], openclaw_archive_row)
+            .map_err(|error| format!("failed to enumerate OpenClaw archive index: {error}"))?;
+        for candidate in mapped {
+            match candidate {
+                Ok(row) => rows.push(row),
+                Err(_) => unreadable_rows += 1,
+            }
+        }
+    }
+    Ok(OpenClawSessionEnumeration {
+        rows,
+        unreadable_rows,
+    })
+}
+
+/// One `session_windows` row, or an error that leaves the row for
+/// [`enumerate_openclaw_sessions`] to count. A NULL `started_at` (legacy
+/// Doctor imports) stays in the row as `None`; only a missing session
+/// identity makes the row unidentifiable.
+fn openclaw_window_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenClawSessionRow> {
+    let session_id: Option<String> = row.get(0)?;
+    let timestamp: Option<String> = row.get(1)?;
+    Ok(OpenClawSessionRow {
+        session_id: session_id
+            .ok_or_else(|| openclaw_null_identity("session_windows.session_id"))?,
+        generation: None,
+        timestamp,
+    })
+}
+
+/// One `session_transcript_archives` row, or an error that leaves the row
+/// for [`enumerate_openclaw_sessions`] to count. A NULL `created_at` stays in
+/// the row as `None`; a NULL `session_id` or `generation` has no readable
+/// identity, so the row is counted instead of being mangled into the window
+/// id space (which could collide with a live window of the same session).
+fn openclaw_archive_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenClawSessionRow> {
+    let session_id: Option<String> = row.get(0)?;
+    let generation: Option<i64> = row.get(1)?;
+    let timestamp: Option<String> = row.get(2)?;
+    Ok(OpenClawSessionRow {
+        session_id: session_id
+            .ok_or_else(|| openclaw_null_identity("session_transcript_archives.session_id"))?,
+        generation: Some(
+            generation
+                .ok_or_else(|| openclaw_null_identity("session_transcript_archives.generation"))?,
+        ),
+        timestamp,
+    })
+}
+
+/// Err for a row whose identity-bearing column is NULL; the enumeration then
+/// counts it instead of guessing one.
+fn openclaw_null_identity(column: &'static str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, column.into())
+}
+
+/// Read one OpenClaw window or one retained cold archive through a single
+/// read-only SQLite snapshot. Message event JSON is kept as structured raw
+/// values, preserving event ids, sequence, model/provider and usage fields.
+/// Nullable columns surface as explicit `null` in the export — a legacy
+/// import row without `started_at`/`created_at`, or an event without
+/// `event_json`, keeps its row with unknown content rather than being elided
+/// or fabricated into empty values. What cannot be preserved honestly (a
+/// NULL agent id, archive blob or `archive_sha256`) fails the read closed
+/// under the column's own name instead of a generic decode error.
+pub fn read_openclaw_session(
+    db: &Path,
+    session_id: &str,
+    generation: Option<i64>,
+) -> Result<OpenClawSessionSnapshot, String> {
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_openclaw_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
+    let agent_id: Option<String> = conn
+        .query_row("SELECT agent_id FROM schema_meta LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| format!("failed to read OpenClaw agent identity: {error}"))?
+        .flatten();
+    let Some(agent_id) = agent_id else {
+        return Err("OpenClaw schema_meta.agent_id is missing or NULL".to_string());
+    };
+    if let Some(generation) = generation {
+        let (archive, declared_digest, blob) = conn.query_row(
+            "SELECT session_id, generation, session_key, reason, encoding, archive_sha256, archive_name, created_at, published_at, archive_blob FROM session_transcript_archives WHERE session_id = ?1 AND generation = ?2",
+            rusqlite::params![session_id, generation],
+            |row| {
+                let blob: Option<Vec<u8>> = row.get(9)?;
+                let mut archive = Map::new();
+                for (i, name) in ["session_id", "generation", "session_key", "reason", "encoding", "archive_sha256", "archive_name", "created_at", "published_at"].iter().enumerate() {
+                    archive.insert((*name).to_string(), sqlite_value_to_json(row.get_ref(i)?, false));
+                }
+                Ok((archive, row.get::<_, Option<String>>(5)?, blob))
+            },
+        ).map_err(|error| format!("failed to read OpenClaw archive: {error}"))?;
+        let Some(blob) = blob else {
+            return Err(
+                "OpenClaw archive_blob is NULL; the archive row has no bytes to preserve"
+                    .to_string(),
+            );
+        };
+        let Some(declared_digest) = declared_digest else {
+            return Err(
+                "OpenClaw archive_sha256 is NULL; the archive blob cannot be verified".to_string(),
+            );
+        };
+        let blob_digest = hex_digest(&Sha256::digest(&blob));
+        if !declared_digest.eq_ignore_ascii_case(&blob_digest) {
+            return Err("OpenClaw archive blob digest does not match archive_sha256".to_string());
+        }
+        let mut archive = archive;
+        let blob_hex = blob
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        archive.insert("blob_hex".to_string(), Value::String(blob_hex));
+        let json_line = serde_json::to_vec(&serde_json::json!({
+            "schema": "chat-stasher.openclaw.archive.v1",
+            "agent_id": agent_id,
+            "archive": Value::Object(archive),
+        }))
+        .map_err(|error| format!("failed to serialize OpenClaw archive: {error}"))?;
+        return Ok(OpenClawSessionSnapshot {
+            cursor: OpenCodeCursor {
+                session_time_updated: generation,
+                row_count: 1,
+                row_high_water: Some(OpenCodeHighWater {
+                    time_updated: generation,
+                    id: blob_digest,
+                }),
+                message_count: 0,
+                message_high_water: None,
+                part_count: 0,
+                part_high_water: None,
+            },
+            json_line,
+        });
+    }
+    let window: Value = conn
+        .query_row(
+            "SELECT * FROM session_windows WHERE session_id = ?1",
+            [session_id],
+            |row| row_to_json_object(row, false),
+        )
+        .map_err(|error| format!("failed to read OpenClaw session window: {error}"))?;
+    let mut events = Vec::new();
+    {
+        let mut statement = conn.prepare(
+            "SELECT seq, event_json, created_at FROM transcript_events WHERE session_id = ?1 ORDER BY seq",
+        ).map_err(|error| format!("failed to read OpenClaw transcript events: {error}"))?;
+        let mapped = statement.query_map([session_id], |row| {
+            let seq: Option<i64> = row.get(0)?;
+            let seq = seq.ok_or_else(|| openclaw_null_identity("transcript_events.seq"))?;
+            let raw: Option<String> = row.get(1)?;
+            let event: Option<Value> = match raw {
+                Some(raw) => Some(serde_json::from_str::<Value>(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?),
+                // A NULL event_json is preserved as an explicit null: the row
+                // exists, its content is unknown — it is never elided and
+                // never fabricated into an empty event.
+                None => None,
+            };
+            Ok(serde_json::json!({"seq": seq, "event": event, "created_at": sqlite_value_to_json(row.get_ref(2)?, false)}))
+        }).map_err(|error| format!("failed to enumerate OpenClaw transcript events: {error}"))?;
+        for candidate in mapped {
+            events.push(
+                candidate.map_err(|error| {
+                    format!("failed to read OpenClaw transcript events: {error}")
+                })?,
+            );
+        }
+    }
+    let latest = match events.last() {
+        Some(event) => event["seq"]
+            .as_i64()
+            .ok_or_else(|| "OpenClaw event sequence is not an integer".to_string())?,
+        None => -1,
+    };
+    let event_count = events.len() as u64;
+    let json_line = serde_json::to_vec(&serde_json::json!({
+        "schema": "chat-stasher.openclaw.session.v1",
+        "agent_id": agent_id,
+        "window": window,
+        "events": events,
+    }))
+    .map_err(|error| format!("failed to serialize OpenClaw session: {error}"))?;
+    let observation = hex_digest(&Sha256::digest(&json_line));
+    let high_water = OpenCodeHighWater {
+        time_updated: latest,
+        id: observation,
+    };
+    let cursor = OpenCodeCursor {
+        session_time_updated: latest,
+        row_count: event_count,
+        row_high_water: Some(high_water.clone()),
+        message_count: event_count,
+        message_high_water: Some(high_water),
+        part_count: 0,
+        part_high_water: None,
+    };
+    Ok(OpenClawSessionSnapshot { cursor, json_line })
+}
+
+fn ensure_openclaw_schema(conn: &Connection) -> Result<(), String> {
+    for (table, required) in [
+        ("session_windows", &["session_id", "started_at"][..]),
+        ("schema_meta", &["agent_id"][..]),
+        (
+            "transcript_events",
+            &["session_id", "seq", "event_json", "created_at"][..],
+        ),
+        (
+            "session_transcript_archives",
+            &[
+                "session_id",
+                "generation",
+                "session_key",
+                "reason",
+                "encoding",
+                "archive_blob",
+                "archive_sha256",
+                "archive_name",
+                "created_at",
+                "published_at",
+            ][..],
+        ),
+    ] {
+        let columns = sqlite_table_columns(conn, table)
+            .map_err(|error| format!("failed to read OpenClaw {table} schema: {error}"))?;
+        if !required
+            .iter()
+            .all(|column| columns.iter().any(|actual| actual == column))
+        {
+            return Err(format!(
+                "OpenClaw schema mismatch: table={table} columns={}",
+                columns.join(",")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Read the logical cursor for one session. This is the cheap second-pass
@@ -2194,5 +2537,206 @@ mod b90_unreadable_count_tests {
         drop(conn);
         let probe = probe_sqlite_store_with(&db, &cursor_global_schema());
         assert_eq!(probe.unreadable_count, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod openclaw_tests {
+    use super::*;
+    use crate::test_support::Sandbox;
+
+    #[test]
+    fn openclaw_export_includes_window_events_and_cold_archives() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("openclaw-agent.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, ended_at TEXT, started_at TEXT);
+             INSERT INTO session_windows VALUES ('window-1', 'logical-1', NULL, '2026-01-02T03:04:05Z');
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             INSERT INTO transcript_events VALUES ('window-1', 7,
+               '{\"id\":\"event-7\",\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"provider\":\"synthetic-provider\",\"model\":\"synthetic-model\",\"usage\":{\"input\":11,\"output\":13,\"cacheRead\":17,\"cacheWrite\":19,\"totalTokens\":60,\"cost\":{\"total\":0.25}}}}',
+               '2026-01-02T03:04:06Z');
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);
+             INSERT INTO session_transcript_archives VALUES ('deleted-1', 2, 'logical-2', 'deleted', 'zstd', X'73796e7468657469632d636f6c642d61726368697665', 'cf3d6b9c3808b8ab261b086242d3e53e0d5b7d31eb2518319b679f4c3e4821c6', 'synthetic.jsonl.zst', '2026-01-03T00:00:00Z', '2026-01-03T00:00:01Z');",
+        )
+        .unwrap();
+        assert!(PathBuf::from(format!("{}-wal", db.display())).exists());
+        let index = enumerate_openclaw_sessions(&db).unwrap();
+        assert_eq!(index.unreadable_rows, 0);
+        assert_eq!(
+            index.rows.len(),
+            2,
+            "live window and deleted archive are both candidates"
+        );
+        let live = read_openclaw_session(&db, "window-1", None).unwrap();
+        let json: Value = serde_json::from_slice(&live.json_line).unwrap();
+        assert_eq!(json["events"][0]["seq"], 7);
+        assert_eq!(
+            json["events"][0]["event"]["message"]["provider"],
+            "synthetic-provider"
+        );
+        assert_eq!(
+            json["events"][0]["event"]["message"]["usage"]["cacheRead"],
+            17
+        );
+        let cold = read_openclaw_session(&db, "deleted-1", Some(2)).unwrap();
+        let cold: Value = serde_json::from_slice(&cold.json_line).unwrap();
+        assert_eq!(cold["archive"]["encoding"], "zstd");
+        assert_eq!(
+            cold["archive"]["blob_hex"],
+            "73796e7468657469632d636f6c642d61726368697665"
+        );
+        conn.execute(
+            "UPDATE session_transcript_archives SET archive_sha256 = 'synthetic-mismatch' WHERE session_id = 'deleted-1'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            read_openclaw_session(&db, "deleted-1", Some(2)).is_err(),
+            "a mismatched archive digest is unreadable, not a valid preserved archive"
+        );
+        drop(conn);
+    }
+
+    /// W325/GLM review. Legacy Doctor imports can leave `session_windows` rows
+    /// without `started_at`, and `session_transcript_archives.created_at` is
+    /// NULL in the same legacy flows. One such row must not abort the whole
+    /// per-agent enumeration: without the archive rows, the scanner's cold-file
+    /// dedup never sees the SQLite archive ids and re-collects (or, when the
+    /// store aborts, drops) generations it should have matched. Unidentifiable
+    /// rows (NULL `session_id`, NULL `generation`) stay skipped-and-counted
+    /// rather than identity-mangled into the window id space.
+    #[test]
+    fn openclaw_null_and_unidentifiable_rows_do_not_abort_enumeration() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("openclaw-agent.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, started_at TEXT);
+             INSERT INTO session_windows VALUES (NULL, 'logical-a', '2026-01-01T00:00:00Z');
+             INSERT INTO session_windows VALUES ('legacy-import', 'logical-a', NULL);
+             INSERT INTO session_windows VALUES ('current-window', 'logical-b', '2026-01-02T00:00:00Z');
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             INSERT INTO transcript_events VALUES ('legacy-import', 1, '{\"id\":\"synthetic-event\"}', NULL);
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);
+             INSERT INTO session_transcript_archives VALUES ('legacy-archive', 4, 'logical-a', 'reset', 'zstd', X'00', '6e657665722d74727573742d612d73796e7468657469632d646967657374', 'legacy-archive.jsonl.zst', NULL, NULL);
+             INSERT INTO session_transcript_archives VALUES (NULL, 5, 'logical-b', 'deleted', 'zstd', X'00', '6e657665722d74727573742d612d73796e7468657469632d646967657374', 'unnamed.jsonl.zst', '2026-01-03T00:00:00Z', NULL);
+             INSERT INTO session_transcript_archives VALUES ('generation-less', NULL, 'logical-b', 'deleted', 'zstd', X'00', '6e657665722d74727573742d612d73796e7468657469632d646967657374', 'generation-less.jsonl.zst', '2026-01-03T00:00:00Z', NULL);",
+        )
+        .unwrap();
+        assert!(PathBuf::from(format!("{}-wal", db.display())).exists());
+        let index = enumerate_openclaw_sessions(&db).expect(
+            "a NULL started_at, created_at or generation must not make the whole agent store unenumerable",
+        );
+        assert_eq!(
+            index.rows.len(),
+            3,
+            "the two identifiable windows and the one fully identified archive row all enumerate"
+        );
+        assert_eq!(
+            index.unreadable_rows, 3,
+            "the NULL session_id window, the NULL session_id archive and the NULL generation archive are counted, not silently dropped"
+        );
+        let legacy = index
+            .rows
+            .iter()
+            .find(|row| row.session_id == "legacy-import")
+            .expect("a window without started_at is still a candidate");
+        assert_eq!(legacy.timestamp, None);
+        assert_eq!(legacy.generation, None);
+        let archive = index
+            .rows
+            .iter()
+            .find(|row| row.session_id == "legacy-archive")
+            .expect(
+                "archive rows are enumerated even though the windows query saw a NULL started_at",
+            );
+        assert_eq!(archive.generation, Some(4));
+        assert_eq!(archive.timestamp, None);
+        assert!(index
+            .rows
+            .iter()
+            .any(|row| row.session_id == "current-window"));
+        assert!(!index
+            .rows
+            .iter()
+            .any(|row| row.session_id == "generation-less"
+                || row.session_id == "unnamed.jsonl.zst"
+                || row.session_id.is_empty()));
+        drop(conn);
+    }
+
+    /// W325/GLM review. `transcript_events.created_at` and `event_json` are
+    /// nullable upstream; a NULL must neither abort the session export nor
+    /// vanish a row. The row is preserved with explicit `null` values — an
+    /// unknown stays null, it never becomes an elided event or a fabricated
+    /// timestamp.
+    #[test]
+    fn openclaw_null_event_columns_preserve_rows_instead_of_aborting_them() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("openclaw-agent.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, ended_at TEXT, started_at TEXT);
+             INSERT INTO session_windows VALUES ('legacy-import', 'logical-a', NULL, NULL);
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             INSERT INTO transcript_events VALUES ('legacy-import', 1, '{\"id\":\"synthetic-event\"}', NULL);
+             INSERT INTO transcript_events VALUES ('legacy-import', 2, NULL, '2026-01-02T03:04:06Z');
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);",
+        )
+        .unwrap();
+        assert!(PathBuf::from(format!("{}-wal", db.display())).exists());
+        let snapshot = read_openclaw_session(&db, "legacy-import", None).expect(
+            "a NULL started_at, created_at or event_json must not abort the session export",
+        );
+        let json: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(json["window"]["started_at"], Value::Null);
+        let events = json["events"].as_array().expect("both event rows survive");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["seq"], 1);
+        assert_eq!(events[0]["created_at"], Value::Null);
+        assert_eq!(events[0]["event"]["id"], "synthetic-event");
+        assert_eq!(events[1]["event"], Value::Null);
+        drop(conn);
+    }
+
+    /// W325/GLM review. An archive row with a NULL `archive_sha256` cannot have
+    /// its blob verified; the session read must fail closed and the error must
+    /// name `archive_sha256` instead of surfacing as a generic SQLite decode
+    /// error that never mentions the column that made verification impossible.
+    #[test]
+    fn openclaw_archive_without_declared_digest_fails_closed_under_its_own_name() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("openclaw-agent.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, ended_at TEXT, started_at TEXT);
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);
+             INSERT INTO session_transcript_archives VALUES ('no-digest', 1, 'logical-a', 'deleted', 'zstd', X'00', NULL, 'no-digest.jsonl.zst', '2026-01-03T00:00:00Z', NULL);",
+        )
+        .unwrap();
+        assert!(PathBuf::from(format!("{}-wal", db.display())).exists());
+        let error = read_openclaw_session(&db, "no-digest", Some(1)).expect_err(
+            "an archive with no declared digest is unreadable, not a valid preserved archive",
+        );
+        assert!(
+            error.contains("archive_sha256"),
+            "the failure must name the integrity column that made the blob unverifiable, got: {error}"
+        );
+        drop(conn);
     }
 }

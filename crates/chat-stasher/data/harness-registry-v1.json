@@ -185,6 +185,45 @@
       }
     },
     {
+      "id": "openclaw",
+      "display_name": "OpenClaw",
+      "product_group": "agent-platforms",
+      "dev_priority": "normal",
+      "known_issue": "Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md.",
+      "paths": {
+        "macos": {
+          "template": "$HOME/.openclaw/agents",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "https://docs.openclaw.ai/concepts/session"
+        },
+        "linux": {
+          "template": "$HOME/.openclaw/agents",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "https://docs.openclaw.ai/concepts/session"
+        },
+        "windows": {
+          "template": "$HOME/.openclaw/agents",
+          "format": "sqlite",
+          "confidence": "official-docs",
+          "source": "https://docs.openclaw.ai/concepts/session"
+        }
+      },
+      "notes": "Each agent has agent/openclaw-agent.sqlite with WAL sidecars and sessions/ cold transcript archives. The scanner reads session_windows, transcript_events and session_transcript_archives; archive rows are keyed by session_id and generation. Agent identity is part of each archived session id.",
+      "seal_policy": "not-applicable",
+      "seal_source": "SQLite store; read-only WAL-aware access, no active transcript file is renamed.",
+      "reference": {
+        "upstream_project": "openclaw/openclaw",
+        "file_path": "docs/concepts/session.md",
+        "line_count": 0,
+        "license": "MIT",
+        "relationship": "reference",
+        "source_url": "https://github.com/openclaw/openclaw/blob/main/docs/concepts/session.md",
+        "license_url": "https://github.com/openclaw/openclaw/blob/main/LICENSE"
+      }
+    },
+    {
       "id": "cursor",
       "display_name": "Cursor",
       "verified": {

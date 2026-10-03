@@ -47,9 +47,9 @@
 # The seeded set is derived at run time from the shipped registry
 # (crates/chat-stasher/data/harness-registry-v1.json) for the current platform,
 # so this script cannot drift from the data file it is about. On Linux the
-# shipped cells leave five harnesses seedable:
+# shipped cells leave six harnesses seedable:
 #
-#   claude-code · codex · gemini-cli · opencode · cursor
+#   claude-code · codex · gemini-cli · opencode · cursor · openclaw
 #
 # `codex` needs one configured line on Linux/Windows and this script writes it
 # (see the CODEX note at the init step). The other seven are *not* seeded, each
@@ -347,6 +347,42 @@ def plant_opencode(root, n):
     conn.commit(); conn.close()
 
 
+def plant_openclaw(root, n):
+    # src/sqlite_probe.rs (openclaw_export_includes_window_events_and_cold_archives):
+    # one agent DB with the required schema, one logical history window, and a
+    # raw message event. The synthetic event metadata is kept in its source
+    # shape so doctor, collect, and the archive-gap check all use one fixture.
+    conn = sqlite_at(f"{root}/main/agent/openclaw-agent.sqlite")
+    conn.executescript(
+        "CREATE TABLE schema_meta(agent_id TEXT);"
+        "INSERT INTO schema_meta VALUES ('main');"
+        "CREATE TABLE session_windows(session_id TEXT, session_key TEXT, started_at TEXT);"
+        "CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);"
+        "CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT,"
+        " reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT,"
+        " created_at TEXT, published_at TEXT);"
+    )
+    for i in range(n):
+        sid = f"openclaw-window-{i}"
+        conn.execute(
+            "INSERT INTO session_windows VALUES (?,?,?)",
+            (sid, f"openclaw-logical-{i}", "2026-01-02T03:04:05Z"),
+        )
+        conn.execute(
+            "INSERT INTO transcript_events VALUES (?,?,?,?)",
+            (
+                sid,
+                1,
+                '{"id":"synthetic-openclaw-event","type":"message","message":'
+                '{"role":"user","content":"synthetic openclaw message",'
+                '"provider":"synthetic-provider","model":"synthetic-model",'
+                '"usage":{"input":2,"output":3}}}',
+                "2026-01-02T03:04:06Z",
+            ),
+        )
+    conn.commit(); conn.close()
+
+
 def plant_cursor(root, n):
     # tests/doctor_consistency_test.rs (plant_cursor_db): cursorDiskKV with
     # `composerData:%` keys and a `createdAt` inside the JSON value.
@@ -400,6 +436,7 @@ RECIPES = {
     "codex": (1, plant_codex),
     "gemini-cli": (2, plant_gemini),
     "opencode": (3, plant_opencode),
+    "openclaw": (1, plant_openclaw),
     "cursor": (2, plant_cursor),
     "grok": (1, plant_grok),
     "kimi-code": (1, plant_kimi),
@@ -499,10 +536,10 @@ SEEDED_IDS="$(awk -F'\t' '$2=="seeded"{print $1}' "$WORK/seeded.tsv" | tr '\n' '
 SEEDED_TOTAL="$(awk -F'\t' '$2=="seeded"{s+=$3} END{print s+0}' "$WORK/seeded.tsv")"
 [ -n "$SEEDED_IDS" ] || fail_now "no harness could be seeded — the recipes and the registry have diverged"
 # A floor on coverage, so a recipe cannot be dropped (or a cell's confidence
-# flipped) and take the smoke's reach with it silently. These four are the
+# flipped) and take the smoke's reach with it silently. These five are the
 # harnesses this smoke is expected to cover on Linux; if one drops out, that is
 # a change to look at, not a quieter smoke.
-for required in claude-code codex gemini-cli opencode; do
+for required in claude-code codex gemini-cli opencode openclaw; do
   echo " $SEEDED_IDS " | grep -q " $required " \
     || fail_now "required harness $required could not be seeded on $PLATFORM — coverage would silently shrink"
 done

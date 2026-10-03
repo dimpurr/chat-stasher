@@ -563,8 +563,8 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1011  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:2169-2219  8c2dfeee36d6  lines=51
   <- docs-dev/privacy.md:439  :: fn project_provenance(lines: &[&str]) -> Option<ProjectProv…
-crates/chat-stasher/src/collect.rs:1682-1722  dee9861aad8f  lines=41
-  <- docs-dev/privacy.md:961  :: fn process_whole_file(
+crates/chat-stasher/src/collect.rs:1682-1722  b98ca2edc014  lines=41
+  <- docs-dev/privacy.md:961  :: ));
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
@@ -613,11 +613,11 @@ crates/chat-stasher/src/doctor.rs:2364-2425  7c29760692b2  lines=62
   <- docs-dev/install.md:1009  :: pub fn inspect_fts_indexes(config: &Config) -> Vec<FtsIndex…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1457-1676  04ffa0d7cbff  lines=220
+crates/chat-stasher/src/fts.rs:1459-1679  b6dd6f684adc  lines=221
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1678-1693  9e2e91da42eb  lines=16
-  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: /// Clear only an FTS cache directory carrying this module'…
-crates/chat-stasher/src/fts.rs:2128-2137  64fcac75f933  lines=10
+crates/chat-stasher/src/fts.rs:1681-1696  c572ae968c6b  lines=16
+  <- docs-dev/privacy.md:61, docs-dev/threat-model.md:921  :: pub fn clear(&self) -> Result<bool> {
+crates/chat-stasher/src/fts.rs:2130-2139  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:921  :: #[cfg(unix)]
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
   <- docs-dev/privacy.md:465, docs-dev/privacy.md:955  :: /// Subdirectory of the inbox where consumed files are reti…
@@ -885,8 +885,8 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
   <- docs-dev/install.md:948  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1220  :: }
-crates/chat-stasher/src/scanner.rs:1393-1508  f4d1ab8b6fa3  lines=116
-  <- docs-dev/privacy.md:961  :: /// Additional raw usage files stored under
+crates/chat-stasher/src/scanner.rs:1393-1508  3dd4c2c8f6ed  lines=116
+  <- docs-dev/privacy.md:961  :: sqlite_layout: Some(layout),
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:903  :: /// Resolve the executable that a persistent scheduler may …
 crates/chat-stasher/src/schedule.rs:197-301  0146bafd68ef  lines=105
@@ -903,10 +903,10 @@ crates/chat-stasher/src/snapshot_cache.rs:587-621  3d14c6ed2e13  lines=35
   <- docs-dev/privacy.md:70  :: // ---- owner-only permissions ----------------------------…
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs-dev/threat-model.md:819  :: //! Read-only guarantee: every connection opens with `mode=…
-crates/chat-stasher/src/sqlite_probe.rs:1373-1376  b250c934a6e3  lines=4
-  <- SECURITY.md:68, docs-dev/threat-model.md:817  :: let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::S…
-crates/chat-stasher/src/sqlite_probe.rs:2010-2056  79eecb3f0cca  lines=47
-  <- docs-dev/threat-model.md:820  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
+crates/chat-stasher/src/sqlite_probe.rs:1708-1715  ae091c19ff12  lines=8
+  <- SECURITY.md:68, docs-dev/threat-model.md:817  :: /// so:
+crates/chat-stasher/src/sqlite_probe.rs:2342-2393  e73a4594263b  lines=52
+  <- docs-dev/threat-model.md:820  :: println!(
 crates/chat-stasher/src/store.rs:159-162  f2781c197162  lines=4
   <- docs-dev/install.md:611, docs-dev/install.md:701  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
 crates/chat-stasher/src/store.rs:320-420  fe1c57e64763  lines=101

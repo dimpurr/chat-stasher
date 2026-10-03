@@ -16,6 +16,7 @@ mod codex;
 mod cursor;
 mod gemini_cli;
 mod kimi_code;
+mod openclaw;
 mod opencode;
 
 pub const DEFAULT_WINDOW: usize = 50;
@@ -249,6 +250,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "gemini-cli"
             | "kimi-code"
             | "opencode"
+            | "openclaw"
             | "cursor"
             | "chatgpt"
             | "deepseek"
@@ -291,6 +293,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "gemini-cli" => gemini_cli::document(value, conversation),
         "kimi-code" => kimi_code::record_or_count(value, conversation),
         "opencode" => opencode::normalize_session(value, conversation),
+        "openclaw" => openclaw::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
