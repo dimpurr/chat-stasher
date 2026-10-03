@@ -64,6 +64,7 @@ fn scan(root: &std::path::Path) -> chat_stasher::scanner::ScanReport {
 
 #[test]
 fn a_dsh_session_is_named_by_its_directory_and_flagged_compressed() {
+    let _cleared = without_ambient_dsh_home();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let transcript = root.join("--Users-me-code-project--/session-1f2e3d4c/session.v4.jsonl.zstd");
@@ -105,6 +106,7 @@ fn a_dsh_session_is_named_by_its_directory_and_flagged_compressed() {
 /// claimed twice, once under the slug and once under the real session.
 #[test]
 fn a_transcript_one_level_above_the_session_directory_is_not_a_session() {
+    let _cleared = without_ambient_dsh_home();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let misplaced = root.join("--Users-me-code-project--/session.v4.jsonl.zstd");
@@ -125,6 +127,7 @@ fn a_transcript_one_level_above_the_session_directory_is_not_a_session() {
 /// not be claimed, so the format and the file agree or nothing is recorded.
 #[test]
 fn the_uncompressed_name_is_a_different_source_shape() {
+    let _cleared = without_ambient_dsh_home();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let plain = root.join("--Users-me-code-project--/session-1f2e3d4c/session.v4.jsonl");
@@ -137,5 +140,88 @@ fn the_uncompressed_name_is_a_different_source_shape() {
         report.records.len(),
         0,
         "the declared file is session.v4.jsonl.zstd; a differently named file is not it"
+    );
+}
+
+/// Environment variables are process-global, so any test that sets one takes
+/// this lock. Tests that pass an explicit root are unaffected either way, since
+/// the config root outranks the environment.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The three fixture tests pin the resolved root themselves, but the resolver
+/// checks the environment **before** the configured root, and this suite also
+/// runs on machines where `DSH_HOME` is genuinely exported (inside a DSH
+/// session, for instance). So those tests clear it for their duration. The
+/// guard restores the value before it releases the lock, so no other test can
+/// observe the variable while it is missing.
+struct DshHomeCleared {
+    restore: EnvRestore,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+fn without_ambient_dsh_home() -> DshHomeCleared {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let restore = EnvRestore("DSH_HOME", std::env::var_os("DSH_HOME"));
+    std::env::remove_var("DSH_HOME");
+    DshHomeCleared { restore, _guard: guard }
+}
+
+/// Puts one environment variable back when it leaves scope, including on a
+/// panic: the resolver checks the environment *before* the configured root, so
+/// a variable left set by one test changes what every later test in this binary
+/// resolves.
+struct EnvRestore(&'static str, Option<std::ffi::OsString>);
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => std::env::set_var(self.0, value),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// `DSH_HOME` moves the whole home, so the declared root is
+/// `$DSH_HOME/sessions`. The registry cell has declared that override from the
+/// start; the resolver below it kept a table of known home layers, and one that
+/// is missing falls back to the template — which reads the default location
+/// while the registry claims otherwise. This is the test that catches a missing
+/// entry in that table. It was found by running the real binary against a moved
+/// home, not by any unit test.
+#[test]
+fn dsh_home_env_override_moves_the_root() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let elsewhere = tempfile::tempdir().unwrap();
+    let override_home = elsewhere.path().join("dsh-home");
+    let _restore = EnvRestore("DSH_HOME", std::env::var_os("DSH_HOME"));
+    std::env::set_var("DSH_HOME", &override_home);
+
+    let root = override_home.join("sessions");
+    let transcript = root.join("--Users-me-code-project--/session-1f2e3d4c/session.v4.jsonl.zstd");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(&transcript, ZSTD_FRAME_MAGIC).unwrap();
+
+    // No config root: the environment is the only thing that can resolve this.
+    let config = Config::default();
+    let report =
+        scanner::scan_with_registry_and_machine(&config, &registry_for_this_platform(), "synthetic")
+            .expect("the synthetic scan runs");
+
+    let probe = report
+        .probes
+        .iter()
+        .find(|probe| probe.id == "deepseek-harness")
+        .expect("the harness has a probe row");
+    assert_eq!(
+        probe.root.as_deref(),
+        Some(root.as_path()),
+        "the declared env override must be the resolved root (note: {})",
+        probe.note
+    );
+    assert_eq!(probe.record_count, Some(1));
+    assert_eq!(report.records.len(), 1);
+    assert!(
+        report.records[0].compressed,
+        "the override moves the root without changing what the file is"
     );
 }
