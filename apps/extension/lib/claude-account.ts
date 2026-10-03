@@ -55,9 +55,12 @@ function object(value: unknown): Record<string, unknown> | null {
 export function claudeWhoAmIId(value: unknown): string | null {
   const root = object(value);
   if (!root) return null;
-  for (const owner of [root, object(root.user), object(root.currentUser), object(root.current_user)]) {
-    if (!owner) continue;
-    for (const key of ['userId', 'user_id', 'id', 'uuid']) {
+  for (const key of ['userId', 'user_id']) {
+    const id = validId(root[key]);
+    if (id !== null) return id;
+  }
+  for (const owner of [object(root.user), object(root.currentUser), object(root.current_user)]) {
+    if (owner) for (const key of ['userId', 'user_id', 'id', 'uuid']) {
       const id = validId(owner[key]);
       if (id !== null) return id;
     }

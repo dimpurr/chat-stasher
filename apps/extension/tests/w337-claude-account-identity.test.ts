@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readClaudeAccountId, withClaudeAccountReading } from '../lib/claude-account';
+import { claudeWhoAmIId, readClaudeAccountId, withClaudeAccountReading } from '../lib/claude-account';
 import { accountFingerprintFor, accountIdFromCapture } from '../lib/account-fingerprint';
 import { ACCOUNT_SALT_KEY } from '../lib/account-fingerprint';
 import type { CapturedFetch } from '../lib/contract';
@@ -30,6 +30,13 @@ describe('W337 · Claude current-user identity', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`${ORIGIN}/api/account`);
     expect(calls[0]?.init).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store' });
+  });
+
+  it('does not treat ambiguous top-level id or uuid fields as the current user', () => {
+    expect(claudeWhoAmIId({ id: 'project-fixture' })).toBeNull();
+    expect(claudeWhoAmIId({ uuid: 'organization-fixture' })).toBeNull();
+    expect(claudeWhoAmIId({ id: 'project-fixture', uuid: 'organization-fixture' })).toBeNull();
+    expect(claudeWhoAmIId({ user: { uuid: USER_A } })).toBe(USER_A);
   });
 
   it('falls back to the organization user_settings userId', async () => {
@@ -100,7 +107,7 @@ describe('W337 · Claude current-user identity', () => {
     expect(messages).toEqual([{ type: CLAUDE_ACCOUNT_IDENTITY_MESSAGE, url: URL }]);
   });
 
-  it('asks the page identity port for Claude backfill captures before the archive sink', async () => {
+  it('asks the page identity port for each Claude backfill capture before the archive sink', async () => {
     const store = memoryStore();
     const lookedUpUrls: string[] = [];
     const captures: CapturedFetch[] = [];
@@ -121,6 +128,8 @@ describe('W337 · Claude current-user identity', () => {
     };
     http.claudeAccountIdentity = async (captureUrl) => {
       lookedUpUrls.push(captureUrl);
+      // A later account is not reused for an earlier delivered URL: each capture
+      // gets its own reading from the owning page rather than a cached id.
       return { kind: 'id', id: USER_A, source: 'response-body-claude-whoami' };
     };
     let now = 1_790_000_000_000;
