@@ -427,9 +427,13 @@ pub struct RegistryCell {
 /// directory instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionDirRule {
-    /// Root-relative directory glob for the session directory. Slash-separated
-    /// components support patterns such as `*` and `*/*`; each component uses
-    /// the same `*` glob syntax as [`RegistryCell::session_pattern`].
+    /// Root-relative directory glob for the session directory. Without a
+    /// leading `**`, slash-separated components such as `*` and `*/*` match
+    /// one exact depth below the root. A leading `**` matches zero or more
+    /// whole directory components before the remaining pattern, for stores
+    /// whose sessions can appear at multiple depths or nest inside sessions.
+    /// Other components use the same `*` glob syntax as
+    /// [`RegistryCell::session_pattern`].
     pub pattern: String,
     /// Literal path from that directory to the transcript file, `/`-separated
     /// on every platform (compared component by component, so a Windows
@@ -2432,19 +2436,18 @@ struct DirectoryScan {
 /// Where a directory sits relative to the cell's [`SessionDirRule`].
 ///
 /// The state travels down the walk instead of being recomputed per file, so a
-/// file at any depth "sees" the session directory it actually sits in. A
-/// directory that matches replaces whatever match was open above it: the
-/// session a file belongs to is the nearest matching directory above it, and
-/// [`relpath_matches`] then decides whether the file is that session's
-/// transcript. The root itself never counts — the rule matches directories
-/// *below* the declared root, so a root that happens to be named `session-x`
-/// does not turn every file beneath it into one session.
+/// file at any depth "sees" its session directory. Ordinary exact-depth rules
+/// open the first matching scope and descendants keep it. A leading-`**` rule
+/// may match again below that scope; then the nearest matching directory owns
+/// the transcript. [`relpath_matches`] decides whether the file is that
+/// session's transcript. The root itself never counts.
 #[derive(Debug, Clone)]
 enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
-    /// First matching session-directory ancestor below the declared root:
-    /// its path, and its name — the native id. Descendants keep this scope.
+    /// The current matching session-directory ancestor: its path and name —
+    /// the native id. Ordinary rules keep the first scope; recursive rules
+    /// replace it when a nested directory matches.
     In { dir: PathBuf, id: String },
 }
 
@@ -2456,13 +2459,6 @@ fn descend_scope(
     root: &Path,
     rule: Option<&SessionDirRule>,
 ) -> SessionScope {
-    // A broad rule such as `*` names the session directories immediately
-    // below the declared root. Once one is found, nested implementation
-    // directories (`.system_generated/logs`, for example) remain inside that
-    // same session rather than replacing its native id.
-    if matches!(parent, SessionScope::In { .. }) {
-        return parent.clone();
-    }
     let Some(rule) = rule else {
         return parent.clone();
     };
@@ -2478,11 +2474,33 @@ fn descend_scope(
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    if components.len() != pattern.len()
-        || !components
-            .iter()
-            .zip(pattern)
-            .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
+    let (recursive, parts) = match pattern.split_first() {
+        Some((&"**", rest)) => (true, rest),
+        _ => (false, pattern.as_slice()),
+    };
+    if parts.is_empty() {
+        return parent.clone();
+    }
+    if !recursive && matches!(parent, SessionScope::In { .. }) {
+        // Non-recursive rules are anchored to one exact depth below the root;
+        // implementation directories inside an open session cannot rematch.
+        return parent.clone();
+    }
+    let start = if recursive {
+        let Some(start) = components.len().checked_sub(parts.len()) else {
+            return parent.clone();
+        };
+        start
+    } else {
+        if components.len() != parts.len() {
+            return parent.clone();
+        }
+        0
+    };
+    if !components[start..]
+        .iter()
+        .zip(parts)
+        .all(|(name, pattern)| matches_session_pattern(name, Some(pattern)))
     {
         return parent.clone();
     }
@@ -3476,6 +3494,119 @@ mod tests {
         assert!(!matches_session_pattern("settings.json", Some("session-*")));
         assert!(!matches_session_pattern("state.json", Some("session-*")));
         assert!(!matches_session_pattern("config.json", Some("session-*")));
+    }
+
+    #[test]
+    fn recursive_session_dir_pattern_matches_zero_or_more_prefix_components() {
+        fn id(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In { id, .. } => Some(id),
+            }
+        }
+
+        let root = Path::new("/fixture/sessions");
+        let rule = SessionDirRule {
+            pattern: "**/session_*".to_string(),
+            file: "agents/main/wire.jsonl".to_string(),
+        };
+        for path in [
+            root.join("session_zero-prefix"),
+            root.join("workspace").join("session_one-prefix"),
+            root.join("workspace")
+                .join("project")
+                .join("session_two-prefix"),
+        ] {
+            let scope = descend_scope(&SessionScope::Outside, &path, root, Some(&rule));
+            assert_eq!(id(&scope), path.file_name().and_then(|name| name.to_str()));
+        }
+    }
+
+    #[test]
+    fn recursive_session_dir_pattern_uses_nearest_match_but_keeps_implementation_dirs() {
+        fn id(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In { id, .. } => Some(id),
+            }
+        }
+
+        let root = Path::new("/fixture/sessions");
+        let rule = SessionDirRule {
+            pattern: "**/session_*".to_string(),
+            file: "agents/main/wire.jsonl".to_string(),
+        };
+        let outer_path = root.join("workspace").join("session_outer");
+        let outer = descend_scope(&SessionScope::Outside, &outer_path, root, Some(&rule));
+        assert_eq!(id(&outer), Some("session_outer"));
+
+        let implementation = outer_path.join("agents");
+        let still_outer = descend_scope(&outer, &implementation, root, Some(&rule));
+        assert_eq!(id(&still_outer), Some("session_outer"));
+
+        let inner_path = outer_path.join("session_inner");
+        let inner = descend_scope(&outer, &inner_path, root, Some(&rule));
+        assert_eq!(id(&inner), Some("session_inner"));
+    }
+
+    #[test]
+    fn ordinary_two_level_session_dir_pattern_stays_exact_and_nonrecursive() {
+        fn id(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In { id, .. } => Some(id),
+            }
+        }
+
+        let root = Path::new("/fixture/sessions");
+        let rule = SessionDirRule {
+            pattern: "*/*".to_string(),
+            file: "transcript.jsonl".to_string(),
+        };
+        let root_session = root.join("workspace").join("session_one");
+        let scope = descend_scope(&SessionScope::Outside, &root_session, root, Some(&rule));
+        assert_eq!(id(&scope), Some("session_one"));
+
+        let implementation = root_session.join("implementation").join("session_false");
+        let preserved = descend_scope(&scope, &implementation, root, Some(&rule));
+        assert_eq!(id(&preserved), Some("session_one"));
+
+        let too_deep = root.join("workspace").join("project").join("session_two");
+        let rejected = descend_scope(&SessionScope::Outside, &too_deep, root, Some(&rule));
+        assert_eq!(id(&rejected), None);
+    }
+
+    #[test]
+    fn ordinary_session_dir_patterns_keep_exact_root_relative_depth() {
+        fn id(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In { id, .. } => Some(id),
+            }
+        }
+
+        let root = Path::new("/fixture/sessions");
+        for (pattern, matching, too_deep) in [
+            (
+                "*",
+                root.join("session_one"),
+                root.join("workspace").join("session_false"),
+            ),
+            (
+                "*/session_*",
+                root.join("workspace").join("session_one"),
+                root.join("workspace").join("agents").join("session_false"),
+            ),
+        ] {
+            let rule = SessionDirRule {
+                pattern: pattern.to_string(),
+                file: "agents/main/wire.jsonl".to_string(),
+            };
+            let matched = descend_scope(&SessionScope::Outside, &matching, root, Some(&rule));
+            assert_eq!(id(&matched), Some("session_one"), "pattern: {pattern}");
+            let rejected = descend_scope(&SessionScope::Outside, &too_deep, root, Some(&rule));
+            assert_eq!(id(&rejected), None, "pattern: {pattern}");
+        }
     }
 
     #[test]

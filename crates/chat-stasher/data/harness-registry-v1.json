@@ -567,7 +567,7 @@
           "env_override": "KIMI_CODE_HOME",
           "format": "jsonl",
           "session_dir": {
-            "pattern": "session_*",
+            "pattern": "**/session_*",
             "file": "agents/main/wire.jsonl"
           },
           "confidence": "source-confirmed",
@@ -578,7 +578,7 @@
           "env_override": "KIMI_CODE_HOME",
           "format": "jsonl",
           "session_dir": {
-            "pattern": "session_*",
+            "pattern": "**/session_*",
             "file": "agents/main/wire.jsonl"
           },
           "confidence": "unascertained",
@@ -589,7 +589,7 @@
           "env_override": "KIMI_CODE_HOME",
           "format": "jsonl",
           "session_dir": {
-            "pattern": "session_*",
+            "pattern": "**/session_*",
             "file": "agents/main/wire.jsonl"
           },
           "confidence": "unascertained",

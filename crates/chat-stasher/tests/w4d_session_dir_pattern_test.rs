@@ -9,6 +9,13 @@ fn root_relative_two_level_session_directory_pattern_is_scanned() {
     let transcript = root.join("workspace/session-uuid/transcript.jsonl");
     fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     fs::write(&transcript, b"{}\n").unwrap();
+    // A generic exact-depth `*/*` rule must keep its original session owner
+    // through implementation paths such as agents/main/wire.jsonl. A nested
+    // directory that resembles another session must not become a new owner.
+    let implementation_transcript =
+        root.join("workspace/session-uuid/agents/main/session-false/transcript.jsonl");
+    fs::create_dir_all(implementation_transcript.parent().unwrap()).unwrap();
+    fs::write(&implementation_transcript, b"{}\n").unwrap();
 
     let cell = serde_json::json!({
         "template": "~/synthetic-sessions",
