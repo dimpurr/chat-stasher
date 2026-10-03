@@ -72,7 +72,7 @@ use crate::sqlite_probe::{
     sqlite_store_fingerprint, OpenCodeCursor,
 };
 use crate::store;
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::OnceCell;
@@ -120,6 +120,12 @@ pub struct OffsetEntry {
     /// from turning every session into "changed".
     #[serde(default)]
     pub store_fingerprint: Option<String>,
+    /// Grok Bot rows already delivered to this destination, keyed by the
+    /// SHA-256 of their canonical raw JSON — one entry per archived row, so
+    /// a sequence observed again with changed content still delivers the new
+    /// variant once, and an identical replay delivers nothing.
+    #[serde(default)]
+    pub grok_bot_row_digests: Option<Vec<String>>,
 }
 
 /// The evidence a cursor has to produce on demand: the sealed shard set it is
@@ -563,6 +569,7 @@ fn stage_prefix_entry(
             compressed: true,
             opencode: None,
             store_fingerprint: None,
+            grok_bot_row_digests: None,
         }));
     }
 
@@ -601,6 +608,7 @@ fn stage_prefix_entry(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
+            grok_bot_row_digests: None,
         }));
     }
 
@@ -629,6 +637,7 @@ fn stage_prefix_entry(
         compressed: false,
         opencode: None,
         store_fingerprint: None,
+        grok_bot_row_digests: None,
     }))
 }
 
@@ -1083,6 +1092,7 @@ pub fn collect_scan_report(
             old.as_ref(),
             unverifiable.is_some(),
             stage,
+            state_dir,
             machine,
             bucket_cap,
         ) {
@@ -1173,11 +1183,24 @@ fn collect_one(
     old: Option<&OffsetEntry>,
     force_reset: bool,
     stage: &Path,
+    state_dir: &Path,
     machine: &str,
     bucket_cap: usize,
 ) -> anyhow::Result<Processed> {
     if let Some(layout) = record.sqlite_layout {
-        process_sqlite(record, layout, old, force_reset, stage, machine, bucket_cap)
+        if layout == SqliteSessionLayout::GrokBot {
+            process_grok_bot(
+                record,
+                old,
+                force_reset,
+                stage,
+                state_dir,
+                machine,
+                bucket_cap,
+            )
+        } else {
+            process_sqlite(record, layout, old, force_reset, stage, machine, bucket_cap)
+        }
     } else if record.compressed || is_zstd_path(&record.absolute_path) {
         Ok(process_compressed(
             record,
@@ -1206,6 +1229,186 @@ fn collect_one(
             bucket_cap,
         )?)
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GrokBotUnionState {
+    version: u32,
+    records: Vec<crate::grok_bot::ReplicaRecord>,
+}
+
+// Version 2 of the union state: records may carry more than one variant of
+// one sequence (a position re-observed with changed content is kept as an
+// additional row). The wire shape — `{version, records:[{sequence, raw}]}` —
+// is unchanged; unknown fields such as version 1's per-record
+// `sequence_gaps` are ignored on read.
+const GROK_BOT_UNION_STATE_VERSION: u32 = 2;
+
+/// Delivery identity of one Grok Bot union row: the SHA-256 of its
+/// canonical raw JSON. Rows are content-addressed because a sequence number
+/// alone cannot say whether a position carries one archived observation or
+/// several variants.
+fn grok_bot_row_digest(record: &crate::grok_bot::ReplicaRecord) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&record.raw).context("serialize Grok Bot raw record")?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn process_grok_bot(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    state_dir: &Path,
+    machine: &str,
+    bucket_cap: usize,
+) -> anyhow::Result<Processed> {
+    let agent_id = record
+        .id
+        .splitn(3, '.')
+        .nth(2)
+        .ok_or_else(|| anyhow!("invalid Grok Bot agent session id"))?;
+    let root = record
+        .absolute_path
+        .parent()
+        .ok_or_else(|| anyhow!("Grok Bot replica has no persistence directory"))?;
+    let observed = crate::grok_bot::read_persistence(root)?
+        .into_iter()
+        .find(|agent| agent.agent_id == agent_id)
+        .ok_or_else(|| anyhow!("Grok Bot replica disappeared during collection"))?;
+
+    let union_dir = state_dir.join("grok-bot-unions");
+    fs::create_dir_all(&union_dir).context("create Grok Bot union state directory")?;
+    let union_path = union_dir.join(format!("{}.json", sha256_hex(agent_id.as_bytes())));
+    let previous = match fs::read(&union_path) {
+        Ok(bytes) => {
+            let state: GrokBotUnionState = serde_json::from_slice(&bytes).with_context(|| {
+                format!("parse Grok Bot union state ({})", path_digest(&union_path))
+            })?;
+            if state.version != 1 && state.version != GROK_BOT_UNION_STATE_VERSION {
+                bail!("unsupported Grok Bot union state version {}", state.version);
+            }
+            // Version 1 held at most one record per sequence — a valid
+            // variant list, so it merges as-is. No version 1 state file can
+            // exist outside a test run: the version 1 reader never matched a
+            // real replica blob on disk (W329b).
+            state.records
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).context("read Grok Bot union state"),
+    };
+    let union = crate::grok_bot::merge_replica_records(previous, observed.records.clone());
+    let delivered: std::collections::BTreeSet<String> = old
+        .and_then(|entry| entry.grok_bot_row_digests.as_ref())
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let deliver_all = force_reset
+        || old.is_none()
+        || old.is_some_and(|entry| entry.grok_bot_row_digests.is_none());
+    let mut payload = Vec::new();
+    let mut rows_written = 0usize;
+    let mut delivered_now = delivered.clone();
+    for item in &union {
+        let digest = grok_bot_row_digest(item)?;
+        if deliver_all || !delivered.contains(&digest) {
+            serde_json::to_writer(&mut payload, &item.raw)
+                .context("serialize Grok Bot raw record")?;
+            payload.push(b'\n');
+            delivered_now.insert(digest);
+            rows_written += 1;
+        }
+    }
+    if rows_written == 0 && old.is_some() && !force_reset {
+        let source_bytes = fs::metadata(&record.absolute_path)
+            .with_context(|| {
+                format!(
+                    "stat Grok Bot replica ({})",
+                    path_digest(&record.absolute_path)
+                )
+            })?
+            .len();
+        return Ok(Processed {
+            state: old.cloned().expect("checked above"),
+            outcome: CollectOutcome {
+                session_prefix: id_prefix(&record.id),
+                source_path_sha256: path_digest(&record.absolute_path),
+                source_bytes,
+                bytes_read: source_bytes,
+                prefix_bytes_validated: source_bytes,
+                lines_written: 0,
+                shard: None,
+                reset: false,
+                compressed: false,
+            },
+        });
+    }
+    let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
+    let gaps = crate::grok_bot::sequence_gaps(union_sequences.iter().copied());
+    let metadata = serde_json::json!({
+        "_chat_stasher": {
+            "source": "grok-bot",
+            "agent_name": observed.name,
+            "agent_name_state": if observed.name.is_some() { "known" } else { "unknown" },
+            "partial_replica": true,
+            "sequence_gaps": gaps,
+            "observed_sequence_min": union_sequences.first(),
+            "observed_sequence_max": union_sequences.last(),
+        }
+    });
+    serde_json::to_writer(&mut payload, &metadata)
+        .context("serialize Grok Bot partial metadata")?;
+    payload.push(b'\n');
+
+    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+        store::StageWriter::Collect,
+        stage,
+        machine,
+        &record.id,
+        &[payload.clone()],
+        bucket_cap,
+    )?);
+
+    let state = GrokBotUnionState {
+        version: GROK_BOT_UNION_STATE_VERSION,
+        records: union,
+    };
+    let encoded = serde_json::to_vec(&state).context("serialize Grok Bot union state")?;
+    let tmp = union_path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&tmp, &encoded).context("write Grok Bot union state")?;
+    fs::rename(&tmp, &union_path).context("commit Grok Bot union state")?;
+
+    let source_bytes = fs::metadata(&record.absolute_path)
+        .with_context(|| {
+            format!(
+                "stat Grok Bot replica ({})",
+                path_digest(&record.absolute_path)
+            )
+        })?
+        .len();
+    let digest = sha256_hex(&serde_json::to_vec(&state.records)?);
+    Ok(Processed {
+        state: OffsetEntry {
+            offset: delivered_now.len() as u64,
+            prefix_len: source_bytes,
+            prefix_sha256: digest,
+            compressed: false,
+            opencode: None,
+            store_fingerprint: None,
+            grok_bot_row_digests: Some(delivered_now.into_iter().collect()),
+        },
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes,
+            bytes_read: source_bytes,
+            prefix_bytes_validated: 0,
+            lines_written: rows_written + 1,
+            shard,
+            reset: old.is_some_and(|entry| entry.grok_bot_row_digests.is_none()),
+            compressed: false,
+        },
+    })
 }
 
 fn process_sqlite(
@@ -1327,6 +1530,9 @@ fn process_sqlite(
                 snapshot.json_line,
                 &store_fingerprint,
             )
+        }
+        SqliteSessionLayout::GrokBot => {
+            bail!("Grok Bot persistence must use its replica collector")
         }
     }
 }
@@ -1474,6 +1680,7 @@ fn process_sqlite_snapshot(
             compressed: false,
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1536,6 +1743,7 @@ fn unchanged_content_sqlite(
             compressed: false,
             opencode: Some(cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1612,6 +1820,7 @@ fn process_jsonl(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
+            grok_bot_row_digests: None,
         })
     } else {
         plain_state(&record.absolute_path, new_offset)?
@@ -1738,6 +1947,7 @@ fn process_opencode(
             compressed: false,
             opencode: Some(snapshot.cursor),
             store_fingerprint: Some(store_fingerprint.to_string()),
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1804,6 +2014,7 @@ fn process_whole_file(
             compressed: false,
             opencode: None,
             store_fingerprint: None,
+            grok_bot_row_digests: None,
         },
         outcome: CollectOutcome {
             session_prefix: id_prefix(&record.id),
@@ -1879,6 +2090,7 @@ fn process_compressed(
         compressed: true,
         opencode: None,
         store_fingerprint: None,
+        grok_bot_row_digests: None,
     };
     Ok(Processed {
         state,
@@ -2006,6 +2218,7 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
         compressed: false,
         opencode: None,
         store_fingerprint: None,
+        grok_bot_row_digests: None,
     })
 }
 

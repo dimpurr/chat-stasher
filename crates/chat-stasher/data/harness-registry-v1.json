@@ -280,6 +280,32 @@
       }
     },
     {
+      "id": "grok-bot",
+      "display_name": "Grok Bot (desktop)",
+      "dev_priority": "low",
+      "known_issue": "local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness",
+      "paths": {
+        "macos": {
+          "template": "~/Library/Application Support/Grok Bot/",
+          "format": "json",
+          "confidence": "measured-locally",
+          "source": "measured locally (W321): blobs are named by the unpadded lowercase base32 of their state keys; replica keys end in transcript.replicas.<agent-uuid>; a roster blob carries agent names"
+        }
+      },
+      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness.",
+      "seal_policy": "not-applicable",
+      "seal_source": "read-only replica blobs are never renamed or modified",
+      "reference": {
+        "upstream_project": "Grok Bot desktop app",
+        "file_path": "not found",
+        "line_count": "unascertained",
+        "license": "unascertained",
+        "relationship": "no reference",
+        "source_url": "unascertained",
+        "license_url": "unascertained"
+      }
+    },
+    {
       "id": "grok",
       "display_name": "Grok (xAI CLI)",
       "dev_priority": "low",

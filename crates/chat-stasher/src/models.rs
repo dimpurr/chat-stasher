@@ -17,6 +17,7 @@ pub enum HarnessSource {
     OpenClaw,
     Cursor,
     Grok,
+    GrokBot,
     CopilotCli,
     Aider,
     Crush,
@@ -25,10 +26,10 @@ pub enum HarnessSource {
     KimiCode,
 }
 
-/// Layout of a virtual session backed by a read-only SQLite source.
+/// Layout of a virtual session backed by a structured, read-only local source.
 ///
 /// File-backed sources leave this as `None`; the scanner sets it only when a
-/// `SessionRecord` represents one logical row/composer inside a SQLite store.
+/// `SessionRecord` represents a logical row, composer, or app replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqliteSessionLayout {
     OpenCode,
@@ -36,6 +37,7 @@ pub enum SqliteSessionLayout {
     CursorGlobal,
     CursorLegacy,
     Grok,
+    GrokBot,
 }
 
 impl HarnessSource {
@@ -50,6 +52,7 @@ impl HarnessSource {
             HarnessSource::OpenClaw => "openclaw",
             HarnessSource::Cursor => "cursor",
             HarnessSource::Grok => "grok",
+            HarnessSource::GrokBot => "grok-bot",
             HarnessSource::CopilotCli => "github-copilot-cli",
             HarnessSource::Aider => "aider",
             HarnessSource::Crush => "crush",
@@ -71,6 +74,7 @@ impl HarnessSource {
             "openclaw" => Some(HarnessSource::OpenClaw),
             "cursor" => Some(HarnessSource::Cursor),
             "grok" => Some(HarnessSource::Grok),
+            "grok-bot" => Some(HarnessSource::GrokBot),
             "github-copilot-cli" => Some(HarnessSource::CopilotCli),
             "aider" => Some(HarnessSource::Aider),
             "crush" => Some(HarnessSource::Crush),
