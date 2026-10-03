@@ -419,8 +419,7 @@ and across machines that answer comes from the masterkey-derived key above, and
 substituting one for the other would turn an install boundary into an account
 switch.
 
-🔴 W239 · **An organization is not an account, so a platform that files
-conversations under one records no fingerprint at all.** claude.ai addresses every
+🔴 W239 · **An organization is not an account.** claude.ai addresses every
 conversation by organization, and two accounts can be members of a single organization (a Team
 or Enterprise workspace). A digest of the organization is therefore *equal* for those two
 accounts: recording it would not be an unknown but a positive, false assertion that a
@@ -432,6 +431,17 @@ as the scope the backfill progress is filed under; what changes is only that it 
 presented as an account identity. And no lease is taken over an organization for the same
 reason: a lease derived from it would agree with every account inside it and suspend
 nothing (`apps/extension/lib/backfill/enumerate.ts:4586-4639`).
+🔴 W337 · Before a Claude capture reaches the worker, the content bridge asks the
+logged-in page for its current user with a cache-disabled `/api/account` request. When
+that readable response has no user id, it tries the captured organization's
+`/api/claude_code/organizations/<org>/user_settings` `userId`. The raw id crosses only
+into the capture worker; `accountFingerprintFor` applies the install-local HMAC and the
+worker deletes the transient id before a bundle, outbox entry, export, log or native-host
+message can be made. The fingerprint source records which endpoint supplied it. A
+completed lookup with no id stays `no-account-id-in-capture`; a failed or unreadable
+lookup stays `account-id-unreadable`. When no user id is available, the bundle carries
+`organization-is-not-an-account` (`apps/extension/lib/contract.ts:1261-1272`) rather than
+hashing the shared organization.
 
 🔴 W299 · **On ChatGPT the id that is hashed is the `ChatGPT-Account-Id` value on the
 captured request, and it is untrusted input.** ChatGPT's conversation body carries no

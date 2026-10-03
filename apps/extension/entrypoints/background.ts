@@ -242,6 +242,12 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
   //    header source as well, so the guarantee does not rest on this line alone.
   delete captured.chatgptAccountIdHeader;
   delete captured.chatgptAccountIdHeaderPresent;
+  // 🔴 W337 · The only durable Claude identity is the accountFingerprintFor
+  //    result above. Drop both the raw id and lookup metadata at the same
+  //    boundary, before a bundle, export, outbox entry or host message exists.
+  delete captured.claudeAccountId;
+  delete captured.claudeAccountIdSource;
+  delete captured.claudeAccountUnknownReason;
   return {
     schema: SCHEMA,
     ...install,

@@ -32,6 +32,7 @@ import { backfillPlanFor } from '../lib/backfill/enumerate';
 import { observeChatGptWorkspaceFingerprint, resolveChatGptWorkspace, type ChatGptWorkspaceObservation, type FingerprintedChatGptIdentity } from '../lib/backfill/chatgpt-workspace';
 import { CHATGPT_WORKSPACE_REQUEST_MESSAGE } from '../lib/backfill/tab-port';
 import { createClaudePageScope } from '../lib/backfill/claude-page';
+import { readClaudeAccountId } from '../lib/claude-account';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
@@ -364,6 +365,22 @@ export default defineContentScript({
      */
     async function deliverCapture(payload: CapturedFetch): Promise<void> {
       let outgoing = payload;
+      if (findPlatformForUrl(payload.url)?.id === 'claude') {
+        // 🔴 W337 · Ask from the already-open, logged-in page context. The first
+        //    request is explicitly cache-disabled; only if it has no current-user
+        //    id does the reader try user_settings for this capture's organization.
+        //    Raw identity travels only to the worker's fingerprint boundary.
+        const reading = await readClaudeAccountId(payload.url, pageOrigin, async (url, init) => {
+          const response = await window.fetch(url, init);
+          return { status: response.status, text: () => response.text() };
+        });
+        outgoing = {
+          ...payload,
+          ...(reading.kind === 'id'
+            ? { claudeAccountId: reading.id, claudeAccountIdSource: reading.source }
+            : { claudeAccountUnknownReason: reading.reason }),
+        };
+      }
       if (findPlatformForUrl(payload.url)?.id === 'gemini' && isGeminiDetailRequest(payload.url)) {
         const completed = await completeGeminiLiveCapture(payload, {
           pageOrigin,
