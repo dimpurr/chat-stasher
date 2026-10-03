@@ -2887,7 +2887,8 @@ mod tests {
 
     #[test]
     fn grok_bot_message_records_without_transcript_text_remain_unindexable() {
-        let extracted = extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
+        let extracted =
+            extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
     }
 
