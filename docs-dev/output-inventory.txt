@@ -2013,7 +2013,7 @@ println      crates/chat-stasher/src/remote_err.rs:536  "[trust-host] records wr
 println      crates/chat-stasher/src/remote_err.rs:538  "[trust-host]   {line}"
 with_context crates/chat-stasher/src/runstate.rs:139  "create state dir {}"
 context      crates/chat-stasher/src/runstate.rs:142  "serialise run state"
-eprintln     crates/chat-stasher/src/scanner.rs:2409  "warning: cannot expand path `{p}`: {e}"
+eprintln     crates/chat-stasher/src/scanner.rs:2417  "warning: cannot expand path `{p}`: {e}"
 bail         crates/chat-stasher/src/schedule.rs:137  "binary path must be an installed path outside target/: {}"
 anyhow       crates/chat-stasher/src/schedule.rs:159  "current executable is a build artifact at {}; pass --binary with an installed path or install chat-stasher under ~/.local/bin or Homebrew"
 bail         crates/chat-stasher/src/schedule.rs:192  "backup_interval_secs must be greater than zero"

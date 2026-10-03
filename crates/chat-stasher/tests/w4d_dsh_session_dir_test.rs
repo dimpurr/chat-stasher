@@ -160,10 +160,15 @@ struct DshHomeCleared {
 }
 
 fn without_ambient_dsh_home() -> DshHomeCleared {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let restore = EnvRestore("DSH_HOME", std::env::var_os("DSH_HOME"));
     std::env::remove_var("DSH_HOME");
-    DshHomeCleared { restore, _guard: guard }
+    DshHomeCleared {
+        restore,
+        _guard: guard,
+    }
 }
 
 /// Puts one environment variable back when it leaves scope, including on a
@@ -190,7 +195,9 @@ impl Drop for EnvRestore {
 /// home, not by any unit test.
 #[test]
 fn dsh_home_env_override_moves_the_root() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let elsewhere = tempfile::tempdir().unwrap();
     let override_home = elsewhere.path().join("dsh-home");
     let _restore = EnvRestore("DSH_HOME", std::env::var_os("DSH_HOME"));
@@ -203,9 +210,12 @@ fn dsh_home_env_override_moves_the_root() {
 
     // No config root: the environment is the only thing that can resolve this.
     let config = Config::default();
-    let report =
-        scanner::scan_with_registry_and_machine(&config, &registry_for_this_platform(), "synthetic")
-            .expect("the synthetic scan runs");
+    let report = scanner::scan_with_registry_and_machine(
+        &config,
+        &registry_for_this_platform(),
+        "synthetic",
+    )
+    .expect("the synthetic scan runs");
 
     let probe = report
         .probes
