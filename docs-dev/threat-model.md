@@ -31,7 +31,7 @@ Understanding the roles below requires knowing the path the content takes.
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
    (`apps/extension/lib/outbox.ts:365-437`;
-   `apps/extension/entrypoints/background.ts:372-389`).
+   `apps/extension/entrypoints/background.ts:378-395`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
    `chat-stasher install-native-host --stage <path>` — over
@@ -59,7 +59,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:159-162`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:439-478`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:32`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:32`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -107,7 +107,7 @@ Concretely, five separate plaintext exposures:
    database, inside your browser profile
    (`apps/extension/lib/outbox.ts:102-119`, `:365-437`). The record's `raw.text`
    field is the raw response body — the conversation itself
-   (`apps/extension/entrypoints/background.ts:262-265`). It sits there,
+   (`apps/extension/entrypoints/background.ts:268-271`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
    and the record is deleted (`apps/extension/lib/outbox.ts:440-455`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
@@ -294,7 +294,7 @@ also read. That is the same set of values such a script can read directly out of
 `window.WIZ_global_data`, which is why the channel is acceptable here — it
 discloses nothing new — rather than an accident nobody looked at. **Backfill is
 different** — it walks conversation lists and detail endpoints
-(`apps/extension/lib/backfill/engine.ts:2160-2169`, `:2919-2923`), which produces a
+(`apps/extension/lib/backfill/engine.ts:2162-2171`, `:2921-2925`), which produces a
 request pattern the platform can see and which does not look like a human
 reading their history. **We have not investigated** whether any platform's terms
 of service prohibit this, nor whether any platform rate-limits or flags such a
@@ -315,7 +315,7 @@ coordination sentence the extension shows is about *this* machine: when the loca
 coordination channel is unavailable — an older host, or a host that cannot be
 reached — the leg does not run at all, live capture continues, and the popup says
 exactly that, "Update chat-stasher to enable backfill. Live capture remains
-active in this browser." (`apps/extension/entrypoints/background.ts:2048`;
+active in this browser." (`apps/extension/entrypoints/background.ts:2054`;
 `apps/extension/locales/en.yml:485-486`). Refusing to backfill is the safe
 direction, but that sentence is not a statement about your other machines.
 
@@ -354,7 +354,7 @@ Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
 (`apps/extension/lib/contract.ts:1438-1441`, `:1491-1507`). That value is written
 into the bundle and therefore into your archive
-(`apps/extension/entrypoints/background.ts:250-252`). It never leaves your
+(`apps/extension/entrypoints/background.ts:256-258`). It never leaves your
 machine, but it means your archive contains your account identifier.
 
 🔴 **Four different account- or install-scoped values end up on this path, and
@@ -497,21 +497,21 @@ fingerprinted ChatGPT scope helper. An absent or ambiguous header is an explicit
 leave pending work in place. A different salt is incomparable, never an accusation.
 The header is still page-visible, untrusted
 provenance, and distinguishes header values rather than verified people
-(`apps/extension/entrypoints/dw-bridge.content.ts:247-274`, `:604-648`;
-`apps/extension/entrypoints/background.ts:3228-3242`;
-`apps/extension/lib/backfill/tab-port.ts:223-242`;
-`apps/extension/lib/backfill/tab-port.ts:813-816`;
-`apps/extension/lib/backfill/tab-port.ts:873-901`;
-`apps/extension/lib/backfill/tab-port.ts:1074-1146`, `:1157-1215`;
-`apps/extension/lib/backfill/engine.ts:1588-1603`;
-`apps/extension/lib/backfill/engine.ts:1681-1710`;
-`apps/extension/lib/backfill/engine.ts:2195-2207`;
-`apps/extension/lib/backfill/engine.ts:2632-2643`;
-`apps/extension/lib/backfill/engine.ts:1712-1733`;
-`apps/extension/lib/backfill/engine.ts:2941-2944`;
-`apps/extension/lib/backfill/engine.ts:2999-3003`;
-`apps/extension/lib/backfill/engine.ts:3079-3083`;
-`apps/extension/lib/backfill/engine.ts:3202-3209`;
+(`apps/extension/entrypoints/dw-bridge.content.ts:248-275`, `:616-660`;
+`apps/extension/entrypoints/background.ts:3234-3248`;
+`apps/extension/lib/backfill/tab-port.ts:226-245`;
+`apps/extension/lib/backfill/tab-port.ts:816-819`;
+`apps/extension/lib/backfill/tab-port.ts:876-904`;
+`apps/extension/lib/backfill/tab-port.ts:1077-1149`, `:1178-1236`;
+`apps/extension/lib/backfill/engine.ts:1590-1605`;
+`apps/extension/lib/backfill/engine.ts:1683-1712`;
+`apps/extension/lib/backfill/engine.ts:2197-2209`;
+`apps/extension/lib/backfill/engine.ts:2634-2645`;
+`apps/extension/lib/backfill/engine.ts:1714-1735`;
+`apps/extension/lib/backfill/engine.ts:2943-2946`;
+`apps/extension/lib/backfill/engine.ts:3001-3005`;
+`apps/extension/lib/backfill/engine.ts:3081-3085`;
+`apps/extension/lib/backfill/engine.ts:3204-3211`;
 `apps/extension/lib/backfill/chatgpt-workspace.ts:1-35`;
 `apps/extension/lib/backfill/chatgpt-workspace.ts:94-96`).
 
@@ -528,13 +528,13 @@ and Grok: each run takes the fingerprint of the account named by its scope befor
 fetching anything and checks every list or body response against it. A proven
 difference on the same install stops with `account-changed` and suspends that
 scope (`apps/extension/lib/backfill/account-lease.ts:161-226`;
-`apps/extension/lib/backfill/engine.ts:1559-1603`;
-`apps/extension/lib/backfill/engine.ts:1621-1666`). ChatGPT's W303
+`apps/extension/lib/backfill/engine.ts:1561-1605`;
+`apps/extension/lib/backfill/engine.ts:1623-1668`). ChatGPT's W303
 lease has a separate request-header source, described above; it does not derive
 account identity from the workspace scope. A capture that names another account
 also suspends every scope of that platform whose recorded fingerprint differs,
 and starts the new account's own scope while the old scope keeps its debts
-(`apps/extension/entrypoints/background.ts:1423-1479`, `:1550-1566`). Missing
+(`apps/extension/entrypoints/background.ts:1429-1485`, `:1556-1572`). Missing
 identity on those four platforms remains incomparable and does not accuse; missing
 or ambiguous ChatGPT request identity instead yields `refused-unknown` and the
 response is not accepted. Fingerprints with different `saltId` values are
@@ -721,7 +721,7 @@ They reach three different places, and the differences matter:
   incomparable across installs by construction. It is metadata only — counts,
   codes, a version string and timestamps — and it carries no conversation text,
   no session id and no scope label
-  (`apps/extension/entrypoints/background.ts:3061-3090`). This is what makes an
+  (`apps/extension/entrypoints/background.ts:3067-3096`). This is what makes an
   install visible *as an install*: a capture puts the same names on a shard, but
   only this record says how much that profile holds and when it last reported,
   which is what another machine reads when it lists your installs.
@@ -781,7 +781,7 @@ with nobody reviewing it. It mints a new install id and then resets the sequence
 in that order, and touches no already-sealed record — captures already archived
 keep the identity they were sealed with
 (`apps/extension/lib/install-identity.ts:71-110`;
-`apps/extension/entrypoints/background.ts:3293-3306`). The card states all four
+`apps/extension/entrypoints/background.ts:3299-3312`). The card states all four
 things a person needs before an irreversible choice: what happened, that nothing
 was lost, that history is not rewritten, and what the button does
 (`apps/extension/locales/en.yml:69-85`).
@@ -993,17 +993,17 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:71-158`;
-   `apps/extension/entrypoints/background.ts:1727-1787`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1733-1793`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:303-357`); a body
    response that admits it is incomplete is refused and listed as a failure
-   rather than archived (`apps/extension/lib/backfill/engine.ts:3249-3283`).
+   rather than archived (`apps/extension/lib/backfill/engine.ts:3251-3285`).
    Gemini's routes were measured in a logged-in session as well, its requests
    carry three values read out of the page's own bootstrap blob at request time
    and held in memory only, and its body is paged: more than 20 pages and the
    conversation is refused and listed as a failure rather than archived in part
    (`apps/extension/lib/platform-auth.ts:712-819`;
-   `apps/extension/lib/backfill/engine.ts:3040-3103`). On
+   `apps/extension/lib/backfill/engine.ts:3042-3105`). On
    **Perplexity** it enumerates your conversations and fetches their content,
    one `GET /rest/thread/<slug>` per conversation, archiving a body only when
    the response declares there is no more
