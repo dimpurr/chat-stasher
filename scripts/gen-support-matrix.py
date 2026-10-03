@@ -41,8 +41,10 @@ and must not collapse into one glyph:
                                  one OS cell is source-confirmed / official-docs
                                  / measured-locally), or the extension ships the
                                  platform in its stable channel with source-backed
-                                 capture. Path/source known; end-to-end not
-                                 claimed.
+                                 capture, or a pathless `surface: agent-platform`,
+                                 `ingest: inbox` harness accepts bundles. The
+                                 scanner path cells remain absent for that row.
+                                 End-to-end is not claimed.
     experimental                 registered, but enabled only in the extension's
                                  dev build (`channel: experimental`).
     uncertain (unverified)       registered on a community claim only, or the
@@ -579,6 +581,15 @@ def harness_verified(h: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def is_pathless_inbox_agent(h: dict[str, Any]) -> bool:
+    paths = h.get("paths") or {}
+    return (
+        h.get("surface") == "agent-platform"
+        and h.get("ingest") == "inbox"
+        and not any(paths.get(os_name) is not None for os_name in OS_ORDER)
+    )
+
+
 def cell_status(
     cell: dict[str, Any] | None,
     verified: dict[str, Any] | None,
@@ -618,6 +629,8 @@ def harness_status(h: dict[str, Any]) -> str:
     verified = harness_verified(h)
     if verified is not None and verified.get("platform") is None:
         return f"{STATUS_VERIFIED} ({verified['date']})"
+    if is_pathless_inbox_agent(h):
+        return STATUS_SUPPORTED
     roots = harness_root_entries(h)
     # For one OS, all roots are required and the weakest root decides. Across
     # OSes, any supported platform keeps the harness available, as before.
@@ -726,15 +739,16 @@ def render_short(
 ) -> str:
     as_of = resolve_as_of(as_of)
     out: list[str] = []
-    out.append("**5+ platforms.** Local AI coding tools and web chats, archived the same way.")
+    out.append("**5+ platforms.** Local AI tools, agent platforms, and web chats.")
     out.append("")
     out.append("| Surface | Platform | Status | Last verified |")
     out.append("|---|---|---|---|")
     for h in harnesses:
         st = harness_status(h)
         cell = last_verified_cell(harness_verified(h), as_of)
+        surface = "Agent platform" if h.get("surface") == "agent-platform" else "Local"
         out.append(
-            f"| Local | {esc(h.get('display_name') or h['id'])} | {esc(st)} | {esc(cell)} |"
+            f"| {surface} | {esc(h.get('display_name') or h['id'])} | {esc(st)} | {esc(cell)} |"
         )
     for p in platforms:
         st = web_status(p)
@@ -767,7 +781,7 @@ def render_full(
 ) -> str:
     out: list[str] = []
     as_of = resolve_as_of(as_of)
-    out.append("### Local AI coding tools")
+    out.append("### Local harnesses and agent platforms")
     out.append("")
     out.append("| Harness | OS | Session path template | Format | Confidence | Status | Source |")
     out.append("|---|---|---|---|---|---|---|")
@@ -775,6 +789,7 @@ def render_full(
         name = h.get("display_name") or h["id"]
         verified = harness_verified(h)
         ref = (h.get("reference") or {}).get("source_url", "")
+<<<<<<< HEAD
         for root_name, paths in harness_root_entries(h):
             for os_name in OS_ORDER:
                 cell = paths.get(os_name)
@@ -787,6 +802,16 @@ def render_full(
                     )
                     continue
                 source = first_url(cell.get("source", "")) or first_url(ref)
+=======
+        for os_name in OS_ORDER:
+            cell = paths.get(os_name)
+            status = (
+                harness_status(h)
+                if cell is None and is_pathless_inbox_agent(h)
+                else cell_status(cell, verified)
+            )
+            if cell is None:
+>>>>>>> 87db56f (Add Grok Bot registry and agent platform group)
                 out.append(
                     "| {name} | {os} | {template} | {fmt} | {conf} | {status} | {src} |".format(
                         name=esc(label),
@@ -823,8 +848,10 @@ def render_full(
     out.append("| Surface | Tool or platform | Last verified | Dev priority | Known issue |")
     out.append("|---|---|---|---|---|")
     for h in harnesses:
+        surface = "Agent platform" if h.get("surface") == "agent-platform" else "Local"
         out.append(
-            "| Local | {name} | {when} | {prio} | {issue} |".format(
+            "| {surface} | {name} | {when} | {prio} | {issue} |".format(
+                surface=surface,
                 name=esc(h.get("display_name") or h["id"]),
                 when=esc(last_verified_cell(harness_verified(h), as_of)),
                 prio=esc(h.get("dev_priority") or ABSENT),
@@ -1183,6 +1210,12 @@ _SELFTEST_REGISTRY = {
                 "windows": {"template": "%USERPROFILE%\\.delta", "format": "jsonl", "confidence": "unascertained", "source": "not read"},
             },
         },
+        {
+            "id": "agent-fixture",
+            "display_name": "Agent fixture",
+            "surface": "agent-platform",
+            "ingest": "inbox",
+        },
     ],
 }
 
@@ -1267,7 +1300,7 @@ def selftest() -> int:
         harnesses = load_harnesses(tmp)
         platforms = parse_contract_platforms(tmp)
         browsers = load_browsers(tmp)
-        probe("registry parsed", [h["id"] for h in harnesses] == ["alpha", "beta", "gamma", "delta"])
+        probe("registry parsed", [h["id"] for h in harnesses] == ["alpha", "beta", "gamma", "delta", "agent-fixture"])
         probe("contract parsed", [p["id"] for p in platforms] == ["p-stable", "p-exp", "p-unver"])
         probe(
             "browsers parsed",
@@ -1282,6 +1315,14 @@ def selftest() -> int:
         probe("source-confirmed cell is supported", harness_status(by_id["alpha"]) == STATUS_SUPPORTED)
         probe("community-only cell is uncertain", harness_status(by_id["beta"]) == STATUS_UNCERTAIN)
         probe("all-unascertained cell is not supported", harness_status(by_id["gamma"]) == STATUS_UNSUPPORTED)
+        probe("pathless inbox agent is supported before end-to-end evidence", harness_status(by_id["agent-fixture"]) == STATUS_SUPPORTED)
+        probe(
+            "an inbox agent with scanner paths does not borrow pathless support",
+            harness_status({
+                **by_id["agent-fixture"],
+                "paths": {"linux": {"confidence": "unascertained"}},
+            }) == STATUS_UNSUPPORTED,
+        )
         probe(
             "verified record wins and carries its date",
             harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
@@ -1431,6 +1472,18 @@ def selftest() -> int:
         probe("full table carries a path template", "~/.alpha/<uuid>.jsonl" in full)
         probe("full table carries the verified date", "(2026-09-15)" in full)
         probe(
+            "pathless inbox agent has no scanner paths but remains supported",
+            all(
+                f"| Agent fixture | {os_label} | {ABSENT} | {ABSENT} | {ABSENT} | supported | {ABSENT} |" in full
+                for os_label in OS_LABEL.values()
+            ),
+        )
+        verified_agent = {**by_id["agent-fixture"], "verified": {"date": "2026-09-25", "scope": "synthetic probe"}}
+        probe(
+            "pathless inbox agent reports verification only after dated evidence",
+            harness_status(verified_agent) == f"{STATUS_VERIFIED} (2026-09-25)",
+        )
+        probe(
             "the short legend names the re-check rule beside its threshold",
             f"a date older than {RECHECK_DAYS} days is shown as {RECHECK_LABEL} (DATE)" in short,
         )
@@ -1446,6 +1499,10 @@ def selftest() -> int:
         probe(
             "the editorial section renders a verified harness with no priority or issue",
             f"| Local | Delta | 2026-09-15 | {ABSENT} | {ABSENT} |" in full,
+        )
+        probe(
+            "the editorial section preserves an agent-platform surface",
+            f"| Agent platform | Agent fixture | {ABSENT} | {ABSENT} | {ABSENT} |" in full,
         )
         probe(
             "the editorial section keeps the absent placeholder for unwritten fields",

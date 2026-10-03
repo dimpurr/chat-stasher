@@ -4,7 +4,7 @@
 
 Every AI tool, chat site, browser, operating system and storage destination chat-stasher works with, and how sure we are about each one.
 
-The four large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the tool actually scans and registers. Do not edit them by hand: change the registry and regenerate.
+The four large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the scanner reads, what the inbox accepts, and what the extension captures. Do not edit them by hand: change the registry and regenerate.
 
 ## How to read the status
 
@@ -13,7 +13,7 @@ Two facts are kept apart on purpose: "we know where this tool keeps its sessions
 | Status | Meaning |
 |---|---|
 | **verified end-to-end (DATE)** | A real session was archived on a real machine, and the date of that check is recorded. |
-| **supported** | The path or route has a source, and the scanner or extension acts on it. End to end is not claimed. |
+| **supported** | A scanner path is sourced, an inbox route accepts bundles, or the extension captures the platform. End to end is not claimed. |
 | **experimental** | A web platform enabled in the development build of the extension only. |
 | **uncertain (unverified)** | A path exists only as an unconfirmed claim. It is not scanned unless you point `[harness_roots]` at it. |
 | **not supported** | No path could be established for this system. It is not scanned, and the scanner reports *unknown*, never "0 sessions". |
@@ -58,7 +58,7 @@ around it.
 ## The support matrix
 
 <!-- support-matrix:full:start -->
-### Local AI coding tools
+### Local harnesses and agent platforms
 
 | Harness | OS | Session path template | Format | Confidence | Status | Source |
 |---|---|---|---|---|---|---|
@@ -98,6 +98,9 @@ around it.
 | Grok (xAI CLI) | macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | verified end-to-end (2026-10-03) | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
+| Grok Bot | macOS | - | - | - | supported | - |
+| Grok Bot | Linux | - | - | - | supported | - |
+| Grok Bot | Windows | - | - | - | supported | - |
 | GitHub Copilot CLI | macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Linux | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Windows | `%USERPROFILE%\.copilot\` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
@@ -143,6 +146,7 @@ around it.
 | Local | Cursor | 2026-09-25 | normal | - |
 | Local | Grok Bot (desktop) | - | low | local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |
+| Agent platform | Grok Bot | - | - | - |
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |

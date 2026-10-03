@@ -1404,8 +1404,8 @@ struct ParseOutcome {
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
 /// holds the whole file — `raw.text` is authoritative, never dropped.
 fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
-    let fallback_id = sanitize_component(&native_id_from_name(name));
-    let default_platform = "deepseek".to_string();
+    let (default_platform, fallback_session_id) = native_identity_from_name(name);
+    let fallback_id = sanitize_component(&fallback_session_id);
 
     let mut out = ParseOutcome {
         id: format!("{}.{}", default_platform, fallback_id),
@@ -1580,22 +1580,30 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     Ok(out)
 }
 
-/// `deepseek-<sessionId>.json` -> `<sessionId>` (best-effort fallback id).
-fn native_id_from_name(name: &str) -> String {
-    let mut s = name.to_string();
-    if let Some(stripped) = s.strip_prefix("deepseek-") {
-        s = stripped.to_string();
-    }
-    if let Some(stripped) = s.strip_suffix(PART_SUFFIX) {
-        s = stripped.to_string();
-    }
-    if let Some(stripped) = s.strip_suffix(".json") {
-        s = stripped.to_string();
-    }
-    if s.is_empty() {
-        s = "unknown".to_string();
-    }
-    s
+/// `grok-bot-<sessionId>.json` -> (`grok-bot`, `<sessionId>`), with the same
+/// fallback for every bundle platform. An unknown prefix remains `unknown`;
+/// malformed content must never be relabelled as DeepSeek by default.
+fn native_identity_from_name(name: &str) -> (String, String) {
+    let name = name.strip_suffix(PART_SUFFIX).unwrap_or(name);
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    let platform = crate::activity::BUNDLE_HARNESSES
+        .iter()
+        .copied()
+        .filter(|platform| stem.starts_with(&format!("{platform}-")))
+        .max_by_key(|platform| platform.len());
+    let (platform, session_id) = match platform {
+        Some(platform) => (
+            platform.to_string(),
+            stem.strip_prefix(&format!("{platform}-")).unwrap_or(stem),
+        ),
+        None => ("unknown".to_string(), stem),
+    };
+    let session_id = if session_id.is_empty() {
+        "unknown"
+    } else {
+        session_id
+    };
+    (platform, session_id.to_string())
 }
 
 /// Keep an id component filesystem-safe and `:`-free (drives `sessionShardDir`).
@@ -2211,6 +2219,19 @@ mod tests {
             vec!["000001.jsonl"]
         );
         drop(dir);
+    }
+
+    #[test]
+    fn non_json_filename_fallback_keeps_grok_bot_and_unknown_prefixes_honest() {
+        let grok = parse_bundle("grok-bot-x.json", b"not json").unwrap();
+        assert_eq!(grok.platform, "grok-bot");
+        assert_eq!(grok.session_id, "x");
+        assert_eq!(grok.id, "grok-bot.x");
+
+        let unknown = parse_bundle("mystery-x.json", b"not json").unwrap();
+        assert_eq!(unknown.platform, "unknown");
+        assert_eq!(unknown.session_id, "mystery-x");
+        assert_eq!(unknown.id, "unknown.mystery-x");
     }
 
     #[test]

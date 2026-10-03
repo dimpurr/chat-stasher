@@ -848,12 +848,12 @@ fn render_machines(
 }
 
 /// Order the matrix's source columns by group (UIA-3, 29-UI-DESIGN §3.1):
-/// web platforms, then coding agents, then the ungrouped bucket — each sorted
+/// web platforms, coding agents, agent platforms, then the ungrouped bucket — each sorted
 /// alphabetically within itself so the order is stable across launches — and
 /// the no-harness column last, a *rowspan* header of its own rather than a
 /// group member, because it is the absence of a classifiable source, not one
 /// more group. `BTreeSet` iteration is already sorted, so grouping is a
-/// three-way stable partition of it.
+/// four-way stable partition of it.
 fn grouped_sources(
     sources: &BTreeSet<String>,
     no_harness: &str,
@@ -862,6 +862,7 @@ fn grouped_sources(
     for group in [
         PlatformGroup::WebPlatforms,
         PlatformGroup::CodingAgents,
+        PlatformGroup::AgentPlatforms,
         PlatformGroup::Ungrouped,
     ] {
         out.extend(

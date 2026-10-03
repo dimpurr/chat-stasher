@@ -686,6 +686,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("zed", FORMAT_SQLITE),
     ("continue", "json"),
     ("kimi-code", "jsonl"),
+    ("grok-bot", FORMAT_JSONL),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -808,14 +809,14 @@ fn reader_document(harness: &str, body: &str) -> Option<DocText> {
     }
     if conversation.messages.is_empty()
         && (conversation.unrecognized_lines > 0
-            // A web-bundle harness reads the platform's own body out of an
-            // inbox bundle, and its generic arm will hand back an empty
+            // A bundle harness reads its own body out of an inbox bundle, and
+            // its generic arm will hand back an empty
             // conversation for any value at all. A bundle it could not render
             // a single message from is a framing it does not know — which is
             // the difference between this and a `claude-code` shard of nothing
             // but `summary` records, where an empty body is the measurement
             // the reader actually made.
-            || (crate::activity::WEB_HARNESSES.contains(&harness)
+            || (crate::activity::BUNDLE_HARNESSES.contains(&harness)
                 && conversation.unrendered_lines > 0))
     {
         return None;
@@ -2777,8 +2778,8 @@ mod tests {
             ),
             (
                 "grok-bot",
-                br#"{"seq":1,"kind":"message"}"#,
-                Expected::Format(FORMAT_JSON),
+                br#"{"raw":{"text":"{\"messages\":[{\"role\":\"user\",\"content\":\"synthetic bot prompt\"}]}"}}"#,
+                Expected::Text("synthetic bot prompt"),
             ),
             (
                 "google-antigravity",
@@ -2883,6 +2884,22 @@ mod tests {
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
     }
 
+    #[test]
+    fn grok_bot_message_records_without_transcript_text_remain_unindexable() {
+        let extracted = extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+    }
+
+    #[test]
+    fn an_agent_platform_bundle_indexes_its_generic_transcript_body() {
+        let body =
+            r#"{"messages":[{"role":"assistant","content":"synthetic grok-bot transcript"}]}"#;
+        let line = serde_json::json!({ "raw": { "text": body } }).to_string();
+        let extracted = extract_index_document_for("grok-bot", line.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic grok-bot transcript"));
+    }
+
     /// The registry ids, read from the same file the scanner loads.
     fn registry_harness_ids() -> Vec<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/harness-registry-v1.json");
@@ -2918,7 +2935,7 @@ mod tests {
         let raw = std::fs::read_to_string(path).expect("read the support registry");
         let registry: serde_json::Value = serde_json::from_str(&raw).expect("parse the registry");
         for (harness, format) in HARNESS_SOURCE_FORMATS {
-            let declared = registry["harnesses"]
+            let entry = registry["harnesses"]
                 .as_array()
                 .expect("the registry lists harnesses")
                 .iter()
@@ -2943,6 +2960,25 @@ mod tests {
                     formats.join(" ")
                 })
                 .expect("the harness is in the registry");
+            let pathless = entry["paths"].is_null()
+                || entry["paths"]
+                    .as_object()
+                    .map(|paths| paths.is_empty())
+                    .unwrap_or(false);
+            if pathless {
+                assert_eq!(entry["surface"], "agent-platform");
+                assert_eq!(entry["ingest"], "inbox");
+                assert_eq!(*harness, "grok-bot");
+                assert_eq!(*format, FORMAT_JSONL);
+                continue;
+            }
+            let declared = entry["paths"]
+                .as_object()
+                .expect("a scannable harness lists platform cells")
+                .values()
+                .filter_map(|cell| cell["format"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
             assert!(
                 declared.contains(format),
                 "`{harness}` is declared `{declared}` but this module names it `{format}`"

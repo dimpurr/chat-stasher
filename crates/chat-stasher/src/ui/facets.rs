@@ -1,7 +1,7 @@
 //! facets — the platform/agent grouping table and the session list's facet bar.
 //!
 //! 29-UI-DESIGN §2 (W137/UIA-3): every session's harness belongs to one of
-//! three groups — **web platforms**, **coding agents**, or an honest
+//! four groups — **web platforms**, **coding agents**, **agent platforms**, or an honest
 //! **ungrouped** bucket for ids this build does not classify. The grouping is
 //! a static map on purpose: an id nobody classified stays visibly
 //! unclassified until a release classifies it, never guessed into a group by
@@ -31,7 +31,8 @@ use crate::selector::{Resolved, Selector, Verdict};
 
 use super::{percent_encode, Query, UiData};
 
-/// The three honest groups a harness id can fall into (29-UI-DESIGN §2.1).
+/// The four honest buckets a harness id can fall into — web platforms, coding
+/// agents, agent platforms, and ungrouped (29-UI-DESIGN §2.1).
 /// `Ungrouped` is a named bucket, never a silent catch-all: anything this
 /// build does not classify lands there and is *labelled* as unclassified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum PlatformGroup {
     WebPlatforms,
     /// A terminal/editor coding agent: claude-code, codex, opencode, …
     CodingAgents,
+    /// A product agent platform with its own transcript export surface.
+    AgentPlatforms,
     /// An id this build does not classify. A new platform's first sessions
     /// land here, and stay filterable on their own id meanwhile.
     Ungrouped,
@@ -52,6 +55,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "Web platforms",
             PlatformGroup::CodingAgents => "Coding agents",
+            PlatformGroup::AgentPlatforms => "Agent platforms",
             PlatformGroup::Ungrouped => "ungrouped",
         }
     }
@@ -61,6 +65,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "web-platforms",
             PlatformGroup::CodingAgents => "coding-agents",
+            PlatformGroup::AgentPlatforms => "agent-platforms",
             PlatformGroup::Ungrouped => "ungrouped",
         }
     }
@@ -73,6 +78,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "g-web",
             PlatformGroup::CodingAgents => "g-agents",
+            PlatformGroup::AgentPlatforms => "g-agent-platforms",
             PlatformGroup::Ungrouped => "g-ungrouped",
         }
     }
@@ -132,6 +138,11 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "zed",
 ];
 
+/// Product agent platforms. This is independent of delivery method: these
+/// transcripts currently arrive through the inbox, while future products may
+/// use another route without changing their dashboard group.
+const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot"];
+
 /// Classify a harness id. Web platforms are matched **first**: `grok` lives
 /// in both lists' worlds and its group is the web one by design. Everything
 /// not in either list — including platforms the extension learns after this
@@ -139,6 +150,8 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
 pub fn group_of(harness: &str) -> PlatformGroup {
     if WEB_PLATFORM_HARNESSES.contains(&harness) {
         PlatformGroup::WebPlatforms
+    } else if AGENT_PLATFORM_HARNESSES.contains(&harness) {
+        PlatformGroup::AgentPlatforms
     } else if CODING_AGENT_HARNESSES.contains(&harness) {
         PlatformGroup::CodingAgents
     } else {
@@ -168,6 +181,10 @@ fn group_values(group: PlatformGroup, data: &UiData) -> Vec<String> {
             .map(|h| (*h).to_string())
             .collect(),
         PlatformGroup::CodingAgents => CODING_AGENT_HARNESSES
+            .iter()
+            .map(|h| (*h).to_string())
+            .collect(),
+        PlatformGroup::AgentPlatforms => AGENT_PLATFORM_HARNESSES
             .iter()
             .map(|h| (*h).to_string())
             .collect(),
@@ -203,6 +220,7 @@ struct Buckets {
     all: usize,
     web: usize,
     agents: usize,
+    agent_platforms: usize,
     ungrouped: usize,
     no_prefix: usize,
     /// Sessions whose harness contains the list separator: real sources,
@@ -215,6 +233,7 @@ fn buckets(data: &UiData, base: &Selector) -> Buckets {
         all: 0,
         web: 0,
         agents: 0,
+        agent_platforms: 0,
         ungrouped: 0,
         no_prefix: 0,
         unexpressible: 0,
@@ -230,6 +249,7 @@ fn buckets(data: &UiData, base: &Selector) -> Buckets {
             Some(h) => match group_of(h) {
                 PlatformGroup::WebPlatforms => out.web += 1,
                 PlatformGroup::CodingAgents => out.agents += 1,
+                PlatformGroup::AgentPlatforms => out.agent_platforms += 1,
                 PlatformGroup::Ungrouped => out.ungrouped += 1,
             },
         }
@@ -300,8 +320,8 @@ struct FacetItem {
     values: Option<Vec<String>>,
 }
 
-/// The facet bar of `/sessions` (29-UI-DESIGN §2.3): `All · Web platforms ·
-/// Coding agents · ungrouped`, each with the count the click yields, each
+/// The facet bar of `/sessions`: `All · Web platforms · Coding agents · Agent
+/// platforms · ungrouped`, each with the count the click yields, each
 /// non-current item a plain GET link that inherits every other facet in
 /// force, the current item marked `aria-current` — and only the item whose
 /// value set is **exactly** the page's harness constraint: a strict subset
@@ -314,6 +334,7 @@ pub(super) fn facet_bar(resolved: &Resolved, params: &Query, token: &str, data: 
     let groups = [
         (PlatformGroup::WebPlatforms, b.web),
         (PlatformGroup::CodingAgents, b.agents),
+        (PlatformGroup::AgentPlatforms, b.agent_platforms),
         (PlatformGroup::Ungrouped, b.ungrouped),
     ];
     let items: Vec<FacetItem> = std::iter::once(FacetItem {
@@ -484,6 +505,7 @@ mod tests {
         assert_eq!(group_of("kimi-code"), PlatformGroup::CodingAgents);
         assert_eq!(group_of("claude"), PlatformGroup::WebPlatforms);
         assert_eq!(group_of("claude-code"), PlatformGroup::CodingAgents);
+        assert_eq!(group_of("grok-bot"), PlatformGroup::AgentPlatforms);
         assert_eq!(
             group_of("grok"),
             PlatformGroup::WebPlatforms,
@@ -493,7 +515,7 @@ mod tests {
             .expect("the embedded harness registry must parse for this test");
         for h in &registry.harnesses {
             match group_of(&h.id) {
-                PlatformGroup::CodingAgents => {}
+                PlatformGroup::CodingAgents | PlatformGroup::AgentPlatforms => {}
                 PlatformGroup::WebPlatforms => {
                     assert_eq!(
                         h.id, "grok",
@@ -549,9 +571,9 @@ mod tests {
     }
 
     /// The counts the bar names over the unfiltered view, derived by hand:
-    /// All 7, Web platforms 2 (deepseek, grok), Coding agents 2, ungrouped 1
-    /// (omega-web — `we,ird` cannot be linked and is excluded), and the two
-    /// gap notes with their counts.
+    /// All 7, Web platforms 2 (deepseek, grok), Coding agents 2, Agent
+    /// platforms 0, ungrouped 1 (omega-web — `we,ird` cannot be linked and is
+    /// excluded), and the two gap notes with their counts.
     #[test]
     fn bar_counts_are_the_hand_laid_bucket_totals() {
         let d = fixture::groups_data();
@@ -563,6 +585,7 @@ mod tests {
         );
         assert!(bar.contains(">Web platforms 2</a>"), "bar: {bar}");
         assert!(bar.contains(">Coding agents 2</a>"), "bar: {bar}");
+        assert!(bar.contains(">Agent platforms 0</a>"), "bar: {bar}");
         assert!(bar.contains(">ungrouped 1</a>"), "bar: {bar}");
         assert!(
             page.contains(
@@ -590,7 +613,7 @@ mod tests {
         let b = buckets(&d, &base_selector(&resolved));
         assert_eq!(
             b.all,
-            b.web + b.agents + b.ungrouped + b.no_prefix + b.unexpressible,
+            b.web + b.agents + b.agent_platforms + b.ungrouped + b.no_prefix + b.unexpressible,
             "every matched row lands in exactly one bucket"
         );
         assert_eq!(
@@ -598,11 +621,12 @@ mod tests {
                 b.all,
                 b.web,
                 b.agents,
+                b.agent_platforms,
                 b.ungrouped,
                 b.no_prefix,
                 b.unexpressible
             ),
-            (7, 2, 2, 1, 1, 1)
+            (7, 2, 2, 0, 1, 1, 1)
         );
 
         let plain = fixture::data();
@@ -614,6 +638,7 @@ mod tests {
         );
         assert!(bar.contains(">Web platforms 1</a>"), "bar: {bar}");
         assert!(bar.contains(">Coding agents 2</a>"), "bar: {bar}");
+        assert!(bar.contains(">Agent platforms 0</a>"), "bar: {bar}");
         let ungrouped_cell = bar
             .split("·")
             .find(|cell| cell.contains("ungrouped 0"))

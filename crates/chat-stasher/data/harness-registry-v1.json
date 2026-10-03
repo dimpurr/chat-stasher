@@ -550,6 +550,14 @@
       }
     },
     {
+      "id": "grok-bot",
+      "display_name": "Grok Bot",
+      "surface": "agent-platform",
+      "ingest": "inbox",
+      "paths": {},
+      "notes": "Transcript bundles are supplied by the Grok Bot and ingested through the inbox. No local session-store path is scanned."
+    },
+    {
       "id": "github-copilot-cli",
       "display_name": "GitHub Copilot CLI",
       "dev_priority": "low",

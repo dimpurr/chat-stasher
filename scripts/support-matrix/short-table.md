@@ -1,4 +1,4 @@
-**5+ platforms.** Local AI coding tools and web chats, archived the same way.
+**5+ platforms.** Local AI tools, agent platforms, and web chats.
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
@@ -12,6 +12,7 @@
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
+| Agent platform | Grok Bot | supported | - |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |
 | Local | crush | supported | - |

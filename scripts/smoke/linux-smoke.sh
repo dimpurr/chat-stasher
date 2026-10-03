@@ -682,7 +682,7 @@ step "2/8 · doctor on a machine with nothing configured"
 # This run is the honest-absence half of the smoke. Nothing is configured yet, so
 # the registry alone decides which harnesses get looked at — and the invariant
 # this repository exists for has to hold here: a harness the registry declines to
-# probe is `unknown`, and an unknown is never rendered as `0`.
+# probe never gets a measured zero. Its count stays unknown or not applicable.
 DOCTOR_JSON="$WORK/doctor-pristine.json"
 rc=0; "$INSTALLED" doctor --json >"$DOCTOR_JSON" 2>"$WORK/doctor-pristine.err" || rc=$?
 check "doctor --json exits 0" 0 "$rc"
@@ -726,6 +726,8 @@ for hid, p in sorted(probes.items()):
                        "name it in SKIP_COUNT_KIND to assert it")
         elif sc["kind"] != want:
             bad.append(f"{hid}: state={state} yet session_count={sc} (this skip must stay {want})")
+        elif state == "skip_wrong_platform" and sc.get("why") != "registry has no cell for this platform":
+            bad.append(f"{hid}: state={state} but N/A reason is {sc.get('why')!r}")
     elif sc["kind"] != "known":
         bad.append(f"{hid}: state={state} yet session_count={sc} (a probe that ran must count)")
 
@@ -911,8 +913,10 @@ for hid, want in sorted(seeded.items()):
 # asserted rather than left implicit.
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
-    "template_unresolvable": "skip_unresolvable",
+    # A pathless inbox product such as Grok Bot has no scanner root to check.
+    # Keep it explicitly skipped for this platform with a not-applicable count.
     "no_cell_for_platform": "skip_wrong_platform",
+    "template_unresolvable": "skip_unresolvable",
     "cell_rejects_json": "missing",
     "id_not_keyable": "missing",
     "no_schema_in_build": "missing",

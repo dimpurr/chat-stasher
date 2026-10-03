@@ -4025,6 +4025,46 @@ mod tests {
     }
 
     #[test]
+    fn pathless_registry_entry_skips_with_unknown_count_for_missing_and_empty_paths() {
+        for paths in ["", ",\"paths\": {}"] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let registry_path = dir.path().join("registry.json");
+            let row = if paths.is_empty() {
+                r#"{"id":"grok-bot","display_name":"Grok Bot","surface":"agent-platform","ingest":"inbox"}"#.to_string()
+            } else {
+                format!(
+                    r#"{{"id":"grok-bot","display_name":"Grok Bot","surface":"agent-platform","ingest":"inbox"{paths}}}"#
+                )
+            };
+            fs::write(
+                &registry_path,
+                format!(r#"{{"schema_version":1,"generated":"test","harnesses":[{row}]}}"#),
+            )
+            .unwrap();
+            let registry = load_registry(&registry_path).expect("pathless registry loads");
+            let mut report = ScanReport::default();
+            let probe = probe_harness(
+                &Config::default(),
+                &registry.harnesses[0],
+                current_platform(),
+                "synthetic-machine",
+                &mut report,
+            );
+
+            assert_eq!(probe.state, ProbeState::SkipWrongPlatform);
+            assert!(
+                probe.root.is_none(),
+                "pathless harness must not resolve a root"
+            );
+            assert_eq!(probe.record_count, None, "unknown must not become zero");
+            assert!(matches!(
+                probe_session_count(&probe),
+                json_out::CountState::NotApplicable { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn unascertained_cell_is_skipped_not_scanned() {
         // Nothing tells the scanner where this harness lives, so the only path
         // available is the one the registry itself calls unverified: skip it.
