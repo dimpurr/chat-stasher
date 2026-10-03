@@ -5,7 +5,7 @@ import {
   WEBSOCKET_HOOK_UNINSTALLED_WARNING,
   type PageHookOptions,
 } from '../lib/page-hook';
-import { PLATFORMS, WS_OBSERVED_MESSAGE } from '../lib/contract';
+import { CAPTURE_MESSAGE, PLATFORMS } from '../lib/contract';
 
 /**
  * A WebSocket stand-in that records everything the page would observe, so a
@@ -63,6 +63,7 @@ function declaredOptions(): PageHookOptions {
         credibility: 'unverified',
         channel: 'experimental',
         webSocketCapture: true,
+        eventSourceCapture: true,
       },
     ],
   };
@@ -83,7 +84,7 @@ function makeWindow(origin: string, overrides: Record<string, unknown> = {}): an
   };
 }
 
-describe('C15 · WebSocket observation is opt-in per platform row', () => {
+describe('C15 · streamed response capture is opt-in per platform row', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -102,15 +103,12 @@ describe('C15 · WebSocket observation is opt-in per platform row', () => {
     const socket = new fakeWindow.WebSocket('wss://chat.deepseek.com/api/v0/chat/history_messages');
     socket.emit('message', { data: '{"chat_messages":[]}' });
 
-    const observed = posted.filter(
-      (message: any) => message && message.type === WS_OBSERVED_MESSAGE,
-    );
-    expect(observed).toEqual([]);
+    expect(posted.filter((message: any) => message?.type === CAPTURE_MESSAGE)).toEqual([]);
     // And no shipped platform row may opt in.
     expect(PLATFORMS.filter((platform) => platform.webSocketCapture === true)).toEqual([]);
   });
 
-  it('② leaves the page WebSocket behaviour identical (messages / events / close / errors)', () => {
+  it('② captures shaped WebSocket responses and leaves page behaviour identical', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const posted: unknown[] = [];
     const fakeWindow = makeWindow(WS_ORIGIN, {
@@ -150,13 +148,48 @@ describe('C15 · WebSocket observation is opt-in per platform row', () => {
     expect(socket.sent).toEqual(['page-frame']);
     expect(socket.closedWith).toEqual([1000, 'bye']);
 
-    // Observation happened (that is the new capability) but only as a page message.
-    const observed = posted.filter(
-      (message: any) => message && message.type === WS_OBSERVED_MESSAGE,
-    );
-    expect(observed).toHaveLength(1);
-    expect((observed[0] as any).payload.platformId).toBe('test-ws-platform');
-    expect((observed[0] as any).payload.text).toBe('{"chat_messages":[]}');
+    const captures = posted.filter((message: any) => message?.type === CAPTURE_MESSAGE);
+    expect(captures).toHaveLength(1);
+    expect((captures[0] as any).payload).toMatchObject({
+      url: 'https://ws.example.test/chathub',
+      method: 'GET',
+      status: 200,
+      text: '{"chat_messages":[]}',
+    });
+    expect((captures[0] as any).payload).not.toHaveProperty('authorization');
+  });
+
+  it('captures complete EventSource response events through the normal capture envelope', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const posted: unknown[] = [];
+    const fakeWindow = makeWindow(WS_ORIGIN, {
+      EventSource: class FakeEventSource {
+        private listeners: Record<string, Array<(event: unknown) => void>> = {};
+        constructor(readonly url: string) {}
+        addEventListener(name: string, listener: (event: unknown) => void): void {
+          (this.listeners[name] ??= []).push(listener);
+        }
+        emit(name: string, event: unknown): void {
+          for (const listener of this.listeners[name] ?? []) listener(event);
+        }
+      },
+      postMessage: (message: unknown) => posted.push(message),
+    });
+
+    vi.stubGlobal('window', fakeWindow);
+    installPageFetchHook(declaredOptions());
+    const source = new fakeWindow.EventSource('https://ws.example.test/chathub');
+    source.emit('message', { data: '{"chat_messages":[]}' });
+    source.emit('message', { data: '{"delta":"partial"}' });
+
+    const captures = posted.filter((message: any) => message?.type === CAPTURE_MESSAGE);
+    expect(captures).toHaveLength(1);
+    expect((captures[0] as any).payload).toMatchObject({
+      url: 'https://ws.example.test/chathub',
+      method: 'GET',
+      status: 200,
+      text: '{"chat_messages":[]}',
+    });
   });
 
   it('③ leaves a trace when a declared origin does NOT get the wrapper installed', () => {
