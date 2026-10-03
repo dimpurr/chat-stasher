@@ -822,6 +822,68 @@
         "scope": "Read-only copies of all 8 real sessions were collected, staged, pushed and read back with matching SHA-256; all 8 were indexed and rendered by the normalized reader (tested code git f636b57).",
         "platform": "macos"
       }
+    },
+    {
+      "id": "deepseek-harness",
+      "display_name": "DeepSeek Harness",
+      "dev_priority": "normal",
+      "known_issue": "measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); no session has been archived end to end yet",
+      "dimensions": {
+        "supported": [],
+        "surfaces": [
+          "app",
+          "web",
+          "cli"
+        ]
+      },
+      "paths": {
+        "macos": {
+          "template": "~/.dsh/sessions/",
+          "env_override": "DSH_HOME",
+          "format": "jsonl.zstd",
+          "session_dir": {
+            "pattern": "*/*",
+            "file": "session.v4.jsonl.zstd"
+          },
+          "confidence": "measured-locally",
+          "source": "measured on macOS 2026-10-03 against the installed app 0.2.0-rc.2, session format 4: the home holds sessions/<slug-of-cwd>/<session-id>/session.v4.jsonl.zstd beside a 0-byte session.lock, plus storages/ and attachments/. 7 sessions and 372 frames were decoded frame by frame; field names, counts and digests only, never message text."
+        },
+        "linux": {
+          "template": "$HOME/.dsh/sessions/",
+          "env_override": "DSH_HOME",
+          "format": "jsonl.zstd",
+          "session_dir": {
+            "pattern": "*/*",
+            "file": "session.v4.jsonl.zstd"
+          },
+          "confidence": "unascertained",
+          "source": "upstream documentation places the home at DSH_HOME with ~/.dsh as the default on every platform; no Linux install was measured."
+        },
+        "windows": {
+          "template": "%USERPROFILE%\\.dsh\\sessions\\",
+          "env_override": "DSH_HOME",
+          "format": "jsonl.zstd",
+          "session_dir": {
+            "pattern": "*/*",
+            "file": "session.v4.jsonl.zstd"
+          },
+          "confidence": "unascertained",
+          "source": "same as linux; no Windows install was measured."
+        }
+      },
+      "notes": "DeepSeek Harness (dsh), an open-source agent harness. Every surface writes into one home: the desktop app, dsh web, headless, sdk and acp all use $DSH_HOME/sessions, so a session cannot be attributed to a surface and the registry declares no supported dimension. DSH_HOME replaces the home directory (default ~/.dsh), so the cells keep the /sessions/ suffix. The transcript is a concatenation of Zstandard frames whose first frame is the session header. The file name is a constant, so session_dir takes the id from the directory: a bare <uuid> for a subagent child, session-<uuid> otherwise. The <slug-of-cwd> component is lossy and must never be parsed; the header's cwd is authoritative. session.lock is 0 bytes and proves nothing about quiescence. Attachments live outside the log at <DSH_HOME>/attachments/v1 and are not archived yet.",
+      "seal_policy": "no-rename",
+      "seal_source": "upstream persistence documentation read 2026-10-03: the JSONL provider materialises a session atomically, the write path truncates and re-encodes a torn tail before its first new append, and one live writer owns a session at a time, so a rename seal would race the owner.",
+      "reference": {
+        "upstream_project": "deepseek-ai/deepseek-harness",
+        "file_path": "packages/session/session-persistence-jsonl",
+        "line_count": "unascertained",
+        "license": "MIT",
+        "relationship": "reference",
+        "source_url": "https://github.com/deepseek-ai/deepseek-harness",
+        "license_url": "https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE",
+        "verification": "Public documentation and published packages were read, and the local layout was measured on macOS. This is not a licence review of the packaged application."
+      }
     }
   ],
   "browsers": [

@@ -26,6 +26,7 @@ pub enum HarnessSource {
     Zed,
     Continue,
     KimiCode,
+    DeepSeekHarness,
 }
 
 /// Layout of a virtual session backed by a structured, read-only local source.
@@ -65,6 +66,9 @@ impl HarnessSource {
             HarnessSource::Zed => "zed",
             HarnessSource::Continue => "continue",
             HarnessSource::KimiCode => "kimi-code",
+            // Not abbreviable to `deepseek`: that id is the deepseek.com web
+            // chat platform, a different harness from this local agent.
+            HarnessSource::DeepSeekHarness => "deepseek-harness",
         }
     }
 
@@ -89,6 +93,7 @@ impl HarnessSource {
             "zed" => Some(HarnessSource::Zed),
             "continue" => Some(HarnessSource::Continue),
             "kimi-code" => Some(HarnessSource::KimiCode),
+            "deepseek-harness" => Some(HarnessSource::DeepSeekHarness),
             _ => None,
         }
     }
@@ -120,7 +125,10 @@ pub struct SessionRecord {
     pub mtime: SystemTime,
     /// Which harness produced it.
     pub source: HarnessSource,
-    /// True when the file is zst-compressed (`*.jsonl.zst`).
+    /// True when the file is zst-compressed, whichever spelling the registry
+    /// declares: `*.jsonl.zst` (codex) or `*.jsonl.zstd` (DeepSeek Harness).
+    /// Read from the declared format rather than sniffed, so a source that
+    /// declares compression and is read as text cannot happen silently.
     pub compressed: bool,
     /// Present for a virtual SQLite session; absent for ordinary files.
     pub sqlite_layout: Option<SqliteSessionLayout>,

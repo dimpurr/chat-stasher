@@ -2986,7 +2986,14 @@ fn strip_format_suffix(name: &str, format: &str) -> Option<(String, bool)> {
     suffixes.sort_by_key(|suffix| std::cmp::Reverse(suffix.len()));
     suffixes.into_iter().find_map(|suffix| {
         name.strip_suffix(&suffix).map(|base| {
-            let compressed = suffix.ends_with(".zst");
+            // The registry declares the format, so this reads the declaration
+            // rather than guessing from a filename: both the `zst` spelling
+            // (codex's `jsonl.zst`) and the `zstd` spelling (DeepSeek
+            // Harness's `jsonl.zstd`) are zstd. `compressed` decides whether
+            // the bytes are stored as decoded lines or as opaque payload, so a
+            // source that says `.zstd` while this reads false would be archived
+            // as compressed bytes and rendered as binary.
+            let compressed = suffix.ends_with(".zst") || suffix.ends_with(".zstd");
             (base.to_string(), compressed)
         })
     })
