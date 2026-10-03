@@ -47,7 +47,7 @@ Tells the scanner where a tool keeps its sessions, when that is not where the bu
 | `opencode` | opencode | | `zed` | Zed |
 | `cursor` | Cursor | | `continue` | Continue |
 | `grok` | Grok (xAI CLI) | | `kimi-code` | Kimi Code |
-| `grok-bot` | Grok Bot desktop app | | | |
+| `grok-bot` | Grok Bot desktop app | | `hermes-agent` | Hermes Agent |
 
 ```toml
 [harness_roots]
@@ -57,6 +57,7 @@ opencode = "~/.local/share/opencode/opencode.db"
 
 - For a tool that stores one database file, give the file. For a tool that stores a folder of sessions, give the folder.
 - `grok-bot` accepts the app-support directory; its reader locates `sand-client-persistence` below it, decodes the app's base32-named state blobs, and archives observed replica rows as partial data with sequence gaps recorded (positions before the first observed row included). It is available on macOS only. A row the app rewrites in place is archived as an additional variant of that sequence, never as a replacement.
+- `hermes-agent` accepts the `state.db` file. Its legacy `~/.hermes/sessions` compatibility sources are scanned when no root is set here; a root you set is the whole source, and the default home paths are not consulted around it.
 - A path you write here is always looked at, even where the registry has no verified path for your system.
 - A path that does not exist is reported as *unknown*, never as "0 sessions".
 

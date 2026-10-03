@@ -930,26 +930,45 @@ pub fn scan_with_registry_and_machine(
     for h in &registry.harnesses {
         let mut probe = probe_harness(config, h, platform, &machine, &mut report);
         if h.id == "hermes-agent" {
-            match scan_hermes_legacy(h, machine, &report.records) {
-                Ok(records) => {
-                    let count = records.len() as u64;
-                    let legacy_bytes = records.iter().map(|record| record.byte_size).sum::<u64>();
-                    probe.bytes = probe.bytes.map(|bytes| bytes.saturating_add(legacy_bytes));
-                    probe
-                        .recognized_files
-                        .extend(records.iter().map(|record| record.absolute_path.clone()));
-                    report.records.extend(records);
-                    if let Some(value) = probe.record_count.as_mut() {
-                        *value += count;
+            // The legacy compatibility roots follow the same precedence the
+            // primary probe applies to its own root ("0." in `probe_harness`):
+            // a root the user stated — `[harness_roots]` in the config, or the
+            // cell's env override — is the harness's whole source, so the
+            // `~`-templates must not reach around it into the machine's real
+            // home. A platform with no registry cell is not looked at at all,
+            // for the same reason the primary probe is not. Either way the
+            // missing legacy records are a stated policy in the probe's note,
+            // never a measurement of the user's home.
+            let cell = h.paths.cell_for(platform);
+            let user_stated_root = config.explicit_harness_root(&h.id).is_some()
+                || cell.and_then(root_from_env_override).is_some();
+            if user_stated_root {
+                probe.note.push_str(
+                    "; legacy compatibility roots not scanned: the harness root is user-stated",
+                );
+            } else if cell.is_some() {
+                match scan_hermes_legacy(h, machine, &report.records) {
+                    Ok(records) => {
+                        let count = records.len() as u64;
+                        let legacy_bytes =
+                            records.iter().map(|record| record.byte_size).sum::<u64>();
+                        probe.bytes = probe.bytes.map(|bytes| bytes.saturating_add(legacy_bytes));
+                        probe
+                            .recognized_files
+                            .extend(records.iter().map(|record| record.absolute_path.clone()));
+                        report.records.extend(records);
+                        if let Some(value) = probe.record_count.as_mut() {
+                            *value += count;
+                        }
+                        if let Some(value) = probe.candidate_count.as_mut() {
+                            *value += count;
+                        }
+                        probe.note.push_str(&format!(
+                            "; legacy JSON/JSONL sessions={count} after ID deduplication"
+                        ));
                     }
-                    if let Some(value) = probe.candidate_count.as_mut() {
-                        *value += count;
-                    }
-                    probe.note.push_str(&format!(
-                        "; legacy JSON/JSONL sessions={count} after ID deduplication"
-                    ));
+                    Err(path) => report.indeterminate_roots.push(path),
                 }
-                Err(path) => report.indeterminate_roots.push(path),
             }
         }
         report.probes.push(probe);

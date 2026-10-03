@@ -337,10 +337,11 @@ fn hermes_scanner_reads_sqlite_and_deduplicates_legacy_session_ids() {
         }]
     }))
     .unwrap();
-    let config = Config {
-        harness_roots: [("hermes-agent".to_string(), db.to_string_lossy().to_string())].into(),
-        ..Default::default()
-    };
+    // No `[harness_roots]` entry: a root the user states covers the whole
+    // harness and turns the legacy scan off, so the both-sources-together
+    // path this test exercises is the unresolved default one, where the
+    // templates are what point the scanner at the planted files.
+    let config = Config::default();
     let result = scanner::scan_with_registry(&config, &registry).unwrap();
     for (name, old) in previous {
         if let Some(value) = old {

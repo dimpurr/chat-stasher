@@ -50,6 +50,10 @@ For older installations, `~/.hermes/sessions/*.json` and `*.jsonl` are also
 scanned. Files with a native session ID already present in `state.db` are
 deduplicated against the database session. SQLite schema mismatches and read
 errors remain visible as scan uncertainty rather than an empty session list.
+When you set the Hermes Agent root under
+[`harness_roots`](config.md#harness_roots), that root is the whole source:
+the `state.db` and the legacy compatibility paths above are not consulted
+around it.
 
 ## The support matrix
 
