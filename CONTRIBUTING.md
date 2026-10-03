@@ -138,6 +138,7 @@ and the smoke — follow:
 ```sh
 python3 scripts/check-terminology.py
 python3 scripts/check-citation-drift.py
+python3 -m unittest scripts/tests/test_check_citation_drift.py
 python3 scripts/output-inventory.py --check
 python3 scripts/check-support-matrix.py
 python3 scripts/check-support-matrix.py --selftest

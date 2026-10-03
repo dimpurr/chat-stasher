@@ -357,6 +357,9 @@ jobs:
       - name: Citation anchors still point at what the docs claim
         run: python3 scripts/check-citation-drift.py
 
+      - name: Citation semantic binding regression tests
+        run: python3 -m unittest scripts/tests/test_check_citation_drift.py
+
       # The relocation script's own self-test, for the same reason the two
       # above are here: a gate that cannot prove it still catches anything is
       # worth nothing. It builds throwaway repositories under a temp directory
