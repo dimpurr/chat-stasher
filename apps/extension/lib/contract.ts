@@ -1018,6 +1018,14 @@ export interface ChatGptProvenanceSupplement {
   observedAt: string;
 }
 
+/** Normalized provenance dimensions. Values are observations, never guesses. */
+export interface SessionProvenanceDimensions {
+  surface?: string[];
+  tenant?: string[];
+  container?: string[];
+  status?: string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
@@ -1102,6 +1110,7 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if ('sessionId' in value) return false;
   if ('provenance' in value) return false;
   if ('provenanceSupplement' in value) return false;
+  if ('dimensions' in value) return false;
   // 🔴 W299 · The transient ChatGPT account header is accepted only on ChatGPT captures.
   //    A forged or malformed value is page-visible metadata and becomes `unknown` in the
   //    fingerprint reader; it cannot discard a valid capture. `platform.id` is checked
@@ -1342,6 +1351,8 @@ export interface InboxBundle {
   provenance?: ChatGptProvenance;
   /** Append-only later source observation, if one was separately delivered. */
   provenanceSupplement?: ChatGptProvenanceSupplement;
+  /** Optional normalized source provenance, authored by the extension. */
+  dimensions?: SessionProvenanceDimensions;
   url: string;
   method: string;
   status: number;

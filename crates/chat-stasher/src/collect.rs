@@ -1152,6 +1152,17 @@ pub fn collect_scan_report(
                     save_state(&state_path, &state, &destination_id, &debts)?;
                 }
                 report.outcomes.push(outcome);
+                if !record.provenance.is_empty() {
+                    let body = stage_shard_fact(stage, machine, &record.id)?;
+                    crate::provenance::append_scan_observation(
+                        stage,
+                        machine,
+                        &record.id,
+                        &record.provenance,
+                        body.shard_count,
+                        &body.concat_sha256,
+                    )?;
+                }
             }
             Err(_) => report.errors.push(CollectError {
                 session_prefix: id_prefix(&record.id),

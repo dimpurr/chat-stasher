@@ -28,6 +28,7 @@ pub mod normalize;
 pub mod orphans;
 pub mod overview;
 pub mod packcheck;
+pub mod provenance;
 pub mod prune_orphans;
 pub mod push_progress;
 pub mod readback;
