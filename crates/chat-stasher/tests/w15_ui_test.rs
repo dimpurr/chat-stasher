@@ -1957,24 +1957,25 @@ fn paging_cannot_page_out_of_the_launch_filter() {
 // -------------------------------------------------- UIA-3 · platform groups
 //
 // The grouping map, its facet bar and its JSON column over a real loopback
-// socket and real binary. The fixture is the shape the task spec names: one
-// machine holding a coding agent session, a web-platform session, a session
-// from a platform id NO build classifies (`omega-web` — the "new platform
-// lands in ungrouped" case), and one id with no harness prefix at all.
+// socket and real binary. The fixture pins each product group, a session from
+// a platform id NO build classifies (`omega-web` — the "new platform lands in
+// ungrouped" case), and one id with no harness prefix at all.
 
 /// A platform id no release of this tool has ever classified. It arrives in
 /// the archive exactly the way a real extension platform would: as the
 /// leading segment of an extension-delivered session id.
 const GROUP_NEW_PLATFORM: &str = "omega-web.grp-0002";
 const GROUP_AGENT: &str = "claude-code.mbp-grp.019bf00d-97b6-7eb2-9bf8-eacbacc09871";
+const GROUP_PRODUCT_AGENT: &str = "grok-bot.mbp-grp.synthetic-session";
 const GROUP_WEB: &str = "deepseek.grp-0001";
 const GROUP_NO_PREFIX: &str = ".no-prefix-grp";
 
-/// One machine, one snapshot, four sessions — one per platform-group state
-/// the facet bar counts, all synthetic.
+/// One machine, one snapshot, five synthetic sessions across all four
+/// platform-group buckets and the no-prefix column.
 fn build_grouped_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let pairs = [
         (GROUP_AGENT, vec![cc_line("2025-04-01T12:00:00Z")]),
+        (GROUP_PRODUCT_AGENT, vec![ext_line()]),
         (GROUP_WEB, vec![ext_line()]),
         (GROUP_NEW_PLATFORM, vec![ext_line()]),
         // `.no-prefix-grp` renders `(no harness prefix)`: nothing before its
@@ -2062,18 +2063,29 @@ fn facet_bar_links_are_the_shared_selector_and_their_counts_do_not_lie() {
 
     let (status, html) = ui.get("/sessions");
     assert_eq!(status, 200, "{html}");
-    // The bar names the fixture's hand-counted groups: All 4, one web
-    // platform, one coding agent, one unclassified id — with All current.
+    // The bar names the fixture's hand-counted groups: All 5, one web
+    // platform, one coding agent, one agent platform, one unclassified id —
+    // with All current.
     assert!(
-        html.contains("<b aria-current=\"true\">All 4</b>"),
-        "the bar's All count is the four sessions: {html}"
+        html.contains("<b aria-current=\"true\">All 5</b>"),
+        "the bar's All count is the five sessions: {html}"
     );
     assert!(
         html.contains("Sources this build does not classify sit under <i>ungrouped</i>"),
         "the bar explains the ungrouped bucket: {html}"
     );
     let links = facet_bar_links(&html);
-    assert_eq!(links.len(), 3, "web, agents, ungrouped: {html}");
+    assert_eq!(
+        links.len(),
+        4,
+        "web, coding agents, agent platforms, ungrouped: {html}"
+    );
+    assert!(
+        links
+            .iter()
+            .any(|(href, label)| href.contains("grok-bot") && label == "Agent platforms 1"),
+        "the agent-platform group link names Grok Bot: {links:?}"
+    );
     let ungrouped = links
         .iter()
         .find(|(href, _)| href.contains("omega-web"))
@@ -2169,7 +2181,8 @@ fn facet_bar_links_are_the_shared_selector_and_their_counts_do_not_lie() {
 }
 
 /// Platform groups reach both surfaces on the real server: the overview's
-/// matrix columns grouped and ordered web → agents → ungrouped → no-prefix,
+/// matrix columns grouped and ordered web → coding agents → agent platforms →
+/// ungrouped → no-prefix,
 /// and `/api/sessions` rows carrying the `platform_group` a consumer filters
 /// on — `ungrouped` for the new platform, `null` for the no-prefix row.
 #[test]
@@ -2194,6 +2207,10 @@ fn platform_groups_reach_the_matrix_and_the_json_rows() {
         "{matrix}"
     );
     assert!(
+        matrix.contains("<th colspan=1 class=\"ghead g-agent-platforms\">Agent platforms</th>"),
+        "{matrix}"
+    );
+    assert!(
         matrix.contains("<th colspan=1 class=\"ghead g-ungrouped\">ungrouped</th>"),
         "the unclassified platform is grouped as itself: {matrix}"
     );
@@ -2201,7 +2218,7 @@ fn platform_groups_reach_the_matrix_and_the_json_rows() {
         matrix.contains("<th rowspan=2 class=n>(no harness prefix)</th>"),
         "the no-prefix column is its own spanning header, not a group: {matrix}"
     );
-    let order: Vec<usize> = ["deepseek", "claude-code", "omega-web"]
+    let order: Vec<usize> = ["deepseek", "claude-code", "grok-bot", "omega-web"]
         .iter()
         .map(|label| {
             matrix
@@ -2226,7 +2243,7 @@ fn platform_groups_reach_the_matrix_and_the_json_rows() {
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let rows = v["sessions"].as_array().unwrap();
-    assert_eq!(rows.len(), 4, "{body}");
+    assert_eq!(rows.len(), 5, "{body}");
     for row in rows {
         let source = row["source"].as_str().unwrap();
         // The wire words of UIA-3's grouping map, plus its null rule: a row
@@ -2234,6 +2251,7 @@ fn platform_groups_reach_the_matrix_and_the_json_rows() {
         let expect = match source {
             "claude-code" => Some("coding-agents"),
             "deepseek" => Some("web-platforms"),
+            "grok-bot" => Some("agent-platforms"),
             "omega-web" => Some("ungrouped"),
             "(no harness prefix)" => None,
             other => panic!("unexpected source `{other}`: {body}"),

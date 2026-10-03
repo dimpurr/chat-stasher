@@ -141,6 +141,7 @@ font-size:.74rem;padding:.05rem .3rem;white-space:nowrap;color:var(--fg)}
 th.ghead{font-weight:400;font-size:.78rem;padding-bottom:.05rem}
 .g-web{color:var(--link)}
 .g-agents{color:var(--ok)}
+.g-agent-platforms{color:var(--ok)}
 .g-ungrouped{color:var(--muted)}
 footer{color:var(--muted);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--line);padding-top:.8rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--head);padding:.6rem .8rem;

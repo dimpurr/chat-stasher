@@ -4001,14 +4001,21 @@ mod tests {
     }
 
     /// UIA-3 (29-UI-DESIGN §3.1): the matrix's source columns are grouped —
-    /// web platforms, then coding agents, then the ungrouped bucket, each
+    /// web platforms, coding agents, agent platforms, then the ungrouped bucket, each
     /// sorted within itself, with the no-harness column last and outside any
     /// group — and the header carries the group cells above the source cells.
     /// The groupings the fixture lays out by hand: deepseek and grok are web,
-    /// claude-code is an agent, omega-web and the separator id are ungrouped.
+    /// claude-code is a coding agent, grok-bot an agent platform, and
+    /// omega-web and the separator id are ungrouped.
     #[test]
     fn the_matrix_columns_are_grouped_by_platform_group() {
-        let d = fixture::groups_data();
+        let mut d = fixture::groups_data();
+        let mut grok_bot = d.sessions[0].clone();
+        grok_bot.index = d.sessions.len();
+        grok_bot.harness = Some("grok-bot".to_string());
+        grok_bot.session_id = "synthetic-grok-bot-session".to_string();
+        grok_bot.short_id = "synthetic-grok-bot".to_string();
+        d.sessions.push(grok_bot);
         let html = req("/", &d, &NoContent).body;
         let matrix = html
             .split("<h2>Machine × source</h2>")
@@ -4029,6 +4036,10 @@ mod tests {
             "{header}"
         );
         assert!(
+            header.contains("<th colspan=1 class=\"ghead g-agent-platforms\">Agent platforms</th>"),
+            "{header}"
+        );
+        assert!(
             header.contains("<th colspan=2 class=\"ghead g-ungrouped\">ungrouped</th>"),
             "omega-web and the separator id are the ungrouped run: {header}"
         );
@@ -4041,26 +4052,34 @@ mod tests {
              {header}"
         );
         // The source cells keep their group's colour class, and the column
-        // order is the group order — web, agents, ungrouped, no-prefix last —
+        // order is the group order — web, coding agents, agent platforms,
+        // ungrouped, no-prefix last —
         // regardless of alphabetical order.
         let bottom = header
             .split_once("</tr>\n<tr>")
             .map(|(_, rest)| rest)
             .expect("the source header row must exist");
-        let order: Vec<usize> = ["deepseek", "grok", "claude-code", "omega-web", "we,ird"]
-            .iter()
-            .map(|label| {
-                let at = bottom
-                    .find(&format!(">{}</th>", html::esc(label)))
-                    .unwrap_or_else(|| panic!("`{label}` must be a source header: {bottom}"));
-                at
-            })
-            .collect();
+        let order: Vec<usize> = [
+            "deepseek",
+            "grok",
+            "claude-code",
+            "grok-bot",
+            "omega-web",
+            "we,ird",
+        ]
+        .iter()
+        .map(|label| {
+            let at = bottom
+                .find(&format!(">{}</th>", html::esc(label)))
+                .unwrap_or_else(|| panic!("`{label}` must be a source header: {bottom}"));
+            at
+        })
+        .collect();
         let mut sorted = order.clone();
         sorted.sort();
         assert_eq!(
             order, sorted,
-            "web platforms, then agents, then ungrouped — not alphabetical"
+            "web platforms, then coding agents, agent platforms, then ungrouped — not alphabetical"
         );
         assert!(
             bottom.contains("<th class=\"n g-web\">deepseek</th>"),
