@@ -193,7 +193,7 @@ The flags worth knowing, because each one changes what the agent sees:
 
 | Flag | What it does |
 |---|---|
-| `--turns user` | Keeps only your own messages, where the tool's format makes that certain. Elsewhere every line is written and the readout says `turns=not-requested`, so nothing is dropped silently. |
+| `--turns user` | Filters Claude Code sessions to messages the format identifies as your own. For other tools every line is written and the manifest records `turns_filter: "not-supported"`. |
 | `--trim-to-window` | With a date filter, also drops lines timestamped outside it. |
 | `--since` / `--until` / `--day` | The conversation's own dates, not the dates of the backup runs. |
 | `--machine` / `--harness` | Narrows by which machine and which tool. |
