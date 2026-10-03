@@ -116,7 +116,10 @@ SNIPPET_LEN = 60
 SEMANTIC_BINDINGS = [
     {
         "doc": "docs-dev/threat-model.md",
-        "claim_markers": ("access token it reads", "/api/auth/session"),
+        # Match the bound claim by its subject and endpoint, not one exact
+        # verb phrase: prose may say "reads" or "fetches", and Markdown may
+        # wrap the phrase across lines.
+        "claim_markers": ("access token", "/api/auth/session"),
         "target": "apps/extension/lib/platform-auth.ts",
         "source_markers": ("readSessionToken", "CHATGPT_SESSION_PATH", ".accessToken"),
     },
@@ -398,6 +401,8 @@ def semantic_binding_problems(
     citations: list[Citation],
     documents: dict[str, str],
     source_lines: Callable[[str], list[str]],
+    *,
+    require_claims: bool = False,
 ) -> list[str]:
     """Check the one documented claim whose source must establish token reading."""
     problems: list[str] = []
@@ -419,16 +424,24 @@ def semantic_binding_problems(
         matches = [
             (first, last)
             for first, last, paragraph in paragraphs
-            if all(marker.casefold() in paragraph.casefold() for marker in binding["claim_markers"])
+            if all(
+                marker.casefold() in re.sub(r"\s+", " ", paragraph).casefold()
+                for marker in binding["claim_markers"]
+            )
         ]
         if not matches:
             # Relocation and parser fixtures often carry synthetic document
             # sets that do not include this claim. They retain ordinary drift
             # behavior; the binding applies only where the claim is present.
+            if require_claims:
+                problems.append(
+                    f"[semantic citation mismatch] {doc}: claim disappeared or drifted; expected a paragraph "
+                    f"containing {', '.join(repr(marker) for marker in binding['claim_markers'])}"
+                )
             continue
         if len(matches) != 1:
             problems.append(
-                f"{doc}: expected one paragraph containing the semantic citation claim; found {len(matches)}"
+                f"[semantic citation mismatch] {doc}: expected one paragraph containing the semantic citation claim; found {len(matches)}"
             )
             continue
 
@@ -441,14 +454,18 @@ def semantic_binding_problems(
         for citation in claim_citations:
             if citation.target != binding["target"]:
                 continue
+            if citation.end - citation.start + 1 > 40:
+                continue
             cited_text = "\n".join(source_lines(citation.target)[citation.start - 1:citation.end])
             if all(marker in cited_text for marker in binding["source_markers"]):
                 valid = True
                 break
         if not valid:
             problems.append(
-                f"{doc}: the /api/auth/session claim must cite {binding['target']} "
-                "at the token-read implementation (readSessionToken, CHATGPT_SESSION_PATH, .accessToken)"
+                f"[semantic citation mismatch] {doc}: the claim containing "
+                f"{', '.join(repr(marker) for marker in binding['claim_markers'])} must cite "
+                f"{binding['target']} at an implementation range of at most 40 lines "
+                f"containing {', '.join(binding['source_markers'])}"
             )
     return problems
 
@@ -487,7 +504,15 @@ def collect() -> tuple[dict[str, dict], list[str]]:
         if os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as handle:
                 documents[doc] = handle.read()
-    problems.extend(semantic_binding_problems(citations, documents, read_lines))
+    # The required live binding belongs to the full project checkout. Minimal
+    # repositories built by relocation self-tests intentionally carry a
+    # claimless threat-model document and exercise ordinary citation behavior.
+    require_live_bindings = os.path.isfile(os.path.join(REPO, "Cargo.toml"))
+    problems.extend(
+        semantic_binding_problems(
+            citations, documents, read_lines, require_claims=require_live_bindings
+        )
+    )
 
     entries: dict[str, dict] = {}
     for cit in citations:
@@ -585,7 +610,10 @@ def cmd_check(entries: dict[str, dict], problems: list[str]) -> int:
     failures: list[str] = []
 
     for p in problems:
-        failures.append(f"[引用无法解析] {p}")
+        if p.startswith("[semantic citation mismatch]"):
+            failures.append(p)
+        else:
+            failures.append(f"[引用无法解析] {p}")
 
     for key in sorted(entries, key=sort_key):
         cur = entries[key]
