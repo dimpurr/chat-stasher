@@ -25,7 +25,7 @@ sidecar. The raw body preserves full error details.
 | Usage | Every `message.usage` subfield, including unknown future subfields |
 | Error | `isApiErrorMessage` and structured error facts; complete error detail remains in raw body |
 | Record classification | `type`, `userType`, `isSidechain`, `entrypoint`; tool-result records and their raw probe/error text |
-| Session context | `timestamp`, `cwd`, `sessionId`, parent session reference |
+| Session context | `timestamp`, `cwd`, `sessionId`, `parentUuid` (the worker's parent message reference) |
 | Worker provenance | Whether the source path was under `subagents/` is **not yet retained**. The regression test has an ignored expected-failure assertion pending Step 2 provenance work. |
 
 ## Codex
@@ -69,5 +69,8 @@ bytes and SHA-256 exactly; OpenCode's SQLite rows are represented as an archive
 session envelope and each listed message field is compared semantically. It
 also includes an API error, unknown usage fields, a Claude parent and worker,
 two Codex rate-limit windows, and an OpenCode row with tokens, error, and
-`path.cwd`. The `subagents/` source-path provenance assertion is marked as a
-TODO / expected failure until Step 2 adds provenance.
+`path.cwd`. The ignored `subagents/` expected-failure test collects a worker
+fixture from under `subagents/`, pushes it, restores the archive activity
+index, and checks that `source_path_class` is `subagents/`. Step 2 can make
+that archived metadata assertion pass without replacing it with a stage-only
+check.

@@ -124,6 +124,42 @@ fn store_config(root: &Path) -> StoreConfig {
     }
 }
 
+fn restored_activity_rows(
+    store: &BackupStore,
+    key: &rustic_core::repofile::MasterKey,
+    root: &Path,
+) -> Vec<Value> {
+    let (repo, _) = store
+        .open_indexed(key)
+        .expect("open archive for metadata readback");
+    let snapshot = repo
+        .get_all_snapshots()
+        .expect("list archive snapshots")
+        .into_iter()
+        .filter(|snapshot| snapshot.hostname == MACHINE)
+        .max()
+        .expect("archive has a snapshot for the synthetic machine");
+    let stage_relative = root
+        .canonicalize()
+        .expect("canonicalize synthetic stage root");
+    let stage_relative = stage_relative.strip_prefix("/").unwrap_or(&stage_relative);
+    let index_path = stage_relative
+        .join("meta")
+        .join(MACHINE)
+        .join("activity-v1.jsonl");
+    let node = repo
+        .node_from_snapshot_and_path(&snapshot, &index_path.to_string_lossy())
+        .expect("activity index is present in archive snapshot");
+    let mut bytes = Vec::new();
+    repo.dump(&node, &mut bytes)
+        .expect("restore archived activity index");
+    std::str::from_utf8(&bytes)
+        .expect("activity index is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("activity index row is JSON"))
+        .collect()
+}
+
 fn restored_value(store: &BackupStore, key: &rustic_core::repofile::MasterKey, id: &str) -> Value {
     let (bytes, _) = store.read_session_concat(MACHINE, id, key).unwrap();
     let text = std::str::from_utf8(&bytes).expect("restored JSON body is UTF-8");
@@ -168,7 +204,7 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
         "type": "assistant", "userType": "external", "isSidechain": true,
         "entrypoint": "agent", "timestamp": "2026-10-02T12:02:00.000Z",
         "cwd": "/synthetic/project", "sessionId": "agent-worker-w315",
-        "parentSessionId": "claude-parent-w315",
+        "parentUuid": "msg_claude_parent_w315",
         "message": {"id": "msg_claude_worker_w315", "model": "claude-synthetic-v1",
                     "usage": {"input_tokens": 5, "output_tokens": 4, "future_worker_counter": 29},
                     "content": [{"type": "text", "text": "synthetic worker"}]}
@@ -196,7 +232,8 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
         write_jsonl(&claude_worker_path, std::slice::from_ref(&claude_worker));
 
     let codex_event = json!({
-        "type": "event_msg", "timestamp": "2026-10-02T12:04:00.000Z",
+        "id": "evt_codex_usage_w315", "type": "event_msg",
+        "timestamp": "2026-10-02T12:04:00.000Z",
         "event_msg": {"type": "token_count", "turn_context": {"model": "codex-synthetic-v2"},
             "info": {"last_token_usage": {"input_tokens": 31, "cached_input_tokens": 8,
                 "output_tokens": 13, "reasoning_output_tokens": 5, "future_usage_counter": 37}},
@@ -258,6 +295,31 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
         .expect("collect and seal all synthetic sessions");
     assert_eq!(collected.changed_records, 4);
 
+    // Shared identity/harness fields are part of the retention contract even
+    // though they are represented by the archive session partition rather
+    // than duplicated inside every raw JSONL record.
+    for (path, harness, native_id) in [
+        (&claude_parent_path, "claude-code", "claude-parent-w315"),
+        (&claude_worker_path, "claude-code", "agent-worker-w315"),
+        (&codex_path, "codex", "rollout-w315"),
+        (&opencode_db, "opencode", "ses_w315_synthetic"),
+    ] {
+        let record = scan
+            .records
+            .iter()
+            .find(|record| record.absolute_path == *path)
+            .expect("synthetic source is identified by scanner");
+        assert_eq!(
+            record.source.short(),
+            harness,
+            "retained harness for {path:?}"
+        );
+        assert!(
+            record.id.contains(native_id),
+            "stable session identity for {path:?}"
+        );
+    }
+
     let cfg = store_config(root);
     let key = rustic_core::repofile::MasterKey::new();
     store::persist_key_file(&cfg, &key).unwrap();
@@ -310,8 +372,40 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
         parent["records"][0]["message"]["usage"]["future_usage_counter"],
         19
     );
+    assert_eq!(
+        parent["records"][0]["message"]["usage"],
+        json!({"input_tokens": 11, "output_tokens": 7, "cache_read_input_tokens": 3,
+               "cache_creation_input_tokens": 2, "future_usage_counter": 19}),
+        "all Claude usage subfields, including the unknown future field, survive"
+    );
     assert_eq!(parent["records"][1]["isApiErrorMessage"], true);
     assert_eq!(parent["records"][1]["error"]["status"], 429);
+    assert_eq!(
+        parent["records"][1]["error"]["class"],
+        "synthetic_rate_limit"
+    );
+    assert_eq!(
+        parent["records"][1]["error"]["message"],
+        "synthetic API error"
+    );
+    assert_eq!(
+        parent["records"][1]["message"]["id"],
+        "msg_claude_error_w315"
+    );
+    assert_eq!(
+        parent["records"][1]["message"]["model"],
+        "claude-synthetic-v1"
+    );
+    assert_eq!(
+        parent["records"][1]["message"]["usage"],
+        json!({"input_tokens": 0, "output_tokens": 0, "future_error_usage": 23})
+    );
+    assert_eq!(parent["records"][1]["message"]["usage"]["input_tokens"], 0);
+    assert_eq!(parent["records"][1]["message"]["usage"]["output_tokens"], 0);
+    assert_eq!(
+        parent["records"][1]["message"]["usage"]["future_error_usage"],
+        23
+    );
     assert_eq!(parent["records"][0]["type"], "assistant");
     assert_eq!(parent["records"][0]["userType"], "external");
     assert_eq!(parent["records"][0]["isSidechain"], false);
@@ -324,17 +418,49 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     assert_eq!(parent["records"][0]["sessionId"], "claude-parent-w315");
     assert_eq!(worker["records"][0]["isSidechain"], true);
     assert_eq!(
-        worker["records"][0]["parentSessionId"],
-        "claude-parent-w315"
+        worker["records"][0]["parentUuid"], "msg_claude_parent_w315",
+        "Claude worker parent reference is the retained parentUuid"
+    );
+    assert_eq!(worker["records"][0]["type"], "assistant");
+    assert_eq!(worker["records"][0]["userType"], "external");
+    assert_eq!(worker["records"][0]["entrypoint"], "agent");
+    assert_eq!(worker["records"][0]["sessionId"], "agent-worker-w315");
+    assert_eq!(
+        worker["records"][0]["timestamp"],
+        "2026-10-02T12:02:00.000Z"
+    );
+    assert_eq!(worker["records"][0]["cwd"], "/synthetic/project");
+    assert_eq!(
+        worker["records"][0]["message"]["model"],
+        "claude-synthetic-v1"
+    );
+    assert_eq!(
+        worker["records"][0]["message"]["id"],
+        "msg_claude_worker_w315"
+    );
+    assert_eq!(
+        worker["records"][0]["message"]["usage"],
+        json!({"input_tokens": 5, "output_tokens": 4, "future_worker_counter": 29})
     );
     assert_eq!(
         parent["records"][2]["message"]["content"][0]["type"],
         "tool_result"
     );
+    assert_eq!(
+        parent["records"][2]["message"]["content"][0]["content"], "synthetic probe result",
+        "tool-result probe/error text remains in the raw archive body"
+    );
+    assert_eq!(
+        parent["records"][2]["message"]["id"],
+        "msg_claude_tool_w315"
+    );
 
     let codex = restored_value(&archive, &key, &id_for_path(&codex_path));
     assert_eq!(codex, json!({"records": [codex_event]}));
     let rate_limits = &codex["records"][0]["event_msg"]["rate_limits"];
+    assert_eq!(codex["records"][0]["id"], "evt_codex_usage_w315");
+    assert_eq!(codex["records"][0]["type"], "event_msg");
+    assert_eq!(codex["records"][0]["timestamp"], "2026-10-02T12:04:00.000Z");
     assert_eq!(
         codex["records"][0]["event_msg"]["turn_context"]["model"],
         "codex-synthetic-v2"
@@ -342,6 +468,12 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     assert_eq!(
         codex["records"][0]["event_msg"]["info"]["last_token_usage"]["future_usage_counter"],
         37
+    );
+    assert_eq!(
+        codex["records"][0]["event_msg"]["info"]["last_token_usage"],
+        json!({"input_tokens": 31, "cached_input_tokens": 8, "output_tokens": 13,
+               "reasoning_output_tokens": 5, "future_usage_counter": 37}),
+        "all Codex last_token_usage fields and unknown future fields survive"
     );
     assert_eq!(rate_limits["limit_id"], "synthetic_plan_w315");
     assert_eq!(rate_limits["primary"]["window_minutes"], 300);
@@ -369,10 +501,20 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     assert_eq!(restored_data["providerID"], "provider-synthetic");
     assert_eq!(restored_data["modelID"], "opencode-synthetic-v3");
     assert_eq!(restored_data["tokens"]["future_tokens"], 43);
+    assert_eq!(restored_data["tokens"]["input"], 17);
+    assert_eq!(restored_data["tokens"]["output"], 9);
+    assert_eq!(restored_data["tokens"]["reasoning"], 4);
     assert_eq!(restored_data["tokens"]["cache"]["read"], 6);
     assert_eq!(restored_data["tokens"]["cache"]["write"], 2);
     assert_eq!(restored_data["error"]["statusCode"], 503);
+    assert_eq!(restored_data["error"]["name"], "SyntheticProviderError");
+    assert_eq!(
+        restored_data["error"]["message"],
+        "synthetic provider error"
+    );
     assert_eq!(restored_data["path"]["cwd"], "/synthetic/opencode-project");
+    assert_eq!(restored_data["time"]["created"], 1_800_000_100_i64);
+    assert_eq!(restored_data["time"]["completed"], 1_800_000_200_i64);
 }
 
 /// Step 2 adds archive source-path provenance. Keep the expected assertion in
@@ -381,6 +523,60 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
 #[test]
 #[ignore = "expected failure until Step 2 archives source-path provenance"]
 fn subagents_source_path_provenance_is_retained() {
-    let archived_source_path_class: Option<&str> = None;
-    assert_eq!(archived_source_path_class, Some("subagents/"));
+    let sandbox = test_support::Sandbox::new();
+    sandbox.ensure_dirs();
+    let root = sandbox.root();
+    let source_root = root.join("sources/claude");
+    let source = source_root.join("project/subagents/agent-worker-w315.jsonl");
+    let record = json!({
+        "type": "assistant", "timestamp": "2026-10-02T12:02:00.000Z",
+        "sessionId": "agent-worker-w315", "parentUuid": "msg_parent_w315",
+        "isSidechain": true,
+        "message": {"id": "msg_worker_w315", "model": "claude-synthetic-v1",
+                    "usage": {"input_tokens": 5, "output_tokens": 4}}
+    });
+    write_jsonl(&source, std::slice::from_ref(&record));
+
+    let mut registry: Value =
+        serde_json::from_str(include_str!("../data/harness-registry-v1.json"))
+            .expect("shipped registry is valid JSON");
+    registry["harnesses"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["id"].as_str() == Some("claude-code"));
+    let registry: HarnessRegistry = serde_json::from_value(registry).unwrap();
+    let config = Config {
+        harness_roots: [(
+            "claude-code".to_string(),
+            source_root.to_string_lossy().into_owned(),
+        )]
+        .into_iter()
+        .collect(),
+        ..Config::default()
+    };
+    let scan = scanner::scan_with_registry(&config, &registry).expect("scan worker fixture");
+    assert_eq!(scan.records.len(), 1);
+    let id = scan.records[0].id.clone();
+    let stage = root.join("stage");
+    let state = root.join("collector-state");
+    let destination = DestinationView::unreachable("w315-provenance-fixture");
+    collect::collect_scan_report(&scan, &stage, MACHINE, &state, 20, &destination)
+        .expect("collect and seal synthetic worker session");
+
+    let cfg = store_config(root);
+    let key = rustic_core::repofile::MasterKey::new();
+    store::persist_key_file(&cfg, &key).unwrap();
+    let archive = BackupStore::new(cfg, MACHINE.to_string());
+    archive
+        .push(&stage, &key)
+        .expect("push worker fixture to local repository");
+    let restored = restored_activity_rows(&archive, &key, &stage)
+        .into_iter()
+        .find(|row| row["session_id"] == id)
+        .expect("worker provenance row is present in archive readback");
+
+    assert_eq!(
+        restored["source_path_class"], "subagents/",
+        "archived activity provenance retains the source path class for this worker"
+    );
 }
