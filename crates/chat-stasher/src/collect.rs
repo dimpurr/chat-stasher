@@ -68,8 +68,8 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-    read_openclaw_session, read_opencode_session, read_sqlite_session, read_zed_session,
-    sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
+read_hermes_session, read_openclaw_session, read_opencode_session, read_sqlite_session,
+    read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
 };
 use crate::store;
 use anyhow::{anyhow, bail, Context};
@@ -1603,6 +1603,22 @@ fn process_sqlite(
             bucket_cap,
             &store_fingerprint,
         ),
+        SqliteSessionLayout::HermesAgent => {
+            let session_id = native_session_id(record, "Hermes Agent")?;
+            let snapshot = read_hermes_session(&record.absolute_path, &session_id)
+                .map_err(|error| anyhow!("failed to read Hermes session snapshot: {error}"))?;
+            process_sqlite_snapshot(
+                record,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                snapshot.cursor,
+                snapshot.json_line,
+                &store_fingerprint,
+            )
+        }
         SqliteSessionLayout::CursorLegacy => {
             let session_id = native_session_id(record, "Cursor legacy")?;
             let snapshot = read_cursor_legacy_session(&record.absolute_path, &session_id).map_err(
