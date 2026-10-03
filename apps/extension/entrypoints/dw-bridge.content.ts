@@ -30,9 +30,9 @@ import {
 import { installTabHello } from '../lib/backfill/tab-hello';
 import { backfillPlanFor } from '../lib/backfill/enumerate';
 import { observeChatGptWorkspaceFingerprint, resolveChatGptWorkspace, type ChatGptWorkspaceObservation, type FingerprintedChatGptIdentity } from '../lib/backfill/chatgpt-workspace';
-import { CHATGPT_WORKSPACE_REQUEST_MESSAGE } from '../lib/backfill/tab-port';
+import { CHATGPT_WORKSPACE_REQUEST_MESSAGE, CLAUDE_ACCOUNT_IDENTITY_MESSAGE } from '../lib/backfill/tab-port';
 import { createClaudePageScope } from '../lib/backfill/claude-page';
-import { readClaudeAccountId } from '../lib/claude-account';
+import { readClaudeAccountId, withClaudeAccountReading } from '../lib/claude-account';
 import {
   chatgptDetailUrlFor,
   createAuthorizedFetch,
@@ -374,12 +374,7 @@ export default defineContentScript({
           const response = await window.fetch(url, init);
           return { status: response.status, text: () => response.text() };
         });
-        outgoing = {
-          ...payload,
-          ...(reading.kind === 'id'
-            ? { claudeAccountId: reading.id, claudeAccountIdSource: reading.source }
-            : { claudeAccountUnknownReason: reading.reason }),
-        };
+        outgoing = withClaudeAccountReading(payload, reading);
       }
       if (findPlatformForUrl(payload.url)?.id === 'gemini' && isGeminiDetailRequest(payload.url)) {
         const completed = await completeGeminiLiveCapture(payload, {
@@ -752,6 +747,21 @@ export default defineContentScript({
           && (message as { type?: unknown }).type === CHATGPT_WORKSPACE_REQUEST_MESSAGE) {
           sendResponse(resolveChatGptWorkspace(chatGptWorkspaceObservation));
           return false;
+        }
+        if (message && typeof message === 'object'
+          && (message as { type?: unknown }).type === CLAUDE_ACCOUNT_IDENTITY_MESSAGE) {
+          const url = (message as { url?: unknown }).url;
+          let requestOrigin: string | null = null;
+          try { if (typeof url === 'string') requestOrigin = new URL(url).origin; } catch { /* refuse malformed input */ }
+          if (typeof url !== 'string' || findPlatformForUrl(url)?.id !== 'claude' || requestOrigin !== pageOrigin) {
+            sendResponse({ kind: 'unknown', reason: 'account-id-unreadable' });
+            return false;
+          }
+          void readClaudeAccountId(url, pageOrigin, async (identityUrl, init) => {
+            const response = await window.fetch(identityUrl, init);
+            return { status: response.status, text: () => response.text() };
+          }).then(sendResponse).catch(() => sendResponse({ kind: 'unknown', reason: 'account-id-unreadable' }));
+          return true;
         }
         // 🔴 W31c · The organization question, asked **before** the fetch channel
         //    below only because it is a different kind of thing: it carries no URL

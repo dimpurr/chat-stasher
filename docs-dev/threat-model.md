@@ -440,7 +440,7 @@ worker deletes the transient id before a bundle, outbox entry, export, log or na
 message can be made. The fingerprint source records which endpoint supplied it. A
 completed lookup with no id stays `no-account-id-in-capture`; a failed or unreadable
 lookup stays `account-id-unreadable`. When no user id is available, the bundle carries
-`organization-is-not-an-account` (`apps/extension/lib/contract.ts:1261-1272`) rather than
+an unknown account result (`apps/extension/lib/contract.ts:1261-1272`) rather than
 hashing the shared organization.
 
 🔴 W299 · **On ChatGPT the id that is hashed is the `ChatGPT-Account-Id` value on the

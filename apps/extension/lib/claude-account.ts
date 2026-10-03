@@ -1,6 +1,7 @@
 /** W337 · Resolve Claude's current user id at the page boundary. */
 
 import { orgFromRequestUrl } from './backfill/claude-org';
+import type { CapturedFetch } from './contract';
 
 export const CLAUDE_WHOAMI_PATH = '/api/account';
 export const CLAUDE_SETTINGS_PATH = '/api/claude_code/organizations';
@@ -10,6 +11,23 @@ export type ClaudeAccountUnknownReason = 'no-account-id-in-capture' | 'account-i
 export type ClaudeAccountReading =
   | { kind: 'id'; id: string; source: 'response-body-claude-whoami' | 'response-body-claude-user-settings' }
   | { kind: 'unknown'; reason: ClaudeAccountUnknownReason };
+
+/** Replace any page-carried identity claim with a reading made by our own lookup. */
+export function withClaudeAccountReading(
+  captured: CapturedFetch,
+  reading: ClaudeAccountReading,
+): CapturedFetch {
+  const untrustedFree = { ...captured };
+  delete untrustedFree.claudeAccountId;
+  delete untrustedFree.claudeAccountIdSource;
+  delete untrustedFree.claudeAccountUnknownReason;
+  return {
+    ...untrustedFree,
+    ...(reading.kind === 'id'
+      ? { claudeAccountId: reading.id, claudeAccountIdSource: reading.source }
+      : { claudeAccountUnknownReason: reading.reason }),
+  };
+}
 
 export interface ClaudeIdentityResponse {
   status: number;
