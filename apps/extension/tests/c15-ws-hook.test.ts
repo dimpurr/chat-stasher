@@ -112,6 +112,7 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const posted: unknown[] = [];
     const fakeWindow = makeWindow(WS_ORIGIN, {
+      location: { origin: WS_ORIGIN, href: `${WS_ORIGIN}/chat/candidate?access_token=page-secret` },
       postMessage: (message: unknown) => posted.push(message),
     });
 
@@ -123,10 +124,10 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
     // Statics and instanceof must survive the wrapper.
     expect(Wrapped.OPEN).toBe(1);
 
-    const socket = new Wrapped(`${WS_ORIGIN.replace('https:', 'wss:')}/chathub`, ['proto-a']);
+    const socket = new Wrapped(`${WS_ORIGIN.replace('https:', 'wss:')}/chathub?access_token=socket-secret`, ['proto-a']);
     expect(socket).toBeInstanceOf(FakeWebSocket);
     // Constructor arguments are forwarded verbatim.
-    expect(socket.constructorArgs).toEqual([`wss://ws.example.test/chathub`, ['proto-a']]);
+    expect(socket.constructorArgs).toEqual([`wss://ws.example.test/chathub?access_token=socket-secret`, ['proto-a']]);
 
     const seen: Array<[string, unknown]> = [];
     socket.addEventListener('message', (event: any) => seen.push(['message', event]));
@@ -135,6 +136,7 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
 
     const messageEvent = { data: '{"chat_messages":[]}' };
     socket.emit('message', messageEvent);
+    socket.emit('message', messageEvent);
     const errorEvent = { type: 'error' };
     socket.emit('error', errorEvent);
 
@@ -142,13 +144,16 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
     socket.send('page-frame');
     socket.close(1000, 'bye');
 
-    expect(seen.map(([name]) => name)).toEqual(['message', 'error', 'close']);
+    expect(seen.map(([name]) => name)).toEqual(['message', 'message', 'error', 'close']);
     expect(seen[0]?.[1]).toBe(messageEvent);
-    expect(seen[1]?.[1]).toBe(errorEvent);
+    expect(seen[1]?.[1]).toBe(messageEvent);
+    expect(seen[2]?.[1]).toBe(errorEvent);
     expect(socket.sent).toEqual(['page-frame']);
     expect(socket.closedWith).toEqual([1000, 'bye']);
 
     const captures = posted.filter((message: any) => message?.type === CAPTURE_MESSAGE);
+    expect(JSON.stringify(captures)).not.toContain('socket-secret');
+    expect(JSON.stringify(captures)).not.toContain('page-secret');
     expect(captures).toHaveLength(1);
     expect((captures[0] as any).payload).toMatchObject({
       url: 'https://ws.example.test/chathub',
@@ -163,6 +168,7 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const posted: unknown[] = [];
     const fakeWindow = makeWindow(WS_ORIGIN, {
+      location: { origin: WS_ORIGIN, href: `${WS_ORIGIN}/chat/candidate?access_token=page-secret` },
       EventSource: class FakeEventSource {
         private listeners: Record<string, Array<(event: unknown) => void>> = {};
         constructor(readonly url: string) {}
@@ -178,11 +184,14 @@ describe('C15 · streamed response capture is opt-in per platform row', () => {
 
     vi.stubGlobal('window', fakeWindow);
     installPageFetchHook(declaredOptions());
-    const source = new fakeWindow.EventSource('https://ws.example.test/chathub');
+    const source = new fakeWindow.EventSource('https://ws.example.test/chathub?token=event-source-secret');
+    source.emit('message', { data: '{"chat_messages":[]}' });
     source.emit('message', { data: '{"chat_messages":[]}' });
     source.emit('message', { data: '{"delta":"partial"}' });
 
     const captures = posted.filter((message: any) => message?.type === CAPTURE_MESSAGE);
+    expect(JSON.stringify(captures)).not.toContain('event-source-secret');
+    expect(JSON.stringify(captures)).not.toContain('page-secret');
     expect(captures).toHaveLength(1);
     expect((captures[0] as any).payload).toMatchObject({
       url: 'https://ws.example.test/chathub',
