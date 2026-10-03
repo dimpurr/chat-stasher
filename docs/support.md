@@ -85,6 +85,9 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Kimi Code | macOS | `~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | source-confirmed | supported | - |
 | Kimi Code | Linux | `$HOME/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | unascertained | not supported | - |
 | Kimi Code | Windows | `%USERPROFILE%\.kimi-code\sessions\<workspaceId>\<sessionId>\agents\main\wire.jsonl` | jsonl | unascertained | not supported | - |
+| DeepSeek Harness | macOS | `~/.dsh/sessions/` | jsonl.zstd | measured-locally | supported | https://github.com/deepseek-ai/deepseek-harness |
+| DeepSeek Harness | Linux | `$HOME/.dsh/sessions/` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
+| DeepSeek Harness | Windows | `%USERPROFILE%\.dsh\sessions\` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
 
 ### Web AI chats (browser extension)
 
@@ -116,6 +119,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Local | Zed | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | - | normal | a real local store was read but no session has been archived end to end (git 2294f04) |
+| Local | DeepSeek Harness | - | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); no session has been archived end to end yet |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |

@@ -16,6 +16,7 @@
 | Local | Zed | supported | - |
 | Local | Continue | supported | - |
 | Local | Kimi Code | supported | - |
+| Local | DeepSeek Harness | supported | - |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
 | Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |
