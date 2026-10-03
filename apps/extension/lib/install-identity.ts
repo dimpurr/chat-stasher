@@ -41,7 +41,7 @@ let identityPromise: Promise<InstallIdentity> | null = null;
 /** Missing or unreadable storage is an error; a capture must not invent an ephemeral identity. */
 export function getInstallIdentity(): Promise<InstallIdentity> {
   if (identityPromise) return identityPromise;
-  identityPromise = (async () => {
+  const initialization = (async () => {
     const storage = localStorageArea();
     if (!storage) throw new Error('install identity storage unavailable');
     const query = { [INSTALL_IDENTITY_KEY]: null };
@@ -65,6 +65,10 @@ export function getInstallIdentity(): Promise<InstallIdentity> {
     if (persisted?.install_id !== install_id) throw new Error('install identity changed during initialization');
     return identity;
   })();
+  identityPromise = initialization.catch((error: unknown) => {
+    identityPromise = null;
+    throw error;
+  });
   return identityPromise;
 }
 
