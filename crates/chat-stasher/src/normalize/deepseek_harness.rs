@@ -11,9 +11,11 @@
 //! only the first frame reads one record out of hundreds.)
 //!
 //! The shapes below were measured on the installed build (macOS app
-//! `0.2.0-rc.2`, session format v4, 2026-10-03; 7 sessions, 232 frames on one
-//! machine) by decoding every frame and recording **field names, counts and
-//! digests only** — never message text:
+//! `0.2.0-rc.2`, session format v4, 2026-10-03; 7 sessions on one machine, the
+//! largest a live session that had reached 372 frames while still being
+//! written, so a frame count here is a reading and not a ceiling) by decoding
+//! every frame and recording **field names, counts and digests only** — never
+//! message text:
 //!
 //! * `session` — the header frame: `{version, id, createdAt, cwd, isSeeded,
 //!   delegationDepth, agentPreset, parentSession?, origin?}`. It is metadata,
