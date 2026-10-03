@@ -22,6 +22,7 @@
 //! No real archive is touched: every path is a temp dir, and the assertions are
 //! on the tool's own output, never on conversation content.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -67,6 +68,48 @@ fn write_shard(stage: &Path, seq: u32, body: &str) {
         .join("000");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{seq:06}.jsonl")), body).unwrap();
+}
+
+fn data_files(repo: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![repo.join("data")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn repository_file_state(repo: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut state = BTreeMap::new();
+    let mut stack = vec![repo.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                state.insert(
+                    path.strip_prefix(repo).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    state
 }
 
 /// Push `stage` into a fresh local repository, then run L3 over it, and return
@@ -262,6 +305,112 @@ fn repair_duplicates_reports_counts_and_never_changes_the_repository() {
         fs::read_dir(repo.join("snapshots")).unwrap().count(),
         snapshots_before,
         "the report must not append or remove snapshots"
+    );
+}
+
+#[test]
+fn repair_duplicates_does_not_render_an_unreadable_source_as_zero_duplicates() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let stage = sandbox.join("stage");
+    let line = r#"{"type":"user","message":{"role":"user","content":"synthetic"}}"#;
+    write_shard(&stage, 1, &format!("{line}\n"));
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+
+    let push = |sandbox: &Path, stage: &Path, repo: &Path, key: &Path| {
+        run(
+            sandbox,
+            &[
+                "push",
+                "--stage",
+                stage.to_str().unwrap(),
+                "--repo",
+                repo.to_str().unwrap(),
+                "--key-file",
+                key.to_str().unwrap(),
+                "--machine",
+                MACHINE,
+                "--keep-ssh-masters",
+            ],
+        )
+    };
+    let first_push = push(sandbox, &stage, &repo, &key);
+    assert!(
+        first_push.status.success(),
+        "first push failed: {:?}",
+        first_push.status
+    );
+
+    // The older readable snapshot has one shard and therefore a complete zero
+    // duplicate count. The newest snapshot adds a repeated shard for this same
+    // source, then loses the pack(s) it introduced.
+    let packs_before = data_files(&repo);
+    write_shard(&stage, 2, &format!("{line}\n"));
+    let second_push = push(sandbox, &stage, &repo, &key);
+    assert!(
+        second_push.status.success(),
+        "second push failed: {:?}",
+        second_push.status
+    );
+    let added_packs: Vec<_> = data_files(&repo)
+        .into_iter()
+        .filter(|path| !packs_before.contains(path))
+        .collect();
+    assert!(!added_packs.is_empty(), "second push must add pack files");
+    for pack in added_packs {
+        fs::remove_file(pack).unwrap();
+    }
+    let rustic_cache = test_support::rustic_cache_root(&sandbox.join("home"));
+    if rustic_cache.exists() {
+        fs::remove_dir_all(rustic_cache).unwrap();
+    }
+    let snapshots_before = fs::read_dir(repo.join("snapshots")).unwrap().count();
+    let repository_before = repository_file_state(&repo);
+
+    let report = run(
+        sandbox,
+        &[
+            "repair-duplicates",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--json",
+            "--keep-ssh-masters",
+        ],
+    );
+    assert_eq!(report.status.code(), Some(3), "incomplete read must exit 3");
+    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(
+        json["complete"], false,
+        "partial report must say complete=false"
+    );
+    assert!(
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or_default().contains(MACHINE)),
+        "the incomplete source must be identified by a warning"
+    );
+    assert!(
+        !json["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["machine"] == MACHINE),
+        "an unreadable newest source must not inherit the older snapshot's zero-duplicate result"
+    );
+    assert_eq!(
+        repository_file_state(&repo),
+        repository_before,
+        "repair-duplicates must not change repository files"
+    );
+    assert_eq!(
+        fs::read_dir(repo.join("snapshots")).unwrap().count(),
+        snapshots_before,
+        "the report must not change repository snapshots"
     );
 }
 
