@@ -669,7 +669,7 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       // warning. Required (not "any of"): a body without `messages` is the drift
       // case, so it must fail the shape gate and be warned about rather than
       // pass through as an empty-looking capture.
-      requiredPaths: ['messages'],
+      requiredArrayPaths: ['messages'],
     },
     // 🔴 Measured 2026-09-14: chat ids appear in `/chat/<id>`, and the ids seen
     // have more than one shape (one hex-like, one alphanumeric), so the character
