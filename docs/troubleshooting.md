@@ -91,6 +91,28 @@ This is on purpose. chat-stasher never trusts a server it has not met before. Co
 
 chat-stasher refuses, and no flag gets past it. A changed key can mean someone is impersonating your server. Find out why it changed (for example, from your provider) before you edit `~/.ssh/known_hosts`.
 
+### `verify --level l3` reports a possible duplicate seal
+
+L3 checks each staged session against the archive and reports possible duplicate
+seals without failing verification. To inspect the destination's newest archived
+body for each session and machine, run the read-only inventory:
+
+```sh
+chat-stasher repair-duplicates --destination <name>
+```
+
+The duplicate session, shard and byte counts describe byte-identical shard-by-
+shard replays of a session's complete preceding sequence—the pattern readers
+collapse. `collapsed-run` entries show where each such replay occurs. Separate
+`suspicious_kept_*` counts are individual repeated shards that do not form a
+complete replay; readers keep them because repetition alone does not prove a
+duplicate session.
+
+This is an inventory only: it does not change stored shards or snapshots. Exit
+`3` or `complete: false` means the archive could not be fully read. Treat the
+reported findings as partial and any unreported sessions as unknown, not clear;
+resolve the read error and run the inventory again.
+
 ## Web chats and the browser extension
 
 ### A chat is not being captured
