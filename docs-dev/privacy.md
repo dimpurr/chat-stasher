@@ -157,7 +157,7 @@ the sentence.
    `apps/extension/lib/outbox.ts:440-455`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
-   (`crates/chat-stasher/src/main.rs:325-362`;
+   (`crates/chat-stasher/src/main.rs:329-366`;
    `crates/chat-stasher/src/store.rs:320-420`).
 
 Steps 1–3 happen entirely on your machine, in plaintext. Step 4 is the only
@@ -436,7 +436,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:207-219`; `crates/chat-stasher/src/activity.rs:2169-2219`). A project name is a label from
+(`contracts/inbox.schema.json:207-219`; `crates/chat-stasher/src/activity.rs:2367-2417`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -467,7 +467,7 @@ and timestamp, not its content. We do not delete it; `ingest` retires it to
 The CLI makes one plaintext copy too, and it is not a capture but an archive
 session: `chat-stasher export --out <dir>` writes the sessions it selected back
 out **decrypted**, one file per session, into the directory you name
-(`crates/chat-stasher/src/main.rs:683-769`). Nothing moves those files on and
+(`crates/chat-stasher/src/main.rs:687-773`). Nothing moves those files on and
 we keep no record of where they went, so deleting the directory is yours to do.
 The CLI writes no archive content anywhere you did not name.
 
@@ -692,7 +692,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:320-420,1974-1976,2016-2026`; `crates/chat-stasher/src/main.rs:7850-7851`).
+kept on your machine (`crates/chat-stasher/src/store.rs:320-420,1974-1976,2016-2026`; `crates/chat-stasher/src/main.rs:7868-7869`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -970,10 +970,9 @@ Retention on **your** machine is under your control:
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage — the install identity, the report counter, the account-fingerprint salt, backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp (the full list is the table in [section 3b](#3-where-your-data-is-stored)) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
-| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:683-769`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
+| A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:687-773`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
 | Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1530-1646`; `crates/chat-stasher/src/collect.rs:1902-1942`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:164-1316`). Selective per-conversation deletion inside an archive is not implemented. |
-
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
 lives, so uninstalling also deletes the captures *that install* had not been
@@ -986,7 +985,7 @@ be the worse failure.
 profile is retired.** `chat-stasher install-native-host --uninstall` removes the
 host manifest for every browser on the machine in one pass, so an install you
 left in place can no longer deliver and its captures wait in its outbox instead
-(`crates/chat-stasher/src/main.rs:2211-2249`, `:2318-2324`). Draining each
+(`crates/chat-stasher/src/main.rs:2215-2253`, `:2322-2328`). Draining each
 profile's outbox first is the subject of
 [install.md → Before you remove the host](../docs/install.md#before-you-remove-the-host),
 and it is worth doing because an outbox goes away with its profile.
@@ -1032,7 +1031,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:7742-7747`).
+(`crates/chat-stasher/src/main.rs:7760-7765`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
