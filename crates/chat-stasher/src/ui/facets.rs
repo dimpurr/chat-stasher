@@ -121,6 +121,7 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "continue",
     "crush",
     "cursor",
+    "deepseek-harness",
     "gemini-cli",
     "github-copilot-cli",
     "grok-bot",
