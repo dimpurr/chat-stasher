@@ -55,7 +55,7 @@ import {
   summary as outboxSummary,
   type EnqueueResult,
 } from '../lib/outbox';
-import { OUTBOX_ALARM_NAME, syncOutboxAlarm } from '../lib/outbox-alarm';
+import { OUTBOX_ALARM_NAME, syncOutboxAlarmFromRead } from '../lib/outbox-alarm';
 import {
   HOST_UNAVAILABLE,
   checkHost,
@@ -562,14 +562,7 @@ async function drainSafely(): Promise<Awaited<ReturnType<typeof drainOutbox>>> {
  */
 async function syncOutboxAlarmSafely(): Promise<void> {
   try {
-    // No IndexedDB API ⇒ the outbox cannot exist ⇒ 0 is certain, not assumed.
-    // A failed read with the API present stays unknown (null) and keeps the timer.
-    if (!outboxApiPresent()) {
-      await syncOutboxAlarm(alarmsApi(), 0);
-      return;
-    }
-    const s = await outboxSummary();
-    await syncOutboxAlarm(alarmsApi(), s === null ? null : s.pending);
+    await syncOutboxAlarmFromRead(alarmsApi(), outboxApiPresent(), outboxSummary);
   } catch (err) {
     console.warn('[chat-stasher] outbox alarm sync failed', (err as Error).message);
   }

@@ -44,3 +44,29 @@ export async function syncOutboxAlarm(
   await alarms.create(OUTBOX_ALARM_NAME, { periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
   return 'created';
 }
+
+/**
+ * Read the outbox state for alarm scheduling. A missing IndexedDB API means
+ * the outbox cannot exist in this context, so it is a verified empty queue.
+ * Once the API exists, a failed read or malformed summary is unknown and must
+ * keep the retry alarm armed.
+ */
+export async function syncOutboxAlarmFromRead(
+  alarms: AlarmsApi | null | undefined,
+  storageAvailable: boolean,
+  readSummary: () => Promise<unknown>,
+): Promise<AlarmSyncResult> {
+  if (!storageAvailable) return syncOutboxAlarm(alarms, 0);
+
+  let pending: number | null = null;
+  try {
+    const summary = await readSummary();
+    if (summary && typeof summary === 'object') {
+      const count = (summary as { pending?: unknown }).pending;
+      if (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) pending = count;
+    }
+  } catch {
+    // The API exists, so an unreadable queue is not evidence that it is empty.
+  }
+  return syncOutboxAlarm(alarms, pending);
+}
