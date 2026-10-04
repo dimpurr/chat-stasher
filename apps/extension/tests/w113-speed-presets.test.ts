@@ -162,6 +162,14 @@ describe('W113 · reading and writing the choice', () => {
     expect(await readSpeedPreset(store)).toBe(DEFAULT_SPEED_PRESET);
   });
 
+  it('a storage read failure selects the documented safe default', async () => {
+    const store = memoryStore({ [SPEED_PRESET_KEY]: 'faster' });
+    store.load = async () => { throw new Error('storage unavailable'); };
+
+    expect(await readSpeedPreset(store)).toBe('gentle');
+    expect((await readSpeedPlan(store)).preset).toBe('gentle');
+  });
+
   it('the choice round-trips, and the write reports what was persisted', async () => {
     const store = memoryStore();
     for (const preset of ALL) {
@@ -178,6 +186,14 @@ describe('W113 · reading and writing the choice', () => {
 
     await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow(/did not persist/i);
     expect(await readSpeedPreset(store)).toBe('standard');
+  });
+
+  it('does not report a choice as persisted when read-back fails after a successful save', async () => {
+    const store = memoryStore();
+    store.load = async () => { throw new Error('read-back unavailable'); };
+
+    await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow('read-back unavailable');
+    expect(store.data[SPEED_PRESET_KEY]).toBe('faster');
   });
 
   it('does not report gentle as persisted when a no-op write only reads back the default', async () => {
