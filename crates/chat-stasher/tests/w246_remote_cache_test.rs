@@ -1024,6 +1024,7 @@ fn snapshot_cache_over_a_latency_injected_sftp_link() {
                 source_zone: None,
                 title: None,
                 provenance: None,
+                dimensions: Default::default(),
                 account_keys: Vec::new(),
                 measured_body: None,
             };

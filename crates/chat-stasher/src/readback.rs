@@ -2,9 +2,10 @@
 //!
 //! Answers "what do I have archived, across every machine, right now". It
 //! re-opens the repository, lists *all* snapshots, groups them by `hostname`,
-//! and for the newest snapshot of each machine buckets its sealed shards by
-//! the `sessions/<machine>/…` marker. Every session's shards are concatenated
-//! in global sequence order and hashed, across bucket directories.
+//! and walks each machine's snapshots newest-first. For each session, the
+//! newest copy of each shard sequence wins while older sequences absent from
+//! later snapshots are retained. The resulting shards are concatenated in
+//! global sequence order and hashed, across bucket directories.
 //!
 //! Why "newest per hostname" and not "the newest snapshot":
 //!
@@ -15,22 +16,22 @@
 //!   (Spike B6b measured this: the newest snapshot covers exactly one machine.)
 //! * `sessions/<machine>/…` is the path partition fixed at push time, so no
 //!   cross-checks about "who owns this path" are needed — the read side just
-//!   buckets what is there. The only cross-machine information that has to be
-//!   derived here is *which snapshot is newest per machine*.
+//!   buckets what is there. The cross-machine information derived here is
+//!   *which snapshots belong to each machine and which copy of a shard is
+//!   newest*.
 //!
-//! The "newest per hostname" step is not provided by rustic: the library
-//! groups snapshots ([`SnapshotGroupCriterion`] / [`Grouped`]) but never
-//! reduces a group to its latest member — the CLI does that itself in
-//! `SnapshotFilter::post_process`. That reduction is the ~ten lines this
-//! module implements ([`newest_snapshot_per_host`]).
+//! Snapshot grouping and newest-first traversal are provided by
+//! [`snapshots_by_host_newest_first`]. [`newest_snapshot_per_host`] remains
+//! available for commands that specifically need only the latest run.
 //!
 //! "Newest per hostname" is *not* the whole archive, though, and ADR-021 made
 //! the readers that ask "what do I have archived" cumulative: `reclaim-stage`
 //! deletes a session's bodies from the stage once every destination has proved
 //! it holds them, so a busy machine's newest snapshot holds only the last
 //! push's batch. Those readers walk every snapshot of a hostname newest-first
-//! and let a session's **first** appearance win
-//! ([`snapshots_by_host_newest_first`]) — one function, so `read
+//! and let each shard sequence's **newest** copy win while retaining older
+//! sequences absent from later snapshots ([`snapshots_by_host_newest_first`])
+//! — one function, so `read
 //! --all-machines`, `verify` L3, `search`, `read --session` and `export` cannot
 //! disagree about where a session lives. `newest_snapshot_per_host` remains for
 //! the questions that really are about the latest backup run, such as the
@@ -77,6 +78,9 @@ pub struct SessionBackedUp {
     /// a doubled body is a *consistent* triple. These can, because a re-seal
     /// leaves a shard byte-identical to one already in the sequence.
     pub shard_sha256: Vec<String>,
+    /// Parsed global sequence numbers aligned with `shard_sha256` and
+    /// `shard_bytes`; `None` marks a retained noncanonical legacy filename.
+    pub shard_sequences: Vec<Option<u64>>,
     /// Byte length of each shard, same order as [`Self::shard_sha256`].
     pub shard_bytes: Vec<u64>,
     /// `(start, end)` shard-index ranges whose concatenated bytes equal a
@@ -178,11 +182,12 @@ pub fn newest_snapshot_per_host(snaps: Vec<SnapshotFile>) -> Vec<SnapshotFile> {
 ///
 /// This is the traversal order ADR-021's cumulative readers use, and the order
 /// is the whole rule: a cumulative reader walks one hostname's snapshots from
-/// newest to oldest and keeps the **first** appearance of each session, so the
-/// snapshot a session is reported against is the newest one that holds it.
+/// newest to oldest and keeps the newest copy of each shard path/sequence,
+/// while retaining older sequences missing from later snapshots. A session is
+/// reported against its newest snapshot appearance, but its body can span pushes.
 ///
-/// One function rather than one per reader, because "which snapshot holds this
-/// session" must have exactly one answer. `read --all-machines` / `verify` L3
+/// One function rather than one per reader, so every reader uses the same
+/// snapshot order. `read --all-machines` / `verify` L3
 /// ([`BackupStore::read_cumulative_sessions`]), `search` and `read --session`
 /// all resolve it through here.
 pub fn snapshots_by_host_newest_first(
@@ -230,6 +235,40 @@ pub struct ArchivedWriters {
 }
 
 impl BackupStore {
+    /// Read the newest archived provenance observation sidecar for one
+    /// machine. The match is by the archived trailing `meta/<machine>/`
+    /// components; the original stage root is intentionally irrelevant.
+    pub fn read_archived_provenance_observations(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+    ) -> anyhow::Result<Vec<crate::provenance::ProvenanceObservation>> {
+        let backends = self.backends()?;
+        let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
+            .context("open repository for provenance observations")?;
+        self.require_sound_packs(&repo)?;
+        let snapshots = snapshots_by_host_newest_first(repo.get_all_snapshots()?);
+        let Some((_, host_snaps)) = snapshots.into_iter().find(|(host, _)| host == machine) else {
+            anyhow::bail!("no snapshot for machine `{machine}` in this repository");
+        };
+        for snapshot in host_snaps {
+            let root = repo.node_from_snapshot_and_path(&snapshot, "")?;
+            let entries = repo
+                .ls(&root, &LsOptions::default())?
+                .collect::<rustic_core::RusticResult<Vec<_>>>()?;
+            for (path, node) in entries {
+                if node.node_type != NodeType::File || !is_provenance_path(&path, machine) {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                repo.dump(&node, &mut bytes)
+                    .context("read archived provenance observations")?;
+                return crate::provenance::parse_observations(&bytes);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// Read every machine's `meta/<machine>/writer.json` from its newest
     /// snapshot, for the writer-version comparison `overview`, `status` and the
     /// stale-index check all make.
@@ -337,6 +376,7 @@ impl BackupStore {
                 shards.sort_by_key(|(n, _)| store_seq_of(n));
                 let mut concat = Vec::new();
                 let mut shard_sha256 = Vec::with_capacity(shards.len());
+                let mut shard_sequences = Vec::with_capacity(shards.len());
                 let mut shard_bytes = Vec::with_capacity(shards.len());
                 let mut shard_run_duplicates = Vec::new();
                 let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
@@ -359,6 +399,7 @@ impl BackupStore {
                     }
                     shard_offsets.push(concat.len());
                     shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+                    shard_sequences.push(crate::store::parse_shard_seq(shard));
                     shard_bytes.push(buf.len() as u64);
                     concat.extend_from_slice(&buf);
                 }
@@ -369,6 +410,7 @@ impl BackupStore {
                     concat_bytes: concat.len() as u64,
                     sha256: hex_digest(&Sha256::digest(&concat)),
                     shard_sha256,
+                    shard_sequences,
                     shard_bytes,
                     shard_run_duplicates,
                 });
@@ -391,10 +433,10 @@ impl BackupStore {
     /// Cumulative cross-machine read-back merge (`read --all-machines` and `verify` L3).
     ///
     /// Answers "what do all snapshots hold across machines, cumulatively" (ADR-021).
-    /// Groups snapshots by hostname, traverses snapshots from newest to oldest reading
-    /// tree metadata, and maps each session to the newest snapshot that contains it.
-    /// Only the resolved sessions (filtered by `wanted` if specified) have their data
-    /// blobs downloaded and concatenated into verification triples.
+    /// Groups snapshots by hostname and traverses newest first, keeping the newest
+    /// copy of each shard path/sequence while retaining older missing sequences.
+    /// Only the resolved sessions (filtered by `wanted` if specified) have their
+    /// data blobs downloaded and concatenated into verification triples.
     pub fn read_cumulative_sessions(
         &self,
         mk: &MasterKey,
@@ -439,24 +481,23 @@ impl BackupStore {
             let snapshot_time = newest_snap.time.to_string();
             let snapshot_time_unix = newest_snap.time.timestamp().as_second();
 
-            let mut sessions_map: BTreeMap<String, Vec<(String, rustic_core::repofile::Node)>> =
+            // Keep the newest copy of every sequence, while retaining older
+            // sequences absent from later snapshots. A reclaimed stage may
+            // push only the next shard, so the newest snapshot alone is not a
+            // complete session body.
+            let mut sessions_map: BTreeMap<
+                String,
+                BTreeMap<(u64, String), (Option<u64>, String, String, rustic_core::repofile::Node)>,
+            > = BTreeMap::new();
+            let mut observations: BTreeMap<String, Vec<crate::provenance::ProvenanceObservation>> =
                 BTreeMap::new();
+            let mut metadata_loaded = false;
+            let mut sequence_paths: BTreeMap<(String, u64), String> = BTreeMap::new();
+            let mut ambiguous_sequences: BTreeSet<(String, u64)> = BTreeSet::new();
 
             for snap in &snaps {
-                if let Some(wanted_set) = wanted {
-                    let wanted_for_this_machine: BTreeSet<&str> = wanted_set
-                        .iter()
-                        .filter(|(m, _)| m == &hostname)
-                        .map(|(_, s)| s.as_str())
-                        .collect();
-                    if !wanted_for_this_machine.is_empty()
-                        && wanted_for_this_machine
-                            .iter()
-                            .all(|s| sessions_map.contains_key(*s))
-                    {
-                        break;
-                    }
-                }
+                let snap_id = snap.id.to_hex().as_str().to_string();
+                let short = snap_id[..8.min(snap_id.len())].to_string();
 
                 let root = match repo.node_from_snapshot_and_path(snap, "") {
                     Ok(n) => n,
@@ -489,12 +530,30 @@ impl BackupStore {
                     }
                 };
 
-                let mut snap_sessions: BTreeMap<
-                    String,
-                    Vec<(String, rustic_core::repofile::Node)>,
-                > = BTreeMap::new();
                 for (path, node) in entries {
                     if node.node_type != NodeType::File {
+                        continue;
+                    }
+                    if shard_policy.collapses() && is_provenance_path(&path, &hostname) {
+                        if !metadata_loaded {
+                            let mut bytes = Vec::new();
+                            repo.dump(&node, &mut bytes).with_context(|| {
+                                format!("snapshot {short}: cannot read provenance metadata")
+                            })?;
+                            for observation in crate::provenance::parse_observations(&bytes)
+                                .with_context(|| {
+                                    format!("snapshot {short}: parse provenance metadata")
+                                })?
+                            {
+                                if observation.dimensions.is_valid() {
+                                    observations
+                                        .entry(observation.session_id.clone())
+                                        .or_default()
+                                        .push(observation);
+                                }
+                            }
+                            metadata_loaded = true;
+                        }
                         continue;
                     }
                     if let Some((m, session, shard)) = bucket_shard_path(&path) {
@@ -504,48 +563,72 @@ impl BackupStore {
                                     continue;
                                 }
                             }
-                            if !sessions_map.contains_key(&session) {
-                                snap_sessions
-                                    .entry(session)
-                                    .or_default()
-                                    .push((shard, node));
+                            let (identity, sequence) = archive_shard_identity(&path, &shard);
+                            if let Some(sequence) = sequence {
+                                let key = (session.clone(), sequence);
+                                let path_identity = path.to_string_lossy().into_owned();
+                                if sequence_paths
+                                    .insert(key.clone(), path_identity.clone())
+                                    .is_some_and(|prior| prior != path_identity)
+                                {
+                                    ambiguous_sequences.insert(key);
+                                }
                             }
+                            sessions_map
+                                .entry(session)
+                                .or_default()
+                                .entry(identity)
+                                .or_insert((sequence, short.clone(), shard, node));
                         }
                     }
-                }
-
-                for (session, shards) in snap_sessions {
-                    sessions_map.entry(session).or_insert(shards);
                 }
             }
 
             let mut sessions = Vec::new();
-            for (session_id, mut shards) in sessions_map {
-                shards.sort_by_key(|(n, _)| store_seq_of(n));
+            for (session_id, shards) in sessions_map {
+                let shards: Vec<_> = shards
+                    .into_values()
+                    .map(|(sequence, snapshot, shard, node)| (sequence, snapshot, shard, node))
+                    .collect();
                 let mut concat = Vec::new();
                 let mut shard_sha256 = Vec::with_capacity(shards.len());
                 let mut shard_bytes = Vec::with_capacity(shards.len());
+                let mut shard_sequences = Vec::with_capacity(shards.len());
                 let mut shard_run_duplicates = Vec::new();
                 let mut shard_offsets: Vec<usize> = Vec::with_capacity(shards.len());
                 let mut shard_bodies = Vec::with_capacity(shards.len());
-                for (shard, node) in &shards {
+                for (sequence, snapshot, shard, node) in &shards {
                     let mut buf = Vec::new();
                     repo.dump(node, &mut buf)
-                        .with_context(|| format!("dump shard {shard}"))?;
-                    shard_bodies.push(buf);
+                        .with_context(|| format!("snapshot {snapshot}: dump shard {shard}"))?;
+                    shard_bodies.push((
+                        sequence.filter(|sequence| {
+                            !ambiguous_sequences.contains(&(session_id.clone(), *sequence))
+                        }),
+                        buf,
+                    ));
                 }
                 let duplicate_indices: BTreeSet<_> = if shard_policy.collapses() {
-                    crate::store::duplicate_shard_indices(&shard_bodies)
+                    let bodies: Vec<_> =
+                        shard_bodies.iter().map(|(_, body)| body.clone()).collect();
+                    crate::store::duplicate_shard_indices(&bodies)
                         .into_iter()
                         .collect()
                 } else {
                     BTreeSet::new()
                 };
-                for ((_shard, _node), (index, buf)) in
+                let observed_sequences = crate::provenance::verified_observation_sequences(
+                    &session_id,
+                    observations.get(&session_id).map_or(&[], Vec::as_slice),
+                    &shard_bodies,
+                );
+                for ((_sequence, _snapshot, _shard, _node), (index, (sequence, buf))) in
                     shards.iter().zip(shard_bodies.iter().enumerate())
                 {
                     let digest: [u8; 32] = Sha256::digest(&buf).into();
-                    if duplicate_indices.contains(&index) {
+                    let provenance_bound =
+                        sequence.is_some_and(|sequence| observed_sequences.contains(&sequence));
+                    if duplicate_indices.contains(&index) && !provenance_bound {
                         continue;
                     }
                     let current_index = shard_sha256.len();
@@ -564,6 +647,7 @@ impl BackupStore {
                     shard_offsets.push(concat.len());
                     shard_sha256.push(hex_digest(&digest));
                     shard_bytes.push(buf.len() as u64);
+                    shard_sequences.push(*sequence);
                     concat.extend_from_slice(&buf);
                 }
                 sessions.push(SessionBackedUp {
@@ -573,6 +657,7 @@ impl BackupStore {
                     concat_bytes: concat.len() as u64,
                     sha256: hex_digest(&Sha256::digest(&concat)),
                     shard_sha256,
+                    shard_sequences,
                     shard_bytes,
                     shard_run_duplicates,
                 });
@@ -646,7 +731,7 @@ impl BackupStore {
                 if node.node_type != NodeType::File {
                     continue;
                 }
-                let Some((found_machine, session, shard)) = bucket_shard_path(path) else {
+                let Some((found_machine, session, shard)) = bucket_shard_path(&path) else {
                     continue;
                 };
                 if found_machine != machine || !wanted.contains(&session) {
@@ -734,6 +819,33 @@ impl BackupStore {
     where
         F: FnMut(&str, &[u8]) -> anyhow::Result<()>,
     {
+        self.for_each_archived_session_shards_with_policy(
+            mk,
+            machine,
+            shard_policy,
+            |id, shards| {
+                let concat: Vec<u8> = shards
+                    .iter()
+                    .flat_map(|(_, body)| body.iter().copied())
+                    .collect();
+                visit(id, &concat)
+            },
+        )
+    }
+
+    /// Shard-preserving archive walk for consumers that need provenance body
+    /// bindings. The callback receives shards with optional parsed sequence
+    /// numbers, after applying the same duplicate policy as the concatenated reader.
+    pub fn for_each_archived_session_shards_with_policy<F>(
+        &self,
+        mk: &MasterKey,
+        machine: &str,
+        shard_policy: DuplicateShardPolicy,
+        mut visit: F,
+    ) -> anyhow::Result<CumulativeSessionRead>
+    where
+        F: FnMut(&str, &[(Option<u64>, Vec<u8>)]) -> anyhow::Result<()>,
+    {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
             .context("open repository for archived sessions")?;
@@ -753,9 +865,17 @@ impl BackupStore {
             snapshots_scanned: 0,
             snapshots_in_repo,
         };
-        // Sessions already claimed by a newer snapshot. Kept across snapshots so
-        // an older copy can never overwrite the newer one (ADR-021).
-        let mut resolved: BTreeSet<String> = BTreeSet::new();
+        // Take the newest copy of each sequence number, while retaining older
+        // sequence numbers that later snapshots no longer contain. Reclaimed
+        // stages can append a new shard after an earlier push, so resolving a
+        // whole session from its newest snapshot would lose the archived prefix.
+        let mut held: BTreeMap<String, BTreeMap<(u64, String), (Option<u64>, String, Node)>> =
+            BTreeMap::new();
+        let mut observations: BTreeMap<String, Vec<crate::provenance::ProvenanceObservation>> =
+            BTreeMap::new();
+        let mut metadata_loaded = false;
+        let mut sequence_paths: BTreeMap<(String, u64), String> = BTreeMap::new();
+        let mut ambiguous_sequences: BTreeSet<(String, u64)> = BTreeSet::new();
         for snap in &host_snaps {
             let snap_id = snap.id.to_hex().as_str().to_string();
             let short = &snap_id[..8.min(snap_id.len())];
@@ -768,48 +888,110 @@ impl BackupStore {
                 .with_context(|| format!("snapshot {short}: cannot list tree"))?;
             out.snapshots_scanned += 1;
 
-            let mut held: BTreeMap<String, Vec<(u64, &Node)>> = BTreeMap::new();
-            for (path, node) in &entries {
+            for (path, node) in entries {
                 if node.node_type != NodeType::File {
                     continue;
                 }
-                let Some((found_machine, session, shard)) = bucket_shard_path(path) else {
+                if shard_policy.collapses() && is_provenance_path(&path, machine) {
+                    if !metadata_loaded {
+                        let mut bytes = Vec::new();
+                        repo.dump(&node, &mut bytes).with_context(|| {
+                            format!("snapshot {short}: cannot read provenance metadata")
+                        })?;
+                        for observation in crate::provenance::parse_observations(&bytes)
+                            .with_context(|| {
+                                format!("snapshot {short}: parse provenance metadata")
+                            })?
+                        {
+                            if observation.dimensions.is_valid() {
+                                observations
+                                    .entry(observation.session_id.clone())
+                                    .or_default()
+                                    .push(observation);
+                            }
+                        }
+                        metadata_loaded = true;
+                    }
+                    continue;
+                }
+                let Some((found_machine, session, shard)) = bucket_shard_path(&path) else {
                     continue;
                 };
-                if found_machine != machine || resolved.contains(&session) {
+                if found_machine != machine {
                     continue;
                 }
-                held.entry(session)
-                    .or_default()
-                    .push((store_seq_of(&shard), node));
+                let (identity, sequence) = archive_shard_identity(&path, &shard);
+                if let Some(sequence) = sequence {
+                    let key = (session.clone(), sequence);
+                    let path_identity = path.to_string_lossy().into_owned();
+                    if sequence_paths
+                        .insert(key.clone(), path_identity.clone())
+                        .is_some_and(|prior| prior != path_identity)
+                    {
+                        ambiguous_sequences.insert(key);
+                    }
+                }
+                held.entry(session).or_default().entry(identity).or_insert((
+                    sequence,
+                    short.to_string(),
+                    node,
+                ));
             }
-
-            for (session, mut shards) in held {
-                if !resolved.insert(session.clone()) {
-                    continue;
-                }
-                shards.sort_by_key(|(seq, _)| *seq);
-                let mut shard_bodies = Vec::with_capacity(shards.len());
-                for (_, node) in shards {
-                    let mut buf = Vec::new();
-                    repo.dump(node, &mut buf).with_context(|| {
-                        format!(
-                            "snapshot {short}: cannot read a shard of session `{}`",
-                            crate::id::short_session_id(&session)
-                        )
-                    })?;
-                    shard_bodies.push(buf);
-                }
-                let concat = crate::store::select_shard_bodies(shard_bodies, shard_policy)
+        }
+        for (session, shards) in held {
+            let mut shard_bodies = Vec::with_capacity(shards.len());
+            for ((_sort_sequence, _identity), (sequence, snapshot, node)) in shards {
+                let mut buf = Vec::new();
+                repo.dump(&node, &mut buf).with_context(|| {
+                    format!(
+                        "snapshot {snapshot}: cannot read a shard of session `{}`",
+                        crate::id::short_session_id(&session)
+                    )
+                })?;
+                let sequence = sequence.filter(|sequence| {
+                    !ambiguous_sequences.contains(&(session.clone(), *sequence))
+                });
+                shard_bodies.push((sequence, buf));
+            }
+            let selected = if shard_policy.collapses() {
+                let bodies: Vec<_> = shard_bodies.iter().map(|(_, body)| body.clone()).collect();
+                let duplicates: BTreeSet<_> = crate::store::duplicate_shard_indices(&bodies)
                     .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                visit(&session, &concat)?;
-                out.sessions += 1;
-            }
+                    .collect();
+                let observed_sequences = crate::provenance::verified_observation_sequences(
+                    &session,
+                    observations.get(&session).map_or(&[], Vec::as_slice),
+                    &shard_bodies,
+                );
+                shard_bodies
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, shard)| {
+                        let provenance_bound = shard
+                            .0
+                            .is_some_and(|sequence| observed_sequences.contains(&sequence));
+                        (!duplicates.contains(&index) || provenance_bound).then_some(shard)
+                    })
+                    .collect()
+            } else {
+                shard_bodies
+            };
+            visit(&session, &selected)?;
+            out.sessions += 1;
         }
         Ok(out)
     }
+}
+
+pub(crate) fn is_provenance_path(path: &Path, machine: &str) -> bool {
+    let parts: Vec<_> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect();
+    parts.len() >= 3
+        && parts[parts.len() - 3] == "meta"
+        && parts[parts.len() - 2] == machine
+        && parts[parts.len() - 1] == "provenance-v1.jsonl"
 }
 
 fn store_seq_of(name: &str) -> u64 {
@@ -850,6 +1032,19 @@ pub fn bucket_shard_path(path: &Path) -> Option<(String, String, String)> {
         rest[1].to_string(),
         (*shard).to_string(),
     ))
+}
+
+/// Stable identity while accumulating session shards across snapshots. Valid
+/// sequence filenames dedupe within the session; invalid filenames are kept
+/// by full archive-relative path so equal basenames cannot collide.
+fn archive_shard_identity(path: &Path, shard: &str) -> ((u64, String), Option<u64>) {
+    let sequence = crate::store::parse_shard_seq(shard);
+    let sort_sequence = sequence.unwrap_or(u64::MAX);
+    // Distinct paths with the same sequence are malformed/ambiguous, but both
+    // payloads must survive readback. Repeated copies at the same path across
+    // snapshots still collapse to the newest node.
+    let path_identity = path.to_string_lossy().into_owned();
+    ((sort_sequence, path_identity), sequence)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -918,6 +1113,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_shards_with_same_basename_keep_distinct_archive_paths() {
+        let first = archive_shard_identity(
+            Path::new("root/sessions/m/s/001/legacy.jsonl"),
+            "legacy.jsonl",
+        );
+        let second = archive_shard_identity(
+            Path::new("root/sessions/m/s/002/legacy.jsonl"),
+            "legacy.jsonl",
+        );
+        assert_eq!(first.1, None);
+        assert_eq!(second.1, None);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn same_sequence_with_distinct_archive_paths_keeps_both_identities() {
+        let first = archive_shard_identity(
+            Path::new("root/sessions/m/s/001/000007.jsonl"),
+            "000007.jsonl",
+        );
+        let second = archive_shard_identity(
+            Path::new("root/sessions/m/s/002/000007.jsonl"),
+            "000007.jsonl",
+        );
+        assert_eq!(first.1, Some(7));
+        assert_eq!(second.1, Some(7));
+        assert_ne!(first.0, second.0);
+    }
+
     /// Negative self-check unit: a one-byte flip in a payload must change the
     /// digest, so the e2e comparison really is able to report a mismatch.
     #[test]
@@ -941,6 +1166,7 @@ mod tests {
             concat_bytes: payload.len() as u64,
             sha256: hex_digest(&Sha256::digest(&payload)),
             shard_sha256: vec![hex_digest(&Sha256::digest(&payload))],
+            shard_sequences: vec![Some(1)],
             shard_bytes: vec![payload.len() as u64],
             shard_run_duplicates: Vec::new(),
         };

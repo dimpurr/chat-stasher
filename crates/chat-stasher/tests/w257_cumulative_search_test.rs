@@ -116,6 +116,7 @@ fn write_activity_index(stage: &Path, sessions: &[&str], first: i64, last: i64) 
             source_zone: None,
             title: None,
             provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };

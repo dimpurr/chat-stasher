@@ -250,7 +250,15 @@ fn facet_href(params: &Query, token: &str, harness_values: Option<&[String]>) ->
     for (key, value) in params {
         if !matches!(
             key.as_str(),
-            "session" | "machine" | "day" | "since" | "until" | "sort" | "limit"
+            "session"
+                | "machine"
+                | "day"
+                | "since"
+                | "until"
+                | "surface"
+                | "sub_surface"
+                | "sort"
+                | "limit"
         ) || !seen.insert(key.as_str())
         {
             continue;
@@ -392,6 +400,20 @@ mod tests {
     use super::super::fixture;
     use super::*;
     use crate::selector::SelectorArgs;
+
+    #[test]
+    fn facet_href_preserves_surface_and_alias_without_changing_precedence() {
+        let params = vec![
+            ("surface".to_string(), "app".to_string()),
+            ("sub_surface".to_string(), "cli".to_string()),
+        ];
+        let href = facet_href(&params, "t", Some(&["codex".to_string()]));
+        assert!(href.contains("surface=app"), "{href}");
+        assert!(href.contains("sub_surface=cli"), "{href}");
+        let (_, query) = crate::ui::split_target(&href);
+        let selector = crate::ui::selector_from_query(&query).unwrap().selector;
+        assert_eq!(selector.surface.as_deref(), Some("app"));
+    }
 
     fn req(target: &str, data: &crate::ui::UiData) -> String {
         let (path, params) = crate::ui::split_target(target);

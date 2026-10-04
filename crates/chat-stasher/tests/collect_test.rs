@@ -1,14 +1,21 @@
 //! Incremental collector tests use only synthetic source trees in temp dirs.
 //! Assertions inspect bytes/counts, while test output stays metadata-only.
 
+use chat_stasher::activity;
 use chat_stasher::collect;
 use chat_stasher::collect::DestinationView;
 use chat_stasher::config::Config;
+use chat_stasher::fts;
+use chat_stasher::provenance::{self, SessionProvenance};
 use chat_stasher::scanner::{self, HarnessRegistry};
+use chat_stasher::selector::{Selector, SessionMeta, TimeBounds, Verdict};
 use chat_stasher::store;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
+
+static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn registry() -> HarnessRegistry {
     let cell = json!({
@@ -241,3 +248,171 @@ fn incomplete_tail_is_left_for_the_next_read() {
 }
 
 use std::io::Write;
+
+#[test]
+fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_surfaces() {
+    let _guard = HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &home);
+    let home_reset = HomeReset(old_home);
+
+    let user_line = b"{\"created_at\":\"2026-10-01T10:00:00Z\",\"type\":\"USER_INPUT\",\"content\":\"synthetic prompt\"}\n";
+    let assistant_line = b"{\"created_at\":\"2026-10-01T10:00:01Z\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"synthetic reply\"}\n";
+    let mut roots = Vec::new();
+    for (root, surface, content) in [
+        ("antigravity-cli", "cli", user_line.to_vec()),
+        (
+            "antigravity-ide",
+            "ide",
+            [user_line.as_slice(), assistant_line.as_slice()].concat(),
+        ),
+        ("antigravity", "app", user_line.to_vec()),
+    ] {
+        let source = home
+            .join(".gemini")
+            .join(root)
+            .join("brain/session-same-uuid/.system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, content).unwrap();
+        let cell = json!({
+            "template": format!("~/.gemini/{root}/brain/"),
+            "format": "jsonl",
+            "confidence": "source-confirmed",
+            "source": "synthetic fixture",
+            "session_dir": { "pattern": "*", "file": ".system_generated/logs/transcript.jsonl" }
+        });
+        let paths = match scanner::current_platform() {
+            "macos" => json!({"macos": cell}),
+            "linux" => json!({"linux": cell}),
+            "windows" => json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        roots.push(json!({
+            "id": root,
+            "paths": paths,
+            "provenance": { "surface": [surface] }
+        }));
+    }
+    let registry: HarnessRegistry = serde_json::from_value(json!({
+        "schema_version": 1,
+        "generated": "synthetic fixture",
+        "harnesses": [{ "id": "google-antigravity", "display_name": "fixture", "source_roots": roots }]
+    })).unwrap();
+    let scan =
+        scanner::scan_with_registry_and_machine(&Config::default(), &registry, "fixture-machine")
+            .unwrap();
+    let session_id = "google-antigravity.fixture-machine.session-same-uuid";
+    assert_eq!(
+        scan.records
+            .iter()
+            .filter(|record| record.id == session_id)
+            .count(),
+        3
+    );
+
+    let stage = temp.path().join("stage");
+    let state = temp.path().join("state");
+    let first = collect::collect_scan_report(&scan, &stage, "fixture-machine", &state, 20, &dest())
+        .unwrap();
+    assert_eq!(
+        first.lines_written, 2,
+        "the resumed snapshot contributes only its suffix; the third identical stream adds nothing"
+    );
+    let body = store::concat_shards(&stage, "fixture-machine", session_id).unwrap();
+    assert_eq!(
+        body,
+        [user_line.as_slice(), assistant_line.as_slice()].concat()
+    );
+
+    let body_text = std::str::from_utf8(&body).unwrap();
+    let normalized = chat_stasher::normalize::normalize("google-antigravity", body_text);
+    assert_eq!(normalized.message_total, 2);
+    let indexed = fts::extract_index_document_for("google-antigravity", &body).unwrap();
+    assert!(indexed.not_indexable.is_none());
+    assert!(indexed.body.contains("synthetic prompt"));
+    assert!(indexed.body.contains("synthetic reply"));
+    let lines: Vec<_> = body_text.lines().collect();
+    let times = activity::analyze_session("google-antigravity", &lines);
+    assert_eq!(times.line_count, 2);
+    assert!(matches!(times.time_source, activity::TimeSource::Exact));
+
+    let observations = provenance::read_observations(&stage, "fixture-machine").unwrap();
+    assert_eq!(
+        observations.len(),
+        3,
+        "each source root records its immutable observation"
+    );
+    let mut dimensions = SessionProvenance::default();
+    provenance::merge_verified_observations(
+        &mut dimensions,
+        session_id,
+        &observations,
+        &[user_line.to_vec(), assistant_line.to_vec()],
+    );
+    assert_eq!(dimensions.surface, ["app", "cli", "ide"]);
+    let cli = Selector {
+        surface: Some("cli".into()),
+        ..Default::default()
+    };
+    let app = Selector {
+        surface: Some("app".into()),
+        ..Default::default()
+    };
+    let meta = SessionMeta {
+        machine: "fixture-machine",
+        session_id,
+        harness: Some("google-antigravity"),
+        surfaces: Some(&dimensions.surface),
+        first_unix: times.first_unix,
+        last_unix: times.last_unix,
+        time_bounds: TimeBounds::Complete,
+        time_why: None,
+    };
+    assert_eq!(cli.select(&meta), Verdict::Selected);
+    assert_eq!(app.select(&meta), Verdict::Selected);
+    drop(home_reset);
+}
+
+#[test]
+fn new_session_does_not_probe_destination_for_an_archive_prefix() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source_root = temp.path().join("source");
+    fs::create_dir_all(&source_root).unwrap();
+    fs::write(
+        source_root.join("session.jsonl"),
+        b"{\"type\":\"USER_INPUT\"}\n",
+    )
+    .unwrap();
+    let scan_report = scan(&source_root);
+    let destination = DestinationView::new("fresh-session", |_| {
+        panic!("a genuinely new session must not open the archive")
+    });
+    let stage = temp.path().join("stage");
+    let report = collect::collect_scan_report(
+        &scan_report,
+        &stage,
+        "fixture-machine",
+        &temp.path().join("state"),
+        20,
+        &destination,
+    )
+    .unwrap();
+    assert!(report.errors.is_empty());
+}
+
+struct HomeReset(Option<std::ffi::OsString>);
+
+impl Drop for HomeReset {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+}

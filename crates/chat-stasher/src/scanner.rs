@@ -659,33 +659,36 @@ impl ScanReport {
                 let Some(source) = HarnessSource::from_id(&probe.id) else {
                     return None;
                 };
-                let session_records = self
+                let session_records: std::collections::BTreeSet<_> = self
                     .records
                     .iter()
                     .filter(|record| record.source == source)
-                    .count();
+                    .map(|record| record.id.as_str())
+                    .collect();
                 match probe.record_count {
                     Some(0) => None,
-                    Some(recognized_sessions) if session_records as u64 >= recognized_sessions => {
+                    Some(recognized_sessions)
+                        if session_records.len() as u64 >= recognized_sessions =>
+                    {
                         None
                     }
                     Some(recognized_sessions) => Some(ArchiveGap {
                         harness_id: probe.id.clone(),
                         display_name: probe.display_name.clone(),
                         recognized_sessions: Some(recognized_sessions),
-                        session_records,
+                        session_records: session_records.len(),
                     }),
                     // An existing single-file store whose schema/read failed
                     // is still not consumable by `collect`; keep its count
                     // honest rather than inventing a zero.
                     None if matches!(probe.state, ProbeState::FileTarget)
-                        && session_records == 0 =>
+                        && session_records.is_empty() =>
                     {
                         Some(ArchiveGap {
                             harness_id: probe.id.clone(),
                             display_name: probe.display_name.clone(),
                             recognized_sessions: None,
-                            session_records,
+                            session_records: session_records.len(),
                         })
                     }
                     None => None,
@@ -915,6 +918,170 @@ pub fn scan_with_registry_and_machine(
 }
 
 fn probe_harness(
+    config: &Config,
+    h: &RegistryHarness,
+    platform: &str,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    if h.source_roots.is_empty() {
+        return probe_harness_single(config, h, platform, machine, report);
+    }
+
+    let mut subprobes = Vec::new();
+    let mut total = ScanReport::default();
+    let canonical_override = config.explicit_harness_root(&h.id).is_some();
+    let root_keys: Vec<_> = h
+        .source_roots
+        .iter()
+        .map(|root| format!("{}:{}", h.id, root.id))
+        .collect();
+    let has_all_root_overrides = root_keys
+        .iter()
+        .all(|key| config.explicit_harness_root(key).is_some());
+    if canonical_override && !has_all_root_overrides {
+        return HarnessProbe {
+            id: h.id.clone(),
+            display_name: h.display_name.clone(),
+            root: None,
+            confidence: Confidence::Unascertained,
+            state: ProbeState::Indeterminate,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: "a canonical harness_roots override is ambiguous across multiple source roots; declare every root with a quoted harness_roots key `<harness>:<source-root>`".to_string(),
+        };
+    }
+    for root in &h.source_roots {
+        let Some(cell) = root.paths.cell_for(platform) else {
+            continue;
+        };
+        let mut one = h.clone();
+        one.paths = root.paths.clone();
+        one.source_roots.clear();
+        let mut root_config = config.clone();
+        if has_all_root_overrides {
+            root_config.harness_roots.remove(&h.id);
+        }
+        // Partial per-root overrides are useful when the remaining roots
+        // should use their registered defaults. A canonical override is
+        // rejected above unless every root has an explicit replacement.
+        if let Some(path) = config.explicit_harness_root(&format!("{}:{}", h.id, root.id)) {
+            root_config.harness_roots.remove(&h.id);
+            root_config
+                .harness_roots
+                .insert(h.id.clone(), path.to_string());
+        }
+        let mut local = ScanReport::default();
+        let probe = probe_harness_single(&root_config, &one, platform, machine, &mut local);
+        for record in &mut local.records {
+            record.provenance = root.provenance.clone();
+        }
+        total.records.extend(local.records);
+        total.missing_roots.extend(local.missing_roots);
+        total.indeterminate_roots.extend(local.indeterminate_roots);
+        // Cells without a supported source format are treated the same way as
+        // any other declared root, including their honest unknown state.
+        let _ = cell;
+        subprobes.push(probe);
+    }
+    let any_unknown = subprobes.iter().any(HarnessProbe::not_probed_p)
+        || subprobes
+            .iter()
+            .any(|p| p.state == ProbeState::Indeterminate);
+    let any_scanned = subprobes.iter().any(HarnessProbe::installed_p);
+    let all_missing =
+        !subprobes.is_empty() && subprobes.iter().all(|p| p.state == ProbeState::Missing);
+    let unique_records: std::collections::BTreeSet<_> = total
+        .records
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect();
+    let known_count = unique_records.len() as u64;
+    // Missing cells stay unknown through aggregation; they are never filled
+    // with a semantic zero.
+    let unreadable = subprobes
+        .iter()
+        .try_fold(0u64, |sum, probe| sum.checked_add(probe.unreadable_count?));
+    let unreadable_entries = subprobes.iter().try_fold(0u64, |sum, probe| {
+        sum.checked_add(probe.unreadable_entry_count?)
+    });
+    let counts_complete = !subprobes.is_empty()
+        && subprobes.iter().all(|p| p.record_count.is_some())
+        && unreadable.is_some()
+        && unreadable_entries.is_some();
+    let bytes_complete = !subprobes.is_empty() && subprobes.iter().all(|p| p.bytes.is_some());
+    let confidence = subprobes
+        .iter()
+        .map(|p| p.confidence)
+        // A combined harness can claim no stronger evidence than its weakest
+        // included source root.
+        .max_by_key(|c| match c {
+            Confidence::Confirmed => 0,
+            Confidence::OfficialDocs => 1,
+            Confidence::Measured => 2,
+            Confidence::CommunityClaim => 3,
+            Confidence::Unascertained => 4,
+        })
+        .unwrap_or(Confidence::Unascertained);
+    let state = if any_unknown {
+        ProbeState::Indeterminate
+    } else if all_missing {
+        ProbeState::Missing
+    } else if any_scanned {
+        ProbeState::Scanned
+    } else {
+        ProbeState::SkipWrongPlatform
+    };
+    let roots: Vec<_> = subprobes.iter().filter_map(|p| p.root.clone()).collect();
+    report.records.extend(total.records);
+    report.missing_roots.extend(total.missing_roots);
+    report.indeterminate_roots.extend(total.indeterminate_roots);
+    HarnessProbe {
+        id: h.id.clone(),
+        display_name: h.display_name.clone(),
+        root: roots.first().cloned(),
+        confidence,
+        state,
+        record_count: (!any_unknown && counts_complete).then_some(known_count),
+        // An unreadable source root has no native id to deduplicate against
+        // the other roots, so candidate totals remain unknown in that case.
+        candidate_count: (!any_unknown
+            && counts_complete
+            && unreadable == Some(0)
+            && unreadable_entries == Some(0))
+        .then_some(known_count),
+        unreadable_count: (!any_unknown && counts_complete)
+            .then_some(unreadable)
+            .flatten(),
+        unreadable_entry_count: (!any_unknown && counts_complete)
+            .then_some(unreadable_entries)
+            .flatten(),
+        earliest: subprobes.iter().filter_map(|p| p.earliest).min(),
+        latest: subprobes.iter().filter_map(|p| p.latest).max(),
+        bytes: (!any_unknown && bytes_complete)
+            .then(|| subprobes.iter().map(|p| p.bytes.unwrap()).sum()),
+        recognized_files: subprobes
+            .into_iter()
+            .flat_map(|p| p.recognized_files)
+            .collect(),
+        note: if any_unknown {
+            "one or more declared source roots could not be fully checked; total is unknown"
+                .to_string()
+        } else if all_missing {
+            "all declared source roots are absent".to_string()
+        } else {
+            format!("{} declared source roots checked", roots.len())
+        },
+    }
+}
+
+fn probe_harness_single(
     config: &Config,
     h: &RegistryHarness,
     platform: &str,
@@ -2778,6 +2945,286 @@ mod tests {
             "harnesses": [{"id": "grok", "display_name": "Grok CLI fixture", "paths": paths}]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn multi_root_registry_deduplicates_native_ids_and_keeps_weakest_confidence() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let specs = [
+            (
+                "antigravity-cli",
+                "cli",
+                "measured-locally",
+                &["overlap-uuid", "cli-only"][..],
+            ),
+            (
+                "antigravity-ide",
+                "ide",
+                "source-confirmed",
+                &["overlap-uuid"][..],
+            ),
+            // A declared but unascertained root makes the combined probe
+            // unknown and must keep the weakest confidence, even though the
+            // other roots were scanned successfully.
+            ("antigravity-app", "app", "unascertained", &["app-only"][..]),
+        ];
+        let cell = |template: String, confidence: &str| {
+            serde_json::json!({
+                "template": template,
+                "format": "jsonl",
+                "confidence": confidence,
+                "source": "synthetic fixture",
+                "session_dir": { "pattern": "*", "file": ".system_generated/logs/transcript.jsonl" }
+            })
+        };
+        let mut roots = Vec::new();
+        for (root_name, surface, confidence, sessions) in specs {
+            for session in sessions {
+                let path = sandbox
+                    .home()
+                    .join(".gemini")
+                    .join(root_name)
+                    .join("brain")
+                    .join(session)
+                    .join(".system_generated/logs/transcript.jsonl");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"{\"created_at\":\"2026-10-01T10:00:00Z\",\"type\":\"USER_INPUT\",\"content\":\"synthetic\"}\n").unwrap();
+            }
+            let template = format!("~/.gemini/{root_name}/brain/");
+            let paths = match current_platform() {
+                "macos" => serde_json::json!({"macos": cell(template, confidence)}),
+                "linux" => serde_json::json!({"linux": cell(template, confidence)}),
+                "windows" => serde_json::json!({"windows": cell(template, confidence)}),
+                platform => panic!("unexpected platform: {platform}"),
+            };
+            roots.push(serde_json::json!({
+                "id": root_name,
+                "paths": paths,
+                "provenance": { "surface": [surface] }
+            }));
+        }
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{ "id": "google-antigravity", "display_name": "fixture", "source_roots": roots }]
+        })).unwrap();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        let unique: std::collections::BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(
+            unique.len(),
+            2,
+            "overlapping native UUIDs count once; probe={probe:?}; roots={:?}",
+            report
+                .records
+                .iter()
+                .map(|r| &r.absolute_path)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .filter(|record| record.id.ends_with("overlap-uuid"))
+                .count(),
+            2,
+            "each source observation remains available to collection"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "the skipped root makes the total unknown"
+        );
+        assert_eq!(
+            probe.confidence,
+            Confidence::Unascertained,
+            "the weakest root bounds aggregate confidence"
+        );
+        let mut surfaces: Vec<_> = report
+            .records
+            .iter()
+            .map(|record| record.provenance.surface[0].as_str())
+            .collect();
+        surfaces.sort_unstable();
+        assert_eq!(surfaces, ["cli", "cli", "ide"]);
+    }
+
+    #[test]
+    fn session_dir_supports_root_relative_multilevel_patterns() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.root().join("sessions");
+        let transcript = root.join("workspace-a/session-uuid/transcript.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, b"{}\n").unwrap();
+        let scan = collect_records(
+            &root,
+            HarnessSource::GoogleAntigravity,
+            "synthetic-machine",
+            "jsonl",
+            None,
+            Some(&SessionDirRule {
+                pattern: "*/*".to_string(),
+                file: "transcript.jsonl".to_string(),
+            }),
+        );
+        assert_eq!(scan.records.len(), 1);
+        assert!(scan.records[0].id.ends_with(".session-uuid"));
+        assert_eq!(scan.records[0].absolute_path, transcript);
+    }
+
+    #[test]
+    fn multisource_platform_absence_keeps_all_metrics_unknown() {
+        let platform = current_platform();
+        let other = match platform {
+            "macos" => "linux",
+            "linux" => "windows",
+            "windows" => "macos",
+            _ => unreachable!(),
+        };
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "google-antigravity",
+                "display_name": "fixture",
+                "source_roots": [{
+                    "id": "only-other-platform",
+                    "paths": { (other): {"template": "/unused", "format": "jsonl", "confidence": "measured-locally"} },
+                    "provenance": {"surface": ["app"]}
+                }]
+            }]
+        })).unwrap();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic").unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::SkipWrongPlatform);
+        assert_eq!(probe.record_count, None);
+        assert_eq!(probe.unreadable_count, None);
+        assert_eq!(probe.bytes, None);
+    }
+
+    #[test]
+    fn canonical_override_is_not_reused_for_every_source_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let cell = |id: &str, template: &str, surface: &str| {
+            let one = serde_json::json!({
+                "template": template,
+                "format": "jsonl",
+                "confidence": "measured-locally",
+                "session_dir": {"pattern": "*", "file": "transcript.jsonl"}
+            });
+            let paths = match current_platform() {
+                "macos" => serde_json::json!({"macos": one}),
+                "linux" => serde_json::json!({"linux": one}),
+                "windows" => serde_json::json!({"windows": one}),
+                other => panic!("unexpected platform {other}"),
+            };
+            serde_json::json!({"id": id, "paths": paths, "provenance": {"surface": [surface]}})
+        };
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "google-antigravity",
+                "display_name": "fixture",
+                "source_roots": [
+                    cell("cli", "~/cli", "cli"),
+                    cell("app", "~/app", "app")
+                ]
+            }]
+        }))
+        .unwrap();
+        let config = Config {
+            harness_roots: [(
+                "google-antigravity".to_string(),
+                sandbox.home().to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let report = scan_with_registry_and_machine(&config, &registry, "synthetic").unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Indeterminate);
+        assert_eq!(probe.record_count, None);
+        assert!(report.records.is_empty());
+        assert!(probe.note.contains("ambiguous"));
+    }
+
+    #[test]
+    fn partial_per_root_override_keeps_default_for_other_roots() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let cell = |template: &str, surface: &str| {
+            let one = serde_json::json!({
+                "template": template,
+                "format": "jsonl",
+                "confidence": "measured-locally",
+                "session_dir": {"pattern": "*", "file": "transcript.jsonl"}
+            });
+            let paths = match current_platform() {
+                "macos" => serde_json::json!({"macos": one}),
+                "linux" => serde_json::json!({"linux": one}),
+                "windows" => serde_json::json!({"windows": one}),
+                other => panic!("unexpected platform {other}"),
+            };
+            serde_json::json!({"id": surface, "paths": paths, "provenance": {"surface": [surface]}})
+        };
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "google-antigravity",
+                "display_name": "fixture",
+                "source_roots": [cell("~/.gemini/cli/", "cli"), cell("~/.gemini/app/", "app")]
+            }]
+        }))
+        .unwrap();
+        let cli_file = sandbox
+            .home()
+            .join(".gemini/cli/session-cli/transcript.jsonl");
+        let default_app = sandbox
+            .home()
+            .join(".gemini/app/session-default/transcript.jsonl");
+        let override_root = sandbox.home().join("synthetic-override");
+        let override_app = override_root.join("session-app/transcript.jsonl");
+        for path in [&cli_file, &default_app, &override_app] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"{}\n").unwrap();
+        }
+        let config = Config {
+            harness_roots: [(
+                "google-antigravity:app".to_string(),
+                override_root.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let report = scan_with_registry_and_machine(&config, &registry, "synthetic").unwrap();
+        assert_eq!(report.records.len(), 2);
+        assert!(report
+            .records
+            .iter()
+            .any(|row| row.absolute_path == cli_file));
+        assert!(report
+            .records
+            .iter()
+            .any(|row| row.absolute_path == override_app));
+        assert!(!report
+            .records
+            .iter()
+            .any(|row| row.absolute_path == default_app));
     }
 
     #[test]

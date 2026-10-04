@@ -769,6 +769,7 @@ mod tests {
             concat_bytes: sizes.iter().sum(),
             sha256: String::new(),
             shard_sha256: digests.iter().map(|d| d.to_string()).collect(),
+            shard_sequences: (1..=digests.len() as u64).map(Some).collect(),
             shard_bytes: sizes.to_vec(),
             shard_run_duplicates: Vec::new(),
         };

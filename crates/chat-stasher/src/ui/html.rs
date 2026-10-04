@@ -582,6 +582,7 @@ enum Constraint<'a> {
     Machine(&'a str),
     Prefix(&'a str),
     Harnesses(&'a std::collections::BTreeSet<String>),
+    Surface(&'a str),
     Window(&'a crate::selector::TimeWindow),
 }
 
@@ -595,6 +596,9 @@ fn constraints(selector: &Selector) -> Vec<Constraint<'_>> {
     }
     if let Some(h) = &selector.harnesses {
         parts.push(Constraint::Harnesses(h));
+    }
+    if let Some(surface) = &selector.surface {
+        parts.push(Constraint::Surface(surface));
     }
     if let Some(w) = &selector.window {
         parts.push(Constraint::Window(w));
@@ -620,6 +624,7 @@ pub fn describe_selector(selector: &Selector) -> Option<String> {
                     )
                 }
             }
+            Constraint::Surface(surface) => format!("surface `{surface}`"),
             Constraint::Window(w) => w.describe(),
         })
         .collect();
@@ -669,6 +674,9 @@ pub fn selector_cli_flags(selector: &Selector) -> Result<String, String> {
                     "--harness {}",
                     sh_single_quote(&h.iter().cloned().collect::<Vec<_>>().join(","))
                 ));
+            }
+            Constraint::Surface(surface) => {
+                flags.push(format!("--surface {}", sh_single_quote(surface)));
             }
             Constraint::Window(w) => flags.push(window_flags(w)?),
         }
@@ -742,6 +750,17 @@ fn window_flags(w: &crate::selector::TimeWindow) -> Result<String, String> {
 /// or cannot be spelled together; the caller shows the sentence and prints no
 /// command, because a command that almost matches is worse than none.
 pub fn conjoined_flags(launch: &Selector, query: &Selector) -> Result<String, String> {
+    let surface = match (&launch.surface, &query.surface) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(format!(
+                "the launch filter names surface `{a}` and this page's filter names `{b}` — \
+                 no session can match both, so the view is not spellable on one command line"
+            ));
+        }
+        (Some(a), Some(_)) => Some(a.clone()),
+        (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+        (None, None) => None,
+    };
     let machine = match (&launch.machine, &query.machine) {
         (Some(a), Some(b)) if a != b => {
             return Err(format!(
@@ -791,6 +810,7 @@ pub fn conjoined_flags(launch: &Selector, query: &Selector) -> Result<String, St
         (None, None) => None,
     };
     selector_cli_flags(&Selector {
+        surface,
         session_id_prefix,
         machine,
         harnesses,
@@ -1093,6 +1113,7 @@ mod tests {
             session_id_prefix: Some(prefix.into()),
             machine: Some(machine.into()),
             harnesses,
+            surface: None,
             window: Some(crate::selector::TimeWindow {
                 since_unix: Some(1),
                 until_unix: Some(2),
@@ -1232,6 +1253,25 @@ mod tests {
             conjoined_flags(&launch_prefix, &query_prefix).unwrap(),
             "--session '019bf0d-'"
         );
+    }
+
+    #[test]
+    fn reproduce_flags_keep_surface_and_reject_conflicting_surfaces() {
+        let query = Selector {
+            surface: Some("app".into()),
+            ..Default::default()
+        };
+        assert_eq!(selector_cli_flags(&query).unwrap(), "--surface 'app'");
+        assert_eq!(
+            conjoined_flags(&Selector::default(), &query).unwrap(),
+            "--surface 'app'"
+        );
+        let launch = Selector {
+            surface: Some("cli".into()),
+            ..Default::default()
+        };
+        let error = conjoined_flags(&launch, &query).unwrap_err();
+        assert!(error.contains("cli") && error.contains("app"), "{error}");
     }
 
     /// Filters that cannot hold at once are reported, never approximated: the

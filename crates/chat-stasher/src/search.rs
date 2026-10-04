@@ -140,6 +140,7 @@ pub struct SessionHit {
     pub title: SessionLabel,
     /// Capture-time provenance and the latest supplemental attribution.
     pub provenance: Option<ProjectProvenance>,
+    pub dimensions: crate::provenance::SessionProvenance,
     /// W219 · The comparable account keys this session's own records carry, from
     /// its activity-index row. Empty means no comparable key was recorded — an
     /// unknown account, or an index written before the field existed — which is
@@ -745,6 +746,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "archive_time_unix": h.archive_time_unix,
                 "first_unix": time_state(h.first_unix, h.time_why.as_deref(), &h.time_source),
                 "last_unix": time_state(h.last_unix, h.time_why.as_deref(), &h.time_source),
+                "dimensions": h.dimensions,
             });
             if let Some(provenance) = &h.provenance {
                 hit["provenance"] = serde_json::json!(provenance);
@@ -767,6 +769,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "dimension": match u.dimension {
                     UnplacedBy::Time => "time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::Surface => "surface",
                     UnplacedBy::NoContent => "no_content",
                 },
                 "why": u.why,
@@ -842,6 +845,7 @@ struct IndexedTime {
     /// see [`SessionLabel::LegacyIndex`]).
     title: Option<SessionTitle>,
     provenance: Option<ProjectProvenance>,
+    dimensions: crate::provenance::SessionProvenance,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
@@ -865,6 +869,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     let line_count = row.line_count;
     let title = row.title.clone();
     let provenance = row.provenance.clone();
+    let dimensions = row.dimensions.clone();
     match (row.first_unix, row.last_unix, why) {
         (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
             first_unix: None,
@@ -874,6 +879,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: ActivityTimeSource::NoConversationContent,
             title,
             provenance,
+            dimensions: dimensions.clone(),
         },
         // Bounds that are only part of the span: carried through as measured,
         // with the partiality kept on the source so no consumer answers
@@ -887,6 +893,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 source: row.time_source.clone(),
                 title,
                 provenance,
+                dimensions: dimensions.clone(),
             }
         }
         (Some(first), Some(last), _) => IndexedTime {
@@ -897,6 +904,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: row.time_source.clone(),
             title,
             provenance,
+            dimensions: dimensions.clone(),
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
@@ -906,6 +914,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: ActivityTimeSource::Unknown { why },
             title,
             provenance,
+            dimensions: dimensions.clone(),
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
@@ -917,6 +926,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             },
             title,
             provenance,
+            dimensions,
         },
     }
 }
@@ -1559,6 +1569,7 @@ pub fn search_sessions(
                     TimeBounds::Complete
                 },
                 time_why: time_why.as_deref(),
+                surfaces: indexed.map(|row| row.dimensions.surface.as_slice()),
             };
             match selector.select(&meta) {
                 Verdict::Selected => report.hits.push(SessionHit {
@@ -1580,6 +1591,12 @@ pub fn search_sessions(
                     time_source,
                     title,
                     provenance,
+                    // Empty means no recorded dimensions; selector evaluation
+                    // above preserves that as Unevaluated under a surface filter.
+                    dimensions: indexed
+                        .map_or_else(crate::provenance::SessionProvenance::default, |row| {
+                            row.dimensions.clone()
+                        }),
                     account_keys,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
@@ -1653,6 +1670,7 @@ mod tests {
             },
             title: SessionLabel::NoLabelRecorded,
             provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
         }
     }
@@ -2141,6 +2159,7 @@ mod tests {
                 time_source: ActivityTimeSource::Exact,
                 title: SessionLabel::NoLabelRecorded,
                 provenance: None,
+                dimensions: Default::default(),
                 account_keys: Vec::new(),
             }],
             unplaced: vec![UnplacedSession {
@@ -2225,6 +2244,7 @@ mod tests {
                         .into(),
                 },
                 provenance: None,
+                dimensions: Default::default(),
                 account_keys: Vec::new(),
             }],
             unplaced: Vec::new(),
@@ -2364,6 +2384,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2391,6 +2412,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2416,6 +2438,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };

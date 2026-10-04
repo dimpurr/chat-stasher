@@ -137,6 +137,18 @@ pub struct ShardFact {
     pub shard_count: usize,
     pub concat_bytes: u64,
     pub concat_sha256: String,
+    /// Exact per-shard identities when every shard has a canonical sequence.
+    /// Older persisted debt records omit this field and remain valid for exact
+    /// aggregate comparisons only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shard_identities: Vec<ShardFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardFingerprint {
+    pub sequence: u64,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 /// One source's outstanding debt to one destination.
@@ -267,6 +279,24 @@ pub fn archive_facts_from_readback(report: &crate::readback::ReadAllReport) -> A
                     shard_count: session.shard_count,
                     concat_bytes: session.concat_bytes,
                     concat_sha256: session.sha256.clone(),
+                    shard_identities: if session.shard_sequences.len() == session.shard_sha256.len()
+                        && session.shard_sequences.len() == session.shard_bytes.len()
+                        && session.shard_sequences.iter().all(Option::is_some)
+                    {
+                        session
+                            .shard_sequences
+                            .iter()
+                            .zip(&session.shard_bytes)
+                            .zip(&session.shard_sha256)
+                            .map(|((sequence, bytes), sha256)| ShardFingerprint {
+                                sequence: sequence.expect("checked above"),
+                                bytes: *bytes,
+                                sha256: sha256.clone(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 },
             )
         })
@@ -644,12 +674,25 @@ fn stage_prefix_entry(
 /// Observe what the stage currently holds for one session.
 fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
     let dir = store::session_shard_dir(stage, machine, session_id);
-    let shard_count = store::sealed_shard_entries(&dir)?.len();
+    let mut entries = store::sealed_shard_entries(&dir)?;
+    entries.sort_by_key(|(sequence, _)| *sequence);
+    let shard_count = entries.len();
     let concat = store::concat_shards(stage, machine, session_id)?;
     Ok(ShardFact {
         shard_count,
         concat_bytes: concat.len() as u64,
         concat_sha256: sha256_hex(&concat),
+        shard_identities: entries
+            .into_iter()
+            .map(|(sequence, path)| {
+                let bytes = fs::read(path)?;
+                Ok(ShardFingerprint {
+                    sequence,
+                    bytes: bytes.len() as u64,
+                    sha256: sha256_hex(&bytes),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
     })
 }
 
@@ -667,6 +710,7 @@ fn load_local_manifest_facts(stage: &Path, machine: &str) -> Option<BTreeMap<Str
                             shard_count: row.shard_count,
                             concat_bytes: row.concat_bytes,
                             concat_sha256: row.concat_sha256,
+                            shard_identities: Vec::new(),
                         },
                     );
                 }
@@ -736,7 +780,10 @@ fn debt_settled_locally(
     let dir = store::session_shard_dir(stage, machine, &entry.session_id);
     if store::sealed_shard_entries(&dir)?.is_empty() {
         if let Some(facts) = manifest_facts {
-            if facts.get(&entry.session_id) == Some(&entry.shards) {
+            if facts
+                .get(&entry.session_id)
+                .is_some_and(|fact| same_shard_payload(fact, &entry.shards))
+            {
                 return Ok(Some(DebtVerdict::SettledReclaimed));
             }
         }
@@ -763,7 +810,15 @@ fn verify_debt(
     };
     let key = (machine.to_string(), entry.session_id.clone());
     match facts.get(&key) {
-        Some(observed) if *observed == entry.shards => Ok(DebtVerdict::SettledInArchive),
+        Some(observed)
+            if entry.shards.shard_identities.is_empty()
+                && same_shard_payload(observed, &entry.shards) =>
+        {
+            Ok(DebtVerdict::SettledInArchive)
+        }
+        Some(observed) if archive_contains_shards(observed, &entry.shards) => {
+            Ok(DebtVerdict::SettledInArchive)
+        }
         Some(_) => Ok(DebtVerdict::Unverifiable(
             "destination archive holds a different shard set than the cursor claims",
         )),
@@ -771,6 +826,63 @@ fn verify_debt(
             "destination archive does not hold the shard set the cursor claims",
         )),
     }
+}
+
+fn same_shard_payload(left: &ShardFact, right: &ShardFact) -> bool {
+    left.shard_count == right.shard_count
+        && left.concat_bytes == right.concat_bytes
+        && left.concat_sha256 == right.concat_sha256
+}
+
+/// Whether the archive contains every exact sealed shard named by this debt.
+/// This allows an older source-root debt to remain verifiable after a later
+/// push appended additional global shard sequences. Legacy debt without
+/// sequence fingerprints remains exact-aggregate-only.
+fn archive_contains_shards(archive: &ShardFact, debt: &ShardFact) -> bool {
+    if debt.shard_identities.is_empty()
+        || archive.shard_identities.is_empty()
+        || !valid_shard_fact(archive)
+        || !valid_shard_fact(debt)
+    {
+        return false;
+    }
+    for expected in &debt.shard_identities {
+        if !archive
+            .shard_identities
+            .iter()
+            .any(|observed| observed == expected)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn valid_shard_fact(fact: &ShardFact) -> bool {
+    if fact.shard_count != fact.shard_identities.len()
+        || !valid_sha256(&fact.concat_sha256)
+        || fact.shard_identities.is_empty()
+    {
+        return false;
+    }
+    let mut previous = 0;
+    let mut bytes = 0u64;
+    for shard in &fact.shard_identities {
+        if shard.sequence == 0 || shard.sequence <= previous || !valid_sha256(&shard.sha256) {
+            return false;
+        }
+        previous = shard.sequence;
+        let Some(total) = bytes.checked_add(shard.bytes) else {
+            return false;
+        };
+        bytes = total;
+    }
+    bytes == fact.concat_bytes
+        && (fact.shard_count != 1 || fact.concat_sha256 == fact.shard_identities[0].sha256)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Metadata-only result of one collected source. The source path is represented
@@ -1082,6 +1194,11 @@ pub fn collect_scan_report(
         // the source yields nothing here and the full read happens as before.
         let old = match stored.as_ref() {
             Some(entry) => Some(entry.cursor.clone()),
+            // One native UUID may appear in multiple source roots. Without a
+            // persisted cursor for this exact scanned source, a matching
+            // stage prefix cannot establish whether it is a replay or a new
+            // repeated turn; conservatively capture measured provenance rows.
+            None if !record.provenance.is_empty() => None,
             None => stage_prefix_entry(&record, stage, machine)?,
         };
         // The cursor is still handed down so the outcome can report this as a
@@ -2333,4 +2450,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod shard_fact_tests {
+    use super::*;
+
+    fn fact(sequence: u64, body: &[u8]) -> ShardFact {
+        ShardFact {
+            shard_count: 1,
+            concat_bytes: body.len() as u64,
+            concat_sha256: sha256_hex(body),
+            shard_identities: vec![ShardFingerprint {
+                sequence,
+                bytes: body.len() as u64,
+                sha256: sha256_hex(body),
+            }],
+        }
+    }
+
+    #[test]
+    fn subset_proof_rejects_inconsistent_aggregate_fields() {
+        let archive = fact(1, b"record\n");
+        let mut debt = fact(1, b"record\n");
+        debt.concat_bytes += 10;
+        assert!(!archive_contains_shards(&archive, &debt));
+
+        let mut debt = fact(1, b"record\n");
+        debt.shard_identities[0].sha256 = "bad".into();
+        assert!(!archive_contains_shards(&archive, &debt));
+
+        let mut archive = fact(1, b"record\n");
+        archive
+            .shard_identities
+            .push(archive.shard_identities[0].clone());
+        archive.shard_count += 1;
+        assert!(!archive_contains_shards(&archive, &fact(1, b"record\n")));
+
+        assert!(!archive_contains_shards(
+            &fact(2, b"record\n"),
+            &fact(1, b"record\n")
+        ));
+        let mut archive = fact(1, b"record\n");
+        archive.shard_identities[0].sha256 = sha256_hex(b"other\n");
+        assert!(!archive_contains_shards(&archive, &fact(1, b"record\n")));
+    }
 }

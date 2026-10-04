@@ -11,6 +11,15 @@
 | Gemini CLI | macOS | `~/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
 | Gemini CLI | Linux | `$HOME/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
 | Gemini CLI | Windows | `%USERPROFILE%\.gemini\tmp\<projectId>\chats\` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
+| Google Antigravity (antigravity-cli) | macOS | `~/.gemini/antigravity-cli/brain/` | jsonl | measured-locally | verified end-to-end (2026-10-03) | - |
+| Google Antigravity (antigravity-cli) | Linux | `$HOME/.gemini/antigravity-cli/brain/` | jsonl | unascertained | not supported | - |
+| Google Antigravity (antigravity-cli) | Windows | `%USERPROFILE%\.gemini\antigravity-cli\brain\` | jsonl | unascertained | not supported | - |
+| Google Antigravity (antigravity-ide) | macOS | `~/.gemini/antigravity-ide/brain/` | jsonl | measured-locally | verified end-to-end (2026-10-03) | - |
+| Google Antigravity (antigravity-ide) | Linux | `$HOME/.gemini/antigravity-ide/brain/` | jsonl | unascertained | not supported | - |
+| Google Antigravity (antigravity-ide) | Windows | `%USERPROFILE%\.gemini\antigravity-ide\brain\` | jsonl | unascertained | not supported | - |
+| Google Antigravity (antigravity) | macOS | `~/.gemini/antigravity/brain/` | jsonl | measured-locally | verified end-to-end (2026-10-03) | - |
+| Google Antigravity (antigravity) | Linux | `$HOME/.gemini/antigravity/brain/` | jsonl | unascertained | not supported | - |
+| Google Antigravity (antigravity) | Windows | `%USERPROFILE%\.gemini\antigravity\brain\` | jsonl | unascertained | not supported | - |
 | opencode | macOS | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
 | opencode | Linux | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
 | opencode | Windows | `$XDG_DATA_HOME/opencode/opencode.db` | sqlite | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/anomalyco/opencode/v1.18.4/packages/core/src/database/database.ts |
@@ -64,6 +73,7 @@
 | Local | Claude Code | 2026-09-25 | high | on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear; the drive-letter and backslash sanitization of short paths is still unmeasured |
 | Local | OpenAI Codex CLI | 2026-09-25 | normal | - |
 | Local | Gemini CLI | 2026-09-25 | normal | the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often |
+| Local | Google Antigravity | 2026-10-03 | normal | - |
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
 | Local | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
 | Local | Cursor | 2026-09-25 | normal | - |

@@ -673,6 +673,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("claude-code", "jsonl"),
     ("codex", "jsonl"),
     ("gemini-cli", "json"),
+    ("google-antigravity", "jsonl"),
     ("opencode", FORMAT_SQLITE),
     ("openclaw", FORMAT_SQLITE),
     ("cursor", FORMAT_SQLITE),
@@ -2897,13 +2898,23 @@ mod tests {
                 .iter()
                 .find(|entry| entry["id"].as_str() == Some(*harness))
                 .map(|entry| {
-                    entry["paths"]
-                        .as_object()
-                        .expect("a harness lists platform cells")
-                        .values()
-                        .filter_map(|cell| cell["format"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    let mut formats: Vec<String> = Vec::new();
+                    let mut add_paths = |paths: &serde_json::Value| {
+                        if let Some(cells) = paths.as_object() {
+                            formats.extend(
+                                cells
+                                    .values()
+                                    .filter_map(|cell| cell["format"].as_str().map(str::to_owned)),
+                            );
+                        }
+                    };
+                    add_paths(&entry["paths"]);
+                    if let Some(roots) = entry["source_roots"].as_array() {
+                        for root in roots {
+                            add_paths(&root["paths"]);
+                        }
+                    }
+                    formats.join(" ")
                 })
                 .expect("the harness is in the registry");
             assert!(

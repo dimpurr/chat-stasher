@@ -246,7 +246,9 @@ def default_root() -> str:
 REJECTED_STATIC_DATE = date(1970, 1, 1)
 
 
-def validated_verified(owner: str, value: Any) -> dict[str, Any] | None:
+def validated_verified(
+    owner: str, value: Any, *, allow_platform: bool = False
+) -> dict[str, Any] | None:
     """Normalize a `verified` / `lastVerified` record, or None when absent.
 
     All three fields are checked here so both loaders stay interchangeable:
@@ -279,7 +281,13 @@ def validated_verified(owner: str, value: Any) -> dict[str, Any] | None:
     version = value.get("version")
     if version is not None and not isinstance(version, str):
         raise SupportMatrixError(f"{owner}: `verified.version` must be a string or absent")
-    return {"date": d, "version": version, "scope": scope}
+    platform = value.get("platform")
+    if platform is not None:
+        if not allow_platform or platform not in OS_ORDER:
+            raise SupportMatrixError(
+                f"{owner}: `verified.platform` must be one of {OS_ORDER} or absent"
+            )
+    return {"date": d, "version": version, "scope": scope, "platform": platform}
 
 
 def validated_dev_priority(owner: str, value: Any) -> str | None:
@@ -328,7 +336,7 @@ def load_harnesses(root: str) -> list[dict[str, Any]]:
         # The editorial overlay is normalized in place: validated_* return
         # None for "absent", which the renderers render as ABSENT rather than
         # as a guess, and raise on anything malformed.
-        h["verified"] = validated_verified(owner, h.get("verified"))
+        h["verified"] = validated_verified(owner, h.get("verified"), allow_platform=True)
         h["dev_priority"] = validated_dev_priority(owner, h.get("dev_priority"))
         h["known_issue"] = validated_known_issue(owner, h.get("known_issue"))
         out.append(h)
@@ -559,8 +567,16 @@ def harness_verified(h: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def cell_status(cell: dict[str, Any] | None, verified: dict[str, Any] | None) -> str:
-    if verified is not None:
+def cell_status(
+    cell: dict[str, Any] | None,
+    verified: dict[str, Any] | None,
+    platform: str | None = None,
+) -> str:
+    if (
+        cell is not None
+        and verified is not None
+        and verified.get("platform") in (None, platform)
+    ):
         return f"{STATUS_VERIFIED} ({verified['date']})"
     if cell is None:
         return STATUS_UNSUPPORTED
@@ -588,16 +604,28 @@ def status_rank(status: str) -> int:
 
 def harness_status(h: dict[str, Any]) -> str:
     verified = harness_verified(h)
-    if verified is not None:
+    if verified is not None and verified.get("platform") is None:
         return f"{STATUS_VERIFIED} ({verified['date']})"
-    paths = h.get("paths") or {}
-    best = STATUS_UNSUPPORTED
-    for os_name in OS_ORDER:
-        cell = paths.get(os_name)
-        st = cell_status(cell, None)
-        if status_rank(st) > status_rank(best):
-            best = st
-    return best
+    roots = harness_root_entries(h)
+    # For one OS, all roots are required and the weakest root decides. Across
+    # OSes, any supported platform keeps the harness available, as before.
+    by_os = [
+        min(
+            (cell_status(paths.get(os_name), verified, os_name) for _, paths in roots),
+            key=status_rank,
+            default=STATUS_UNSUPPORTED,
+        )
+        for os_name in OS_ORDER
+    ]
+    return max(by_os, key=status_rank, default=STATUS_UNSUPPORTED)
+
+
+def harness_root_entries(h: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Return each measured source root independently; never flatten roots."""
+    roots = h.get("source_roots") or []
+    if roots:
+        return [(str(root.get("id") or "source"), root.get("paths") or {}) for root in roots]
+    return [("", h.get("paths") or {})]
 
 
 def web_status(p: dict[str, Any]) -> str:
@@ -734,29 +762,30 @@ def render_full(
     for h in harnesses:
         name = h.get("display_name") or h["id"]
         verified = harness_verified(h)
-        paths = h.get("paths") or {}
         ref = (h.get("reference") or {}).get("source_url", "")
-        for os_name in OS_ORDER:
-            cell = paths.get(os_name)
-            status = cell_status(cell, verified)
-            if cell is None:
+        for root_name, paths in harness_root_entries(h):
+            for os_name in OS_ORDER:
+                cell = paths.get(os_name)
+                status = cell_status(cell, verified, os_name)
+                label = name if not root_name else f"{name} ({root_name})"
+                if cell is None:
+                    out.append(
+                        f"| {esc(label)} | {OS_LABEL[os_name]} | {ABSENT} | {ABSENT} | {ABSENT} "
+                        f"| {esc(status)} | {ABSENT} |"
+                    )
+                    continue
+                source = first_url(cell.get("source", "")) or first_url(ref)
                 out.append(
-                    f"| {esc(name)} | {OS_LABEL[os_name]} | {ABSENT} | {ABSENT} | {ABSENT} "
-                    f"| {esc(status)} | {ABSENT} |"
+                    "| {name} | {os} | {template} | {fmt} | {conf} | {status} | {src} |".format(
+                        name=esc(label),
+                        os=OS_LABEL[os_name],
+                        template=code(cell.get("template", "")),
+                        fmt=esc(cell.get("format", ABSENT) or ABSENT),
+                        conf=esc(cell.get("confidence", ABSENT) or ABSENT),
+                        status=esc(status),
+                        src=esc(source or ABSENT),
+                    )
                 )
-                continue
-            source = first_url(cell.get("source", "")) or first_url(ref)
-            out.append(
-                "| {name} | {os} | {template} | {fmt} | {conf} | {status} | {src} |".format(
-                    name=esc(name),
-                    os=OS_LABEL[os_name],
-                    template=code(cell.get("template", "")),
-                    fmt=esc(cell.get("format", ABSENT) or ABSENT),
-                    conf=esc(cell.get("confidence", ABSENT) or ABSENT),
-                    status=esc(status),
-                    src=esc(source or ABSENT),
-                )
-            )
     out.append("")
     out.append("### Web AI chats (browser extension)")
     out.append("")
@@ -1238,6 +1267,32 @@ def selftest() -> int:
             "verified record wins and carries its date",
             harness_status(by_id["delta"]) == f"{STATUS_VERIFIED} (2026-09-15)",
         )
+        probe(
+            "supported macOS remains supported when other OSes are absent",
+            harness_status({"paths": {"macos": {"confidence": "source-confirmed"}}})
+            == STATUS_SUPPORTED,
+        )
+        probe(
+            "a multi-root OS summary keeps the weakest root",
+            harness_status({
+                "source_roots": [
+                    {"id": "one", "paths": {"macos": {"confidence": "source-confirmed"}}},
+                    {"id": "two", "paths": {"macos": {"confidence": "unascertained"}}},
+                ]
+            }) == STATUS_UNSUPPORTED,
+        )
+        platform_verified = {
+            "date": "2026-09-15",
+            "scope": "synthetic macOS-only verification",
+            "platform": "macos",
+        }
+        probe(
+            "platform verification is limited to its declared OS",
+            cell_status({"confidence": "source-confirmed"}, platform_verified, "macos")
+            == f"{STATUS_VERIFIED} (2026-09-15)"
+            and cell_status({"confidence": "source-confirmed"}, platform_verified, "linux")
+            == STATUS_SUPPORTED,
+        )
         web = {p["id"]: p for p in platforms}
         probe(
             "a platform with a recorded verification outranks its channel and credibility",
@@ -1269,6 +1324,7 @@ def selftest() -> int:
                 "date": "2026-09-15",
                 "version": "1.2.3",
                 "scope": "one real conversation on a real page",
+                "platform": None,
             },
         )
         probe(

@@ -76,6 +76,7 @@ fn fact_of(stage: &Path, session_id: &str) -> ShardFact {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect(),
+        shard_identities: Vec::new(),
     }
 }
 
@@ -225,6 +226,7 @@ fn cursor_the_archive_contradicts_is_reread() {
             shard_count: 1,
             concat_bytes: 999,
             concat_sha256: "not-the-digest-the-cursor-claims".into(),
+            shard_identities: Vec::new(),
         },
     );
 

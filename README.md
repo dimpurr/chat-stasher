@@ -168,6 +168,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Claude Code | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | OpenAI Codex CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
+| Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | OpenClaw | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
