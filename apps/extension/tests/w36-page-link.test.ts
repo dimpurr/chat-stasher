@@ -48,6 +48,13 @@ describe('W36 · a stale page link is a named fact, and a quiet one is not a fac
     // A raw string is also a shape a rejection can carry.
     expect(isInvalidatedContextError('Uncaught Error: Extension context invalidated.')).toBe(true);
 
+    // A cross-realm Error does not share this realm's Error prototype, but its
+    // ordinary string message still names the same failure.
+    expect(isInvalidatedContextError({
+      name: 'Error',
+      message: 'Extension context invalidated.',
+    })).toBe(true);
+
     // 🔴 The ordinary case, which must stay quiet.
     expect(isInvalidatedContextError(
       new Error('Could not establish connection. Receiving end does not exist.'),
@@ -57,6 +64,16 @@ describe('W36 · a stale page link is a named fact, and a quiet one is not a fac
     expect(isInvalidatedContextError(undefined)).toBe(false);
     expect(isInvalidatedContextError(null)).toBe(false);
     expect(isInvalidatedContextError({})).toBe(false);
+    expect(isInvalidatedContextError({ message: 42 })).toBe(false);
+    expect(isInvalidatedContextError({
+      message: { toString: () => 'Extension context invalidated.' },
+    }))
+      .toBe(false);
+
+    const throwingMessage = Object.defineProperty({}, 'message', {
+      get() { throw new Error('hostile getter'); },
+    });
+    expect(isInvalidatedContextError(throwingMessage)).toBe(false);
   });
 
   it('says it once, and only for a stale link', () => {
@@ -66,10 +83,14 @@ describe('W36 · a stale page link is a named fact, and a quiet one is not a fac
     // A sleeping worker, twice: nothing is said.
     expect(gate(new Error('Could not establish connection. Receiving end does not exist.'))).toBe(false);
     expect(gate(new Error('Could not establish connection. Receiving end does not exist.'))).toBe(false);
+    expect(gate({ message: 42 })).toBe(false);
+    expect(gate(Object.defineProperty({}, 'message', {
+      get() { throw new Error('hostile getter'); },
+    }))).toBe(false);
     expect(warn).not.toHaveBeenCalled();
 
     // The stale link: said, with the fixed metadata-only line.
-    expect(gate(invalidated())).toBe(true);
+    expect(gate({ name: 'Error', message: 'Extension context invalidated.' })).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(STALE_PAGE_LINK_WARNING);
 

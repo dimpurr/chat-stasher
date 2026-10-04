@@ -71,12 +71,18 @@ export const STALE_PAGE_LINK_WARNING =
  */
 export function isInvalidatedContextError(error: unknown): boolean {
   if (error === null || error === undefined) return false;
-  const message = typeof error === 'string'
-    ? error
-    : typeof (error as { message?: unknown }).message === 'string'
-      ? String((error as { message?: unknown }).message)
-      : '';
-  return message.includes(INVALIDATED_CONTEXT_FRAGMENT);
+  if (typeof error === 'string') return error.includes(INVALIDATED_CONTEXT_FRAGMENT);
+
+  let message: unknown;
+  try {
+    if (typeof error !== 'object' && typeof error !== 'function') return false;
+    message = (error as { message?: unknown }).message;
+  } catch {
+    // Rejection values are untrusted; an accessor must not break the page's
+    // delivery path or consume the one-warning gate.
+    return false;
+  }
+  return typeof message === 'string' && message.includes(INVALIDATED_CONTEXT_FRAGMENT);
 }
 
 /**
