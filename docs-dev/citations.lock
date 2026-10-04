@@ -902,7 +902,7 @@ crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
 crates/chat-stasher/src/orphans.rs:327  3a21d2f444c5  lines=1
   <- docs-dev/orphan-packs.md:65  :: fn verify_unindexed(
 crates/chat-stasher/src/orphans.rs:358-387  08abb9e9f7b4  lines=30
-  <- docs-dev/orphan-packs.md:301  :: /// A test-only rendezvous, for the one window an outside p…
+  <- docs-dev/orphan-packs.md:307  :: /// A test-only rendezvous, for the one window an outside p…
 crates/chat-stasher/src/orphans.rs:458  1da6da7eb8e8  lines=1
   <- docs-dev/orphan-packs.md:94  :: pub fn index_adopting<S: Open>(
 crates/chat-stasher/src/orphans.rs:480-494  db8f4c9c1759  lines=15
