@@ -95,6 +95,17 @@ const [A, B, C] = SCOPES;
 const CURSOR_KEY = 'cs_backfill_cursor_v1';
 const idKey = (scope: string): string => `${PLATFORM}\0${scope}`;
 
+/**
+ * 🔴 Machine-load headroom for the compute-bound cases below. Each drives
+ *    hundreds of real storage reads through the shipped store, so on a loaded
+ *    runner the 5 s default measures the machine rather than the rotation — the
+ *    exact failure W223 sized the wake counts against, which the later session
+ *    mirror made heavier. The seeded streams, every assertion and what each wake
+ *    does are unchanged; the timeout only stops a busy runner from deciding the
+ *    verdict. Same arrangement as tests/w18-state-split.test.ts (W88).
+ */
+const LOAD_TIMEOUT_MS = 60_000;
+
 interface TargetRow { platform: string; origin: string; scope: string }
 const chatgpt = (scope: string): TargetRow => ({ platform: PLATFORM, origin: ORIGIN, scope });
 
@@ -338,7 +349,7 @@ beforeEach(async () => {
 // W86b-A · the capture-before-every-wake table from the review
 // ===========================================================================
 
-describe('W86b-A · a capture between every wake reorders the registry under the cursor', () => {
+describe('W86b-A · a capture between every wake reorders the registry under the cursor', { timeout: LOAD_TIMEOUT_MS }, () => {
   it('🔴 capturing the just-served row before each wake must not reduce the rotation to two scopes', async () => {
     const rows = SCOPES.slice(0, 3).map(chatgpt);
     seedTargets(rows);
@@ -377,7 +388,7 @@ describe('W86b-A · a capture between every wake reorders the registry under the
 // W86b-B · one capture is enough to miss a cycle
 // ===========================================================================
 
-describe('W86b-B · one capture of the row the next wake is owed', () => {
+describe('W86b-B · one capture of the row the next wake is owed', { timeout: LOAD_TIMEOUT_MS }, () => {
   it('🔴 a capture before the fifth wake must not push the owed row behind another', async () => {
     const rows = SCOPES.slice(0, 3).map(chatgpt);
     seedTargets(rows);
@@ -731,7 +742,7 @@ async function propertyRun(
   return { served, ops, registered };
 }
 
-describe('W86b-H / W86c · every row that stays registered is served within n wakes', () => {
+describe('W86b-H / W86c · every row that stays registered is served within n wakes', { timeout: LOAD_TIMEOUT_MS }, () => {
   it('🔴 random newcomer, eviction, move-to-front and re-scope sequences cannot starve a registered row', async () => {
     const rows = SCOPES.map(chatgpt);
     await enableBackfill();
@@ -768,9 +779,11 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
      *
      *    12 wakes for the other two seeds hold the whole loop between ~1.0 s
      *    and ~1.4 s on an idle dev machine (measured across ten isolated
-     *    runs — a fifth to a quarter of vitest's 5000 ms), so the ~2.4× CI
-     *    inflation that failed the run lands near ~3.4 s and still clears
-     *    the budget the old 24-per-seed shape died on.
+     *    runs — a fifth to a quarter of vitest's 5000 ms). The wake counts stay
+     *    at the shortest shape that still checks every window and rolls every
+     *    mutation class, and the case now carries `LOAD_TIMEOUT_MS` headroom, so
+     *    a runner busy enough to inflate the same work past 30 s cannot decide
+     *    the verdict either.
      */
     const STREAMS: ReadonlyArray<readonly [number, number]> = [
       [0, 18],
@@ -845,7 +858,7 @@ describe('W86b-H / W86c · every row that stays registered is served within n wa
 // every stamp — so it takes the wake, `V` was never served, and any window of
 // `n` fails. Under the fix, `V` must be served within every `n` real-work wakes.
 
-describe('W86c §1 · brand-new scopes cannot jump the queue', () => {
+describe('W86c §1 · brand-new scopes cannot jump the queue', { timeout: LOAD_TIMEOUT_MS }, () => {
   it('🔴 a fresh scope before every wake leaves V (registered throughout) unserved on the break', async () => {
     const n = CAP; // the registry cap, and the "n wakes" bound
     const V = 'acct-w86c-V';
