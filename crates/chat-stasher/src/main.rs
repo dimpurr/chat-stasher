@@ -443,8 +443,8 @@ enum Command {
         session: Option<String>,
         /// Cross-machine merge, cumulative: for every hostname, every snapshot
         /// (`sessions/<machine>/…`), each session's shards sequence-joined and
-        /// hashed. Newest copies per shard sequence win; older missing sequences
-        /// remain included. Prints ids, counts, lengths, and sha256 only.
+        /// hashed. Newest copies per shard path win; older sequences absent from
+        /// newer snapshots remain included. Prints ids, counts, lengths, and sha256 only.
         #[arg(long)]
         all_machines: bool,
         /// Print full session ids in per-session rows (default: privacy-safe short ids).

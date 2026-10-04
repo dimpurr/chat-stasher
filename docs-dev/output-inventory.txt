@@ -600,8 +600,8 @@ help_doc     crates/chat-stasher/src/main.rs:440  every snapshot of `--machine`,
 help_doc     crates/chat-stasher/src/main.rs:441  out of the stage is still readable. Ignored by `--all-machines`.
 help_doc     crates/chat-stasher/src/main.rs:444  Cross-machine merge, cumulative: for every hostname, every snapshot
 help_doc     crates/chat-stasher/src/main.rs:445  (`sessions/<machine>/…`), each session's shards sequence-joined and
-help_doc     crates/chat-stasher/src/main.rs:446  hashed. Newest copies per shard sequence win; older missing sequences
-help_doc     crates/chat-stasher/src/main.rs:447  remain included. Prints ids, counts, lengths, and sha256 only.
+help_doc     crates/chat-stasher/src/main.rs:446  hashed. Newest copies per shard path win; older sequences absent from
+help_doc     crates/chat-stasher/src/main.rs:447  newer snapshots remain included. Prints ids, counts, lengths, and sha256 only.
 help_doc     crates/chat-stasher/src/main.rs:450  Print full session ids in per-session rows (default: privacy-safe short ids).
 help_doc     crates/chat-stasher/src/main.rs:453  Show every stored shard. Default reads collapse legacy whole-content
 help_doc     crates/chat-stasher/src/main.rs:454  replays while retaining verified sequence-bound captures, including
