@@ -135,8 +135,10 @@ A hook note names the page's recorded observation and includes the record of
 captures from that platform. If it says the hook is not in effect, reload that
 tab to get a fresh observation, then open a conversation there. Reopen the popup
 to read any current note: a successful hook verification clears the old hook
-note, so no note is not proof that capture succeeded. A capture confirmed from
-that platform in a hook note is evidence the path is working.
+note, so no note is not proof that capture succeeded. A capture confirmation from
+that platform supports the current observation only if its time is at or after
+when that observation began; if the popup does not show enough timing to establish
+this, treat the result as unknown.
 
 A declined-report note is separate: it says a page sent a report that the
 extension did not record, and does not show a recorded observation or capture
