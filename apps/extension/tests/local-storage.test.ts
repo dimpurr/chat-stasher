@@ -34,6 +34,31 @@ describe('localStorageArea', () => {
     expect(localStorageArea()).toBe(chromeLocal);
   });
 
+  it.each([
+    ['missing get', { set: async () => {} }],
+    ['missing set', { get: async () => ({}) }],
+    ['non-callable get', { get: {}, set: async () => {} }],
+    ['non-callable set', { get: async () => ({}), set: false }],
+  ])('falls back to chrome when browser storage has %s', (_case, browserLocal) => {
+    const chromeLocal = storageArea();
+    vi.stubGlobal('browser', { storage: { local: browserLocal } });
+    vi.stubGlobal('chrome', { storage: { local: chromeLocal } });
+
+    expect(localStorageArea()).toBe(chromeLocal);
+  });
+
+  it.each([
+    ['missing get', { set: async () => {} }],
+    ['missing set', { get: async () => ({}) }],
+    ['non-callable get', { get: {}, set: async () => {} }],
+    ['non-callable set', { get: async () => ({}), set: false }],
+  ])('returns null when chrome storage has %s and browser is absent', (_case, chromeLocal) => {
+    vi.stubGlobal('browser', undefined);
+    vi.stubGlobal('chrome', { storage: { local: chromeLocal } });
+
+    expect(localStorageArea()).toBeNull();
+  });
+
   it('returns null when neither global has a storage area', () => {
     vi.stubGlobal('browser', undefined);
     vi.stubGlobal('chrome', undefined);
