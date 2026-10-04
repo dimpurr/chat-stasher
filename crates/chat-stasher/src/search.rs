@@ -142,6 +142,9 @@ pub struct SessionHit {
     pub provenance: Option<ProjectProvenance>,
     /// Collection-time source path class and parent-session reference.
     pub session_provenance: Option<crate::activity::SessionProvenance>,
+    /// Generic 4D provenance retained even when a filter could not place the
+    /// session. An empty value means no dimensions were recorded.
+    pub dimensions: crate::provenance::SessionProvenance,
     /// W219 · The comparable account keys this session's own records carry, from
     /// its activity-index row. Empty means no comparable key was recorded — an
     /// unknown account, or an index written before the field existed — which is
@@ -261,6 +264,9 @@ pub struct UnplacedSession {
     pub time_source: ActivityTimeSource,
     /// Collection-time source path class and parent-session reference.
     pub session_provenance: Option<crate::activity::SessionProvenance>,
+    /// Generic 4D provenance retained even when a filter could not place the
+    /// session. An empty value means no dimensions were recorded.
+    pub dimensions: crate::provenance::SessionProvenance,
 }
 
 impl UnplacedSession {
@@ -749,6 +755,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "archive_time_unix": h.archive_time_unix,
                 "first_unix": time_state(h.first_unix, h.time_why.as_deref(), &h.time_source),
                 "last_unix": time_state(h.last_unix, h.time_why.as_deref(), &h.time_source),
+                "dimensions": h.dimensions,
             });
             if let Some(provenance) = &h.provenance {
                 hit["provenance"] = serde_json::json!(provenance);
@@ -774,6 +781,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                 "dimension": match u.dimension {
                     UnplacedBy::Time => "time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::Surface => "surface",
                     UnplacedBy::NoContent => "no_content",
                 },
                 "why": u.why,
@@ -781,6 +789,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
             if let Some(provenance) = &u.session_provenance {
                 item["session_provenance"] = serde_json::json!(provenance);
             }
+            item["dimensions"] = serde_json::json!(u.dimensions);
             item
         })
         .collect();
@@ -854,6 +863,7 @@ struct IndexedTime {
     title: Option<SessionTitle>,
     provenance: Option<ProjectProvenance>,
     session_provenance: Option<crate::activity::SessionProvenance>,
+    dimensions: crate::provenance::SessionProvenance,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
@@ -878,6 +888,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     let title = row.title.clone();
     let provenance = row.provenance.clone();
     let session_provenance = row.session_provenance.clone();
+    let dimensions = row.dimensions.clone();
     match (row.first_unix, row.last_unix, why) {
         (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
             first_unix: None,
@@ -888,6 +899,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             title,
             provenance,
             session_provenance,
+            dimensions: dimensions.clone(),
         },
         // Bounds that are only part of the span: carried through as measured,
         // with the partiality kept on the source so no consumer answers
@@ -902,6 +914,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 title,
                 provenance,
                 session_provenance,
+                dimensions: dimensions.clone(),
             }
         }
         (Some(first), Some(last), _) => IndexedTime {
@@ -913,6 +926,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             title,
             provenance,
             session_provenance,
+            dimensions: dimensions.clone(),
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
@@ -923,6 +937,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             title,
             provenance,
             session_provenance,
+            dimensions: dimensions.clone(),
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
@@ -935,6 +950,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             title,
             provenance,
             session_provenance,
+            dimensions,
         },
     }
 }
@@ -1577,6 +1593,7 @@ pub fn search_sessions(
                     TimeBounds::Complete
                 },
                 time_why: time_why.as_deref(),
+                surfaces: indexed.map(|row| row.dimensions.surface.as_slice()),
             };
             match selector.select(&meta) {
                 Verdict::Selected => report.hits.push(SessionHit {
@@ -1599,6 +1616,12 @@ pub fn search_sessions(
                     title,
                     provenance,
                     session_provenance: indexed.and_then(|row| row.session_provenance.clone()),
+                    // Empty means no recorded dimensions; selector evaluation
+                    // above preserves that as Unevaluated under a surface filter.
+                    dimensions: indexed
+                        .map_or_else(crate::provenance::SessionProvenance::default, |row| {
+                            row.dimensions.clone()
+                        }),
                     account_keys,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
@@ -1630,6 +1653,10 @@ pub fn search_sessions(
                         line_count,
                         time_source,
                         session_provenance: indexed.and_then(|row| row.session_provenance.clone()),
+                        dimensions: indexed
+                            .map_or_else(crate::provenance::SessionProvenance::default, |row| {
+                                row.dimensions.clone()
+                            }),
                     })
                 }
             }
@@ -1674,6 +1701,7 @@ mod tests {
             title: SessionLabel::NoLabelRecorded,
             provenance: None,
             session_provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
         }
     }
@@ -1707,6 +1735,7 @@ mod tests {
                     why: "no timestamp".into(),
                 },
                 session_provenance: None,
+                dimensions: Default::default(),
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -1768,6 +1797,7 @@ mod tests {
                 line_count: 0,
                 time_source: ActivityTimeSource::NoConversationContent,
                 session_provenance: None,
+                dimensions: Default::default(),
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -1837,6 +1867,7 @@ mod tests {
                     why: "no timestamp".into(),
                 },
                 session_provenance: None,
+                dimensions: Default::default(),
             }],
             not_matched: 100,
             machines_without_index: Vec::new(),
@@ -1900,6 +1931,7 @@ mod tests {
                     why: "no timestamp".into(),
                 },
                 session_provenance: None,
+                dimensions: Default::default(),
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -2026,6 +2058,7 @@ mod tests {
                 why: "no activity index".into(),
             },
             session_provenance: None,
+            dimensions: Default::default(),
         });
         assert!(report.complete(), "still read in full…");
         assert!(!report.answer_complete(), "…but the question is unanswered");
@@ -2127,6 +2160,7 @@ mod tests {
                 why: "no index".into(),
             },
             session_provenance: None,
+            dimensions: Default::default(),
         };
         assert_eq!(u.short_id(), hit("m-1", &u.session_id, 1).short_id());
         assert!(!u.short_id().contains("eacbacc09765"));
@@ -2169,6 +2203,7 @@ mod tests {
                 title: SessionLabel::NoLabelRecorded,
                 provenance: None,
                 session_provenance: None,
+                dimensions: Default::default(),
                 account_keys: Vec::new(),
             }],
             unplaced: vec![UnplacedSession {
@@ -2186,6 +2221,7 @@ mod tests {
                     why: "no activity index".into(),
                 },
                 session_provenance: None,
+                dimensions: Default::default(),
             }],
             not_matched: 1,
             machines_without_index: vec!["m-2".into()],
@@ -2255,6 +2291,7 @@ mod tests {
                 },
                 provenance: None,
                 session_provenance: None,
+                dimensions: Default::default(),
                 account_keys: Vec::new(),
             }],
             unplaced: Vec::new(),
@@ -2310,6 +2347,7 @@ mod tests {
                     why: "no timestamp in fixture".into(),
                 },
                 session_provenance: Some(provenance),
+                dimensions: Default::default(),
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -2452,6 +2490,7 @@ mod tests {
             title: None,
             provenance: None,
             session_provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2480,6 +2519,7 @@ mod tests {
             title: None,
             provenance: None,
             session_provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2506,6 +2546,7 @@ mod tests {
             title: None,
             provenance: None,
             session_provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
             measured_body: None,
         };

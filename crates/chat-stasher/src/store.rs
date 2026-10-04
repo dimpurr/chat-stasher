@@ -253,8 +253,9 @@ pub struct BackupStore {
     /// from (SRCH-1b). `None` is the default and the whole-cache-off case — see
     /// [`BackupStore::with_snapshot_cache`].
     snapshot_cache: Option<std::sync::Arc<crate::snapshot_cache::SnapshotCache>>,
-    /// How this store joins a session's shards: collapse a whole-content replay
-    /// (the default), or hand back every shard. See [`DuplicateShardPolicy`].
+    /// How this store joins a session's shards: collapse unbound byte-identical
+    /// replay shards by default, while retaining exact sequence-bound captured
+    /// duplicates; or hand back every shard. See [`DuplicateShardPolicy`].
     shard_policy: DuplicateShardPolicy,
 }
 
@@ -302,11 +303,8 @@ impl BackupStore {
     /// Set how this store joins a session's shards (default
     /// [`DuplicateShardPolicy::Collapse`]).
     ///
-    /// The opt-out exists because the collapse is a *reader* decision applied to
-    /// bytes that are still, and always will be, on the destination: a whole
-    /// replay that byte-for-byte repeats a session's entire preceding content
-    /// (timestamps and uuids included) is a re-seal, not new conversation, but no
-    /// reader can prove that from the shards alone. Selecting
+    /// The opt-out exists because unbound collapse is a *reader* decision applied
+    /// to bytes that are still, and always will be, on the destination. Selecting
     /// [`DuplicateShardPolicy::KeepAll`] shows every stored shard, so an operator
     /// can see exactly what a collapse dropped. It changes no bytes anywhere.
     pub fn with_shard_policy(mut self, policy: DuplicateShardPolicy) -> Self {
@@ -907,8 +905,8 @@ impl BackupStore {
         Ok((concat, hashes))
     }
 
-    /// Read one session's sealed shards back out of **the newest snapshot that
-    /// holds them**, in global sequence order, as `(concat, [(name, sha256)])`.
+    /// Read one session's sealed shards cumulatively across snapshots, in global
+    /// sequence order, as `(concat, [(name, sha256)])`.
     ///
     /// Unlike [`Self::read_session_readback`] this needs no local stage root:
     /// the dashboard (and `read --session`) addresses a session by
@@ -920,7 +918,8 @@ impl BackupStore {
     /// reading a lost machine's conversation back.
     ///
     /// The search is cumulative over `machine`'s snapshots, newest first
-    /// (ADR-021). It has to be: `reclaim-stage` deletes a session's bodies from
+    /// (ADR-021), keeping newest copies per archive-relative path and retaining
+    /// older sequences absent from later snapshots. `reclaim-stage` deletes a session's bodies from
     /// the stage once every destination has proved it holds them, and every
     /// snapshot taken afterwards therefore holds the session's directory but no
     /// shards. On m3 that is 3162 of 3178 sessions in the newest snapshot, all
@@ -962,54 +961,16 @@ impl BackupStore {
             ));
         };
 
-        // `None` while every snapshot walked so far was readable; `Some(why)` at
-        // the first one that was not. The walk stops there: everything left is
-        // older, and an older copy cannot be shown as the session's current one
-        // while a newer snapshot is unread.
-        let mut unreadable: Option<String> = None;
         let snapshots_held = host_snaps.len();
-        for snap in host_snaps {
-            let snap_id = snap.id.to_hex().as_str().to_string();
-            let short = &snap_id[..8.min(snap_id.len())];
-            let root = match repo.node_from_snapshot_and_path(&snap, "") {
-                Ok(root) => root,
-                Err(e) => {
-                    unreadable = Some(format!("snapshot {short} tree root: {e}"));
-                    break;
-                }
-            };
-            let entries = match repo
-                .ls(&root, &LsOptions::default())
-                .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-            {
-                Ok(entries) => entries,
-                Err(e) => {
-                    unreadable = Some(format!("snapshot {short} tree walk: {e}"));
-                    break;
-                }
-            };
-
-            let shards = session_shard_slots(&entries, machine, session_id);
-            if shards.is_empty() {
-                continue;
-            }
-            let (concat, hashes) = dump_shard_slots(
-                &repo,
-                &entries,
-                &shards,
-                self.body_cache.as_ref(),
-                self.shard_policy,
-            )?;
-            return Ok((concat, hashes));
-        }
-
-        if let Some(why) = unreadable {
-            return Err(anyhow!(
-                "session `{}` cannot be resolved for machine `{machine}`: {why}. That snapshot is \
-                 newer than any that holds a copy, so no copy below it can be shown as the current \
-                 one — this is UNKNOWN, not \"not there\". (exit 3: did not finish)",
-                crate::id::short_session_id(session_id),
-            ));
+        if let Some(result) = dump_cumulative_session(
+            &repo,
+            &host_snaps,
+            machine,
+            session_id,
+            self.body_cache.as_ref(),
+            self.shard_policy,
+        )? {
+            return Ok(result);
         }
         // Reached only when every snapshot of the machine was walked and none
         // held the session — a proof of absence rather than a failure to look.
@@ -1027,8 +988,8 @@ impl BackupStore {
     /// and pays one repository open for it. `export` asks about a whole selected
     /// set, and on a remote backend that difference is the whole command: N
     /// opens is N handshakes, so the batch is not just an optimisation. The two
-    /// paths share [`session_shard_slots`] and [`dump_shard_slots`], which is
-    /// what keeps their bytes identical — the property `export`'s tests pin.
+    /// paths share the cumulative per-sequence reader, which keeps their bytes
+    /// identical — the property `export`'s tests pin.
     ///
     /// A session in `wanted` that no snapshot of its machine holds is
     /// **absent** from the result, never present with zero bytes; the caller
@@ -1039,7 +1000,7 @@ impl BackupStore {
     /// [`Self::read_session_concat`]: `export` writes what `search` found, and
     /// a search that can find a reclaimed session while the export silently
     /// drops it would be a worse inconsistency than the one this fixes. The
-    /// walk stops as soon as every wanted session of a machine has been found.
+    /// Each requested session is joined across every snapshot for its machine.
     pub fn read_selected_sessions(
         &self,
         mk: &MasterKey,
@@ -1056,7 +1017,7 @@ impl BackupStore {
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
 
         for (machine, host_snaps) in crate::readback::snapshots_by_host_newest_first(snaps) {
-            let mut wanted_here: BTreeSet<&str> = wanted
+            let wanted_here: BTreeSet<&str> = wanted
                 .iter()
                 .filter(|(m, _)| m == &machine)
                 .map(|(_, s)| s.as_str())
@@ -1064,39 +1025,16 @@ impl BackupStore {
             if wanted_here.is_empty() {
                 continue;
             }
-            for snap in host_snaps {
-                if wanted_here.is_empty() {
-                    break;
-                }
-                let root = repo
-                    .node_from_snapshot_and_path(&snap, "")
-                    .with_context(|| format!("read snapshot root for machine `{machine}`"))?;
-                let entries = repo
-                    .ls(&root, &LsOptions::default())
-                    .with_context(|| format!("ls snapshot root for machine `{machine}`"))?
-                    .collect::<rustic_core::RusticResult<Vec<_>>>()
-                    .with_context(|| format!("collect snapshot entries for machine `{machine}`"))?;
-                // Newest first: the first snapshot that holds a session's
-                // shards supplies them, and that session is then out of the
-                // wanted set so the older snapshots are not walked for it.
-                let mut resolved = Vec::new();
-                for session_id in &wanted_here {
-                    let shards = session_shard_slots(&entries, &machine, session_id);
-                    if shards.is_empty() {
-                        continue;
-                    }
-                    let (concat, hashes) = dump_shard_slots(
-                        &repo,
-                        &entries,
-                        &shards,
-                        self.body_cache.as_ref(),
-                        self.shard_policy,
-                    )?;
-                    out.insert((machine.clone(), session_id.to_string()), (concat, hashes));
-                    resolved.push(*session_id);
-                }
-                for session_id in resolved {
-                    wanted_here.remove(session_id);
+            for session_id in wanted_here {
+                if let Some(result) = dump_cumulative_session(
+                    &repo,
+                    &host_snaps,
+                    &machine,
+                    session_id,
+                    self.body_cache.as_ref(),
+                    self.shard_policy,
+                )? {
+                    out.insert((machine.clone(), session_id.to_string()), result);
                 }
             }
         }
@@ -1104,39 +1042,114 @@ impl BackupStore {
     }
 }
 
-/// The shards of one session inside `entries`, in global sequence order.
-///
-/// `(sort key, index into `entries`, the shard's real file name on disk)`. This
-/// is the **one** rule that decides which files make up a session, shared by
-/// [`BackupStore::read_session_concat`], [`BackupStore::read_selected_sessions`]
-/// and, through those, `export`; `readback` applies the same rule for its own
-/// bulk reads. One rule is the reason two readers cannot disagree about a
-/// session's bytes.
-///
-/// reason: a non-numeric shard name sorts last (`u64::MAX`) rather than being
-/// dropped — dropping it would silently shorten a session, which is the failure
-/// this repo forbids. Its *name* is reported as it is on disk, never re-derived
-/// from the sort key.
-pub(crate) fn session_shard_slots(
-    entries: &[(PathBuf, rustic_core::repofile::Node)],
+/// Read one session cumulatively across a machine's snapshots. Reclaimed
+/// snapshots may contain only the newest sealed sequence, so retain the newest
+/// copy of each archive-relative shard path while walking every snapshot.
+fn dump_cumulative_session<S: rustic_core::IndexedFull>(
+    repo: &Repository<S>,
+    snapshots: &[SnapshotFile],
     machine: &str,
     session_id: &str,
-) -> Vec<(u64, usize, String)> {
-    let mut shards: Vec<(u64, usize, String)> = Vec::new();
-    for (i, (path, node)) in entries.iter().enumerate() {
-        if node.node_type != NodeType::File {
-            continue;
+    body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
+    policy: DuplicateShardPolicy,
+) -> anyhow::Result<Option<(Vec<u8>, Vec<(String, String)>)>> {
+    let mut held: BTreeMap<(u64, String), (Option<u64>, String, rustic_core::repofile::Node)> =
+        BTreeMap::new();
+    let mut sequence_paths = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    let mut observations = Vec::new();
+    let mut metadata_found = false;
+    for snap in snapshots {
+        let snap_id = snap.id.to_hex().as_str().to_string();
+        let short = &snap_id[..8.min(snap_id.len())];
+        let root = repo
+            .node_from_snapshot_and_path(snap, "")
+            .with_context(|| format!("snapshot {short} tree root"))?;
+        let entries = repo
+            .ls(&root, &LsOptions::default())
+            .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
+            .with_context(|| format!("snapshot {short} tree walk"))?;
+        for (path, node) in entries {
+            if node.node_type != NodeType::File {
+                continue;
+            }
+            if policy.collapses() && crate::readback::is_provenance_path(&path, machine) {
+                if !metadata_found {
+                    let mut bytes = Vec::new();
+                    repo.dump(&node, &mut bytes)
+                        .with_context(|| format!("snapshot {short} provenance metadata"))?;
+                    observations = crate::provenance::parse_observations(&bytes)
+                        .with_context(|| format!("parse snapshot {short} provenance metadata"))?
+                        .into_iter()
+                        .filter(|row| row.dimensions.is_valid() && row.session_id == session_id)
+                        .collect();
+                    metadata_found = true;
+                }
+                continue;
+            }
+            let Some((found_machine, found_session, shard)) =
+                crate::readback::bucket_shard_path(&path)
+            else {
+                continue;
+            };
+            if found_machine != machine || found_session != session_id {
+                continue;
+            }
+            let sequence = parse_shard_seq(&shard);
+            let sort_sequence = sequence.unwrap_or(u64::MAX);
+            let path_id = path.to_string_lossy().into_owned();
+            if let Some(sequence) = sequence {
+                if sequence_paths
+                    .insert(sequence, path_id.clone())
+                    .is_some_and(|previous| previous != path_id)
+                {
+                    ambiguous.insert(sequence);
+                }
+            }
+            held.entry((sort_sequence, path_id))
+                .or_insert((sequence, shard, node));
         }
-        let Some((found_machine, session, shard)) = crate::readback::bucket_shard_path(path) else {
-            continue;
-        };
-        if found_machine != machine || session != session_id {
-            continue;
-        }
-        shards.push((parse_shard_seq(&shard).unwrap_or(u64::MAX), i, shard));
     }
-    shards.sort_by_key(|(seq, idx, _)| (*seq, *idx));
-    shards
+    if held.is_empty() {
+        return Ok(None);
+    }
+    let _scope = declare_session_scope(
+        body_cache,
+        held.values().map(|(_, _, node)| node.meta.size).sum(),
+    );
+    let mut shards = Vec::with_capacity(held.len());
+    for (_, (sequence, name, node)) in held {
+        let mut body = Vec::new();
+        repo.dump(&node, &mut body)
+            .with_context(|| format!("dump shard {name}"))?;
+        let sequence = sequence.filter(|sequence| !ambiguous.contains(sequence));
+        shards.push((sequence, name, body));
+    }
+    let shard_bodies: Vec<_> = shards
+        .iter()
+        .map(|(seq, _, body)| (*seq, body.clone()))
+        .collect();
+    let observed_sequences =
+        crate::provenance::verified_observation_sequences(session_id, &observations, &shard_bodies);
+    let body_only: Vec<_> = shards.iter().map(|(_, _, body)| body.clone()).collect();
+    let duplicates: BTreeSet<_> = if policy.collapses() {
+        duplicate_shard_indices(&body_only).into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut concat = Vec::new();
+    let mut hashes = Vec::new();
+    for (index, (sequence, name, body)) in shards.into_iter().enumerate() {
+        if duplicates.contains(&index)
+            && !sequence.is_some_and(|sequence| observed_sequences.contains(&sequence))
+        {
+            continue;
+        }
+        let digest: [u8; 32] = Sha256::digest(&body).into();
+        concat.extend_from_slice(&body);
+        hashes.push((name, hex_digest(&digest)));
+    }
+    Ok(Some((concat, hashes)))
 }
 
 /// Declare the plaintext size of the session about to be dumped, so ADR-034's
@@ -1156,52 +1169,6 @@ fn declare_session_scope<'a>(
     plaintext_bytes: u64,
 ) -> Option<crate::body_cache::SessionScope<'a>> {
     body_cache.map(|cache| cache.declare_session(plaintext_bytes))
-}
-
-/// Decrypt and concatenate the shards named by [`session_shard_slots`], with one
-/// sha256 per shard.
-///
-/// `S` is the repository's *status*, not its backend: `dump` is only defined for
-/// an [`IndexedFull`](rustic_core::IndexedFull) repository, which is the state
-/// both callers open into.
-fn dump_shard_slots<S: rustic_core::IndexedFull>(
-    repo: &Repository<S>,
-    entries: &[(PathBuf, rustic_core::repofile::Node)],
-    shards: &[(u64, usize, String)],
-    body_cache: Option<&std::sync::Arc<crate::body_cache::BodyCache>>,
-    policy: DuplicateShardPolicy,
-) -> anyhow::Result<(Vec<u8>, Vec<(String, String)>)> {
-    let _scope = declare_session_scope(
-        body_cache,
-        shards
-            .iter()
-            .map(|(_, idx, _)| entries[*idx].1.meta.size)
-            .sum(),
-    );
-    let mut concat = Vec::new();
-    let mut hashes = Vec::new();
-    let mut bodies = Vec::with_capacity(shards.len());
-    for (_, idx, _name) in shards {
-        let mut buf = Vec::new();
-        repo.dump(&entries[*idx].1, &mut buf)
-            .context("dump shard for session content")?;
-        bodies.push(buf);
-    }
-    let duplicates: BTreeSet<_> = if policy.collapses() {
-        duplicate_shard_indices(&bodies).into_iter().collect()
-    } else {
-        BTreeSet::new()
-    };
-    for ((_, _, name), (index, buf)) in shards.iter().zip(bodies.iter().enumerate()) {
-        if duplicates.contains(&index) {
-            continue;
-        }
-        let digest = Sha256::digest(&buf);
-        let digest_key: [u8; 32] = digest.into();
-        concat.extend_from_slice(buf);
-        hashes.push((name.clone(), hex_digest(&digest_key)));
-    }
-    Ok((concat, hashes))
 }
 
 /// sha256 of concatenated source shards on disk (the expected value).

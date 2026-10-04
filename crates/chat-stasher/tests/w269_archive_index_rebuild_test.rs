@@ -227,6 +227,14 @@ fn index_rows(path: &Path) -> BTreeMap<String, serde_json::Value> {
         .collect()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// The whole point of the item: m3 is gone, and its index is recoverable from
 /// the archive next to it — with the times it actually had, and without the
 /// destination gaining a byte.
@@ -342,6 +350,194 @@ fn a_lost_machines_index_rebuilds_from_the_archive_and_leaves_the_destination_al
         repo_before,
         "a read-only rebuild must not change one byte of the destination"
     );
+}
+
+#[test]
+fn archive_only_rebuild_restores_resumed_multishard_surfaces_only_for_bound_bodies() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let machine = "mac";
+    let stage = sandbox.join("stage");
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let cfg = store_config(&repo, &key, sandbox);
+    let mk = MasterKey::new();
+    chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
+
+    let session = "google-antigravity.mac.same-uuid";
+    let shard_one =
+        b"{\"created_at\":\"2026-10-01T10:00:00Z\",\"type\":\"USER_INPUT\",\"content\":\"one\"}\n";
+    let shard_two = b"{\"created_at\":\"2026-10-01T10:00:01Z\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"two\"}\n";
+    let session_dir = stage
+        .join("sessions")
+        .join(machine)
+        .join(session)
+        .join("000");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(session_dir.join("000001.jsonl"), shard_one).unwrap();
+
+    let mut cli = chat_stasher::provenance::SessionProvenance::default();
+    cli.insert_surface("cli");
+    chat_stasher::provenance::append_scan_observation(
+        &stage,
+        machine,
+        session,
+        &cli,
+        1,
+        &sha256_hex(shard_one),
+    )
+    .unwrap();
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+
+    // Model append-only capture over two pushes: reclamation removes the
+    // first body from the local stage, while its old snapshot and provenance
+    // observation remain available for an archive-only cumulative rebuild.
+    chat_stasher::stagereclaim::reclaim_session_body(&stage, machine, session).unwrap();
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(session_dir.join("000002.jsonl"), shard_two).unwrap();
+
+    let mut app = chat_stasher::provenance::SessionProvenance::default();
+    app.insert_surface("app");
+    chat_stasher::provenance::append_scan_observation(
+        &stage,
+        machine,
+        session,
+        &app,
+        1,
+        &sha256_hex(shard_two),
+    )
+    .unwrap();
+
+    let stale = chat_stasher::provenance::ProvenanceObservation {
+        session_id: session.to_string(),
+        dimensions: chat_stasher::provenance::SessionProvenance {
+            surface: vec!["ide".into()],
+            ..Default::default()
+        },
+        body_shard_count: 1,
+        body_sha256: "0".repeat(64),
+        body_shard_sequences: vec![2],
+    };
+    let sidecar = stage.join("meta").join(machine).join("provenance-v1.jsonl");
+    let mut contents = fs::read(&sidecar).unwrap();
+    serde_json::to_writer(&mut contents, &stale).unwrap();
+    contents.push(b'\n');
+    fs::write(sidecar, contents).unwrap();
+
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+    fs::remove_dir_all(&stage).unwrap();
+    write_sandbox_config(sandbox, "mbp-here", &repo, &key);
+
+    let out = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--rebuild",
+            "--destination",
+            "fixture",
+            "--machine",
+            machine,
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "archive-only rebuild failed:\n{stdout}\n{stderr}"
+    );
+    let derived = PathBuf::from(reported(&stdout, "derived").expect("derived index path"));
+    assert_derived_is_sandboxed(sandbox, derived.to_str().unwrap());
+    let rows = index_rows(&derived);
+    let row = rows.get(session).expect("resumed session is rebuilt");
+    assert_eq!(
+        row["dimensions"]["surface"],
+        serde_json::json!(["app", "cli"])
+    );
+    assert_eq!(row["line_count"].as_u64(), Some(2));
+}
+
+#[test]
+fn malformed_newest_provenance_fails_closed_without_blocking_keep_all_body_read() {
+    let sb = tempfile::tempdir().unwrap();
+    let sandbox = sb.path();
+    let machine = "mac";
+    let session = "google-antigravity.mac.malformed-sidecar";
+    let stage = sandbox.join("stage");
+    let repo = sandbox.join("repo");
+    let key = sandbox.join("keys").join("masterkey.json");
+    let cfg = store_config(&repo, &key, sandbox);
+    let mk = MasterKey::new();
+    chat_stasher::store::persist_key_file(&cfg, &mk).unwrap();
+
+    let session_dir = stage
+        .join("sessions")
+        .join(machine)
+        .join(session)
+        .join("000");
+    fs::create_dir_all(&session_dir).unwrap();
+    let first = b"first archived line\n";
+    fs::write(session_dir.join("000001.jsonl"), first).unwrap();
+    let mut provenance = chat_stasher::provenance::SessionProvenance::default();
+    provenance.insert_surface("app");
+    chat_stasher::provenance::append_scan_observation(
+        &stage,
+        machine,
+        session,
+        &provenance,
+        1,
+        &sha256_hex(first),
+    )
+    .unwrap();
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+
+    // The newest sidecar is corrupt, while the older snapshot has a valid
+    // observation. Metadata-dependent readers must report unknown/corrupt,
+    // never fall back to the older row as if it described the newest archive.
+    fs::write(session_dir.join("000002.jsonl"), b"second archived line\n").unwrap();
+    fs::write(
+        stage.join("meta").join(machine).join("provenance-v1.jsonl"),
+        b"{ malformed json\n",
+    )
+    .unwrap();
+    BackupStore::new(cfg.clone(), machine.to_string())
+        .push(&stage, &mk)
+        .unwrap();
+
+    let collapsed = BackupStore::new(cfg.clone(), machine.to_string());
+    let error = collapsed
+        .read_session_concat(machine, session, &mk)
+        .expect_err("corrupt newest provenance must fail closed");
+    assert!(error.to_string().contains("parse snapshot"), "{error:#}");
+    let raw = BackupStore::new(cfg.clone(), machine.to_string())
+        .with_shard_policy(chat_stasher::store::DuplicateShardPolicy::KeepAll)
+        .read_session_concat(machine, session, &mk)
+        .expect("raw keep-all body read does not depend on provenance");
+    assert_eq!(raw.0, b"first archived line\nsecond archived line\n");
+
+    write_sandbox_config(sandbox, "mbp-here", &repo, &key);
+    let out = run(
+        sandbox,
+        &[
+            "activity-index",
+            "--rebuild",
+            "--destination",
+            "fixture",
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "archive activity rebuild must surface corrupt provenance instead of publishing a partial index"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("provenance"), "{stderr}");
 }
 
 /// The fixture for the *current* machine's side of the same question: this

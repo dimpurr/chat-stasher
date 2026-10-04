@@ -168,6 +168,7 @@ fn index_row(machine: &str, session: &str, harness: &str, first: i64, last: i64)
         title: None,
         provenance: None,
         session_provenance: None,
+        dimensions: Default::default(),
         account_keys: Vec::new(),
         measured_body: None,
     }
@@ -1350,6 +1351,90 @@ fn cli_export_writes_the_same_set_search_json_reports() {
             "case `{name}`: the CLI's written set must equal `search --json`'s matched set"
         );
     }
+}
+
+#[test]
+fn cli_surface_search_and_export_keep_unknown_provenance_unplaced() {
+    let sandbox = tempfile::TempDir::new().unwrap();
+    let root = sandbox.path();
+    let (repo, key, _mk) = build_fixture_at(root);
+    let stage = stage_path(root, "m-alpha");
+    let unknown = "claude-code.m-alpha.aaaaaaaa-0000-0000-0000-000000000099";
+    let (ts, when) = jan(12, 10);
+    write_two_shards(
+        &stage,
+        "m-alpha",
+        unknown,
+        &[user_line("unknown surface", Some(&ts))],
+    );
+
+    let index_path = stage.join("meta/m-alpha/activity-v1.jsonl");
+    let raw = fs::read_to_string(&index_path).unwrap();
+    let mut rows: Vec<ActivityRow> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for row in &mut rows {
+        match row.session_id.as_str() {
+            CC_ONE => row.dimensions.insert_surface("app"),
+            CC_TWO => row.dimensions.insert_surface("cli"),
+            _ => unreachable!(),
+        }
+    }
+    rows.push(index_row("m-alpha", unknown, "claude-code", when, when));
+    write_activity_index(&stage, "m-alpha", &rows);
+    BackupStore::new(cfg(&repo, &key, root), "m-alpha".to_string())
+        .push(&stage, &_mk)
+        .unwrap();
+
+    let search = run_cli(root, &repo, &key, "search", &["--json", "--surface", "app"]);
+    assert_eq!(
+        search.status.code(),
+        Some(3),
+        "unknown surface must remain explicit"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(json["matched"].as_u64(), Some(1));
+    assert_eq!(json["not_matched"].as_u64(), Some(1));
+    assert!(json["could_not_be_placed"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        json["sessions"][0]["dimensions"]["surface"],
+        serde_json::json!(["app"])
+    );
+    assert!(json["sessions_not_placed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| {
+            row["dimension"] == "surface"
+                && row["session_short_id"] == chat_stasher::id::short_session_id(unknown)
+        }));
+
+    let out = root.join("surface-export");
+    let export = run_cli(
+        root,
+        &repo,
+        &key,
+        "export",
+        &["--out", out.to_str().unwrap(), "--surface", "app"],
+    );
+    assert_eq!(
+        export.status.code(),
+        Some(3),
+        "export must report unknown provenance"
+    );
+    let manifest = manifest(&out);
+    assert_eq!(manifest["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["flags"]["surface"], "app");
+    assert_eq!(
+        manifest["sessions"][0]["dimensions"]["surface"],
+        serde_json::json!(["app"])
+    );
+    assert!(manifest["sessions_not_placed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["dimension"] == "surface" && row["session_id"] == unknown }));
 }
 
 // ------------------------------------------------------------------ test 5

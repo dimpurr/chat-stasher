@@ -179,6 +179,7 @@ pub(super) fn json_sessions(
             // unclassified source as what it is rather than as the closest
             // classified guess.
             "platform_group": s.harness.as_deref().map(super::facets::group_of).map(|g| g.wire()),
+            "dimensions": s.dimensions,
             "session_short_id": s.short_id,
             "shards": s.shard_count,
             "bytes": s.bytes,
@@ -243,7 +244,7 @@ pub(super) fn json_sessions(
             "machine": s.machine,
             "source": s.source_label(),
             "session_short_id": s.short_id,
-            "dimension": match dim { UnplacedBy::Time => "time", UnplacedBy::Harness => "harness", UnplacedBy::NoContent => "no_content" },
+            "dimension": match dim { UnplacedBy::Time => "time", UnplacedBy::Harness => "harness", UnplacedBy::NoContent => "no_content", UnplacedBy::Surface => "surface" },
             "why": why,
         })).collect::<Vec<_>>(),
     });

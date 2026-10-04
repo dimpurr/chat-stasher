@@ -49,7 +49,8 @@
 # so this script cannot drift from the data file it is about. On Linux the
 # shipped cells leave six harnesses seedable:
 #
-#   claude-code · codex · gemini-cli · opencode · cursor · openclaw
+#   claude-code · codex · gemini-cli · opencode · cursor · openclaw ·
+#   google-antigravity (three synthetic transcript roots on macOS)
 #
 # on macOS, where the Grok Bot desktop app's persistence lives, grok-bot is
 # seedable too — one replica blob, the same shape the scanner test plants.
@@ -208,23 +209,20 @@ import json, sys
 src, dst, real, sim = sys.argv[1:5]
 registry = json.load(open(src))
 for harness in registry["harnesses"]:
-    cells = harness["paths"]
-    if sim not in cells:
-        # The simulated platform has no cell for this harness (grok-bot when
-        # simulating linux: the Grok Bot desktop app is macOS-only), so the
-        # simulation must remove the real platform's cell from the slot this
-        # build reads — otherwise the binary, which really runs on the real
-        # platform, would probe this harness against a template the simulated
-        # seeding never plants and report `missing`, where the simulated
-        # platform cannot have the app at all (`skip_wrong_platform` /
-        # `not_applicable`, the state the assertions below expect).
-        cells.pop(real, None)
-        continue
-    borrow = {k: v for k, v in (cells.get(real) or {}).items() if k.startswith("sql_")}
-    if borrow:
-        spare = "windows" if real != "windows" else "linux"
-        cells[spare] = {**(cells.get(spare) or {}), **borrow}
-    cells[real] = cells[sim]
+    roots = harness.get("source_roots") or [harness]
+    for source_root in roots:
+        cells = source_root.get("paths") or {}
+        if sim not in cells:
+            # The simulated platform has no cell for this source root. Remove
+            # the real platform's cell so the host binary cannot misreport a
+            # missing store where the simulated platform is not applicable.
+            cells.pop(real, None)
+            continue
+        borrow = {k: v for k, v in (cells.get(real) or {}).items() if k.startswith("sql_")}
+        if borrow:
+            spare = "windows" if real != "windows" else "linux"
+            cells[spare] = {**(cells.get(spare) or {}), **borrow}
+        cells[real] = cells[sim]
 json.dump(registry, open(dst, "w"), indent=2)
 PY
   export CHAT_STASHER_REGISTRY="$SIM_REGISTRY"
@@ -495,6 +493,27 @@ def plant_grok_bot(root, n):
         )
 
 
+def plant_antigravity_roots(source_roots, env):
+    planted = 0
+    for source_root in source_roots:
+        cell = source_root["paths"][platform]
+        root = resolve(cell["template"], env)
+        if root is None:
+            raise RuntimeError(f"cannot resolve Antigravity root {source_root['id']}")
+        transcript = pathlib.Path(root) / f"smoke-{source_root['id']}" / cell["session_dir"]["file"]
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            json.dumps({
+                "created_at": "2026-10-01T10:00:00Z",
+                "type": "USER_INPUT",
+                "content": f"synthetic Antigravity {source_root['id']} smoke",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        planted += 1
+    return planted
+
+
 # harness id -> (sessions the recipe plants, the planting function)
 RECIPES = {
     "claude-code": (2, plant_claude_code),
@@ -541,13 +560,10 @@ configured = []
 manifest = []
 for harness in registry["harnesses"]:
     hid = harness["id"]
-    cell = harness["paths"].get(platform)
-    if cell is None:
+    source_roots = harness.get("source_roots") or [harness]
+    cells = [root.get("paths", {}).get(platform) for root in source_roots]
+    if not cells or any(cell is None for cell in cells):
         manifest.append((hid, "not_seeded", "no_cell_for_platform"))
-        continue
-    recipe = RECIPES.get(hid)
-    if recipe is None:
-        manifest.append((hid, "not_seeded", NO_RECIPE.get(hid, "no_fixture_recipe")))
         continue
     # The registry's own gate: an `unascertained` cell is one this build refuses
     # to scan, whatever sits on disk. Planting there would create an expectation
@@ -555,9 +571,24 @@ for harness in registry["harnesses"]:
     # A *configured* root is not gated that way — it is the user stating a fact,
     # not the registry guessing — but the fallback below is only reached for a
     # template this build cannot anchor, which is a different case.
-    if cell.get("confidence") == "unascertained":
+    if any(cell.get("confidence") == "unascertained" for cell in cells):
         manifest.append((hid, "not_seeded", "confidence_unascertained"))
         continue
+    if hid == "google-antigravity":
+        n = plant_antigravity_roots(source_roots, env)
+        counts[hid] = n
+        manifest.append((hid, "seeded", f"{n} unique sessions across {len(source_roots)} roots"))
+        continue
+    recipe = RECIPES.get(hid)
+    if recipe is None:
+        manifest.append((hid, "not_seeded", NO_RECIPE.get(hid, "no_fixture_recipe")))
+        continue
+    if len(cells) > 1:
+        # A single seed recipe cannot represent several independent native
+        # roots without explicit fixture support for each root.
+        manifest.append((hid, "not_seeded", "multi_root_fixture_required"))
+        continue
+    cell = cells[0]
     root = resolve(cell["template"], env)
     if root is None:
         # The cell's template starts with a per-install override (`$CODEX_HOME`,

@@ -447,8 +447,9 @@ the second one rather than folding it into the first:
 `search --text` also finds a session by its own id, or by any prefix of it, even
 though an id is not conversation text.
 
-An index has no `--no-collapse` flag; like `read` and `export` it collapses a
-run that byte-for-byte replays a session's complete preceding shard sequence, and
+An index has no `--no-collapse` flag; like `read` and `export` it collapses legacy
+whole-content replays while retaining verified sequence-bound captures, including
+identical captured bodies. Setting
 setting `CHAT_STASHER_NO_COLLAPSE` to any value other than `0`, `false`, `no`,
 `off` or empty makes the next build index every stored shard instead. This
 covers the full-text index here and the activity index (`activity-index`,

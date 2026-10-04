@@ -422,8 +422,8 @@ enum Command {
         #[arg(long)]
         keep_ssh_masters: bool,
     },
-    /// Dump one session back from the repository (sequence-concatenated) and
-    /// print its sha256 for verification — or, with `--all-machines`, walk
+    /// Read one session from the repository (sequence-concatenated) and
+    /// report its length and sha256 without printing content. With `--all-machines`, walk
     /// **every snapshot of every machine** cumulatively and report per-session
     /// digests.
     Read {
@@ -443,17 +443,16 @@ enum Command {
         session: Option<String>,
         /// Cross-machine merge, cumulative: for every hostname, every snapshot
         /// (`sessions/<machine>/…`), each session's shards sequence-joined and
-        /// hashed. A session is reported against the newest snapshot that holds
-        /// it. Prints ids / shard counts / byte lengths / sha256 only.
+        /// hashed. Newest copies per shard sequence win; older missing sequences
+        /// remain included. Prints ids, counts, lengths, and sha256 only.
         #[arg(long)]
         all_machines: bool,
         /// Print full session ids in per-session rows (default: privacy-safe short ids).
         #[arg(long)]
         full_ids: bool,
-        /// Show every stored shard. By default a run that byte-for-byte replays
-        /// the session's complete preceding shard sequence is collapsed to its
-        /// first copy, because that is what a re-seal leaves. Nothing is deleted
-        /// either way; this only changes what the read returns.
+        /// Show every stored shard. Default reads collapse legacy whole-content
+        /// replays while retaining verified sequence-bound captures, including
+        /// identical captured bodies. Nothing is deleted by either policy.
         #[arg(long)]
         no_collapse: bool,
         /// Machine partition to read. Uses this machine's id when available;
@@ -2578,6 +2577,20 @@ fn rebuild_activity_index(
     // are the only records of a reclaimed session's times that this stage still
     // holds (see the doc comment above).
     let previous = read_previous_activity_rows(&out_path)?;
+    let source_provenance =
+        chat_stasher::provenance::read_observations(stage, machine).map_err(|error| {
+            ActivityIndexError::Read(format!("cannot read provenance observations: {error}"))
+        })?;
+    let mut provenance_by_session: BTreeMap<
+        String,
+        Vec<chat_stasher::provenance::ProvenanceObservation>,
+    > = BTreeMap::new();
+    for observation in source_provenance {
+        provenance_by_session
+            .entry(observation.session_id.clone())
+            .or_default()
+            .push(observation);
+    }
     let recorded_bodies = stage_manifest_bodies(stage, machine);
     let session_provenance =
         activity::load_session_provenance(stage, machine).map_err(|error| {
@@ -2747,6 +2760,20 @@ fn rebuild_activity_index(
         }
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let mut row = activity::build_row(&session_id, machine, &harness, &refs);
+        row.dimensions = chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied());
+        if let Some(observations) = provenance_by_session.get(&session_id) {
+            let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
+                .iter()
+                .zip(&shard_bodies)
+                .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
+                .collect();
+            chat_stasher::provenance::merge_verified_shard_sequence_observations(
+                &mut row.dimensions,
+                &session_id,
+                observations,
+                &sequence_bodies,
+            );
+        }
         row.measured_body = Some(activity::MeasuredBody {
             shard_count,
             concat_sha256: hex_digest(&hasher.finalize()),
@@ -3349,8 +3376,8 @@ struct DerivedIndexOutcome {
 /// Read-only with respect to the destination: every archived body of `machine`
 /// is read through the ADR-021 cumulative walk
 /// ([`readback::BackupStore::for_each_archived_session`] — one session at a
-/// time, first appearance wins, so the bytes are the newest copy the archive
-/// holds), one row is derived per session, and the rows are written to a local
+/// time, newest copy per shard sequence while retaining older missing sequences),
+/// one row is derived per session, and the rows are written to a local
 /// derived index ([`sidecar::derived_activity_index_path`]).
 ///
 /// Why not the archive: `meta/<machine>/activity-v1.jsonl` inside the archive
@@ -3393,6 +3420,23 @@ fn rebuild_activity_index_from_archive(
         .map_err(|e| ActivityIndexError::Write(format!("cannot create derived index: {e}")))?;
 
     let store = BackupStore::for_metadata_query(cfg.clone());
+    let archived_provenance = store
+        .read_archived_provenance_observations(mk, machine)
+        .map_err(|error| {
+            ActivityIndexError::Read(format!(
+                "cannot read archived provenance observations: {error:#}"
+            ))
+        })?;
+    let mut provenance_by_session: BTreeMap<
+        String,
+        Vec<chat_stasher::provenance::ProvenanceObservation>,
+    > = BTreeMap::new();
+    for observation in archived_provenance {
+        provenance_by_session
+            .entry(observation.session_id.clone())
+            .or_default()
+            .push(observation);
+    }
     let mut sessions_indexed = 0usize;
     let mut sessions_without_harness = 0usize;
     // A write failure must come back as exit 1, not as the exit-3 "the read did
@@ -3400,25 +3444,43 @@ fn rebuild_activity_index_from_archive(
     // once the walk is over. The walk keeps going so the message names the
     // first failure rather than the last.
     let mut write_error: Option<String> = None;
-    let walk = store.for_each_archived_session(mk, machine, |session_id, bytes| {
-        if write_error.is_some() {
-            return Ok(());
-        }
-        let harness = sidecar::infer_harness(session_id).unwrap_or_else(|| {
-            sessions_without_harness += 1;
-            "unknown".to_string()
-        });
-        let text = String::from_utf8_lossy(bytes);
-        let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
-        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-        let row = activity::build_row(session_id, machine, &harness, &refs);
-        if let Err(e) = index_temp.write_all(activity::to_jsonl(&row).as_bytes()) {
-            write_error = Some(format!("cannot append activity row: {e}"));
-            return Ok(());
-        }
-        sessions_indexed += 1;
-        Ok(())
-    });
+    let walk = store.for_each_archived_session_shards_with_policy(
+        mk,
+        machine,
+        store::DuplicateShardPolicy::from_env(),
+        |session_id, shard_bodies| {
+            if write_error.is_some() {
+                return Ok(());
+            }
+            let harness = sidecar::infer_harness(session_id).unwrap_or_else(|| {
+                sessions_without_harness += 1;
+                "unknown".to_string()
+            });
+            let bytes: Vec<u8> = shard_bodies
+                .iter()
+                .flat_map(|(_, body)| body.iter().copied())
+                .collect();
+            let text = String::from_utf8_lossy(&bytes);
+            let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            let mut row = activity::build_row(session_id, machine, &harness, &refs);
+            row.dimensions = chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied());
+            if let Some(observations) = provenance_by_session.get(session_id) {
+                chat_stasher::provenance::merge_verified_shard_sequence_observations(
+                    &mut row.dimensions,
+                    session_id,
+                    observations,
+                    shard_bodies,
+                );
+            }
+            if let Err(e) = index_temp.write_all(activity::to_jsonl(&row).as_bytes()) {
+                write_error = Some(format!("cannot append activity row: {e}"));
+                return Ok(());
+            }
+            sessions_indexed += 1;
+            Ok(())
+        },
+    );
     let read = match walk {
         Ok(read) => read,
         Err(e) => {
@@ -8583,9 +8645,8 @@ fn cmd_read(
             }
         );
         // The session is addressed by `(machine, session id)` — the partition
-        // the archived path already carries — and the copy is taken from the
-        // newest snapshot that holds it (ADR-021), so a session whose body has
-        // been reclaimed out of the stage is still readable.
+        // the archived path already carries — and the body is sequence-joined
+        // across snapshots (ADR-021), so reclaimed content is still readable.
         //
         // `--stage` is **not** required for this, and is not the addressing
         // scheme. It used to be both: `read` built
@@ -9331,8 +9392,8 @@ fn body_cache_stats_line(availability: &chat_stasher::body_cache::Availability) 
 
 /// `read --all-machines` — group every snapshot by hostname, walk **all** of
 /// each hostname's snapshots newest-first, and report per-session shard count /
-/// byte length / sha256, a session resolved against the newest snapshot that
-/// holds it (ADR-021). Privacy line: only ids, counts, lengths and digests are
+/// byte length / sha256, joining newest copies by shard sequence and retaining
+/// older missing sequences (ADR-021). Privacy line: only ids, counts, lengths and digests are
 /// printed — never session content.
 ///
 /// This reads the whole destination: unlike `search` it downloads and hashes
@@ -14403,6 +14464,7 @@ fn setup_read_back(config: &Config, local: &SetupLocalSaveReport) -> SetupReadba
         session_id_prefix: None,
         machine: None,
         harnesses: None,
+        surface: None,
         window: None,
     };
     match chat_stasher::search::search_sessions(&store, &mk, &selector) {
@@ -17472,6 +17534,7 @@ mod duplicate_repair_report_tests {
                         "same".to_string(),
                         "different".to_string(),
                     ],
+                    shard_sequences: vec![Some(1), Some(2), Some(3), Some(4)],
                     shard_bytes: vec![5, 7, 5, 7],
                     shard_run_duplicates: Vec::new(),
                 },
@@ -17482,6 +17545,7 @@ mod duplicate_repair_report_tests {
                     concat_bytes: 17,
                     sha256: "concat-two".to_string(),
                     shard_sha256: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+                    shard_sequences: vec![Some(1), Some(2), Some(3)],
                     shard_bytes: vec![5, 7, 5],
                     shard_run_duplicates: Vec::new(),
                 },
@@ -17492,6 +17556,7 @@ mod duplicate_repair_report_tests {
                     concat_bytes: 24,
                     sha256: "concat-two".to_string(),
                     shard_sha256: vec!["a".to_string(), "b".to_string(), "ab".to_string()],
+                    shard_sequences: vec![Some(1), Some(2), Some(3)],
                     shard_bytes: vec![5, 7, 12],
                     shard_run_duplicates: Vec::new(),
                 },

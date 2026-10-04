@@ -140,6 +140,151 @@
       }
     },
     {
+      "id": "google-antigravity",
+      "display_name": "Google Antigravity",
+      "verified": {
+        "date": "2026-10-03",
+        "scope": "macOS local roots: 72 transcript.jsonl files across CLI, IDE, and app collected and indexed. Archive push/readback verified full SHA-256 for every session; archive search and 72-document FTS check passed; archive-only activity rebuild preserved SHA-bound surface observations. Linux and Windows remain unverified.",
+        "platform": "macos"
+      },
+      "dev_priority": "normal",
+      "dimensions": {
+        "supported": [
+          "surface"
+        ],
+        "surfaces": [
+          "cli",
+          "ide",
+          "app"
+        ]
+      },
+      "source_roots": [
+        {
+          "id": "antigravity-cli",
+          "paths": {
+            "macos": {
+              "template": "~/.gemini/antigravity-cli/brain/",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "linux": {
+              "template": "$HOME/.gemini/antigravity-cli/brain/",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.gemini\\antigravity-cli\\brain\\",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            }
+          },
+          "provenance": {
+            "surface": [
+              "cli"
+            ]
+          }
+        },
+        {
+          "id": "antigravity-ide",
+          "paths": {
+            "macos": {
+              "template": "~/.gemini/antigravity-ide/brain/",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "linux": {
+              "template": "$HOME/.gemini/antigravity-ide/brain/",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.gemini\\antigravity-ide\\brain\\",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            }
+          },
+          "provenance": {
+            "surface": [
+              "ide"
+            ]
+          }
+        },
+        {
+          "id": "antigravity",
+          "paths": {
+            "macos": {
+              "template": "~/.gemini/antigravity/brain/",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "linux": {
+              "template": "$HOME/.gemini/antigravity/brain/",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.gemini\\antigravity\\brain\\",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "Measured locally on macOS; other platform locations remain unverified",
+              "session_dir": {
+                "pattern": "*",
+                "file": ".system_generated/logs/transcript.jsonl"
+              }
+            }
+          },
+          "provenance": {
+            "surface": [
+              "app"
+            ]
+          }
+        }
+      ],
+      "notes": "One stable harness identity across its CLI, IDE, and desktop app roots. The JSONL transcript path is fixed within each session directory. Only surface is recorded; no tenant, container, or lifecycle status is inferred.",
+      "seal_policy": "no-rename",
+      "seal_source": "Measured locally: transcript.jsonl is an append-only JSONL stream; retain the source in place and seal a read-only copy."
+    },
+    {
       "id": "opencode",
       "display_name": "opencode",
       "verified": {
@@ -637,9 +782,15 @@
       "display_name": "Chrome",
       "source": "https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -647,8 +798,12 @@
       "display_name": "Chromium",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
         "windows": {
           "tier": "supported",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -660,9 +815,15 @@
       "display_name": "Edge",
       "source": "https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -670,9 +831,15 @@
       "display_name": "Brave",
       "source": "https://github.com/gopasspw/gopass-jsonapi/blob/db70c6919e598d08190c9acfe1993a5c969156e8/internal/jsonapi/manifest/setup_windows.go",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     },
     {
@@ -698,8 +865,12 @@
       "display_name": "Chrome Beta",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
         "windows": {
           "tier": "unverified",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -711,8 +882,12 @@
       "display_name": "Chrome Canary",
       "source": "https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
         "windows": {
           "tier": "unverified",
           "source": "https://chromium.googlesource.com/chromium/src/+/ad587c3edba02a0c746651f6963e1b6e3763f1f7/chrome/browser/extensions/api/messaging/native_process_launcher_win.cc"
@@ -724,9 +899,15 @@
       "display_name": "Opera",
       "source": "https://forums.opera.com/topic/15735/porting-extension-from-chrome-macos-native-messaging",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
-        "windows": {"tier": "unverified"}
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
+        "windows": {
+          "tier": "unverified"
+        }
       }
     },
     {
@@ -734,9 +915,15 @@
       "display_name": "Vivaldi",
       "source": "https://github.com/vergenzt/TabFS/blob/master/install.sh",
       "tiers": {
-        "macos": {"tier": "unverified"},
-        "linux": {"tier": "unverified"},
-        "windows": {"tier": "unverified"}
+        "macos": {
+          "tier": "unverified"
+        },
+        "linux": {
+          "tier": "unverified"
+        },
+        "windows": {
+          "tier": "unverified"
+        }
       }
     },
     {
@@ -744,9 +931,15 @@
       "display_name": "Firefox",
       "source": "https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging",
       "tiers": {
-        "macos": {"tier": "supported"},
-        "linux": {"tier": "supported"},
-        "windows": {"tier": "supported"}
+        "macos": {
+          "tier": "supported"
+        },
+        "linux": {
+          "tier": "supported"
+        },
+        "windows": {
+          "tier": "supported"
+        }
       }
     }
   ]

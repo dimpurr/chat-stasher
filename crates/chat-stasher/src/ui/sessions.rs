@@ -236,6 +236,7 @@ fn page_sessions(
                 dim = match dim {
                     UnplacedBy::Time => "conversation time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::Surface => "surface",
                     UnplacedBy::NoContent => "no conversation content",
                 },
                 why = esc(why),
@@ -650,7 +651,7 @@ fn list_row(s: &UiSession, token: &str, data: &UiData, columns: IdentityColumns)
          <td><a class=mono href=\"/session?i={i}&token={t}\">{sid}</a></td>{dest}{label}{msgs}\
          <td class=n>{sh}</td><td class=n>{b}</td>{f}{l}<td>{snap}</td></tr>\n",
         machine = machine_cell_html(s, columns),
-        h = esc(&s.source_label()),
+        h = format!("{}{}", esc(&s.source_label()), surface_badges(s)),
         i = s.index,
         t = percent_encode(token),
         sid = esc(&s.short_id),
@@ -663,6 +664,19 @@ fn list_row(s: &UiSession, token: &str, data: &UiData, columns: IdentityColumns)
         l = l,
         snap = esc(&fmt_unix(s.archive_time_unix)),
     )
+}
+
+fn surface_badges(s: &UiSession) -> String {
+    s.dimensions
+        .surface
+        .iter()
+        .map(|surface| {
+            format!(
+                " <span class=badge title=\"Recorded runtime surface\">{}</span>",
+                esc(surface)
+            )
+        })
+        .collect()
 }
 
 /// W219 · the machine cell: the machine this row was archived from, plus the

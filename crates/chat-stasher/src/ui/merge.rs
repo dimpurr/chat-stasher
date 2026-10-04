@@ -185,6 +185,7 @@ fn row_of(hit: &crate::search::SessionHit, destination: usize) -> UiSession {
         time_source: hit.time_source.clone(),
         title: hit.title.clone(),
         provenance: hit.provenance.clone(),
+        dimensions: hit.dimensions.clone(),
         line_count: hit.line_count,
         archive_time_unix: hit.archive_time_unix,
         data_blobs: hit.data_blobs,

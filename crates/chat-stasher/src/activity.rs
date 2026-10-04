@@ -82,6 +82,10 @@ pub struct ActivityRow {
     /// source path is persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_provenance: Option<SessionProvenance>,
+    /// Generic 4D provenance observations. Multiple values are retained when a
+    /// session is resumed through more than one surface.
+    #[serde(default, skip_serializing_if = "crate::activity::provenance_empty")]
+    pub dimensions: crate::provenance::SessionProvenance,
     /// W219 · The account keys this session's records actually carry, deduped
     /// and sorted. Each is a **comparable** pair: the fingerprint value and the
     /// `saltId` that makes it comparable to another value.
@@ -315,6 +319,13 @@ mod session_provenance_tests {
         assert_eq!(rows[main_id].parent_session_ref, None);
         assert_eq!(std::fs::read(main_source).unwrap(), main_raw);
     }
+}
+
+fn provenance_empty(value: &crate::provenance::SessionProvenance) -> bool {
+    value.surface.is_empty()
+        && value.tenant.is_empty()
+        && value.container.is_empty()
+        && value.status.is_empty()
 }
 
 /// The identity of one conversation body, as `manifest::SessionManifest` records
@@ -630,6 +641,7 @@ const SUPPORTED_HARNESSES: &[&str] = &[
     "opencode",
     "cursor",
     "gemini-cli",
+    "google-antigravity",
     "grok",
     "kimi-code",
     "chatgpt",
@@ -1201,6 +1213,7 @@ fn line_time(harness: &str, value: &serde_json::Value) -> LineTime {
         "opencode" => opencode_time(value),
         "cursor" => cursor_time(value),
         "gemini-cli" => gemini_time(value),
+        "google-antigravity" => antigravity_time(value),
         "kimi-code" => kimi_code_time(value),
         "zed" => zed_time(value),
         _ => LineTime::NoTimestampField,
@@ -1452,6 +1465,17 @@ fn gemini_time(value: &serde_json::Value) -> LineTime {
                 LineTime::Absent
             }
         }
+    }
+}
+
+/// Google Antigravity transcript events carry an RFC 3339 `created_at` field.
+/// Each line is one event, so the session fold derives its span from those
+/// observed per-event timestamps.
+fn antigravity_time(value: &serde_json::Value) -> LineTime {
+    match value.get("created_at").and_then(one_ts_value) {
+        Some((time, rfc3339)) => local_time(time, time, rfc3339),
+        None if value.get("created_at").is_some() => LineTime::Invalid,
+        None => LineTime::Absent,
     }
 }
 
@@ -2326,6 +2350,7 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         title: Some(a.title),
         provenance: project_provenance(lines),
         session_provenance: None,
+        dimensions: crate::provenance::SessionProvenance::default(),
         account_keys: account_keys(lines),
         // This function only ever sees lines, never the shard files they came
         // from, so it cannot record what it measured. A caller that read the

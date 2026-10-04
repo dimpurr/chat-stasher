@@ -179,7 +179,8 @@ pub struct NotPlacedSession {
     pub machine: String,
     pub session_id: String,
     pub harness: Option<String>,
-    /// `"time"` or `"harness"` — which active filter had no answer.
+    /// `"time"`, `"harness"`, `"surface"` or `"no_content"` — which filter
+    /// could not place this session.
     pub dimension: &'static str,
     /// The filter that could not be evaluated, and why. User-facing.
     pub why: String,
@@ -203,6 +204,8 @@ pub struct ExportedSession {
     pub machine: String,
     pub harness: Option<String>,
     pub session_id: String,
+    /// Capture-time provenance used by search and retained in the manifest.
+    pub dimensions: crate::provenance::SessionProvenance,
     /// Path of the written file, relative to `--out`.
     pub relative_path: String,
     /// Snapshot the bytes came from (the machine's newest at read time).
@@ -357,6 +360,7 @@ impl ExportReport {
                     "machine": s.machine,
                     "harness": s.harness,
                     "session_id": s.session_id,
+                    "dimensions": s.dimensions,
                     "relative_path": s.relative_path,
                     "snapshot_id": s.snapshot_id,
                     "first_message": s.first_message,
@@ -415,6 +419,7 @@ impl ExportReport {
                     .as_ref()
                     .map(|h| h.iter().cloned().collect::<Vec<_>>()),
                 "session_prefix": self.selector.session_id_prefix,
+                "surface": self.selector.surface,
                 "time_window": self.window.as_ref().map(|w| serde_json::json!({
                     "how": match w.how {
                         crate::selector::WindowHow::LocalDays => "local_days",
@@ -896,6 +901,7 @@ pub fn export_sessions(
                 dimension: match u.dimension {
                     UnplacedBy::Time => "time",
                     UnplacedBy::Harness => "harness",
+                    UnplacedBy::Surface => "surface",
                     UnplacedBy::NoContent => "no_content",
                 },
                 why: u.why.clone(),
@@ -994,6 +1000,7 @@ pub fn export_sessions(
             machine: hit.machine.clone(),
             harness: hit.harness.clone(),
             session_id: hit.session_id.clone(),
+            dimensions: hit.dimensions.clone(),
             relative_path: relative,
             snapshot_id: hit.snapshot_id.clone(),
             first_message: time_state(hit.first_unix, why_time),
@@ -1792,6 +1799,7 @@ mod tests {
                     machine: "m".into(),
                     harness: Some("claude-code".into()),
                     session_id: format!("claude-code.m.aaaaaaaa-0000-0000-0000-00000000000{i}"),
+                    dimensions: Default::default(),
                     relative_path: "m/claude-code/x.jsonl".into(),
                     snapshot_id: "abcdef0123456789".into(),
                     first_message: TimeState::known(1),

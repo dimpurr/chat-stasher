@@ -120,6 +120,7 @@ pub struct UiSession {
     /// the same honesty states as [`SessionLabel`] documents.
     pub title: SessionLabel,
     pub provenance: Option<crate::activity::ProjectProvenance>,
+    pub dimensions: crate::provenance::SessionProvenance,
     pub line_count: u64,
     /// The snapshot's own time — the backup run, not the conversation's.
     pub archive_time_unix: i64,
@@ -213,6 +214,7 @@ impl UiSession {
             machine: &self.machine,
             session_id: &self.session_id,
             harness: self.harness.as_deref(),
+            surfaces: Some(&self.dimensions.surface),
             first_unix: self.first_unix,
             last_unix: self.last_unix,
             // The index's own answer, never re-derived from the bounds.
@@ -926,6 +928,9 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
         until: param(params, "until").map(str::to_string),
         since_unix: None,
         until_unix: None,
+        surface: param(params, "surface")
+            .or_else(|| param(params, "sub_surface"))
+            .map(str::to_string),
     }
     .resolve()
 }
@@ -1150,15 +1155,33 @@ pub fn window_of<T>(rows: &[T], page: Page) -> &[T] {
 /// The query keys `/sessions` reads and therefore carries through a paging
 /// link: the selector keys plus `sort` and `limit`. The order is the order the
 /// links spell them in.
-pub const LIST_CARRY: [&str; 8] = [
-    "session", "machine", "harness", "day", "since", "until", "sort", "limit",
+pub const LIST_CARRY: [&str; 10] = [
+    "session",
+    "machine",
+    "harness",
+    "day",
+    "since",
+    "until",
+    "surface",
+    "sub_surface",
+    "sort",
+    "limit",
 ];
 
 /// The query keys `/search` reads: the selector keys, `limit`, and `q` — and
 /// deliberately not `sort`, because a search page's order is the index's
 /// relevance rank rather than one of the list's sortable keys.
-pub const SEARCH_CARRY: [&str; 8] = [
-    "session", "machine", "harness", "day", "since", "until", "limit", "q",
+pub const SEARCH_CARRY: [&str; 10] = [
+    "session",
+    "machine",
+    "harness",
+    "day",
+    "since",
+    "until",
+    "surface",
+    "sub_surface",
+    "limit",
+    "q",
 ];
 
 /// The URL one paging link points at: the query this page was reached by,
@@ -1447,6 +1470,7 @@ pub(crate) mod fixture {
             title: crate::search::SessionLabel::NoLabelRecorded,
             provenance: None,
             session_provenance: None,
+            dimensions: Default::default(),
             account_keys: Vec::new(),
         }
     }
@@ -2207,6 +2231,24 @@ mod tests {
 
     use crate::activity::TitleSource;
     use crate::overview::{Granularity, HeatmapAxis};
+
+    #[test]
+    fn list_and_search_paging_keep_canonical_and_legacy_surface_filters() {
+        let params = vec![
+            ("surface".to_string(), "app".to_string()),
+            ("sub_surface".to_string(), "cli".to_string()),
+            ("q".to_string(), "needle".to_string()),
+        ];
+        let list = page_href("/sessions", &LIST_CARRY, &params, "t", 25);
+        let search = page_href("/search", &SEARCH_CARRY, &params, "t", 25);
+        for href in [list, search] {
+            assert!(href.contains("surface=app"), "{href}");
+            assert!(href.contains("sub_surface=cli"), "{href}");
+            let (_, carried) = split_target(&href);
+            let selector = selector_from_query(&carried).unwrap().selector;
+            assert_eq!(selector.surface.as_deref(), Some("app"));
+        }
+    }
 
     fn req(target: &str, data: &UiData, src: &dyn ContentSource) -> Response {
         let (path, params) = split_target(target);
@@ -4808,6 +4850,7 @@ mod tests {
                 // `fixture::hit` happens to set none, and would silently drop
                 // a provenance this rebuild is meant to reproduce.
                 provenance: s.provenance.clone(),
+                dimensions: s.dimensions.clone(),
                 // W219 · same rule as the provenance copy above: the rebuild
                 // reproduces what the fixture's hit carried, so the round trip
                 // this test is about is not silently narrowed to the fields

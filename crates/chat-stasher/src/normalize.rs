@@ -9,6 +9,7 @@ use crate::activity::TimeSource;
 use serde_json::Value;
 use std::collections::HashMap;
 
+mod antigravity;
 /// One extractor file per harness, dispatched by [`normalize_value`]. A
 /// harness with no arm there is served the raw view only — see
 /// [`harness_has_a_reader`] — and never a generic guess about its shape.
@@ -253,6 +254,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
         "claude-code"
             | "codex"
             | "gemini-cli"
+            | "google-antigravity"
             | "kimi-code"
             | "opencode"
             | "openclaw"
@@ -298,6 +300,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "claude-code" => normalize_cli_line(harness, value, conversation),
         "codex" => codex::normalize_line(value, conversation),
         "gemini-cli" => gemini_cli::document(value, conversation),
+        "google-antigravity" => antigravity::normalize_line(value, conversation),
         "kimi-code" => kimi_code::record_or_count(value, conversation),
         "opencode" => opencode::normalize_session(value, conversation),
         "openclaw" => openclaw::normalize_session(value, conversation),

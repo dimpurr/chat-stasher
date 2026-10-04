@@ -342,6 +342,7 @@ fn data_for(harness: &str) -> UiData {
             time_source: TimeSource::Exact,
             title: SessionLabel::NoLabelRecorded,
             provenance: None,
+            dimensions: Default::default(),
             line_count: 1,
             archive_time_unix: 1_770_000_000,
             data_blobs: 1,

@@ -47,6 +47,8 @@ pub struct SessionMeta<'a> {
     /// [`crate::sidecar::infer_harness`]. `None` means the id carries no
     /// harness prefix — not "some other harness".
     pub harness: Option<&'a str>,
+    /// Recorded provenance surfaces. Missing is unknown, not a mismatch.
+    pub surfaces: Option<&'a [String]>,
     /// Earliest conversation time, unix seconds. `None` is *unknown*; it is
     /// never a stand-in for zero.
     pub first_unix: Option<i64>,
@@ -96,6 +98,7 @@ impl<'a> SessionMeta<'a> {
             machine,
             session_id,
             harness,
+            surfaces: None,
             first_unix: None,
             last_unix: None,
             // No bounds at all, so there is no span for them to be part of.
@@ -161,6 +164,8 @@ pub struct Selector {
     /// Match these harnesses. `Some(empty)` matches nothing, which is what a
     /// user who typed `--harness ""` asked for; `None` is no constraint.
     pub harnesses: Option<BTreeSet<String>>,
+    /// Match an observed runtime surface.
+    pub surface: Option<String>,
     /// Conversation-time window. `None` == every session, whatever its time.
     pub window: Option<TimeWindow>,
 }
@@ -174,6 +179,8 @@ pub enum UnplacedBy {
     Time,
     /// The harness filter.
     Harness,
+    /// A requested provenance surface could not be established.
+    Surface,
     /// The session holds no conversation content at all (ADR-035), so a time
     /// window cannot place it — but for a different reason than a real
     /// conversation with an unknown time.
@@ -250,6 +257,32 @@ impl Selector {
                 }
             }
         }
+        if let Some(want) = &self.surface {
+            match meta.surfaces {
+                Some(values) if !values.is_empty() && values.iter().any(|value| value == want) => {}
+                Some(values) if values.iter().any(|value| value == "unknown") => {
+                    return Verdict::Unevaluated {
+                        dimension: UnplacedBy::Surface,
+                        why: "the session has an unknown source surface, so the surface filter cannot establish a match".to_string(),
+                    };
+                }
+                Some(values) if !values.is_empty() => return Verdict::NotSelected,
+                Some(_) => {
+                    return Verdict::Unevaluated {
+                        dimension: UnplacedBy::Surface,
+                        why: "no source-surface provenance was recorded for this session"
+                            .to_string(),
+                    }
+                }
+                None => {
+                    return Verdict::Unevaluated {
+                        dimension: UnplacedBy::Surface,
+                        why: "no source-surface provenance was recorded for this session"
+                            .to_string(),
+                    }
+                }
+            }
+        }
         let Some(window) = &self.window else {
             return Verdict::Selected;
         };
@@ -312,6 +345,9 @@ pub struct SelectorArgs {
     /// The harness is the leading `.`/`~` segment of the archived session id.
     #[arg(long, value_delimiter = ',', value_name = "ID")]
     pub harness: Option<Vec<String>>,
+    /// Match an observed runtime surface. `--sub-surface` remains an alias.
+    #[arg(long, visible_alias = "sub-surface")]
+    pub surface: Option<String>,
     /// One local calendar day, `YYYY-MM-DD`. Identical to `--since D --until D`.
     #[arg(
         long,
@@ -380,6 +416,7 @@ impl SelectorArgs {
                     .harness
                     .as_ref()
                     .map(|list| list.iter().cloned().collect()),
+                surface: self.surface.clone(),
                 window,
             },
             warnings,
@@ -563,12 +600,35 @@ mod tests {
             machine,
             session_id: session,
             harness: harness_of(session),
+            surfaces: None,
             first_unix: span.map(|s| s.0),
             last_unix: span.map(|s| s.1),
             time_bounds: TimeBounds::Complete,
             time_why: span
                 .is_none()
                 .then_some("no timestamps in this session's lines"),
+        }
+    }
+
+    #[test]
+    fn missing_and_empty_surface_values_are_unevaluated() {
+        let selector = Selector {
+            surface: Some("app".to_string()),
+            ..Default::default()
+        };
+        let missing = meta("m", "google-antigravity.m.s1", Some((1, 2)));
+        let empty = SessionMeta {
+            surfaces: Some(&[]),
+            ..missing
+        };
+        for session in [&missing, &empty] {
+            assert!(matches!(
+                selector.select(session),
+                Verdict::Unevaluated {
+                    dimension: UnplacedBy::Surface,
+                    ..
+                }
+            ));
         }
     }
 
@@ -701,6 +761,7 @@ mod tests {
             machine: "m",
             session_id: "claude-code.m.abc",
             harness: Some("claude-code"),
+            surfaces: None,
             first_unix: Some(1_500),
             last_unix: None,
             time_bounds: TimeBounds::Complete,
