@@ -577,7 +577,7 @@ for harness in registry["harnesses"]:
     if hid == "google-antigravity":
         n = plant_antigravity_roots(source_roots, env)
         counts[hid] = n
-        manifest.append((hid, "seeded", f"{n} unique sessions across {len(source_roots)} roots"))
+        manifest.append((hid, "seeded", str(n)))
         continue
     recipe = RECIPES.get(hid)
     if recipe is None:
