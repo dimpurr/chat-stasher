@@ -46,24 +46,25 @@ export interface BarCounts {
  * empty sliver reads as a measurement, and `[]` for a total of zero.
  */
 export function barGeometry(counts: BarCounts, width: number): BarSegmentGeometry[] {
-  if (width <= 0) return [];
+  if (!Number.isFinite(width) || width <= 0) return [];
   const segments: Array<{ tone: BarTone; count: number }> = ([
-    { tone: 'archived', count: Math.max(0, counts.archived) },
-    { tone: 'owed', count: Math.max(0, counts.owed) },
-    { tone: 'failed', count: Math.max(0, counts.failed) },
-    { tone: 'remainder', count: Math.max(0, counts.remainder) },
+    { tone: 'archived', count: finiteCount(counts.archived) },
+    { tone: 'owed', count: finiteCount(counts.owed) },
+    { tone: 'failed', count: finiteCount(counts.failed) },
+    { tone: 'remainder', count: finiteCount(counts.remainder) },
   ] as Array<{ tone: BarTone; count: number }>).filter((segment) => segment.count > 0);
-  const total = segments.reduce((n, segment) => n + segment.count, 0);
-  if (total === 0) return [];
+  const largest = Math.max(0, ...segments.map((segment) => segment.count));
+  if (largest === 0) return [];
+  const scaledTotal = segments.reduce((n, segment) => n + segment.count / largest, 0);
   // Scale, then clamp: rounding up could make the bar exceed its track, and a
   // bar wider than 100% is the visual form of "more than exists".
-  const series = segments.map((segment) => ({ tone: segment.tone, w: (segment.count / total) * width }));
+  const series = segments.map((segment) => ({ tone: segment.tone, w: ((segment.count / largest) / scaledTotal) * width }));
   let x = 0;
   const out: BarSegmentGeometry[] = [];
   for (const segment of series) {
     const clamped = Math.min(segment.w, width - x);
     if (clamped > 0) out.push({ tone: segment.tone, x, w: clamped });
-    x += segment.w;
+    x += clamped;
   }
   return out;
 }
@@ -76,9 +77,10 @@ export function barGeometry(counts: BarCounts, width: number): BarSegmentGeometr
  * not trust arithmetic it did not perform.
  */
 export function ringDash(percent: number | null, radius: number): { dash: number; gap: number } | null {
-  if (percent === null || !Number.isFinite(percent) || radius <= 0) return null;
+  if (percent === null || !Number.isFinite(percent) || !Number.isFinite(radius) || radius <= 0) return null;
   const clamped = Math.min(100, Math.max(0, percent));
   const circumference = 2 * Math.PI * radius;
+  if (!Number.isFinite(circumference)) return null;
   const dash = (clamped / 100) * circumference;
   return { dash, gap: circumference - dash };
 }
@@ -117,7 +119,12 @@ export interface MonthsOptions {
 
 /** A gross-value helper callers use to decide whether the unknown column belongs on the chart at all. */
 export function unknownTimeTotal(unknown: { archived: number; pending: number }): number {
-  return Math.max(0, unknown.archived) + Math.max(0, unknown.pending);
+  return finiteCount(unknown.archived) + finiteCount(unknown.pending);
+}
+
+/** Runtime storage and caller data can violate the TypeScript number contract. */
+function finiteCount(count: number): number {
+  return Number.isFinite(count) ? Math.max(0, count) : 0;
 }
 
 /**
@@ -134,14 +141,18 @@ export function monthsGeometry(
 ): MonthsGeometry | null {
   const rows = months
     .filter((row) => row.month.length > 0)
-    .map((row) => ({ month: row.month, archived: Math.max(0, row.archived), pending: Math.max(0, row.pending) }))
+    .map((row) => ({ month: row.month, archived: finiteCount(row.archived), pending: finiteCount(row.pending) }))
     .filter((row) => row.archived + row.pending > 0);
-  const unknown = Math.max(0, unknownTime.archived) + Math.max(0, unknownTime.pending);
+  const unknown = unknownTimeTotal(unknownTime);
   if (rows.length === 0 && unknown === 0) return null;
-  if (options.width <= 0 || options.height <= 0) return null;
+  if (!Number.isFinite(options.width) || options.width <= 0 || !Number.isFinite(options.height) || options.height <= 0) return null;
 
   const columns = rows.length + (unknown > 0 ? 1 : 0);
-  const usableWidth = Math.max(0, options.width - Math.max(0, options.gap) * (columns - 1));
+  // An unusable gap is zero; a larger valid gap is capped so the columns stay
+  // within the track even when the requested gaps alone would overrun it.
+  const requestedGap = Number.isFinite(options.gap) ? Math.max(0, options.gap) : 0;
+  const gap = columns > 1 ? Math.min(requestedGap, options.width / (columns - 1)) : 0;
+  const usableWidth = Math.max(0, options.width - gap * (columns - 1));
   const columnWidth = usableWidth / columns;
   const max = Math.max(
     1,
@@ -163,7 +174,7 @@ export function monthsGeometry(
       hUnknown: 0,
       total: stacked,
     });
-    x += columnWidth + options.gap;
+    x += columnWidth + gap;
   }
   if (unknown > 0) {
     out.push({
