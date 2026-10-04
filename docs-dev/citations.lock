@@ -523,8 +523,8 @@ apps/extension/lib/popup-view.ts:1086-1105  87946f53a631  lines=20
   <- docs-dev/privacy.md:497  :: function evictionNote(log: EvictionLog): string {
 apps/extension/lib/popup-view.ts:1222-1235  00dceceff078  lines=14
   <- docs-dev/install.md:183  :: /**
-apps/extension/lib/popup-view.ts:1963-2050  9f67dd3fe14c  lines=88
-  <- docs-dev/privacy.md:682  :: /**
+apps/extension/lib/popup-view.ts:1963-2050  fc56815c3a48  lines=88
+  <- docs-dev/privacy.md:682  :: lines.push(view.coverage);
 apps/extension/lib/recapture.ts:46  cfe455b29ce5  lines=1
   <- docs-dev/privacy.md:507  :: export const LAST_DELIVERED_KEY = 'cs_last_delivered_v1';
 apps/extension/lib/recapture.ts:103-116  3d65dcd98015  lines=14
