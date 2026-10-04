@@ -61,7 +61,7 @@ function header(): Record<string, unknown> {
     detailOutcomes: [],
     detailToday: { day: '2026-09-24', count: 7, cap: 180 },
     lastFetchAt: { enumerate: null, detail: null },
-    failures: [{ id: 'aaaaaaaa', reason: 'detail-empty', at: 1 }],
+    failures: [{ shortId: 'aaaaaaaa', platform: PLATFORM, reason: 'detail-empty', at: 1 }],
     failuresDropped: 0,
     halted: null,
   };
