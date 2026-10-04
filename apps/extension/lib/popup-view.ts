@@ -1557,6 +1557,41 @@ const HOOK_VERDICT_NOTE_KEYS: Record<CaptureVerdict, string> = {
   [CAPTURE_VERDICT_UNKNOWN]: 'popup.notes.hook.verdict.unknown',
 };
 
+/** Brand casing for the IDs users see in hook diagnostics; unknown IDs stay visible. */
+const HOOK_PLATFORM_LABELS: Record<string, string> = {
+  chatgpt: 'ChatGPT',
+  claude: 'Claude',
+  deepseek: 'DeepSeek',
+  gemini: 'Gemini',
+  grok: 'Grok',
+  kimi: 'Kimi',
+  perplexity: 'Perplexity',
+};
+
+function hookPlatformLabel(platform: string): string {
+  return Object.prototype.hasOwnProperty.call(HOOK_PLATFORM_LABELS, platform)
+    ? HOOK_PLATFORM_LABELS[platform]!
+    : platform;
+}
+
+/**
+ * A diagnostic is allowed to name an origin, never the page URL that carried
+ * it. Records written by this extension already hold an origin; trimming again
+ * at the render boundary keeps a malformed or older value from exposing a path,
+ * query, or fragment in the popup.
+ */
+function hookDiagnosticOrigin(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol === 'https:' || parsed.protocol === 'http:') && parsed.origin !== 'null') {
+      return parsed.origin;
+    }
+  } catch {
+    // A malformed stored origin is not printed as arbitrary diagnostic text.
+  }
+  return t('common.unknownShort');
+}
+
 /**
  * 🔴 W43 · One origin's hook record, as a sentence — and, since W69, together
  * with the one fact that can settle it.
@@ -1618,8 +1653,8 @@ function hookStatusNote(record: HookStatusRecord, live: LiveCaptureRecord | null
   const current = currentObservation(record.reasons);
   return [
     t('popup.notes.hook.observed', {
-      platform: record.platform,
-      origin: record.origin,
+      platform: hookPlatformLabel(record.platform),
+      origin: hookDiagnosticOrigin(record.origin),
       reasons,
       when: ui.stamp(record.at),
     }),
