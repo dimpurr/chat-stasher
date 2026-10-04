@@ -319,79 +319,79 @@ apps/extension/lib/contract.ts:34-95  8137d0d1ef2d  lines=62
   <- docs-dev/threat-model.md:288  :: * needs them.**
 apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:561  :: export const PAGE_HOOK_VERSION = 'v1';
-apps/extension/lib/contract.ts:303-348  0d21a1234c75  lines=46
+apps/extension/lib/contract.ts:305-350  0d21a1234c75  lines=46
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:354-850  e679ecb17dc8  lines=497
+apps/extension/lib/contract.ts:356-852  9dc1973404c2  lines=497
   <- docs-dev/install.md:83, docs-dev/install.md:187, docs-dev/privacy.md:111, docs-dev/privacy.md:847  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
-apps/extension/lib/contract.ts:357  65cef6a544ee  lines=1
+apps/extension/lib/contract.ts:359  65cef6a544ee  lines=1
   <- docs-dev/privacy.md:798  :: origins: ['https://chat.deepseek.com'],
-apps/extension/lib/contract.ts:396-402  90fc5f0d7b4a  lines=7
+apps/extension/lib/contract.ts:398-404  90fc5f0d7b4a  lines=7
   <- docs-dev/install.md:32  :: // The external API route/shape differences may represent d…
-apps/extension/lib/contract.ts:417-482  4477a226956f  lines=66
+apps/extension/lib/contract.ts:419-484  85d95a112633  lines=66
   <- docs-dev/install.md:87  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:417  779465350317  lines=1
+apps/extension/lib/contract.ts:419  779465350317  lines=1
   <- docs-dev/privacy.md:799  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:434-449  183bd14dc050  lines=16
+apps/extension/lib/contract.ts:436-451  6ff6670d0810  lines=16
   <- docs-dev/threat-model.md:330  :: pathHints: ['/rest/thread/'],
-apps/extension/lib/contract.ts:469-474  1631eb0ed4f9  lines=6
+apps/extension/lib/contract.ts:471-476  1631eb0ed4f9  lines=6
   <- docs-dev/install.md:89  :: sessionIdPatterns: [
-apps/extension/lib/contract.ts:476-482  748b3e6fe537  lines=7
+apps/extension/lib/contract.ts:478-484  748b3e6fe537  lines=7
   <- docs-dev/install.md:32  :: // 'from-source': nobody on either change opened a logged-i…
-apps/extension/lib/contract.ts:487-501  3c2febd21c22  lines=15
+apps/extension/lib/contract.ts:489-503  3c2febd21c22  lines=15
   <- docs-dev/install.md:32  :: id: 'chatgpt',
-apps/extension/lib/contract.ts:488  4eda2e856655  lines=1
+apps/extension/lib/contract.ts:490  4eda2e856655  lines=1
   <- docs-dev/privacy.md:800  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
-apps/extension/lib/contract.ts:512  586fc9c878ac  lines=1
+apps/extension/lib/contract.ts:514  586fc9c878ac  lines=1
   <- docs-dev/privacy.md:801  :: origins: ['https://gemini.google.com'],
-apps/extension/lib/contract.ts:538-550  ffbeb3d9ba7d  lines=13
+apps/extension/lib/contract.ts:540-552  ffbeb3d9ba7d  lines=13
   <- docs-dev/install.md:32  :: //    `WIZ_global_data` — an XSRF token in the body's `at` …
-apps/extension/lib/contract.ts:561  1f7678ac6786  lines=1
+apps/extension/lib/contract.ts:563  1f7678ac6786  lines=1
   <- docs-dev/privacy.md:802  :: origins: ['https://claude.ai'],
-apps/extension/lib/contract.ts:612-616  d3006384d2f5  lines=5
+apps/extension/lib/contract.ts:614-618  d3006384d2f5  lines=5
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:635  047cc8b8ab4e  lines=1
+apps/extension/lib/contract.ts:637  047cc8b8ab4e  lines=1
   <- docs-dev/privacy.md:803  :: origins: ['https://www.kimi.com'],
-apps/extension/lib/contract.ts:746-751  81d80c1cc585  lines=6
+apps/extension/lib/contract.ts:748-753  81d80c1cc585  lines=6
   <- docs-dev/install.md:32  :: // '/api/chat/...' route family, which is why that origin i…
-apps/extension/lib/contract.ts:760  23c99a148fbc  lines=1
+apps/extension/lib/contract.ts:762  23c99a148fbc  lines=1
   <- docs-dev/privacy.md:804  :: origins: ['https://grok.com'],
-apps/extension/lib/contract.ts:831-841  757ff261970a  lines=11
+apps/extension/lib/contract.ts:833-843  757ff261970a  lines=11
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:857-892  ebba5d56a375  lines=36
+apps/extension/lib/contract.ts:859-894  ebba5d56a375  lines=36
   <- docs-dev/privacy.md:807, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
-apps/extension/lib/contract.ts:879-892  ee0db2699c92  lines=14
+apps/extension/lib/contract.ts:881-894  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
-apps/extension/lib/contract.ts:913  93f15da49cac  lines=1
+apps/extension/lib/contract.ts:915  93f15da49cac  lines=1
   <- docs-dev/privacy.md:844  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1071-1090  795529bbf806  lines=20
+apps/extension/lib/contract.ts:1073-1094  6ada7641acdc  lines=22
   <- docs-dev/privacy.md:842  :: }
-apps/extension/lib/contract.ts:1083-1125  4f0f947ee305  lines=43
+apps/extension/lib/contract.ts:1085-1129  58b342e276c0  lines=45
   <- docs-dev/privacy.md:111, docs-dev/privacy.md:842  :: } catch {
-apps/extension/lib/contract.ts:1090-1152  b31495583f62  lines=63
+apps/extension/lib/contract.ts:1094-1156  b31495583f62  lines=63
   <- docs-dev/threat-model.md:570  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1112-1113  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1116-1117  d72720cd403e  lines=2
   <- docs-dev/privacy.md:444  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1164-1174  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1168-1178  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:569  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1188-1193  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1192-1197  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:372  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1261-1272  1e11e46c5e13  lines=12
+apps/extension/lib/contract.ts:1265-1276  1e11e46c5e13  lines=12
   <- docs-dev/threat-model.md:443  :: /**
-apps/extension/lib/contract.ts:1264-1272  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1268-1276  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:428  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1293-1302  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1297-1306  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:280, docs-dev/threat-model.md:416  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1322-1326  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1326-1330  91a5d6065664  lines=5
   <- docs-dev/privacy.md:504, docs-dev/threat-model.md:373, docs-dev/threat-model.md:413  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1330-1339  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1334-1343  b3b4db645114  lines=10
   <- docs-dev/privacy.md:276  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1353-1356  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1357-1360  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:700  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1418-1446  c5391b602b5e  lines=29
+apps/extension/lib/contract.ts:1422-1450  c5391b602b5e  lines=29
   <- docs-dev/install.md:94  :: /**
-apps/extension/lib/contract.ts:1467-1470  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1471-1474  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:355  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1520-1536  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1524-1540  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:542, docs-dev/threat-model.md:355  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:710, docs-dev/privacy.md:771, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
@@ -463,33 +463,33 @@ apps/extension/lib/outbox.ts:588-621  f91dda6932df  lines=34
   <- docs-dev/privacy.md:712, docs-dev/threat-model.md:118  :: /**
 apps/extension/lib/outbox.ts:623-647  fe9cbdf9b144  lines=25
   <- docs-dev/privacy.md:503  :: export interface LastExport {
-apps/extension/lib/page-hook.ts:255-262  ce770312c2a2  lines=8
+apps/extension/lib/page-hook.ts:258-265  ce770312c2a2  lines=8
   <- docs-dev/privacy.md:907  :: const warnUnsupportedTransport = (transport: string, url: s…
-apps/extension/lib/page-hook.ts:443-515  5b3a55011101  lines=73
+apps/extension/lib/page-hook.ts:448-520  5b3a55011101  lines=73
   <- docs-dev/privacy.md:903, docs-dev/threat-model.md:29  :: const captureCandidate = (
-apps/extension/lib/page-hook.ts:476  0c21ea4d8b4f  lines=1
+apps/extension/lib/page-hook.ts:481  0c21ea4d8b4f  lines=1
   <- docs-dev/privacy.md:844  :: // Metadata only — never the URL, body, or identifiers.
-apps/extension/lib/page-hook.ts:624-629  791755750698  lines=6
+apps/extension/lib/page-hook.ts:629-634  791755750698  lines=6
   <- docs-dev/privacy.md:905  :: const type = this.responseType;
-apps/extension/lib/page-hook.ts:630-633  9e0fabbb14f2  lines=4
+apps/extension/lib/page-hook.ts:635-638  9e0fabbb14f2  lines=4
   <- docs-dev/privacy.md:906  :: text = JSON.stringify(this.response);
-apps/extension/lib/page-hook.ts:666-713  123be49bb0f2  lines=48
+apps/extension/lib/page-hook.ts:671-718  123be49bb0f2  lines=48
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:710  :: const eventSourceConstructor = pageWindow.EventSource;
-apps/extension/lib/page-hook.ts:675-679  4e7c56bc1085  lines=5
+apps/extension/lib/page-hook.ts:680-684  4e7c56bc1085  lines=5
   <- docs-dev/privacy.md:911  :: if (!eventSourcePlatform) {
-apps/extension/lib/page-hook.ts:763-766  05550067e2fd  lines=4
+apps/extension/lib/page-hook.ts:768-771  05550067e2fd  lines=4
   <- docs-dev/privacy.md:911  :: if (!observeWebSocketFrame(socket, url, event?.data)) {
-apps/extension/lib/page-hook.ts:824  a5b96cb2e6ef  lines=1
+apps/extension/lib/page-hook.ts:829  a5b96cb2e6ef  lines=1
   <- docs-dev/privacy.md:109  :: return { value: chatGptAccountIdHeaderValue(accountId), pre…
-apps/extension/lib/page-hook.ts:845-850  ac2add6ee1af  lines=6
+apps/extension/lib/page-hook.ts:850-855  ac2add6ee1af  lines=6
   <- docs-dev/privacy.md:116  :: const platform = getPlatform(parsed.href);
-apps/extension/lib/page-hook.ts:848-857  ffd20a2113ae  lines=10
+apps/extension/lib/page-hook.ts:853-862  ffd20a2113ae  lines=10
   <- docs-dev/threat-model.md:268  :: // ChatGPT's in-page navigation loads only a paged window o…
-apps/extension/lib/page-hook.ts:864  c8304bee299e  lines=1
+apps/extension/lib/page-hook.ts:869  c8304bee299e  lines=1
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:710, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: !platform.methods.includes(normalizedMethod) ||
-apps/extension/lib/page-hook.ts:871-905  45359f1a1af8  lines=35
+apps/extension/lib/page-hook.ts:876-910  45359f1a1af8  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:1098-1141  994e4f465747  lines=44
+apps/extension/lib/page-hook.ts:1103-1146  994e4f465747  lines=44
   <- docs-dev/privacy.md:47  :: /**
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:272  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
