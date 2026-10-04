@@ -1627,6 +1627,44 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_inbox_shard_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            r#"{"synthetic":1}"#.to_string(),
+            "".into(),
+            "synthetic\nsecond".into(),
+        ];
+        let expected = b"{\"synthetic\":1}\n\nsynthetic\nsecond\n";
+        let name = write_shard_atomic(
+            dir.path(),
+            "synthetic-machine",
+            "synthetic-session",
+            &lines,
+            1,
+        )
+        .unwrap();
+        assert_eq!(name, "000001.jsonl");
+        let path =
+            store::shard_path_with_cap(dir.path(), "synthetic-machine", "synthetic-session", 1, 1);
+        assert!(fs::read(&path).unwrap() == expected);
+        assert_eq!(
+            write_shard_atomic(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                &lines,
+                1
+            )
+            .unwrap(),
+            name
+        );
+        assert_eq!(
+            store::next_shard_seq(dir.path(), "synthetic-machine", "synthetic-session").unwrap(),
+            2
+        );
+    }
     use super::*;
     use std::fs;
 

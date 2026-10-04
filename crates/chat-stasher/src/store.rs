@@ -2145,6 +2145,80 @@ impl StoreConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_store_shard_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = b"{\"synthetic\":1}\r\n\xffunterminated";
+        let name = write_sealed_shard_raw_with_cap(
+            StageWriter::Collect,
+            dir.path(),
+            "synthetic-machine",
+            "synthetic-session",
+            raw,
+            1,
+        )
+        .unwrap();
+        assert_eq!(name, "000001.jsonl");
+        let path = shard_path_with_cap(dir.path(), "synthetic-machine", "synthetic-session", 1, 1);
+        assert!(fs::read(path).unwrap() == raw);
+        assert_eq!(
+            write_sealed_shard_raw_with_cap(
+                StageWriter::Collect,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                raw,
+                1
+            )
+            .unwrap(),
+            name
+        );
+        assert_eq!(
+            write_sealed_shard_raw_with_cap(
+                StageWriter::Restore,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                raw,
+                1
+            )
+            .unwrap(),
+            "000002.jsonl"
+        );
+        assert!(
+            fs::read(shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                2,
+                1
+            ))
+            .unwrap()
+                == raw
+        );
+        let lines = vec![b"synthetic".to_vec(), vec![], vec![0xff]];
+        write_sealed_shard_bytes_with_cap(
+            StageWriter::Collect,
+            dir.path(),
+            "synthetic-machine",
+            "synthetic-lines",
+            &lines,
+            1,
+        )
+        .unwrap();
+        assert!(
+            fs::read(shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-lines",
+                1,
+                1
+            ))
+            .unwrap()
+                == b"synthetic\n\n\xff\n"
+        );
+    }
     use super::*;
     use std::fs;
 

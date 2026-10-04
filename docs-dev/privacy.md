@@ -149,7 +149,7 @@ the sentence.
    `runtime.sendNativeMessage`
    (`apps/extension/lib/native-host.ts:32`, `:769-819`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:2992-3003`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:2998-3009`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
@@ -345,7 +345,7 @@ Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
-`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2839-3054`,
+`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2845-3060`,
 `crates/chat-stasher/src/inbox.rs:510-520`, `:879-881`).
 
 The bundle also names the **install** that captured it: three fields — a random
@@ -410,7 +410,7 @@ install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
 (`apps/extension/entrypoints/background.ts:3099-3128`;
-`crates/chat-stasher/src/nativehost.rs:2572`, `:2597-2613`;
+`crates/chat-stasher/src/nativehost.rs:2578`, `:2603-2619`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
 a version string and timestamps — and it carries no conversation text, no session
 id and no account scope label.

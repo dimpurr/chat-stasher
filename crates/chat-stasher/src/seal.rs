@@ -162,6 +162,50 @@ pub fn maybe_seal_active(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_seal_shard_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("active.jsonl");
+        let raw = b"{\"synthetic\":1}\r\n\xffunterminated";
+        fs::write(&active, raw).unwrap();
+        assert_eq!(
+            seal_active_file(
+                &active,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!active.exists());
+        assert!(
+            fs::read(store::shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1,
+                1
+            ))
+            .unwrap()
+                == raw
+        );
+        fs::write(&active, raw).unwrap();
+        assert_eq!(
+            seal_active_file(
+                &active,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1
+            )
+            .unwrap(),
+            1
+        );
+        assert!(fs::read(active).unwrap() == raw);
+    }
     use super::*;
     use crate::scanner::{CONF_CONFIRMED, CONF_UNASCERTAINED};
     use crate::store::{self, session_shard_dir, write_sealed_shard};

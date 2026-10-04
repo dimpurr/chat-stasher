@@ -323,7 +323,7 @@ What one install per profile means, once done:
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3542-3552`, `:3279`).
+  (`crates/chat-stasher/src/nativehost.rs:3548-3558`, `:3285`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -553,7 +553,7 @@ Two properties of that directory, both from
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:3066-3068`, `:3074-3076`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:3072-3074`, `:3080-3082`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and

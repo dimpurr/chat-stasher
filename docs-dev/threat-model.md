@@ -38,7 +38,7 @@ Understanding the roles below requires knowing the path the content takes.
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
    (`apps/extension/lib/native-host.ts:769-819`;
-   `crates/chat-stasher/src/nativehost.rs:2992-3003`). The bundle leaves the
+   `crates/chat-stasher/src/nativehost.rs:2998-3009`). The bundle leaves the
    outbox **only** on a matching `ack`
    (`apps/extension/lib/native-host.ts:1118-1127`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:3927-3961`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:3933-3967`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -388,7 +388,7 @@ the archive can confirm that two conversations belong to one account — which i
 already the party who can read both conversations. The host never returns the
 masterkey or the derived value to the extension, the value is not in the bundle,
 the payload or the export file, and a test asserts the sealed payload never
-contains it (`crates/chat-stasher/src/inbox.rs:2033-2055`). No account id
+contains it (`crates/chat-stasher/src/inbox.rs:2071-2093`). No account id
 visible, no key file resolvable without ambiguity, or a key file that cannot be
 read each mean **no comparable key is derived** — coordination then falls back
 to a platform-wide bucket (`crates/chat-stasher/src/nativehost.rs:1310-1345`,
@@ -599,7 +599,7 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:3927-3961`).
+  (`crates/chat-stasher/src/nativehost.rs:3933-3967`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
@@ -615,11 +615,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:2865-2874`;
+  (`crates/chat-stasher/src/nativehost.rs:2871-2880`;
   `apps/extension/lib/native-host.ts:1118-1127`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:2881-2887`).
+  (`crates/chat-stasher/src/nativehost.rs:2887-2893`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -713,7 +713,7 @@ They reach three different places, and the differences matter:
 - **A per-install status record**, written by the host into the stage as
   `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
-  `crates/chat-stasher/src/nativehost.rs:2572`, `:2597-2613`). It carries the
+  `crates/chat-stasher/src/nativehost.rs:2578`, `:2603-2619`). It carries the
   install id, browser, profile label, extension version, a report time, and one
   row per platform naming the platform, how many captures this browser
   confirmed, how many are still pending, why a leg is paused, and — for a row

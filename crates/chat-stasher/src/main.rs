@@ -10326,6 +10326,28 @@ fn display_session_id(id: &str, full_ids: bool) -> String {
 
 #[cfg(test)]
 mod decision_surface_tests {
+
+    #[test]
+    fn ri2_characterize_cli_resolver_edge_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity");
+        std::fs::write(&path, "ABCDEF0123456789ABCDEF0123456789\n").unwrap();
+        let mut config = Config::default();
+        assert_eq!(
+            resolve_machine_at("test", &config, Some(""), &path).unwrap(),
+            ""
+        );
+        config.machine = Some(" ".into());
+        assert_eq!(
+            resolve_machine_at("test", &config, None, &path).unwrap(),
+            " "
+        );
+        config.machine = Some("".into());
+        assert_eq!(
+            resolve_machine_at("test", &config, None, &path).unwrap(),
+            "abcdef0123456789abcdef0123456789"
+        );
+    }
     use super::*;
     use clap::CommandFactory;
     use std::fs;
