@@ -1039,7 +1039,15 @@ fn probe_harness(
             Confidence::Unascertained => 4,
         })
         .unwrap_or(Confidence::Unascertained);
-    let state = if any_unknown {
+    let all_unascertained = !subprobes.is_empty()
+        && subprobes
+            .iter()
+            .all(|probe| probe.state == ProbeState::SkipUnascertained);
+    let state = if all_unascertained {
+        // Every root was skipped by policy before any filesystem probe. Keep
+        // that precise reason; mixed measured/unknown roots remain indeterminate.
+        ProbeState::SkipUnascertained
+    } else if any_unknown {
         ProbeState::Indeterminate
     } else if all_missing {
         ProbeState::Missing
@@ -3097,6 +3105,7 @@ mod tests {
             probe.record_count, None,
             "the skipped root makes the total unknown"
         );
+        assert_eq!(probe.state, ProbeState::Indeterminate);
         assert_eq!(
             probe.confidence,
             Confidence::Unascertained,
@@ -3862,6 +3871,30 @@ mod tests {
         assert_eq!(report.probes.len(), 1);
         assert_eq!(report.probes[0].state, ProbeState::SkipUnascertained);
         assert!(!report.probes[0].installed_p());
+    }
+
+    #[test]
+    fn all_unascertained_source_roots_keep_policy_skip_and_unknown_counts() {
+        let mut registry = unascertained_registry();
+        let harness = &mut registry.harnesses[0];
+        harness.source_roots = ["cli", "ide", "app"]
+            .into_iter()
+            .map(|id| RegistrySourceRoot {
+                id: id.to_string(),
+                paths: harness.paths.clone(),
+                provenance: Default::default(),
+            })
+            .collect();
+        let report = scan_with_registry(&Config::default(), &registry).unwrap();
+        assert!(report.records.is_empty());
+        assert_eq!(report.probes.len(), 1);
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::SkipUnascertained);
+        assert_eq!(probe.confidence, Confidence::Unascertained);
+        assert_eq!(probe.record_count, None);
+        assert_eq!(probe.candidate_count, None);
+        assert_eq!(probe.bytes, None);
+        assert!(!probe.installed_p());
     }
 
     /// The other side of the same gate: `unascertained` says *we* could not verify a
