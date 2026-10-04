@@ -245,6 +245,28 @@ mod tests {
     }
 
     #[test]
+    fn estimated_shards_handles_u64_boundaries() {
+        let max = u64::MAX;
+        let cases = [
+            // The product exceeds u64, but the quotient is still exact.
+            (max - 1, max, max - 1, max - 2),
+            // Exact completion reaches the full shard count at the limit.
+            (max, max, max, max),
+            // Byte progress above the total is clamped before scaling.
+            (max, max - 1, max, max),
+        ];
+
+        for (done_bytes, total_bytes, total_shards, expected) in cases {
+            let got = estimated_shards(done_bytes, total_bytes, total_shards);
+            assert_eq!(got, expected);
+            assert!(
+                got <= total_shards,
+                "estimated {got} shards beyond total {total_shards}"
+            );
+        }
+    }
+
+    #[test]
     fn progress_lines_are_throttled_to_interval() {
         let (clock, now) = fake_clock();
         let (lines, sink) = collect_sink();
