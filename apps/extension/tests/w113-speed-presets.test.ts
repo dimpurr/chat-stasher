@@ -172,6 +172,22 @@ describe('W113 · reading and writing the choice', () => {
     }
   });
 
+  it('a mismatched read-back rejects even when the store exposes another valid preset', async () => {
+    const store = memoryStore({ [SPEED_PRESET_KEY]: 'standard' });
+    store.save = async () => {}; // Accept the call without persisting the requested value.
+
+    await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow(/did not persist/i);
+    expect(await readSpeedPreset(store)).toBe('standard');
+  });
+
+  it('does not report gentle as persisted when a no-op write only reads back the default', async () => {
+    const store = memoryStore();
+    store.save = async () => {}; // The absent key is interpreted as gentle by ordinary reads.
+
+    await expect(writeSpeedPreset(store, 'gentle')).rejects.toThrow(/did not persist/i);
+    expect(await readSpeedPreset(store)).toBe(DEFAULT_SPEED_PRESET);
+  });
+
   it('a store that cannot hold the choice is not quietly treated as having accepted it', async () => {
     // A store whose write throws must reach the caller: the control that shows "faster is on" would
     // otherwise be showing a rate nothing is running at.
