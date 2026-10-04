@@ -123,6 +123,28 @@ resolve the read error and run the inventory again.
 2. **Check the profile.** The extension belongs to one browser profile. A copy in your Personal profile captures nothing in your Work profile. Load it in every profile you chat in.
 3. **Check the platform.** The popup and [support.md](support.md) list which chat sites each release covers.
 
+### The page is quiet, or the popup reports a hook problem
+
+Open the extension popup on the affected tab and read its notes. A quiet page
+does not produce a failure record: if there is no note about that page, the
+extension has no recorded observation to distinguish an idle page from a hook
+that did not report. No capture on record is also a gap in the record, not proof
+that none arrived.
+
+A hook note names the page's recorded observation and includes the record of
+captures from that platform. If it says the hook is not in effect, reload that
+tab to get a fresh observation, then open a conversation there. Reopen the popup
+to read any current note: a successful hook verification clears the old hook
+note, so no note is not proof that capture succeeded. A capture confirmation from
+that platform supports the current observation only if its time is at or after
+when that observation began; if the popup does not show enough timing to establish
+this, treat the result as unknown.
+
+A declined-report note is separate: it says a page sent a report that the
+extension did not record, and does not show a recorded observation or capture
+confirmation. If it says the report was not recorded because the site is not
+supported, check [support.md](support.md) for coverage.
+
 ### The popup says it cannot reach the host
 
 The host is the `chat-stasher` binary, which your browser starts when the extension delivers. Register it (once per machine, for every browser and profile):
