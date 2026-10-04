@@ -2,9 +2,9 @@
 import { expect } from '@playwright/test';
 import {
   fireAlarm,
-  readStorage,
   test,
   waitForAlarm,
+  waitForTickRecord,
   writeStorage,
   type Extension,
 } from './harness';
@@ -56,6 +56,11 @@ test('a stored Claude scope is allowed by the cookie on a fresh /new page', asyn
   const page = await ext.context.newPage();
   await page.goto(`${ORIGIN}/new`, { waitUntil: 'domcontentloaded' });
   await waitForAlarm(ext, TICK_ALARM);
+  // 🔴 The instant the fire is issued, not the instant the tick runs:
+  //    the record below is only accepted from a wake newer than this
+  //    (`waitForTickRecord`'s `since`), so an already-concluded record
+  //    from an earlier wake can never be read as this tick's verdict.
+  const firedAt = Date.now();
   await fireAlarm(ext, TICK_ALARM);
 
   // The empty list is an ordinary completed run. The only page fetch is the
@@ -64,6 +69,17 @@ test('a stored Claude scope is allowed by the cookie on a fresh /new page', asyn
   await expect.poll(() => requests).toEqual([`GET ${LIST_PATH}`]);
   expect(requests).toEqual([`GET ${LIST_PATH}`]);
   expect(escaped).toEqual([]);
-  const all = await readStorage(ext, ['cs_backfill_lasttick_v1']);
+  // 🔴 The list request is observable the moment the tick issues it, but
+  //    the tick writes its completion record only when the whole run has
+  //    finished (`conclude()` in entrypoints/background.ts, after the
+  //    fetch, the cursor save and the account observation). Reading
+  //    storage here therefore raced the write and could catch the key
+  //    still absent — a stale read, not a verdict. Wait for the record
+  //    itself, the same waiter the other tick specs use: it polls until a
+  //    record written after `firedAt` exists and its sweep has concluded,
+  //    so neither an absent key nor the provisional pre-sweep record
+  //    (`SWEEP_NOT_CONCLUDED`, lib/backfill/alarm.ts) can pass for the
+  //    tick's outcome. No assertion above or below changes.
+  const all = await waitForTickRecord(ext, { since: firedAt });
   expect(all.cs_backfill_lasttick_v1).toMatchObject({ ran: true, reason: 'ran', stopped: 'queue-empty' });
 });
