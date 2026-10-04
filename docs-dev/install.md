@@ -91,7 +91,7 @@ that platform."** The extension has two legs; please read them separately:
   them, so it is skipped silently rather than captured.
   So, reading the code, passive capture on Perplexity **does name the
   conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:1389-1417`) — but this is still a conclusion
+  (`apps/extension/lib/contract.ts:1418-1446`) — but this is still a conclusion
   drawn from reading the code, and the route itself was read out of public
   source rather than measured: **we have not tested it on a real perplexity.ai
   page.**
