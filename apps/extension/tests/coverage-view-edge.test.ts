@@ -5,7 +5,7 @@ import { buildCoverage, type CoverageInput, type CoverageRow, type CoverageScope
 import { chipOf, hueKeyOf, monogramOf } from '../lib/coverage-view';
 import { initialState } from '../lib/backfill/types';
 import { applyUiLocale } from '../lib/i18n';
-import { catalogFetch, withI18n } from './i18n-harness';
+import { CATALOGS, catalogFetch, withI18n } from './i18n-harness';
 
 const NOW = Date.UTC(2026, 8, 24, 12, 0, 0);
 
@@ -74,6 +74,6 @@ describe('coverage status chip sparse boundary', () => {
     expect(chipOf(row)).toEqual({ word: 'retrying', tone: 'wait' });
 
     await applyUiLocale('zh_CN');
-    expect(chipOf(row)).toEqual({ word: '重试中', tone: 'wait' });
+    expect(chipOf(row)).toEqual({ word: CATALOGS.zh_CN.coverage_chip_retrying!.message, tone: 'wait' });
   });
 });
