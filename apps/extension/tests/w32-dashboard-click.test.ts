@@ -207,6 +207,15 @@ afterEach(async () => {
 });
 
 describe('W32 · the dashboard button cannot be pressed twice into one tick', () => {
+  it('exposes the dashboard note as a hidden-when-empty polite status', () => {
+    mountPopup();
+    const note = document.getElementById('dashboard-note');
+
+    expect(note?.getAttribute('role')).toBe('status');
+    expect(note?.getAttribute('aria-live')).toBe('polite');
+    expect(note?.hidden).toBe(true);
+  });
+
   /**
    * The mechanism, on its own — no await between the click and the assertion.
    * Moving the disable below the first `await` in `onOpenDashboard` fails here
