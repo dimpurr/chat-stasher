@@ -10,7 +10,7 @@
 //! Only synthetic trees in temp dirs are touched; assertions are byte counts
 //! and digests, never session content.
 
-use chat_stasher::collect::{self, ArchiveFacts, DestinationView, ShardFact};
+use chat_stasher::collect::{self, ArchiveFacts, DestinationView, ShardFact, ShardFingerprint};
 use chat_stasher::config::Config;
 use chat_stasher::scanner::{self, HarnessRegistry};
 use chat_stasher::store;
@@ -65,18 +65,31 @@ fn holding<'a>(id: &str, facts: ArchiveFacts) -> DestinationView<'a> {
 
 fn fact_of(stage: &Path, session_id: &str) -> ShardFact {
     let concat = store::concat_shards(stage, MACHINE, session_id).unwrap();
+    let mut entries =
+        store::sealed_shard_entries(&store::session_shard_dir(stage, MACHINE, session_id)).unwrap();
+    entries.sort_by_key(|(sequence, _)| *sequence);
+    let shard_identities = entries
+        .iter()
+        .map(|(sequence, path)| {
+            let bytes = fs::read(path).unwrap();
+            ShardFingerprint {
+                sequence: *sequence,
+                bytes: bytes.len() as u64,
+                sha256: Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            }
+        })
+        .collect();
     ShardFact {
-        shard_count: store::sealed_shard_entries(&store::session_shard_dir(
-            stage, MACHINE, session_id,
-        ))
-        .unwrap()
-        .len(),
+        shard_count: entries.len(),
         concat_bytes: concat.len() as u64,
         concat_sha256: Sha256::digest(&concat)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect(),
-        shard_identities: Vec::new(),
+        shard_identities,
     }
 }
 
