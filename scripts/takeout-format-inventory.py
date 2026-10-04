@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections import Counter, defaultdict
 from typing import Any
 
 MAX_INPUT_BYTES = 32 * 1024 * 1024
+MAX_OUTPUT_BYTES = 24_000
 MAX_NODES = 100_000
 MAX_DEPTH = 10
 MAX_FIELDS = 256
@@ -128,7 +130,7 @@ def inventory(document: Any) -> dict[str, Any]:
             "types": dict(sorted(field_types[path].items())),
             "empty": dict(sorted(empty_states[path].items())),
         })
-    return {
+    report = {
         "format": "takeout-structure-v1",
         "nodes_examined": min(nodes, MAX_NODES),
         "truncated": truncated,
@@ -139,6 +141,19 @@ def inventory(document: Any) -> dict[str, Any]:
             for path, counts in sorted(paths.items())
         ],
     }
+    while (
+        len(json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")) + 1
+        >= MAX_OUTPUT_BYTES
+    ):
+        report["truncated"] = True
+        # Preserve field presence/type/empty states before aggregate shapes.
+        if report["value_shapes"]:
+            report["value_shapes"].pop()
+        elif report["fields"]:
+            report["fields"].pop()
+        else:
+            break
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -152,16 +167,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_file is None:
         parser.error("a JSON file is required")
     try:
-        size = os.path.getsize(args.json_file)
-        if size > MAX_INPUT_BYTES:
+        descriptor = os.open(
+            args.json_file,
+            os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise OSError("input is not a regular file")
+            raw = handle.read(MAX_INPUT_BYTES + 1)
+        if len(raw) > MAX_INPUT_BYTES:
             print("takeout inventory: input exceeds size limit", file=sys.stderr)
             return 1
-        with open(args.json_file, "r", encoding="utf-8") as handle:
-            document = json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError):
         print("takeout inventory: input could not be read as JSON", file=sys.stderr)
         return 1
-    print(json.dumps(inventory(document), sort_keys=True, separators=(",", ":")))
+    rendered = json.dumps(inventory(document), sort_keys=True, separators=(",", ":"))
+    print(rendered)
     return 0
 
 
@@ -200,7 +222,7 @@ def selftest() -> int:
     bounded = (
         len(report["fields"]) <= MAX_FIELDS
         and report["nodes_examined"] <= MAX_NODES
-        and len(rendered) < 24_000
+        and len(rendered.encode("utf-8")) + 1 <= MAX_OUTPUT_BYTES
     )
     private_free = all(value not in rendered for value in (message, identifier, path))
     passed = expected and bounded and private_free and report["unrecognized_keys_omitted"] == 1

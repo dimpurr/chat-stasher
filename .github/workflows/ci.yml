@@ -431,6 +431,14 @@ jobs:
       - name: Support matrix check self-test
         run: python3 scripts/check-support-matrix.py --selftest
 
+      # This probe is synthetic-only. Keep its behavior checks in CI so the
+      # input and output bounds and missing/null/empty distinctions stay pinned.
+      - name: Takeout inventory self-test
+        run: python3 scripts/takeout-format-inventory.py --selftest
+
+      - name: Takeout inventory unit tests
+        run: python3 scripts/tests/test_takeout_format_inventory.py
+
       # The four workflows under .github/workflows/ are the only programs in
       # this repository that cannot be run before they ship: GitHub finds their
       # syntax errors, unknown keys and misspelled step outputs when it runs

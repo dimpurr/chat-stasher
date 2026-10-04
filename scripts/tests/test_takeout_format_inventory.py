@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "takeout-format-inventory.py")
@@ -71,6 +74,66 @@ class TakeoutFormatInventoryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn(path, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_input_growth_after_open_is_still_limited_while_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "synthetic-growing-input.json")
+            with open(path, "wb") as handle:
+                handle.write(b"{}")
+
+            original_fdopen = os.fdopen
+
+            def grow_file(descriptor: int, mode: str):
+                handle = original_fdopen(descriptor, mode)
+                with open(path, "ab") as writer:
+                    writer.write(b" " * 32)
+                return handle
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.object(MODULE, "MAX_INPUT_BYTES", 16),
+                patch.object(MODULE.os, "fdopen", side_effect=grow_file),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = MODULE.main([path])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("input exceeds size limit", stderr.getvalue())
+        self.assertNotIn(path, stderr.getvalue())
+
+    def test_deep_report_respects_output_byte_limit(self) -> None:
+        keys = sorted(MODULE.SAFE_FIELD_NAMES)[:8]
+
+        def nested(level: int) -> dict[str, object]:
+            if level == 0:
+                return {key: "synthetic" for key in keys}
+            return {key: nested(level - 1) for key in keys}
+
+        report = MODULE.inventory(nested(3))
+        rendered = json.dumps(report, sort_keys=True, separators=(",", ":"))
+
+        self.assertTrue(report["truncated"])
+        self.assertLess(len(rendered.encode("utf-8")) + 1, MODULE.MAX_OUTPUT_BYTES)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are unavailable")
+    def test_fifo_input_is_rejected_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "synthetic-input.fifo")
+            os.mkfifo(path)
+            result = subprocess.run(
+                [sys.executable, SCRIPT, path],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn(path, result.stderr)
 
 
 if __name__ == "__main__":
