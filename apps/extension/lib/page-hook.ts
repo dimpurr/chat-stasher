@@ -685,11 +685,12 @@ export function installPageFetchHook(options: PageHookOptions): void {
         }
         source.addEventListener('message', (event: MessageEvent) => {
           try {
-            if (typeof event?.data !== 'string') return;
+            const data = event?.data;
+            if (typeof data !== 'string') return;
             // EventSource exposes each event's data, not the HTTP response body.
             // Capture only events that are themselves complete, response-shaped
             // documents; deltas and protocol fragments are not assembled by guess.
-            captureStreamEvent(source, url, event.data, eventSourcePlatform);
+            captureStreamEvent(source, url, data, eventSourcePlatform);
           } catch {
             // Observation must never surface as a page-visible error.
           }
