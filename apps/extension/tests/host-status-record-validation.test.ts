@@ -51,6 +51,7 @@ describe('persisted host status records', () => {
   it.each([
     ['missing timestamp', { ok: true }],
     ['non-boolean ok', { at: AT, ok: 'true' }],
+    ['numeric ok', { at: AT, ok: 1 }],
     ['non-string reason', { at: AT, ok: false, reason: 7 }],
     ['non-string kind', { at: AT, ok: false, kind: null }],
     ['non-string detail', { at: AT, ok: false, detail: {} }],
@@ -78,6 +79,14 @@ describe('persisted host status records', () => {
       hostVersion: '0.0.0-synthetic',
       lastKnownStage: '/synthetic/stage',
     };
+    const store = memoryStore({ [HOST_STATUS_KEY]: expected });
+
+    expect(await loadHostStatus(store)).toEqual(expected);
+  });
+
+  it('accepts the zero timestamp edge rather than reading it as absent', async () => {
+    const { HOST_STATUS_KEY, loadHostStatus } = await import('../lib/host-status');
+    const expected = { at: 0, ok: false, reason: 'host-unavailable' };
     const store = memoryStore({ [HOST_STATUS_KEY]: expected });
 
     expect(await loadHostStatus(store)).toEqual(expected);
@@ -195,6 +204,7 @@ describe('persisted host pause records', () => {
     ['missing reason', { at: AT }],
     ['non-string reason', { at: AT, reason: false }],
     ['non-string detail', { at: AT, reason: 'host-unavailable', detail: 2 }],
+    ['null detail', { at: AT, reason: 'host-unavailable', detail: null }],
   ])('rejects malformed pause record: %s', async (_label, record) => {
     const { HOST_PAUSE_KEY, loadHostPause } = await import('../lib/host-status');
     const store = memoryStore({ [HOST_PAUSE_KEY]: record });
