@@ -137,7 +137,7 @@ export async function readCoverageInputs(
   const skippedFor = (platform: string): TickSkipReason | null => {
     const skipped = tick?.schedule?.skipped;
     if (!Array.isArray(skipped)) return null;
-    return skipped.find((row) => row.platform === platform)?.reason ?? null;
+    return skipped.find((row) => row !== null && typeof row === 'object' && row.platform === platform)?.reason ?? null;
   };
 
   const scopes: CoverageScopeInput[] = [];
