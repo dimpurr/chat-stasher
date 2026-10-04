@@ -121,18 +121,30 @@ def check(root: str) -> tuple[list[Finding], int] | None:
         if rel == SELF:
             continue
         full = os.path.join(root, rel)
-        if not os.path.isfile(full):
-            continue  # a tracked symlink whose target is gone: nothing to read
-        try:
-            with open(full, "rb") as handle:
-                body = handle.read()
-        except OSError:
-            # Unreadable is not clean either, but it is a fact about this
-            # machine rather than about the file's contents: the count below
-            # says which files were read, and the reader can see the gap.
+        if os.path.islink(full):
+            try:
+                # The stored target is part of the tracked file's content.
+                # Read that text without resolving it: it may be broken, or
+                # point outside this checkout entirely.
+                body = os.readlink(full)
+            except OSError:
+                continue
+            read += 1
+            lines = body.splitlines()
+        elif os.path.isfile(full):
+            try:
+                with open(full, "rb") as handle:
+                    body = handle.read()
+            except OSError:
+                # Unreadable is not clean either, but it is a fact about this
+                # machine rather than about the file's contents: the count below
+                # says which files were read, and the reader can see the gap.
+                continue
+            read += 1
+            lines = body.decode(DECODE, "replace").splitlines()
+        else:
             continue
-        read += 1
-        for number, text in enumerate(body.decode(DECODE, "replace").splitlines(), 1):
+        for number, text in enumerate(lines, 1):
             for family, pattern in FAMILIES:
                 for _ in pattern.finditer(text):
                     findings.append(Finding(rel, number, family, text))
@@ -191,6 +203,40 @@ def selftest() -> int:
             # A case that passes must have passed by reading the file, not by
             # finding nothing to read.
             wrong = got_fail != want_fail or read == 0
+            failures += 1 if wrong else 0
+            verdict = "ok" if not wrong else "WRONG"
+            print(
+                f"[private-paths] selftest {verdict}: {label} "
+                f"(want_fail={want_fail}, got={got_fail}, files_read={read})"
+            )
+    symlink_cases = [
+        ("a broken symlink to a private checkout", "../.private/docs/14-ADR.md", True),
+        ("a benign broken relative symlink", "../assets/image.png", False),
+    ]
+    for label, target, want_fail in symlink_cases:
+        with tempfile.TemporaryDirectory(prefix="private-paths-selftest-") as tmp:
+            init = subprocess.run(
+                ["git", "-C", tmp, "init", "-q", "-b", "main"], capture_output=True
+            )
+            if init.returncode != 0:
+                print("[private-paths] selftest cannot run: git init failed")
+                return 1
+            os.makedirs(os.path.join(tmp, "src"), exist_ok=True)
+            os.symlink(target, os.path.join(tmp, "src", "link"))
+            add = subprocess.run(["git", "-C", tmp, "add", "-A"], capture_output=True)
+            if add.returncode != 0:
+                print("[private-paths] selftest cannot run: git add failed")
+                return 1
+            result = check(tmp)
+            if result is None:
+                print("[private-paths] selftest cannot run: no tracked set")
+                return 1
+            problems, read = result
+            got_fail = bool(problems)
+            reported_link = any(
+                problem.path == "src/link" and problem.line == 1 for problem in problems
+            )
+            wrong = got_fail != want_fail or read == 0 or (want_fail and not reported_link)
             failures += 1 if wrong else 0
             verdict = "ok" if not wrong else "WRONG"
             print(
