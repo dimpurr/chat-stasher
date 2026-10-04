@@ -654,16 +654,23 @@ popup:
       those conversations are being worked through a second time. Nothing was
       deleted from this browser's records.
     halted:
+      # 🔴 W426 · The two capability halts, in plain words. Two constraints a
+      # review found being violated: backfill is scoped to its own platform and
+      # account, so no other platform can backfill this one's history — saying
+      # "use a supported platform" sends the user to a dead end; and {pending}
+      # is the count still waiting, not the number listable — the caller's
+      # pendingCount excludes already archived conversations and can be zero,
+      # so the message must not state a total.
       unsupportedPlatform: >-
-        Backfill is not available for {platform} in this build. To capture a
-        conversation now, open it on {platform} and let live capture run; use a
-        supported platform to backfill older conversations. Technical detail:
-        {detail}
+        Backfill is not available for {platform} in this build, and a platform's
+        history can only be backfilled from that platform's own account. To
+        capture a conversation now, open it on {platform} and let live capture
+        run. Technical detail: {detail}
       detailUnsupported: >-
-        This build can list {pending} past conversations on {platform}, but
-        cannot fetch their contents for backfill. To capture one now, open it on
-        {platform} and let live capture run; the listed conversations remain
-        pending. Technical detail: {detail}
+        This build can list past conversations on {platform} but cannot fetch
+        their contents for backfill; {pending} remain pending. To capture one
+        now, open it on {platform} and let live capture run. Technical detail:
+        {detail}
       # 🔴 W31c · The two organization halts, in plain words and in their own
       # sentences. They are NOT the `other` fallback: that one would print the
       # reason code and the technical detail at a user whose actual question is

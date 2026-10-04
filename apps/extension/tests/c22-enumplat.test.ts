@@ -358,7 +358,7 @@ describe('C22-5 · the popup\'s honest explanation', () => {
     expect(out).not.toContain('Claude: history cannot be backfilled yet');
   });
 
-  it('with halted=unsupported-platform it says "not implemented yet", not "the platform changed"', () => {
+  it('with halted=unsupported-platform it names the build limit and the live-capture step, not "the platform changed"', () => {
     const view = renderPopup({
       enabled: true,
       block: null,
@@ -374,7 +374,8 @@ describe('C22-5 · the popup\'s honest explanation', () => {
       failures: NO_FAILURES,
     });
     const out = popupText(view);
-    expect(out).toContain('has no history backfill implemented');
-    expect(out).toContain('This is not a platform change');
+    expect(out).toContain('Backfill is not available for deepseek in this build');
+    expect(out).toContain('open it on deepseek and let live capture run');
+    expect(out).not.toContain('platform change');
   });
 });
