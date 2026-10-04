@@ -186,9 +186,9 @@ async function seed(ext: Extension): Promise<void> {
         archivedCount: 24,
         detailToday: { day: DAY, count: 400, cap: 400 },
         failures: [
-          { id: 'bbbbbbbb', reason: 'detail-too-long', at: NOW - 20 * 3600_000 },
-          { id: 'cccccccc', reason: 'detail-too-long', at: NOW - 19 * 3600_000 },
-          { id: 'dddddddd', reason: 'detail-empty', at: NOW - 18 * 3600_000 },
+          { shortId: 'bbbbbbbb', platform: 'deepseek', reason: 'detail-too-long', at: NOW - 20 * 3600_000 },
+          { shortId: 'cccccccc', platform: 'deepseek', reason: 'detail-too-long', at: NOW - 19 * 3600_000 },
+          { shortId: 'dddddddd', platform: 'deepseek', reason: 'detail-empty', at: NOW - 18 * 3600_000 },
         ],
         failuresDropped: 5,
         halted: {

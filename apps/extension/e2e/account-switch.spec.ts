@@ -129,7 +129,7 @@ function headerA(): Record<string, unknown> {
     enumCursor: { offset: 0, complete: false },
     pendingCount: 1,
     archivedCount: 0,
-    detailToday: { day: '2026-09-26', count: 0, cap: null },
+    detailToday: { day: '2026-09-26', count: 0 },
     accountLease: {
       value: fingerprint(ACCOUNT_A),
       saltId: SALT.id,
