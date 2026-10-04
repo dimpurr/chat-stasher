@@ -148,7 +148,7 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 | `max_bytes` | `"2GiB"` | The quota. Plain bytes or a unit: `"50GB"` is 50 × 10⁹, `"50GiB"` is 50 × 2³⁰. `0` turns the cache off. |
 | `dir` | the platform cache folder (`~/Library/Caches/chat-stasher/body` on macOS; `$XDG_CACHE_HOME/chat-stasher/body` or `~/.cache/chat-stasher/body` on Linux) | Where entries live. The platform default follows the operating system's cache directory; set this key to choose another location. |
 
-- The quota counts entry files and temporary files being written, not filesystem overhead. After a store, least recently used entries are evicted as needed to bring those counted bytes within quota.
+- The quota counts entry files and temporary files being written, not filesystem overhead. After a store, least recently used entries are evicted as needed to bring those counted bytes within quota — once they can be evicted safely: a temporary file still being written counts, but is left alone until it is stale, and a cache nothing can be evicted from (a read-only mount, a permission the cache cannot override) stays over quota, which `doctor` reports against the quota.
 - A session larger than a tenth of the quota is read without being stored.
 - Single-session reads (`read --session` and the dashboard's session load) may use the cache. `verify`, `export`, `dest-init`, `push`, `read --all-machines` and index rebuilds never use it, in either direction.
 - A `[cache]` section with an unreadable value turns the cache **off** instead of guessing, and `doctor` says why.
