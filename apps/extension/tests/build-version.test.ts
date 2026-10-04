@@ -66,6 +66,19 @@ describe('parseBuildNumber', () => {
     expect(parseBuildNumber('10')).toBe(10);
   });
 
+  it('accepts the largest safe integer', () => {
+    expect(parseBuildNumber(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('rejects integers that cannot be represented safely', () => {
+    expect(() => parseBuildNumber(String(Number.MAX_SAFE_INTEGER + 1))).toThrow(
+      /CS_BUILD_NUMBER must be a non-negative integer/,
+    );
+    expect(() => parseBuildNumber('9'.repeat(1_000))).toThrow(
+      /CS_BUILD_NUMBER must be a non-negative integer/,
+    );
+  });
+
   it('rejects anything that is not a base-10 non-negative integer', () => {
     for (const bad of ['-1', 'abc', '1.5', '007', ' 1', '1 ', '1e3', '0x10', 'NaN']) {
       expect(() => parseBuildNumber(bad), `should reject ${JSON.stringify(bad)}`).toThrow(

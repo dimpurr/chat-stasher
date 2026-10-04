@@ -27,16 +27,16 @@ export interface VersionResult {
 }
 
 /**
- * Accepts `0` and any number of digits after a non-zero leading digit. A
- * leading zero like `007` is rejected because as a build number it is
- * ambiguous; the caller gets a clear error rather than a guess.
+ * Accepts `0` and decimal integers up to `Number.MAX_SAFE_INTEGER`. A leading
+ * zero like `007` is rejected because as a build number it is ambiguous; the
+ * caller gets a clear error rather than a guess.
  */
 const BUILD_NUMBER_RE = /^(0|[1-9][0-9]*)$/;
 
 /**
  * Parses `CS_BUILD_NUMBER`. Returns `undefined` when it is unset or empty,
  * meaning "no build number" (byte-identical manifest). Throws a clear error
- * for anything that is not a non-negative integer.
+ * for anything that is not a safely representable non-negative integer.
  */
 export function parseBuildNumber(raw: string | undefined): number | undefined {
   if (raw === undefined || raw === '') return undefined;
@@ -45,7 +45,13 @@ export function parseBuildNumber(raw: string | undefined): number | undefined {
       `CS_BUILD_NUMBER must be a non-negative integer, got ${JSON.stringify(raw)}`,
     );
   }
-  return Number(raw);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `CS_BUILD_NUMBER must be a non-negative integer, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
 }
 
 /**
