@@ -327,10 +327,11 @@ fn doctor_tables_never_contradict_any_harness() {
 /// its counts unknown in both output formats.
 #[test]
 fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
-    let sandbox = tempfile::tempdir().unwrap();
-    let home = sandbox.path().join("home");
-    let source = sandbox.path().join("synthetic-platform-source");
-    let registry = sandbox.path().join("registry.json");
+    let sandbox = test_support::Sandbox::new();
+    sandbox.ensure_dirs();
+    let home = sandbox.home();
+    let source = sandbox.root().join("synthetic-platform-source");
+    let registry = sandbox.root().join("registry.json");
     fs::create_dir_all(&home).unwrap();
     // The synthetic Codex registry cell declares a directory, but the source
     // is a file. This deterministically exercises an unavailable platform
@@ -349,19 +350,10 @@ fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
 
     let run_doctor = |json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
-        command
+        sandbox
+            .apply(&mut command)
             .arg("doctor")
-            .env("HOME", &home)
-            .env("USERPROFILE", &home)
-            .env("XDG_CONFIG_HOME", sandbox.path().join("config"))
-            .env("XDG_DATA_HOME", sandbox.path().join("data"))
-            .env("XDG_STATE_HOME", sandbox.path().join("state"))
-            .env("XDG_CACHE_HOME", sandbox.path().join("xdg-cache"))
-            .env("CHAT_STASHER_REGISTRY", &registry)
-            .env(
-                test_support::RUSTIC_CACHE_DIR_ENV,
-                test_support::rustic_cache_root(sandbox.path()),
-            );
+            .env("CHAT_STASHER_REGISTRY", &registry);
         if json {
             command.arg("--json");
         }
