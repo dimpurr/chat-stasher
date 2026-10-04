@@ -45,7 +45,11 @@ import { haltClassOf, type BackfillHeader, type BackfillState, type HaltRecord }
  */
 export function retryMinutesLeft(halt: HaltRecord, now: number): number {
   if (halt.retryAt === undefined) return 0;
-  return Math.max(0, Math.ceil((halt.retryAt - now) / 60_000));
+  if (!Number.isFinite(halt.retryAt) || !Number.isFinite(now)) return 0;
+  const waitMs = halt.retryAt - now;
+  // Finite inputs can still overflow when subtracted at opposite extremes.
+  if (!Number.isFinite(waitMs)) return 0;
+  return Math.max(0, Math.ceil(waitMs / 60_000));
 }
 
 export interface ProgressView {
