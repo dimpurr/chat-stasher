@@ -223,3 +223,51 @@ describe('persisted host pause records', () => {
     expect(await loadHostPause(store as never)).toEqual(recordWithoutDetail);
   });
 });
+
+describe('malformed host records leave a trace', () => {
+  it('warns when a malformed status record is discarded', async () => {
+    const { HOST_STATUS_KEY, loadHostStatus } = await import('../lib/host-status');
+    const store = memoryStore({ [HOST_STATUS_KEY]: { at: AT, ok: 'yes' } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await loadHostStatus(store)).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when there is no status record to discard', async () => {
+    const { loadHostStatus } = await import('../lib/host-status');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await loadHostStatus(memoryStore())).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns when a malformed pause record is discarded', async () => {
+    const { HOST_PAUSE_KEY, loadHostPause } = await import('../lib/host-status');
+    const store = memoryStore({ [HOST_PAUSE_KEY]: { at: AT, reason: 7 } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await loadHostPause(store)).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when there is no pause record to discard', async () => {
+    const { loadHostPause } = await import('../lib/host-status');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await loadHostPause(memoryStore())).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

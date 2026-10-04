@@ -69,7 +69,12 @@ function optionalStringFieldsAreValid(
 
 export async function loadHostStatus(store: BackfillStore | null): Promise<HostStatusRecord | null> {
   if (!store) return null;
-  return parseHostStatus(await store.load(HOST_STATUS_KEY));
+  const raw = await store.load(HOST_STATUS_KEY);
+  const record = parseHostStatus(raw);
+  if (record === null && raw != null) {
+    console.warn('[chat-stasher] discarding malformed host status record');
+  }
+  return record;
 }
 
 function parseHostStatus(raw: unknown): HostStatusRecord | null {
@@ -92,7 +97,12 @@ export async function loadHostPause(store: BackfillStore | null): Promise<HostPa
     || !isTimestamp(raw.at)
     || typeof raw.reason !== 'string'
     || !optionalStringFieldsAreValid(raw, ['detail'])
-  ) return null;
+  ) {
+    if (raw != null) {
+      console.warn('[chat-stasher] discarding malformed host pause record');
+    }
+    return null;
+  }
   return { reason: raw.reason, at: raw.at, detail: raw.detail as string | undefined };
 }
 
