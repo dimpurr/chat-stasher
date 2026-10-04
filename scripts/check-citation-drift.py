@@ -111,9 +111,17 @@ SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
 SNIPPET_LEN = 60
 
 # The lock proves that cited bytes have not changed; it cannot prove that the
-# bytes support the sentence. Keep the semantic exception narrow: this claim
-# must cite the function that reads ChatGPT's session token, identified by its
-# source names and content rather than by line numbers.
+# bytes support the sentence. A `SEMANTIC_BINDINGS` entry pins one audited claim:
+# the paragraph is found by its subject matter, and every `requirements` entry
+# must be satisfied by a citation *inside that paragraph*. Each requirement names
+# the file the evidence has to live in and the source names that file's cited
+# range must contain, so the binding is about content rather than line numbers.
+#
+# A claim may need more than one requirement. "the `lastActiveOrg` cookie
+# second, and one `GET /api/organizations` third" names a cookie constant and a
+# route literal that live in different files, and pinning only the file the
+# request leg happens to sit in would let the claim decay quietly: the digest in
+# citations.lock would keep matching bytes that no longer say either thing.
 SEMANTIC_BINDINGS = [
     {
         "doc": "docs-dev/threat-model.md",
@@ -121,10 +129,86 @@ SEMANTIC_BINDINGS = [
         # verb phrase: prose may say "reads" or "fetches", and Markdown may
         # wrap the phrase across lines.
         "claim_markers": ("access token", "/api/auth/session"),
-        "target": "apps/extension/lib/platform-auth.ts",
-        "source_markers": ("readSessionToken", "CHATGPT_SESSION_PATH", ".accessToken"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("readSessionToken", "CHATGPT_SESSION_PATH", ".accessToken"),
+            },
+        ],
+    },
+    # W600 · The read-only-probe claim names the flag constant and both URI
+    # spellings. All three sit below the policy comment, so a citation that
+    # stopped at the comment cited prose about the intent and none of the
+    # mechanism it describes.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("Harness session stores are opened read-only", "SQLITE_OPEN_READ_ONLY"),
+        "requirements": [
+            {
+                "target": "crates/chat-stasher/src/sqlite_probe.rs",
+                "source_markers": ("SQLITE_OPEN_READ_ONLY", "mode=ro&immutable=1", 'mode=ro'),
+            },
+        ],
+    },
+    # W600 · "its one other process boundary is runtime.sendNativeMessage to
+    # the pinned host name" is two facts in two places: the pinned name and the
+    # one call that uses it. Citing only the constant left the transport claim
+    # resting on a range that never mentions it.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("process boundary", "runtime.sendNativeMessage"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/native-host.ts",
+                "source_markers": ("NATIVE_HOST_NAME", "com.chat_stasher.host"),
+            },
+            {
+                "target": "apps/extension/lib/native-host.ts",
+                "source_markers": ("runtime.sendNativeMessage", "NATIVE_HOST_NAME"),
+            },
+        ],
+    },
+    # W600 · The content-fingerprint claim names the volatile field it strips.
+    # `safe_urls` is in the VOLATILE_KEYS table, directly above the function the
+    # citation used to name, so the range held the algorithm and not the field.
+    {
+        "doc": "docs-dev/privacy.md",
+        "claim_markers": ("known volatile field", "safe_urls", "content fingerprint"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/recapture.ts",
+                "source_markers": ("VOLATILE_KEYS", "safe_urls", "sha256Hex"),
+            },
+        ],
+    },
+    # W600 · The Claude organization order names a cookie and a route. The
+    # request leg this claim cited builds its URL from a `resolvePath` variable,
+    # so neither literal appeared in it; the cookie name and the resolver are in
+    # claude-org.ts and the route literal is CLAUDE_RESOLVE_PATH in enumerate.ts.
+    {
+        "doc": "docs-dev/privacy.md",
+        "claim_markers": ("lastActiveOrg", "/api/organizations"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/backfill/claude-org.ts",
+                "source_markers": ("CLAUDE_ORG_COOKIE", "lastActiveOrg"),
+            },
+            {
+                "target": "apps/extension/lib/backfill/claude-org.ts",
+                "source_markers": ("resolveClaudeOrg", "orgFromCookie"),
+            },
+            {
+                "target": "apps/extension/lib/backfill/enumerate.ts",
+                "source_markers": ("CLAUDE_RESOLVE_PATH", "/api/organizations"),
+            },
+        ],
     },
 ]
+
+# The widest a bound citation may be and still count as "an implementation
+# range" rather than a pointer at a whole file. A range this size is not
+# evidence: it can contain the marker by accident.
+SEMANTIC_MAX_LINES = 40
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -405,7 +489,18 @@ def semantic_binding_problems(
     *,
     require_claims: bool = False,
 ) -> list[str]:
-    """Check the one documented claim whose source must establish token reading."""
+    """Check the audited claims whose cited range must establish their subject.
+
+    A binding names a document, the markers that find the claim's paragraph, and
+    one or more requirements. Each requirement must be met by a citation inside
+    that paragraph, so a claim is pinned by what its anchors say rather than by
+    the bytes they happened to hold when the lockfile was written.
+
+    🔴 A claim that cannot be found is a problem, not a pass. Dropping the
+    paragraph would otherwise delete the claim and its evidence together, and
+    the lockfile would go on reporting a clean run for prose that no longer
+    exists — `require_claims` is what turns that silence red.
+    """
     problems: list[str] = []
     for binding in SEMANTIC_BINDINGS:
         doc = binding["doc"]
@@ -451,24 +546,45 @@ def semantic_binding_problems(
             citation for citation in citations
             if citation.doc == doc and first <= citation.doc_line <= last
         ]
-        valid = False
-        for citation in claim_citations:
-            if citation.target != binding["target"]:
-                continue
-            if citation.end - citation.start + 1 > 40:
-                continue
-            cited_text = "\n".join(source_lines(citation.target)[citation.start - 1:citation.end])
-            if all(marker in cited_text for marker in binding["source_markers"]):
-                valid = True
-                break
-        if not valid:
+        missing = [
+            requirement
+            for requirement in binding["requirements"]
+            if not _requirement_met(requirement, claim_citations, source_lines)
+        ]
+        if missing:
+            wanted = "; ".join(
+                f"{requirement['target']} containing {', '.join(requirement['source_markers'])}"
+                for requirement in missing
+            )
             problems.append(
                 f"[semantic citation mismatch] {doc}: the claim containing "
                 f"{', '.join(repr(marker) for marker in binding['claim_markers'])} must cite "
-                f"{binding['target']} at an implementation range of at most 40 lines "
-                f"containing {', '.join(binding['source_markers'])}"
+                f"at an implementation range of at most {SEMANTIC_MAX_LINES} lines in each of: {wanted}"
             )
     return problems
+
+
+def _requirement_met(
+    requirement: dict,
+    claim_citations: list[Citation],
+    source_lines: Callable[[str], list[str]],
+) -> bool:
+    """Whether some citation of the claim's paragraph carries this requirement.
+
+    A citation satisfies a requirement when it names the required file, stays
+    inside `SEMANTIC_MAX_LINES`, and its range contains every source marker. The
+    markers are what make this a semantic check: a range that merely overlaps
+    the right neighbourhood is not evidence that it says the thing.
+    """
+    for citation in claim_citations:
+        if citation.target != requirement["target"]:
+            continue
+        if citation.end - citation.start + 1 > SEMANTIC_MAX_LINES:
+            continue
+        cited_text = "\n".join(source_lines(citation.target)[citation.start - 1:citation.end])
+        if all(marker in cited_text for marker in requirement["source_markers"]):
+            return True
+    return False
 
 
 _file_cache: dict[str, list[str]] = {}
