@@ -1618,10 +1618,10 @@ pub fn write_sealed_shard_bytes_with_cap(
     )
 }
 
-/// Seal a verified source delta even when its bytes equal an earlier shard.
-/// JSONL collection uses this only when a validated non-zero cursor proves the
-/// bytes are newly appended source content; all other paths use the idempotent
-/// default writer.
+/// Seal a source capture even when its bytes equal an earlier shard.
+/// JSONL collection uses this for validated appended bytes or a fresh source
+/// whose provenance cannot establish cross-root event identity. Other paths
+/// use the idempotent default writer.
 pub fn write_sealed_shard_bytes_allow_exact_repeat_with_cap(
     writer: StageWriter,
     stage_root: &Path,

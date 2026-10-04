@@ -1994,10 +1994,15 @@ fn process_jsonl(
     };
     let shard = if lines.is_empty() {
         None
-    } else if !data.reset && data.base_offset > 0 {
+    } else if (!data.reset && data.base_offset > 0)
+        || (old.is_none() && !record.provenance.is_empty())
+    {
         // A validated non-zero cursor proves these are newly appended source
         // bytes. They may be byte-identical to an earlier turn (`a\n` followed
         // by another real `a\n`) and still belong in the archive.
+        // A fresh provenance-bearing source is ambiguous even at offset zero:
+        // byte equality with a different root cannot establish event identity.
+        // Its complete capture must therefore retain the same multiplicity.
         Some(store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
             store::StageWriter::Collect,
             stage,

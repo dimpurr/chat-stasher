@@ -599,11 +599,11 @@ crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
 crates/chat-stasher/src/collect.rs:1207-1219  c768f56be50b  lines=13
   <- docs-dev/privacy.md:482  :: match collect_one(
-crates/chat-stasher/src/collect.rs:2045-2085  a9e6cfcecaac  lines=41
+crates/chat-stasher/src/collect.rs:2050-2090  a9e6cfcecaac  lines=41
   <- docs-dev/privacy.md:979  :: .id
-crates/chat-stasher/src/collect.rs:2218-2230  ec7e886a5844  lines=13
+crates/chat-stasher/src/collect.rs:2223-2235  ec7e886a5844  lines=13
   <- docs-dev/openclaw-scanner.md:46  :: entry.compressed
-crates/chat-stasher/src/collect.rs:2352-2366  13f73f5bd827  lines=15
+crates/chat-stasher/src/collect.rs:2357-2371  13f73f5bd827  lines=15
   <- docs-dev/openclaw-scanner.md:46  :: // reason: reaching here means no prefix passed validation …
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…

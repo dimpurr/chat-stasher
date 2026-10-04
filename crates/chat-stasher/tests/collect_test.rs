@@ -349,7 +349,7 @@ fn incomplete_tail_is_left_for_the_next_read() {
 use std::io::Write;
 
 #[test]
-fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_surfaces() {
+fn antigravity_fresh_roots_preserve_ambiguous_overlap_and_all_surfaces() {
     let _guard = HOME_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -406,6 +406,13 @@ fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_
         scanner::scan_with_registry_and_machine(&Config::default(), &registry, "fixture-machine")
             .unwrap();
     let session_id = "google-antigravity.fixture-machine.session-same-uuid";
+    // Each root's exact input must survive, including equal bodies. There is
+    // no verified chronological order between independent source roots.
+    let mut expected_shards: Vec<Vec<u8>> = scan
+        .records
+        .iter()
+        .map(|record| fs::read(&record.absolute_path).unwrap())
+        .collect();
     assert_eq!(
         scan.records
             .iter()
@@ -419,25 +426,40 @@ fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_
     let first = collect::collect_scan_report(&scan, &stage, "fixture-machine", &state, 20, &dest())
         .unwrap();
     assert_eq!(
-        first.lines_written, 2,
-        "the resumed snapshot contributes only its suffix; the third identical stream adds nothing"
+        first.lines_written, 4,
+        "independent roots have no verified event identity; byte overlap cannot authorize dropping a repeated turn"
     );
     let body = store::concat_shards(&stage, "fixture-machine", session_id).unwrap();
+    let mut shard_entries = store::sealed_shard_entries(&store::session_shard_dir(
+        &stage,
+        "fixture-machine",
+        session_id,
+    ))
+    .unwrap();
+    shard_entries.sort_by_key(|(sequence, _)| *sequence);
+    let captured_shards: Vec<Vec<u8>> = shard_entries
+        .iter()
+        .map(|(_, path)| fs::read(path).unwrap())
+        .collect();
+    let mut captured_multiset = captured_shards.clone();
+    captured_multiset.sort();
+    expected_shards.sort();
     assert_eq!(
-        body,
-        [user_line.as_slice(), assistant_line.as_slice()].concat()
+        captured_multiset, expected_shards,
+        "each complete source body survives with its multiplicity"
     );
+    assert_eq!(body, captured_shards.concat());
 
     let body_text = std::str::from_utf8(&body).unwrap();
     let normalized = chat_stasher::normalize::normalize("google-antigravity", body_text);
-    assert_eq!(normalized.message_total, 2);
+    assert_eq!(normalized.message_total, 4);
     let indexed = fts::extract_index_document_for("google-antigravity", &body).unwrap();
     assert!(indexed.not_indexable.is_none());
     assert!(indexed.body.contains("synthetic prompt"));
     assert!(indexed.body.contains("synthetic reply"));
     let lines: Vec<_> = body_text.lines().collect();
     let times = activity::analyze_session("google-antigravity", &lines);
-    assert_eq!(times.line_count, 2);
+    assert_eq!(times.line_count, 4);
     assert!(matches!(times.time_source, activity::TimeSource::Exact));
 
     let observations = provenance::read_observations(&stage, "fixture-machine").unwrap();
@@ -451,7 +473,7 @@ fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_
         &mut dimensions,
         session_id,
         &observations,
-        &[user_line.to_vec(), assistant_line.to_vec()],
+        &captured_shards,
     );
     assert_eq!(dimensions.surface, ["app", "cli", "ide"]);
     let cli = Selector {
@@ -474,6 +496,18 @@ fn antigravity_multi_root_resume_collects_only_the_new_suffix_and_restores_both_
     };
     assert_eq!(cli.select(&meta), Verdict::Selected);
     assert_eq!(app.select(&meta), Verdict::Selected);
+    let unchanged =
+        collect::collect_scan_report(&scan, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert!(unchanged.errors.is_empty());
+    assert_eq!(
+        unchanged.lines_written, 0,
+        "verified source cursors remain incremental"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", session_id).unwrap(),
+        body
+    );
     drop(home_reset);
 }
 
