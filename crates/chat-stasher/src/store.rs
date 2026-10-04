@@ -2182,11 +2182,13 @@ mod tests {
         // Over-large values clamp to the hard backend ceiling, NOT to the
         // (deliberately lower) measured default — the two are separate knobs.
         assert_eq!(cfg3.connections, MAX_CONNECTIONS);
-        assert!(
-            DEFAULT_CONNECTIONS < MAX_CONNECTIONS,
-            "default must stay below the ceiling: raising concurrency buys no \
-             measured speed (D2) but does open masters that must be reaped"
-        );
+        const {
+            assert!(
+                DEFAULT_CONNECTIONS < MAX_CONNECTIONS,
+                "default must stay below the ceiling: raising concurrency buys no \
+                 measured speed (D2) but does open masters that must be reaped"
+            )
+        }
         let cfg4 = StoreConfig {
             repo_root: "/tmp/x".into(),
             key_file: PathBuf::from("/tmp/x.key"),
