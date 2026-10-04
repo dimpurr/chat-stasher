@@ -12,10 +12,25 @@ export interface StorageArea {
   set(items: Record<string, unknown>): Promise<void>;
 }
 
+function storageArea(value: unknown): StorageArea | null {
+  if (typeof value !== 'object' || value === null) return null;
+
+  const area = value as { get?: unknown; set?: unknown };
+  return typeof area.get === 'function' && typeof area.set === 'function'
+    ? (value as StorageArea)
+    : null;
+}
+
+function localStorageCandidate(value: unknown): StorageArea | null {
+  if (typeof value !== 'object' || value === null) return null;
+
+  const storage = (value as { storage?: unknown }).storage;
+  if (typeof storage !== 'object' || storage === null) return null;
+
+  return storageArea((storage as { local?: unknown }).local);
+}
+
 export function localStorageArea(): StorageArea | null {
-  const g = globalThis as {
-    browser?: { storage?: { local?: StorageArea } };
-    chrome?: { storage?: { local?: StorageArea } };
-  };
-  return g.browser?.storage?.local ?? g.chrome?.storage?.local ?? null;
+  const g = globalThis as unknown as { browser?: unknown; chrome?: unknown };
+  return localStorageCandidate(g.browser) ?? localStorageCandidate(g.chrome);
 }

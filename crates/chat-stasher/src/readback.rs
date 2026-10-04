@@ -117,6 +117,10 @@ pub struct ReadAllReport {
     pub snapshots_in_repo: usize,
     /// One [`MachineMerge`] per hostname seen in the repository.
     pub machines: Vec<MachineMerge>,
+    /// Hosts with at least one snapshot that could not be read. Their
+    /// accumulated sessions may come from an older snapshot and must not be
+    /// presented as a complete current inventory.
+    pub incomplete_machines: BTreeSet<String>,
     /// Notes about parts of the archive this read could not reach (e.g. a
     /// snapshot whose tree root would not open). Non-fatal for the *rest* of
     /// the report, but each one is a machine whose sessions are missing from
@@ -461,6 +465,7 @@ impl BackupStore {
                 let root = match repo.node_from_snapshot_and_path(snap, "") {
                     Ok(n) => n,
                     Err(e) => {
+                        report.incomplete_machines.insert(hostname.clone());
                         report.warnings.push(format!(
                             "host `{hostname}` snapshot {}: cannot read tree root: {e}",
                             snap.id.to_hex().as_str()
@@ -473,6 +478,7 @@ impl BackupStore {
                     Ok(it) => match it.collect::<rustic_core::RusticResult<Vec<_>>>() {
                         Ok(e) => e,
                         Err(e) => {
+                            report.incomplete_machines.insert(hostname.clone());
                             report.warnings.push(format!(
                                 "host `{hostname}` snapshot {}: cannot collect entries: {e}",
                                 snap.id.to_hex().as_str()
@@ -481,6 +487,7 @@ impl BackupStore {
                         }
                     },
                     Err(e) => {
+                        report.incomplete_machines.insert(hostname.clone());
                         report.warnings.push(format!(
                             "host `{hostname}` snapshot {}: cannot ls tree: {e}",
                             snap.id.to_hex().as_str()

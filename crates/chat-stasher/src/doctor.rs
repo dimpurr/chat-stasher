@@ -1511,11 +1511,13 @@ const CHECKS_NEEDING_CONFIG: [&str; 10] = [
 /// Deliberately **not** a diagnosis: it carries the two checks that read no
 /// config (D1 Claude settings, D2 Gemini settings, and the directories merely
 /// listed) plus the reason, and says out loud which checks were skipped. Every
-/// config-derived field is left empty, and `config_error` is what tells a
-/// consumer those empties are "did not look" — this is the whole reason `doctor`
-/// is the one command that does not refuse: the user needs to be told *which*
-/// half of their setup is broken, and that answer is worthless if it is dressed
-/// up as a healthy machine.
+/// config-derived field is left empty, except that an unexpandable
+/// `rustic_cache_dir` gets a specific unavailable result so the user knows
+/// which configured path failed. `config_error` tells consumers that all other
+/// empty config-derived fields mean "did not look" — this is the whole reason
+/// `doctor` is the one command that does not refuse: the user needs to be told
+/// *which* half of their setup is broken, and that answer is worthless if it is
+/// dressed up as a healthy machine.
 pub fn config_unreadable(error: String) -> DoctorReport {
     let home = crate::config::home_dir();
     let other_present = OTHER_HARNESS_DIRS
@@ -1523,6 +1525,9 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         .filter(|d| home.join(d).is_dir())
         .map(|d| home.join(d))
         .collect();
+    let cache = error.contains("rustic_cache_dir:").then(|| CacheCheck::Unavailable {
+        detail: "`rustic_cache_dir` could not be expanded; fix that value in the config and run `chat-stasher doctor` again".to_string(),
+    });
     DoctorReport {
         config_source: crate::config::ConfigSource::Unreadable,
         config_error: Some(error),
@@ -1532,7 +1537,7 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         other_present,
         risks: Vec::new(),
         reclaim: None,
-        cache: None,
+        cache,
         // D9's root and quota both come from the config, so it is one of the
         // checks that did not run — not a body cache of zero bytes.
         body_cache: None,
@@ -2130,6 +2135,9 @@ pub enum CacheCheck {
     NoCacheDir { root: PathBuf },
     /// Cache is on and the directory exists, but it could not be measured.
     Unreadable { root: PathBuf, error: String },
+    /// The configured cache path could not be expanded, so there is no safe
+    /// filesystem path to inspect.
+    Unavailable { detail: String },
     /// Cache is on and measured.
     Ok { root: PathBuf, usage: CacheUsage },
 }
@@ -2141,6 +2149,7 @@ impl CacheCheck {
             CacheCheck::Disabled { .. } => "disabled",
             CacheCheck::NoCacheDir { .. } => "no_cache_dir",
             CacheCheck::Unreadable { .. } => "unreadable",
+            CacheCheck::Unavailable { .. } => "unavailable",
             CacheCheck::Ok { .. } => "ok",
         }
     }
@@ -3251,6 +3260,12 @@ fn cache_json(c: &CacheCheck) -> serde_json::Value {
             "root": root.display().to_string(),
             "total_bytes": CountState::unknown(error),
             "error": error,
+            "next_step": "check that the configured rustic cache path is a readable directory, then run `chat-stasher doctor` again",
+        }),
+        CacheCheck::Unavailable { detail } => serde_json::json!({
+            "kind": "unavailable",
+            "total_bytes": CountState::unknown(detail),
+            "next_step": "fix `rustic_cache_dir` in the config and run `chat-stasher doctor` again",
         }),
         CacheCheck::Ok { root, usage } => serde_json::json!({
             "kind": "ok",
@@ -3353,6 +3368,10 @@ pub fn print_report(r: &DoctorReport) {
         eprintln!("🔴 NOT CHECKED — these read the config, so this run has no answer for them:");
         for check in r.not_checked() {
             eprintln!("     · {check}");
+        }
+        if let Some(cache) = &r.cache {
+            eprintln!("D6 · Local metadata cache occupancy");
+            print_cache(cache);
         }
         eprintln!(
             "   An absent result above is NOT a count of zero and NOT a clean verdict: this run did \
@@ -4000,9 +4019,12 @@ fn print_cache(c: &CacheCheck) {
         }
         CacheCheck::Unreadable { root, error } => {
             eprintln!(
-                "  cache root: {} — could not be measured: {error}",
+                "  cache root: {} — could not be measured: {error}; check that this is a readable directory, then run `chat-stasher doctor` again.",
                 root.display()
             );
+        }
+        CacheCheck::Unavailable { detail } => {
+            eprintln!("  cache-path check: unavailable — {detail}");
         }
         CacheCheck::Ok { root, usage } => {
             eprintln!("  cache root: {}", root.display());

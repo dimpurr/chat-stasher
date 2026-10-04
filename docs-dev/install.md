@@ -21,15 +21,15 @@ It is not one app, it is **two pieces**, each doing its own job:
 | **Browser extension (Chat Stasher)** | Saves your conversations from **web-based** chats and hands them straight to the CLI over Native Messaging | Your browser |
 
 **On the CLI side:** its self-description is "Append-only archive for every LLM
-conversation, across harnesses." (`crates/chat-stasher/src/main.rs:82`). It
+conversation, across harnesses." (`crates/chat-stasher/src/main.rs:86`). It
 reads session files that already exist on your machine, and reads them
-read-only (`crates/chat-stasher/src/main.rs:825`).
+read-only (`crates/chat-stasher/src/main.rs:829`).
 
 **On the extension side:** it currently recognizes **seven** web platforms —
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`), Grok (`grok.com`)
-(`apps/extension/lib/contract.ts:397-403,477-483,488-502,539-551,613-617,747-752,832-842`).
+(`apps/extension/lib/contract.ts:396-402,476-482,487-501,538-550,612-616,746-751,831-841`).
 
 🔴 **Recognizing a platform is not the same as capturing on it, and for two of
 the seven it measurably was not.** On 2026-09-19, in a real browser with the
@@ -59,7 +59,7 @@ automatic download anywhere.
 **How the two sides connect:** the extension sends each captured conversation to
 a **Native Messaging host**, which is the `chat-stasher` binary you registered
 by hand with `chat-stasher install-native-host --stage <your-stage>`
-(`crates/chat-stasher/src/main.rs:1027-1069`). The protocol both sides implement
+(`crates/chat-stasher/src/main.rs:1031-1073`). The protocol both sides implement
 is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md).
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
@@ -80,18 +80,18 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:355-851`).
+  count (`apps/extension/lib/contract.ts:354-850`).
   🔴 **Perplexity used to be the exception here; read where it stands now:**
   its row registers the **conversation-content** route — path hint
   `/rest/thread/`, method `GET`, response shape requiring `entries`
-  (`apps/extension/lib/contract.ts:418-483`) — and it recognizes the session id
+  (`apps/extension/lib/contract.ts:417-482`) — and it recognizes the session id
   from the page URL, the `/search/<slug>` the thread is open at
-  (`apps/extension/lib/contract.ts:470-475`). The **conversation-list** route is
+  (`apps/extension/lib/contract.ts:469-474`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
   So, reading the code, passive capture on Perplexity **does name the
   conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:1390-1418`) — but this is still a conclusion
+  (`apps/extension/lib/contract.ts:1418-1446`) — but this is still a conclusion
   drawn from reading the code, and the route itself was read out of public
   source rather than measured: **we have not tested it on a real perplexity.ai
   page.**
@@ -106,7 +106,7 @@ marketing (`apps/extension/lib/backfill/enumerate.ts:4907-4938`):
 
 | Tier | Platforms | What you actually get when you enable backfill |
 | --- | --- | --- |
-| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2964-2965`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:3360-3371`, `:3290-3351`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:3111-3112,3141-3147`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2432-2476`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3375-3437`; `apps/extension/lib/platform-auth.ts:313-350`; `apps/extension/lib/backfill/engine.ts:3248-3282`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3822-3968`; `apps/extension/lib/backfill/engine.ts:3040-3113`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:724-824`). |
+| **Implements fetching the actual history text** | **ChatGPT**, **DeepSeek**, **Perplexity**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversations are listed one by one, and their content is fetched one by one and delivered to the host. This tier is the one that means "your history is backed up" — but read it as *implemented*, not *verified*: a complete backfill has not yet been observed in a real browser on any of the seven. DeepSeek's body request is `GET /api/v0/chat/history_messages?chat_session_id=<id>` (`apps/extension/lib/backfill/enumerate.ts:2964-2965`). 🔴 Grok and Claude are the least verified of the seven: their routes came from reading public open-source implementations, not from a logged-in session, and Grok fetches one conversation with **two** same-origin requests — a skeleton call, then a content call whose body is built only from the ids the skeleton named (`apps/extension/lib/backfill/enumerate.ts:3360-3371`, `:3290-3351`). 🔴 W84 (2026-09-23) filled in Perplexity's body segment last: its route is `GET /rest/thread/<slug>` with a five-parameter set pinned by the plan (`apps/extension/lib/backfill/enumerate.ts:3111-3112,3141-3147`), and a logged-in probe observed a stated completeness signal (`has_next_page` + `next_cursor`) at the top level, so the extension archives a body only when the response declares there is no more, and **refuses** a body that declares more rather than archiving a truncated conversation (`apps/extension/lib/backfill/enumerate.ts:2432-2476`). Kimi's routes, unlike Grok's, **were** measured in a logged-in www.kimi.com session — and its requests carry your page's own login token, read from the page's local storage at request time and held in memory only. If a conversation's body response ever says it holds only part of that conversation, Kimi refuses to archive it and lists it as a failure instead (`apps/extension/lib/backfill/enumerate.ts:3375-3437`; `apps/extension/lib/platform-auth.ts:313-350`; `apps/extension/lib/backfill/engine.ts:3250-3284`). Gemini's routes **were** measured as well (2026-09-14), and it is the one platform here whose conversation body arrives **in pages**: the leg follows the continuation token to the end, one request per page with a 1-3 second gap, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/enumerate.ts:3822-3968`; `apps/extension/lib/backfill/engine.ts:3042-3115`). Its requests carry three values from the page's own `WIZ_global_data` — read through the page-world hook at request time, memory only, attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:724-824`). |
 
 
 🔴 **The one precondition, before any tier applies: this leg fetches through a
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:237`;
-`apps/extension/entrypoints/background.ts:1263-1265`). That page does not have to
+`apps/extension/entrypoints/background.ts:1269-1271`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -184,7 +184,7 @@ The popup shows these three tiers in the same terms as the table above
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:355-851`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:354-850`, a separate matter from backfill.)
 
 ---
 
@@ -256,7 +256,7 @@ chat-stasher init
 ```
 
 `init` writes a commented default config only when the config does **not**
-already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:165-166`).
+already exist; it is non-destructive (`crates/chat-stasher/src/main.rs:169-170`).
 The config file lives at `~/.config/chat-stasher/config.toml`, or under
 `XDG_CONFIG_HOME` if you have set it (`crates/chat-stasher/src/config.rs:22-24,1478-1499`).
 
@@ -268,12 +268,14 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:12433-12441,12451-12474`).
+(`crates/chat-stasher/src/main.rs:12470-12478,12488-12511`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
-destination declared" is never printed as a finding about a config nobody read
-(`crates/chat-stasher/src/doctor.rs:1519-1553`). And an **absent** config file is a
+destination declared" is never printed as a finding about a config nobody read.
+When the error is an unexpandable `rustic_cache_dir`, it also names that cache
+path check as unavailable and says to fix the value and run doctor again
+(`crates/chat-stasher/src/doctor.rs:1521-1557`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:382-391`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -300,11 +302,11 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:2059-2134`).
+  install (`crates/chat-stasher/src/nativehost.rs:2086-2161`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3515-3525`, `:3252`).
+  (`crates/chat-stasher/src/nativehost.rs:3542-3552`, `:3279`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -406,12 +408,12 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:2122-2133`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:2149-2160`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
 browser, byte-identical, exit 0 both times — and it prints every path it wrote,
-left alone, skipped or removed, absolutely (`crates/chat-stasher/src/main.rs:1004-1026`).
+left alone, skipped or removed, absolutely (`crates/chat-stasher/src/main.rs:1008-1030`).
 It is per-user; nothing needs elevation. `--uninstall` removes exactly the files
 it wrote and nothing else.
 
@@ -430,13 +432,13 @@ sentence the surrounding documents have to get right:
 - **All of them point at the same binary and the same stage.** The manifest
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
-  (`crates/chat-stasher/src/main.rs:2160-2175`;
-  `crates/chat-stasher/src/nativehost.rs:2059-2134`). So several installs deliver
+  (`crates/chat-stasher/src/main.rs:2164-2179`;
+  `crates/chat-stasher/src/nativehost.rs:2086-2161`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
   the ones whose data directory is absent, saying so per browser
-  (`crates/chat-stasher/src/main.rs:2102-2112`;
+  (`crates/chat-stasher/src/main.rs:2106-2116`;
   `crates/chat-stasher/src/nativehost.rs:770-772`). A browser you install later
   is therefore not registered until the command is run again.
 - **`--uninstall` is the whole registration, not one profile's share of it.** It
@@ -444,7 +446,7 @@ sentence the surrounding documents have to get right:
   chrome` limits it to the ones named, and `--stage` cannot be combined with it
   at all, exit 2), and it leaves the config, the stage, the sealed captures and
   every other vendor's manifest untouched
-  (`crates/chat-stasher/src/main.rs:2046-2052`, `:2211-2249`, `:2318-2324`).
+  (`crates/chat-stasher/src/main.rs:2050-2056`, `:2215-2253`, `:2322-2328`).
   "It is per-user" does **not** mean "it is per profile": removing the extension
   from one profile is done on that profile's own extension page, and doing it
   with `--uninstall` takes the channel away from the profiles you kept, whose
@@ -463,7 +465,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:101-126`;
-`apps/extension/entrypoints/background.ts:717-733`).
+`apps/extension/entrypoints/background.ts:723-739`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
@@ -519,7 +521,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:2122-2133`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:2149-2160`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -531,10 +533,10 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1192-1220`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2067-2134`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:3039-3041`, `:3047-3049`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:3066-3068`, `:3074-3076`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -544,7 +546,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:2139-2168`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:2166-2195`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once
@@ -556,7 +558,7 @@ See section 2. If you already did it, you do not need to do it again.
 The archive's destination is decided by your config and command-line arguments
 — a local path, or a backend you configure yourself. `push` / `read` / `verify`
 read the repository and key file you select in config or arguments
-(`crates/chat-stasher/src/main.rs:330-362,425-479,492-529`).
+(`crates/chat-stasher/src/main.rs:334-366,429-483,496-533`).
 
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
@@ -569,7 +571,7 @@ can express them (`crates/chat-stasher/src/store.rs:2016-2023`).
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/main.rs:7742-7747`). A second
+destination's `key_file` (`crates/chat-stasher/src/main.rs:7760-7765`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -587,8 +589,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:14048-14055`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:13611-13625`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:14085-14092`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:13648-13662`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -620,11 +622,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:5922-5937`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:5940-5955`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:5927-5952`). An
+it does anything else (`crates/chat-stasher/src/main.rs:5945-5970`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -656,10 +658,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5936-5948`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:5954-5966`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:5927-5935`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:5945-5953`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -922,10 +924,10 @@ Windows every `schedule` action refuses with exit 2 before writing anything,
 and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
-sleeps (`crates/chat-stasher/src/main.rs:6982-7037`).
+sleeps (`crates/chat-stasher/src/main.rs:7000-7055`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
-repeated invocation is safe (`crates/chat-stasher/src/main.rs:216-253`).
+repeated invocation is safe (`crates/chat-stasher/src/main.rs:220-257`).
 
 ---
 
@@ -939,12 +941,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:16919-16921`). This is the
+does not (`crates/chat-stasher/src/main.rs:16956-16958`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:16631-16659`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:16668-16696`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 - No timer installed / never run successfully:
@@ -960,7 +962,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:184-232`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:16921-17054`):
+(`crates/chat-stasher/src/main.rs:16958-17091`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -969,11 +971,11 @@ few lines and does not flood the screen
 - Finally, a fixed last line: `details (one line per session): chat-stasher status --sessions`
 
 To see the per-session detail, add `--sessions`; that will be hundreds of lines
-(`crates/chat-stasher/src/main.rs:386-388`).
+(`crates/chat-stasher/src/main.rs:390-392`).
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:16900-16905`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:16937-16942`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -983,7 +985,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 example; in that case it has no conclusion about your machine) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:16578-16612`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:16615-16649`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -992,7 +994,7 @@ the JSON report is on stdout.
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains
 only paths, counts, bytes, and timestamps
-(`crates/chat-stasher/src/main.rs:480-491`).
+(`crates/chat-stasher/src/main.rs:484-495`).
 
 `doctor` also **connects to each destination you declared**, read-only, and
 reports what came back in three separate states rather than two: reached (and
@@ -1006,7 +1008,7 @@ reports the machines whose archived activity index was written by an older
 (`crates/chat-stasher/src/doctor.rs:1032-1139`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:1840,2366-2427`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:1845-1846,2374-2436`).
 The destination probes are the one check that touches the network; see section
 4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1004-1014,1142-1163,1295-1348`).
 
@@ -1044,7 +1046,7 @@ no directory is created and no file is written.
 Exit codes are the same family `search` uses: `0` wrote at least one session ·
 `1` read everything and selected nothing · `3` did not finish (the files it did
 write are real, and the manifest says what is missing) · `2` usage error
-(`crates/chat-stasher/src/main.rs:683-769`).
+(`crates/chat-stasher/src/main.rs:687-773`).
 
 ---
 
@@ -1055,12 +1057,12 @@ confirmed in the code, not a temporary disclaimer.
 
 - **There is no `restore` command — nothing puts a session back into a
   harness's own directory, and that is not in phase one.** The subcommand table
-  has no `restore` entry (`crates/chat-stasher/src/main.rs:164-1316`). Getting
+  has no `restore` entry (`crates/chat-stasher/src/main.rs:168-1320`). Getting
   content *out* does have a bulk path: `export --out <dir>` writes every session
   a time window selects to files in one command
-  (`crates/chat-stasher/src/main.rs:683-769`), and `read` dumps **one**
+  (`crates/chat-stasher/src/main.rs:687-773`), and `read` dumps **one**
   conversation to standard output at a time
-  (`crates/chat-stasher/src/main.rs:421-479`). Restoring = for now you have to
+  (`crates/chat-stasher/src/main.rs:425-483`). Restoring = for now you have to
   write your own script loop.
 
 - **🔴 Lose a master key file and there is no way to recover the repository it
@@ -1160,7 +1162,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2373-2474`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2379-2480`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4907-4938`) is covered.
@@ -1214,7 +1216,7 @@ touch it again.**
 - Install the timer
 
 **Then it runs automatically:** the timer runs `run-once` at each scheduled
-point — collect, push, exit (`crates/chat-stasher/src/main.rs:216-253`). It does
+point — collect, push, exit (`crates/chat-stasher/src/main.rs:220-257`). It does
 not need you to confirm anything.
 
 **What you should occasionally do** (not required, but recommended):
@@ -1254,10 +1256,10 @@ Collected in one place, so you know which spots to double-check yourself:
 | How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
 | Whether passive capture on Perplexity delivers the conversation it names | **Unverified** (reading the code, the conclusion is now "it recognizes the id and delivers"; see section 1. The route itself was read out of public source, not measured, and we have not tried it on a real page.) |
 | Whether the DeepSeek / Perplexity / Grok conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:3054-3106`, `:3226-3247`, `:3338-3399`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress. That trace carries the shape of the response that did not match — the key names, types and array lengths at the level that disagreed — and carries no conversation text, no id and no title from it (`apps/extension/lib/backfill/enumerate.ts:1488-1556`), so a shape change can be diagnosed from the trace itself instead of from a second logged-in session.) |
-| Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:3338-3399`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:2264-2382`.) |
+| Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:3338-3399`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:2266-2384`.) |
 | Whether a **long** Grok conversation comes back complete from the backfill content endpoint | **Unverified** (its two-step route — a skeleton call then a content call — was cross-checked across implementations, but none of them pages the content call and this extension adds no paging, so a long conversation may be stored as only its first part; `apps/extension/lib/backfill/enumerate.ts:3338-3399`.) |
 | Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Not settled by any source — and checked rather than assumed** (the endpoint itself is well evidenced: it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:2964-2978`. None of the reviewed implementations pages it and this extension adds no paging. Instead of assuming a single response holds the whole conversation, the extension walks the response's own tree — `chat_session.current_message_id` back along `parent_id` to a root — and archives the body only if that walk closes; a body that came back short is not archived at all, it is recorded as a failure with its own reason code and the leg carries on; `apps/extension/lib/backfill/enumerate.ts:2980-3007`.) |
-| Whether a **long** Kimi conversation comes back complete from the backfill body endpoint | **Unverified, and handled rather than guessed** (a logged-in session measured the route and five **short** conversations, none of which carried a page-token field; nothing here pages that endpoint. If a response ever does say it holds more of the conversation, that conversation is not archived at all — it is recorded as a failure with its own reason code and the leg moves on, because a truncated conversation stored as a complete one would be silent loss; `apps/extension/lib/backfill/enumerate.ts:3423-3485`; `apps/extension/lib/backfill/engine.ts:3248-3282`.) |
+| Whether a **long** Kimi conversation comes back complete from the backfill body endpoint | **Unverified, and handled rather than guessed** (a logged-in session measured the route and five **short** conversations, none of which carried a page-token field; nothing here pages that endpoint. If a response ever does say it holds more of the conversation, that conversation is not archived at all — it is recorded as a failure with its own reason code and the leg moves on, because a truncated conversation stored as a complete one would be silent loss; `apps/extension/lib/backfill/enumerate.ts:3423-3485`; `apps/extension/lib/backfill/engine.ts:3250-3284`.) |
 | Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:313-350`.) |
 | Whether a Kimi backfill run has ever completed end to end in a real browser | **Unverified** (implemented and wired to the host, like the other three; no complete run observed. See section 1.1.) |
 | Whether a ChatGPT or DeepSeek backfill run has ever completed end to end in a real browser | **Unverified** (both legs are implemented and wired to the host, but no complete run has been observed in a real browser. See section 1.1.) |

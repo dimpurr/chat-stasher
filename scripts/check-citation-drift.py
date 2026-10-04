@@ -110,6 +110,22 @@ SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
 
 SNIPPET_LEN = 60
 
+# The lock proves that cited bytes have not changed; it cannot prove that the
+# bytes support the sentence. Keep the semantic exception narrow: this claim
+# must cite the function that reads ChatGPT's session token, identified by its
+# source names and content rather than by line numbers.
+SEMANTIC_BINDINGS = [
+    {
+        "doc": "docs-dev/threat-model.md",
+        # Match the bound claim by its subject and endpoint, not one exact
+        # verb phrase: prose may say "reads" or "fetches", and Markdown may
+        # wrap the phrase across lines.
+        "claim_markers": ("access token", "/api/auth/session"),
+        "target": "apps/extension/lib/platform-auth.ts",
+        "source_markers": ("readSessionToken", "CHATGPT_SESSION_PATH", ".accessToken"),
+    },
+]
+
 
 def die(msg: str, code: int = 2) -> None:
     print(f"[citation-lock] {msg}", file=sys.stderr)
@@ -382,6 +398,79 @@ def parse_docs(basenames: dict[str, list[str]]) -> tuple[list[Citation], list[st
     return citations, problems
 
 
+def semantic_binding_problems(
+    citations: list[Citation],
+    documents: dict[str, str],
+    source_lines: Callable[[str], list[str]],
+    *,
+    require_claims: bool = False,
+) -> list[str]:
+    """Check the one documented claim whose source must establish token reading."""
+    problems: list[str] = []
+    for binding in SEMANTIC_BINDINGS:
+        doc = binding["doc"]
+        document = documents.get(doc)
+        if document is None:
+            continue
+
+        lines = document.splitlines()
+        paragraphs: list[tuple[int, int, str]] = []
+        start = 1
+        for index in range(len(lines) + 1):
+            if index == len(lines) or not lines[index].strip():
+                if start <= index:
+                    paragraphs.append((start, index, "\n".join(lines[start - 1:index])))
+                start = index + 2
+
+        matches = [
+            (first, last)
+            for first, last, paragraph in paragraphs
+            if all(
+                marker.casefold() in re.sub(r"\s+", " ", paragraph).casefold()
+                for marker in binding["claim_markers"]
+            )
+        ]
+        if not matches:
+            # Relocation and parser fixtures often carry synthetic document
+            # sets that do not include this claim. They retain ordinary drift
+            # behavior; the binding applies only where the claim is present.
+            if require_claims:
+                problems.append(
+                    f"[semantic citation mismatch] {doc}: claim disappeared or drifted; expected a paragraph "
+                    f"containing {', '.join(repr(marker) for marker in binding['claim_markers'])}"
+                )
+            continue
+        if len(matches) != 1:
+            problems.append(
+                f"[semantic citation mismatch] {doc}: expected one paragraph containing the semantic citation claim; found {len(matches)}"
+            )
+            continue
+
+        first, last = matches[0]
+        claim_citations = [
+            citation for citation in citations
+            if citation.doc == doc and first <= citation.doc_line <= last
+        ]
+        valid = False
+        for citation in claim_citations:
+            if citation.target != binding["target"]:
+                continue
+            if citation.end - citation.start + 1 > 40:
+                continue
+            cited_text = "\n".join(source_lines(citation.target)[citation.start - 1:citation.end])
+            if all(marker in cited_text for marker in binding["source_markers"]):
+                valid = True
+                break
+        if not valid:
+            problems.append(
+                f"[semantic citation mismatch] {doc}: the claim containing "
+                f"{', '.join(repr(marker) for marker in binding['claim_markers'])} must cite "
+                f"{binding['target']} at an implementation range of at most 40 lines "
+                f"containing {', '.join(binding['source_markers'])}"
+            )
+    return problems
+
+
 _file_cache: dict[str, list[str]] = {}
 
 
@@ -409,6 +498,22 @@ def collect() -> tuple[dict[str, dict], list[str]]:
     """把引用聚合成 key -> {digest, snippet, lines, cited_by}。"""
     basenames = build_basename_index()
     citations, problems = parse_docs(basenames)
+    documents = {}
+    for binding in SEMANTIC_BINDINGS:
+        doc = binding["doc"]
+        path = os.path.join(REPO, doc)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                documents[doc] = handle.read()
+    # The required live binding belongs to the full project checkout. Minimal
+    # repositories built by relocation self-tests intentionally carry a
+    # claimless threat-model document and exercise ordinary citation behavior.
+    require_live_bindings = os.path.isfile(os.path.join(REPO, "Cargo.toml"))
+    problems.extend(
+        semantic_binding_problems(
+            citations, documents, read_lines, require_claims=require_live_bindings
+        )
+    )
 
     entries: dict[str, dict] = {}
     for cit in citations:
@@ -506,7 +611,10 @@ def cmd_check(entries: dict[str, dict], problems: list[str]) -> int:
     failures: list[str] = []
 
     for p in problems:
-        failures.append(f"[引用无法解析] {p}")
+        if p.startswith("[semantic citation mismatch]"):
+            failures.append(p)
+        else:
+            failures.append(f"[引用无法解析] {p}")
 
     for key in sorted(entries, key=sort_key):
         cur = entries[key]

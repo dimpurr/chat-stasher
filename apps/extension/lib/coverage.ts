@@ -668,7 +668,7 @@ export function accountNote(row: CoverageRow): string {
 }
 
 /**
- * The two mechanisms step 1 records, each in the user's words. Exhaustive over
+ * The mechanisms step 1 records, each in the user's words. Exhaustive over
  * `AccountIdSource` by construction, so a third mechanism cannot be added without a
  * sentence for it — the same rule `describeSkipReason` follows for reason codes, minus the
  * default arm, because `readAccountLease` has already refused a source this build cannot
@@ -683,6 +683,8 @@ const ACCOUNT_SOURCE_KEY: Record<AccountIdSource, string> = {
   //    `AccountIdSource` by construction — the same rule the note above states — so a
   //    label added to the type without a sentence would not compile.
   'request-header-chatgpt-account-id': 'coverage.account.sourceHeader',
+  'response-body-claude-whoami': 'coverage.account.sourceClaudeWhoami',
+  'response-body-claude-user-settings': 'coverage.account.sourceClaudeSettings',
 };
 
 /**

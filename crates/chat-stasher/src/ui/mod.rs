@@ -1446,6 +1446,7 @@ pub(crate) mod fixture {
             time_source: source,
             title: crate::search::SessionLabel::NoLabelRecorded,
             provenance: None,
+            session_provenance: None,
             account_keys: Vec::new(),
         }
     }
@@ -4812,6 +4813,7 @@ mod tests {
                 // this test is about is not silently narrowed to the fields
                 // someone remembered to list.
                 account_keys: s.account_keys.clone(),
+                session_provenance: None,
             })
             .collect();
         r.sessions_seen = r.hits.len();

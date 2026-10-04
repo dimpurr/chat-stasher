@@ -9,13 +9,10 @@
  * Claude page from claude.ai, lets the real capture path run, and reads the bundle
  * back out of the real outbox.
  *
- * 🔴 W239 changed what there is to assert here, and this spec asserts the new fact
- *    rather than a weaker version of the old one. W128 step 3: claude.ai files
- *    conversations under an **organization**, two accounts can be members of one, so a
- *    fingerprint over the organization is equal for both — and this spec used to
- *    recompute exactly that value. A real capture now records
- *    `organization-is-not-an-account`, creates no salt to key a value with, and leaves
- *    the organization where it is a fact (the bundle's own `url`).
+ * 🔴 W337 adds a real Claude current-user lookup to this spec's capture path. The
+ *    organization remains the conversation namespace, but the page's current-user
+ *    response supplies the account id. The spec verifies the HMAC is persisted while
+ *    the raw synthetic id is absent from the archived bundle.
  *
  * 🔴 The construction is still proven in a real browser, by
  *    `account-switch.spec.ts`: it drives a **grok** capture, where the account id is a
@@ -44,6 +41,7 @@ const SESSION_ID = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const PAGE_PATH = `/chat/${SESSION_ID}`;
 const API_PATH = `/api/organizations/${ORG}/chat_conversations/${SESSION_ID}`;
 const SALT_KEY = 'cs_account_salt_v1';
+const USER_ID = 'synthetic-claude-user-337';
 
 /** Hand-written against the row's `requiredPaths: ['chat_messages']`, not generated from it. */
 const CLAUDE_BODY = JSON.stringify({
@@ -68,8 +66,13 @@ function bundleOf(payload: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-test('a Claude capture records that an organization is not an account, and keys nothing', async ({ ext }) => {
+test('a Claude capture fingerprints the current user id and never archives the raw id', async ({ ext }) => {
   const log = await installFakePlatforms(ext.context, [CLAUDE]);
+  let whoamiRequests = 0;
+  await ext.context.route(`${ORIGIN}/api/account`, async (route) => {
+    whoamiRequests += 1;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ userId: USER_ID }) });
+  });
 
   const page = await ext.context.newPage();
   await page.goto(`${ORIGIN}${PAGE_PATH}`, { waitUntil: 'domcontentloaded' });
@@ -85,28 +88,19 @@ test('a Claude capture records that an organization is not an account, and keys 
   expect(bundle.sessionId).toBe(SESSION_ID);
   expect(entries[0]!.name).toBe(`claude-${SESSION_ID}.json`);
 
-  // 🔴 W239 · **The account field carries no fingerprint, and says why.** This spec
-  //    used to recompute the HMAC the Claude capture produced. That value was derived
-  //    from the organization alone, and W128's step 3 is the fact that two accounts can
-  //    share an organization — so the value was equal for both and the archive would
-  //    have read one account's conversation as the other's. The construction itself is
-  //    still pinned in a real browser, on a platform whose account id is a person:
-  //    `account-switch.spec.ts` recomputes a grok fingerprint from the persisted salt
-  //    the same way this spec used to. What is asserted here is the refusal.
+  // 🔴 W337 · The per-user id comes from the page's cache-disabled who-am-I request,
+  //    not from the organization path. The archived field contains only its HMAC.
   const account = bundle.account as Record<string, unknown>;
-  expect(account).toEqual({ kind: 'unknown', reason: 'organization-is-not-an-account' });
-  // No value, no salt id, no source: the field invents nothing to fill the gap.
-  expect(account).not.toHaveProperty('value');
+  expect(account).toMatchObject({ kind: 'fingerprint', source: 'response-body-claude-whoami' });
+  expect(account.value).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(bundle)).not.toContain(USER_ID);
 
-  // 🔴 Nothing was keyed, so nothing was created to key it with: the install's secret
-  //    is not made for a value this build does not produce.
+  // 🔴 The salt is install-local and contains no input id.
   const stored = (await readStorage(ext, [SALT_KEY]))[SALT_KEY];
-  expect(stored, 'no fingerprint is produced here, so no salt may have been written').toBeUndefined();
+  expect(stored).toBeTruthy();
+  expect(JSON.stringify(stored)).not.toContain(USER_ID);
 
-  // 🔴 The organization is not *lost* by this — it is simply not called an account. It is
-  //    still on the record verbatim, in the URL the capture was taken from (and in the
-  //    backfill scope), which is where a reader who needs it looks.
-  expect(JSON.stringify(account)).not.toContain(ORG);
+  // The organization stays the capture namespace and is not used as the account id.
   expect(bundle.url).toContain(ORG);
 
   // Nothing left the machine, and the only traffic was the fixture's own.
@@ -114,4 +108,5 @@ test('a Claude capture records that an organization is not an account, and keys 
   expect(log.unexpected).toEqual([]);
   expect(log.pageLoads).toEqual([`GET ${PAGE_PATH}`]);
   expect(log.apiResponses).toEqual([`GET ${API_PATH}`]);
+  expect(whoamiRequests).toBe(1);
 });

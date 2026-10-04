@@ -162,6 +162,14 @@ describe('W113 · reading and writing the choice', () => {
     expect(await readSpeedPreset(store)).toBe(DEFAULT_SPEED_PRESET);
   });
 
+  it('a storage read failure selects the documented safe default', async () => {
+    const store = memoryStore({ [SPEED_PRESET_KEY]: 'faster' });
+    store.load = async () => { throw new Error('storage unavailable'); };
+
+    expect(await readSpeedPreset(store)).toBe('gentle');
+    expect((await readSpeedPlan(store)).preset).toBe('gentle');
+  });
+
   it('the choice round-trips, and the write reports what was persisted', async () => {
     const store = memoryStore();
     for (const preset of ALL) {
@@ -170,6 +178,30 @@ describe('W113 · reading and writing the choice', () => {
       expect(await readSpeedPreset(store)).toBe(preset);
       expect((await readSpeedPlan(store)).tickDetails).toBe(SPEED_PLANS[preset].tickDetails);
     }
+  });
+
+  it('a mismatched read-back rejects even when the store exposes another valid preset', async () => {
+    const store = memoryStore({ [SPEED_PRESET_KEY]: 'standard' });
+    store.save = async () => {}; // Accept the call without persisting the requested value.
+
+    await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow(/did not persist/i);
+    expect(await readSpeedPreset(store)).toBe('standard');
+  });
+
+  it('does not report a choice as persisted when read-back fails after a successful save', async () => {
+    const store = memoryStore();
+    store.load = async () => { throw new Error('read-back unavailable'); };
+
+    await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow('read-back unavailable');
+    expect(store.data[SPEED_PRESET_KEY]).toBe('faster');
+  });
+
+  it('does not report gentle as persisted when a no-op write only reads back the default', async () => {
+    const store = memoryStore();
+    store.save = async () => {}; // The absent key is interpreted as gentle by ordinary reads.
+
+    await expect(writeSpeedPreset(store, 'gentle')).rejects.toThrow(/did not persist/i);
+    expect(await readSpeedPreset(store)).toBe(DEFAULT_SPEED_PRESET);
   });
 
   it('a store that cannot hold the choice is not quietly treated as having accepted it', async () => {

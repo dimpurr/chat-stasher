@@ -144,6 +144,7 @@ import {
 import type { HttpPort, HttpResponse } from './engine';
 import type { BackfillStore } from './store';
 import type { AccountIdentity } from './types';
+import { CLAUDE_ACCOUNT_ID_MAX_CHARS, type ClaudeAccountReading } from '../claude-account';
 import { TAB_HELLO_MIN_INTERVAL_MS } from './tab-hello';
 import { carryableRetryAfter } from './types';
 
@@ -174,6 +175,8 @@ export const CHATGPT_WORKSPACE_REQUEST_MESSAGE = 'cs-backfill-chatgpt-workspace'
  *    spent).
  */
 export const CLAUDE_ORG_REQUEST_MESSAGE = 'cs-backfill-claude-org';
+/** Background → top-frame content script: resolve the current Claude account for one capture. */
+export const CLAUDE_ACCOUNT_IDENTITY_MESSAGE = 'cs-backfill-claude-account-identity';
 
 /** The registry of live platform tabs. Same cs_* prefix family; no new permission. */
 export const BACKFILL_TABS_KEY = 'cs_backfill_tabs_v1';
@@ -1143,6 +1146,24 @@ export function tabHttpPort(
       return { ok: false, reason: reply.reason, observed: reply.observed === true };
     }
     throw new Error(`tab ${tabId} gave an unrecognised ChatGPT workspace observation`);
+  };
+  port.claudeAccountIdentity = async (captureUrl: string): Promise<ClaudeAccountReading> => {
+    try {
+      const reply = await withReplyTimeout(
+        send(tabId, { type: CLAUDE_ACCOUNT_IDENTITY_MESSAGE, url: captureUrl }), tabId, timeoutMs,
+        'the Claude account identity',
+      );
+      if (isRecord(reply) && reply.kind === 'id' && typeof reply.id === 'string'
+        && reply.id.trim().length > 0 && reply.id.trim().length <= CLAUDE_ACCOUNT_ID_MAX_CHARS
+        && (reply.source === 'response-body-claude-whoami' || reply.source === 'response-body-claude-user-settings')) {
+        return { kind: 'id', id: reply.id, source: reply.source };
+      }
+      if (isRecord(reply) && reply.kind === 'unknown'
+        && (reply.reason === 'no-account-id-in-capture' || reply.reason === 'account-id-unreadable')) {
+        return { kind: 'unknown', reason: reply.reason };
+      }
+    } catch { /* an unavailable identity stays unknown; it does not lose the capture */ }
+    return { kind: 'unknown', reason: 'account-id-unreadable' };
   };
   return port;
 }

@@ -447,6 +447,7 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
         raise SupportMatrixError(f"{CONTRACT_REL}: `ALL_PLATFORMS` array is not closed")
 
     platforms: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     current: dict[str, Any] | None = None
     # Inside a platform's `lastVerified: {` object: its `date:` / `version:` /
     # `scope:` lines are collected, and its closing line ends the object.
@@ -481,8 +482,14 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
             continue
         m_id = _CONTRACT_ID_RE.match(raw)
         if m_id:
+            platform_id = m_id.group(1)
+            if platform_id in seen_ids:
+                raise SupportMatrixError(
+                    f"{CONTRACT_REL}: platform `{platform_id}` appears twice in `ALL_PLATFORMS`"
+                )
+            seen_ids.add(platform_id)
             current = {
-                "id": m_id.group(1),
+                "id": platform_id,
                 "origins": [],
                 "channel": None,
                 "credibility": None,
@@ -1280,6 +1287,14 @@ def selftest() -> int:
         )
         probe("experimental channel is experimental", web_status(web["p-exp"]) == STATUS_EXPERIMENTAL)
         probe("unverified credibility is uncertain", web_status(web["p-unver"]) == STATUS_UNCERTAIN)
+        unverified_full = render_full([], [web["p-unver"]], [], SELFTEST_AS_OF)
+        probe(
+            "an explicitly unverified capability renders as unverified",
+            "| p-unver | https://unver.example | stable | unverified | uncertain (unverified) |"
+            in unverified_full
+            and "| p-unver | https://unver.example | stable | - |" not in unverified_full
+            and "| p-unver | https://unver.example | stable | supported |" not in unverified_full,
+        )
 
         # The editorial overlay is read out of both sources with the same
         # shape: registry `verified`/`dev_priority`/`known_issue` beside the
@@ -1539,6 +1554,22 @@ def selftest() -> int:
             "date: '2026-08-01',",
         ))
         probe("a changed platform lastVerified fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        duplicate_platform = _SELFTEST_CONTRACT.replace(
+            "  {\n    id: 'p-exp',",
+            "  {\n    id: 'p-stable',\n    origins: ['https://duplicate.example'],\n"
+            "    credibility: 'from-source',\n    channel: 'stable',\n  },\n  {\n    id: 'p-exp',",
+        )
+        _scaffold(tmp, contract=duplicate_platform)
+        try:
+            parse_contract_platforms(tmp)
+            duplicate_diagnostic = None
+        except SupportMatrixError as exc:
+            duplicate_diagnostic = str(exc)
+        probe(
+            "duplicate platform IDs fail with a precise diagnostic",
+            duplicate_diagnostic
+            == f"{CONTRACT_REL}: platform `p-stable` appears twice in `ALL_PLATFORMS`",
+        )
         _scaffold(tmp)
 
         # A malformed editorial record is an input error (exit 2), never a
@@ -1570,6 +1601,34 @@ def selftest() -> int:
         probe("a verified record with an unknown platform is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
         _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace("devPriority: 'low'", "devPriority: 'urgent'"))
         probe("an unknown devPriority in the contract is an error", run_check(tmp, SELFTEST_AS_OF) == 2)
+        missing_credibility = _SELFTEST_CONTRACT.replace(
+            "    credibility: 'unverified',\n    channel: 'stable',",
+            "    channel: 'stable',",
+        )
+        _scaffold(tmp, contract=missing_credibility)
+        try:
+            parse_contract_platforms(tmp)
+            capability_diagnostic = None
+        except SupportMatrixError as exc:
+            capability_diagnostic = str(exc)
+        probe(
+            "a platform missing declared capture credibility fails precisely",
+            capability_diagnostic == f"{CONTRACT_REL}: platform `p-unver` has no `credibility`",
+        )
+        unknown_credibility = _SELFTEST_CONTRACT.replace(
+            "credibility: 'unverified'", "credibility: 'unknown-capability'"
+        )
+        _scaffold(tmp, contract=unknown_credibility)
+        try:
+            parse_contract_platforms(tmp)
+            unknown_capability_diagnostic = None
+        except SupportMatrixError as exc:
+            unknown_capability_diagnostic = str(exc)
+        probe(
+            "an unknown capture credibility fails with a precise diagnostic",
+            unknown_capability_diagnostic
+            == f"{CONTRACT_REL}: platform `p-unver` has unknown credibility `unknown-capability`",
+        )
         _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace(
             "      version: '1.2.3',",
             "      vversion: '1.2.3',",

@@ -10,13 +10,6 @@ export const CHATGPT_WORKSPACE_OBSERVED_MESSAGE = '__chat_stasher_chatgpt_worksp
 export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
 export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
 /**
- * Page-world signal for an OBSERVED WebSocket frame. Deliberately a separate
- * name from CAPTURE_MESSAGE: observation is not capture, nothing downstream
- * saves it yet, and the bridge must not mistake one for the other.
- */
-export const WS_OBSERVED_MESSAGE = '__chat_stasher_ws_observed__';
-
-/**
  * 🔴 W43 · **The page world saying "I could not install the capture hook", or
  *    "the wrapper I installed is no longer in effect".**
  *
@@ -315,6 +308,10 @@ export interface ChatPlatform {
   methods: readonly string[];
   status: { min: number; max: number };
   responseShape: ResponseShape;
+  /** Optional JSON paths that identify a stream snapshot's turn and completion state. */
+  streamTurnIdPaths?: readonly string[];
+  /** A snapshot is archived only when one configured path is `true` or a done status. */
+  streamCompletionPaths?: readonly string[];
   /** Regex source strings; the first capture group is the session id. */
   sessionIdPatterns: readonly string[];
   /** Source-backed is not the same as live verified. */
@@ -333,6 +330,8 @@ export interface ChatPlatform {
    * because it is the only switch that makes us read frame payloads at all.
    */
   webSocketCapture?: boolean;
+  /** Opt-in for EventSource messages whose data is a complete response body. */
+  eventSourceCapture?: boolean;
   /**
    * 🔴 The editorial facts of the generated support tables (SB-1). None of the
    * three fields below is read by the extension's own code; they live in this
@@ -1003,6 +1002,11 @@ export interface CapturedFetch {
   /** True when the request carried the header, even when its value was invalid. This boolean
    *  prevents a malformed supplied header from falling through to a response-body id. */
   chatgptAccountIdHeaderPresent?: boolean;
+  /** W337 · Transient Claude user id, consumed and deleted before persistence. */
+  claudeAccountId?: unknown;
+  claudeAccountIdSource?: 'response-body-claude-whoami' | 'response-body-claude-user-settings';
+  /** W337 · Named outcome of the capture-boundary lookup when no id was readable. */
+  claudeAccountUnknownReason?: 'no-account-id-in-capture' | 'account-id-unreadable';
 }
 
 export interface ChatGptProvenance {
@@ -1125,6 +1129,19 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   }
   if (value.chatgptAccountIdHeaderPresent !== undefined
     && (platform.id !== 'chatgpt' || typeof value.chatgptAccountIdHeaderPresent !== 'boolean')) return false;
+  if (value.claudeAccountId !== undefined
+    && (platform.id !== 'claude' || typeof value.claudeAccountId !== 'string'
+      || value.claudeAccountId.trim().length === 0 || value.claudeAccountId.trim().length > 512)) return false;
+  if (value.claudeAccountIdSource !== undefined
+    && (platform.id !== 'claude'
+      || (value.claudeAccountIdSource !== 'response-body-claude-whoami'
+        && value.claudeAccountIdSource !== 'response-body-claude-user-settings'))) return false;
+  if (value.claudeAccountUnknownReason !== undefined
+    && (platform.id !== 'claude'
+      || (value.claudeAccountUnknownReason !== 'no-account-id-in-capture'
+        && value.claudeAccountUnknownReason !== 'account-id-unreadable'))) return false;
+  if ((value.claudeAccountId !== undefined && value.claudeAccountUnknownReason !== undefined)
+    || (value.claudeAccountIdSource !== undefined && value.claudeAccountId === undefined)) return false;
   if (typeof value.capturedAt !== 'number' || !Number.isFinite(value.capturedAt) || value.capturedAt <= 0) {
     return false;
   }
@@ -1183,8 +1200,8 @@ export interface InboxIdentity {
 /**
  * 🔴 W128 step 1 · Where the id behind an account fingerprint came from.
  *
- * The source travels with the value because the two mechanisms are not equally
- * strong, and a reader who cannot tell them apart would treat an unverified scan
+ * The source travels with the value because the input mechanisms carry different
+ * evidence, and a reader who cannot tell them apart would treat an unverified scan
  * as a verified platform field:
  *  · 'request-url-organization'   — the id is a path segment of the page's own
  *    request (claude.ai addresses every conversation by organization). Verified,
@@ -1200,6 +1217,10 @@ export interface InboxIdentity {
  *    verified. It distinguishes the values the header distinguishes — two
  *    workspaces sharing one value are one fingerprint — which is why it is a
  *    provenance label and not a person's identity.
+ *  · 'response-body-claude-whoami' — 🔴 W337 · the current-user id returned by the
+ *    cache-disabled `/api/account` lookup on the logged-in Claude page.
+ *  · 'response-body-claude-user-settings' — 🔴 W337 · the `userId` in the captured
+ *    organization's Claude Code `user_settings` response, used when who-am-I has no id.
  *
  * 🔴 W239 · **This build no longer produces `'request-url-organization'`** — not on a
  *    bundle and not on a lease. The value is kept, and must be kept, because archives
@@ -1213,7 +1234,9 @@ export interface InboxIdentity {
 export type AccountIdSource =
   | 'request-url-organization'
   | 'response-body-platform-uid'
-  | 'request-header-chatgpt-account-id';
+  | 'request-header-chatgpt-account-id'
+  | 'response-body-claude-whoami'
+  | 'response-body-claude-user-settings';
 
 /**
  * 🔴 W199 · **The same set as a value**, for a reader that has a string off disk and
@@ -1231,6 +1254,8 @@ export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = [
   'request-url-organization',
   'response-body-platform-uid',
   'request-header-chatgpt-account-id',
+  'response-body-claude-whoami',
+  'response-body-claude-user-settings',
 ];
 
 /**
@@ -1254,6 +1279,8 @@ export const ACCOUNT_ID_SOURCES: readonly AccountIdSource[] = [
  *                                         is in the bundle's own `url`, and it remains
  *                                         the request namespace (`coordinationIdFromCapture`).
  *  · 'no-account-id-in-capture'         — nothing account-shaped was visible.
+ *  · 'account-id-unreadable'             — 🔴 W337 · Claude's current-user lookup could
+ *                                         not be read or parsed, so it says unknown.
  *  · 'email-is-not-an-account-id'       — an email was visible; an email is not an
  *                                         account/org id, and this field is never
  *                                         derived from one.
@@ -1273,6 +1300,7 @@ export type AccountUnknownReason =
   | 'organization-not-in-request-url'
   | 'organization-is-not-an-account'
   | 'no-account-id-in-capture'
+  | 'account-id-unreadable'
   | 'email-is-not-an-account-id'
   | 'handle-is-not-an-account-id'
   | 'salt-unavailable'

@@ -5,10 +5,16 @@ use chat_stasher::collect;
 use chat_stasher::collect::DestinationView;
 use chat_stasher::config::Config;
 use chat_stasher::scanner::{self, HarnessRegistry};
-use chat_stasher::store;
+use chat_stasher::store::{self, BackupStore, StoreConfig};
+use rustic_core::repofile::MasterKey;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 
 fn registry() -> HarnessRegistry {
     let cell = json!({
@@ -149,6 +155,99 @@ fn reads_new_bytes_then_resets_on_truncate_and_rewrite() {
         fourth.reset_records,
         after_truncate.len()
     );
+}
+
+#[test]
+fn collect_records_subagent_provenance_and_preserves_raw_source_bytes() {
+    let sandbox = test_support::Sandbox::new();
+    let source_root = sandbox.root().join(".claude/projects");
+    let source = source_root.join("project-fixture/parent-fixture/subagents/agent-fixture.jsonl");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let raw = br#"{"type":"user","message":{"content":"synthetic fixture"}}"#;
+    let raw = [raw.as_slice(), b"\n"].concat();
+    fs::write(&source, &raw).unwrap();
+    let stage = sandbox.root().join("stage");
+    let state = sandbox.root().join("state");
+
+    let scan_report = scan(&source_root);
+    assert_eq!(scan_report.records.len(), 1);
+    let session_id = scan_report.records[0].id.clone();
+    collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20, &dest())
+        .unwrap();
+
+    assert_eq!(fs::read(&source).unwrap(), raw);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &session_id).unwrap(),
+        raw
+    );
+
+    let mut rebuild = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    rebuild.args([
+        "activity-index",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--machine",
+        "fixture-machine",
+        "--rebuild",
+    ]);
+    sandbox.apply(&mut rebuild);
+    let output = rebuild.output().unwrap();
+    assert!(output.status.success(), "activity-index rebuild failed");
+
+    let cfg = StoreConfig {
+        repo_root: sandbox
+            .root()
+            .join("archive")
+            .to_string_lossy()
+            .into_owned(),
+        key_file: sandbox.root().join("archive-key.json"),
+        connections: 1,
+        options: BTreeMap::new(),
+        cache_dir: Some(test_support::rustic_cache_root(sandbox.root())),
+        no_cache: false,
+    };
+    let key = MasterKey::new();
+    store::persist_key_file(&cfg, &key).unwrap();
+    let archive = BackupStore::new(cfg, "fixture-machine".to_string());
+    assert!(archive.push(&stage, &key).unwrap().files_new > 0);
+
+    let (restored, _) = archive
+        .read_session_concat("fixture-machine", &session_id, &key)
+        .unwrap();
+    assert_eq!(
+        restored, raw,
+        "archive readback preserves the raw source bytes"
+    );
+    let (repo, _) = archive.open_indexed(&key).unwrap();
+    let snapshot = repo
+        .get_all_snapshots()
+        .unwrap()
+        .into_iter()
+        .filter(|snapshot| snapshot.hostname == "fixture-machine")
+        .max()
+        .unwrap();
+    let stage_relative = stage.canonicalize().unwrap();
+    let stage_relative = stage_relative.strip_prefix("/").unwrap_or(&stage_relative);
+    let index_path = stage_relative.join("meta/fixture-machine/activity-v1.jsonl");
+    let node = repo
+        .node_from_snapshot_and_path(&snapshot, &index_path.to_string_lossy())
+        .unwrap();
+    let mut archived_index = Vec::new();
+    repo.dump(&node, &mut archived_index).unwrap();
+    let row: serde_json::Value = std::str::from_utf8(&archived_index)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|row: &serde_json::Value| row["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(row["session_provenance"]["source_path_class"], "subagents");
+    assert_eq!(
+        row["session_provenance"]["parent_session_ref"],
+        "parent-fixture"
+    );
+    assert_eq!(row["source_path_class"], "subagents/");
+    assert!(!String::from_utf8_lossy(&archived_index)
+        .contains(sandbox.root().to_string_lossy().as_ref()));
 }
 
 #[test]
