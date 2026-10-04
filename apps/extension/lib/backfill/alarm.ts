@@ -1766,10 +1766,28 @@ function isTickRecord(v: unknown): v is BackfillTickRecord {
   if (!v || typeof v !== 'object') return false;
   const r = v as Partial<BackfillTickRecord>;
   return typeof r.at === 'number'
+    && Number.isFinite(r.at)
     && typeof r.ran === 'boolean'
     && typeof r.reason === 'string'
-    && typeof r.targets === 'number';
+    && TICK_REASONS.has(r.reason as TickReason)
+    && typeof r.targets === 'number'
+    && Number.isInteger(r.targets)
+    && r.targets >= 0;
 }
+
+/** The persisted trace accepts only outcomes the tick scheduler can produce. */
+const TICK_REASONS = new Set<TickReason>([
+  'already-running',
+  'no-store',
+  'disabled',
+  'host-paused',
+  'outbox-near-full',
+  'no-targets',
+  'no-http-port',
+  'no-runnable-target',
+  'scope-asked',
+  'ran',
+]);
 
 /** Read the trace. Unreadable / wrong shape ⇒ null ("I do not know" is also the truth; do not invent a row). */
 export async function loadLastTick(store: BackfillStore | null): Promise<BackfillTickRecord | null> {
