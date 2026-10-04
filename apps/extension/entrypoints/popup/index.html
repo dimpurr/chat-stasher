@@ -184,6 +184,10 @@
       #locale { font: inherit; font-size: 12px; }
       .notes { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid rgba(128,128,128,.35); }
       .notes p { margin: 8px 0; white-space: pre-wrap; opacity: .8; font-size: 12px; }
+      /* Long scopes and diagnostic sentences must wrap inside the popup width. */
+      #dashboard-note, #coverage, #coverage-card .line, #coverage-card .cv-text, .notes p {
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body>
