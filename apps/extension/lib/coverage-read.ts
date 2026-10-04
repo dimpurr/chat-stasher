@@ -97,7 +97,6 @@ function hasReadableCoverageShape(header: BackfillHeader): boolean {
     || !nonNegativeInteger(cursor.offset)
     || typeof cursor.complete !== 'boolean'
     || (cursor.cursor !== undefined && cursor.cursor !== null && !Number.isFinite(cursor.cursor))
-    || (cursor.cursor !== undefined && cursor.cursor !== null && typeof cursor.cursor !== 'number')
     || (cursor.token !== undefined && cursor.token !== null && typeof cursor.token !== 'string')
     || (cursor.truncated !== undefined && !['cursor-missing', 'has-more-missing', 'empty-page-inferred', 'short-page-inferred'].includes(String(cursor.truncated)))
     || (cursor.pageFingerprints !== undefined && (!Array.isArray(cursor.pageFingerprints)
@@ -139,6 +138,12 @@ function hasReadableCoverageShape(header: BackfillHeader): boolean {
     || typeof halted.detail !== 'string'
     || (halted.retryAt !== undefined && !finiteTimestamp(halted.retryAt))
     || (halted.attempts !== undefined && (!nonNegativeInteger(halted.attempts) || halted.attempts < 1)))) return false;
+
+  const relisted = header.relisted as unknown;
+  if (relisted !== undefined && (!record(relisted)
+    || !finiteTimestamp(relisted.at)
+    || !nonNegativeInteger(relisted.recorded)
+    || !nonNegativeInteger(relisted.held))) return false;
 
   if ((header.emptyStreak !== undefined && !nonNegativeInteger(header.emptyStreak))
     || (header.failuresDropped !== undefined && !nonNegativeInteger(header.failuresDropped))) return false;
