@@ -21,6 +21,12 @@
  *     returns `null` when there is nothing to draw — no empty axis that reads
  *     as an empty history, which is exactly the claim `coverage.months.none`
  *     exists to deny.
+ *   · every aggregate it reports is finite. Sanitizing each count separately
+ *     does not make their *sum* finite, and an infinite total scales its
+ *     column's heights to `NaN` or to zero, which is a malformed shape rather
+ *     than a large one. A sum that leaves the number range saturates at
+ *     `Number.MAX_VALUE` and the column is rescaled so the two halves still
+ *     share the track in proportion.
  */
 
 /** The four things a count bar can be made of. `remainder` is the part a known total holds beyond what has been listed so far. */
@@ -97,7 +103,7 @@ export interface MonthColumnGeometry {
   hArchived: number;
   hPending: number;
   hUnknown: number;
-  /** The unrounded total, for labels and titles. */
+  /** The unrounded total, for labels and titles. Saturated at `Number.MAX_VALUE` when the two counts sum past the number range. */
   total: number;
 }
 
@@ -117,14 +123,26 @@ export interface MonthsOptions {
   gap: number;
 }
 
-/** A gross-value helper callers use to decide whether the unknown column belongs on the chart at all. */
+/** A gross-value helper callers use to decide whether the unknown column belongs on the chart at all. Saturating, like every total here. */
 export function unknownTimeTotal(unknown: { archived: number; pending: number }): number {
-  return finiteCount(unknown.archived) + finiteCount(unknown.pending);
+  return finiteTotal(finiteCount(unknown.archived), finiteCount(unknown.pending));
 }
 
 /** Runtime storage and caller data can violate the TypeScript number contract. */
 function finiteCount(count: number): number {
   return Number.isFinite(count) ? Math.max(0, count) : 0;
+}
+
+/**
+ * Saturating sum of two sanitized counts. Each input is finite, but their sum
+ * can exceed `Number.MAX_VALUE` and round to `Infinity`, and an infinite total
+ * would scale every height in its column to `NaN` or zero. The true value is
+ * unrepresentable at that point, so the total clamps to the largest finite
+ * number instead of leaving the geometry.
+ */
+function finiteTotal(a: number, b: number): number {
+  const total = a + b;
+  return Number.isFinite(total) ? total : Number.MAX_VALUE;
 }
 
 /**
@@ -141,8 +159,12 @@ export function monthsGeometry(
 ): MonthsGeometry | null {
   const rows = months
     .filter((row) => row.month.length > 0)
-    .map((row) => ({ month: row.month, archived: finiteCount(row.archived), pending: finiteCount(row.pending) }))
-    .filter((row) => row.archived + row.pending > 0);
+    .map((row) => {
+      const archived = finiteCount(row.archived);
+      const pending = finiteCount(row.pending);
+      return { month: row.month, archived, pending, total: finiteTotal(archived, pending) };
+    })
+    .filter((row) => row.total > 0);
   const unknown = unknownTimeTotal(unknownTime);
   if (rows.length === 0 && unknown === 0) return null;
   if (!Number.isFinite(options.width) || options.width <= 0 || !Number.isFinite(options.height) || options.height <= 0) return null;
@@ -156,23 +178,29 @@ export function monthsGeometry(
   const columnWidth = usableWidth / columns;
   const max = Math.max(
     1,
-    ...rows.map((row) => row.archived + row.pending),
+    ...rows.map((row) => row.total),
     unknown,
   );
 
   const out: MonthColumnGeometry[] = [];
   let x = 0;
   for (const row of rows) {
-    const stacked = row.archived + row.pending;
+    const hArchived = (row.archived / max) * options.height;
+    const hPending = (row.pending / max) * options.height;
+    // The saturated total hides a row whose real sum left the number range: max
+    // stays finite while both halves still measure a full track each. Rescaling
+    // the pair keeps the stack inside the track and the halves in proportion.
+    const stacked = hArchived + hPending;
+    const fit = stacked > options.height ? options.height / stacked : 1;
     out.push({
       kind: 'month',
       key: row.month,
       x,
       w: columnWidth,
-      hArchived: (row.archived / max) * options.height,
-      hPending: (row.pending / max) * options.height,
+      hArchived: hArchived * fit,
+      hPending: hPending * fit,
       hUnknown: 0,
-      total: stacked,
+      total: row.total,
     });
     x += columnWidth + gap;
   }
