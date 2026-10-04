@@ -469,11 +469,16 @@ fn antigravity_fresh_roots_preserve_ambiguous_overlap_and_all_surfaces() {
         "each source root records its immutable observation"
     );
     let mut dimensions = SessionProvenance::default();
-    provenance::merge_verified_observations(
+    let sequence_bodies: Vec<_> = shard_entries
+        .iter()
+        .zip(&captured_shards)
+        .map(|((sequence, _), body)| (Some(*sequence), body.clone()))
+        .collect();
+    provenance::merge_verified_shard_sequence_observations(
         &mut dimensions,
         session_id,
         &observations,
-        &captured_shards,
+        &sequence_bodies,
     );
     assert_eq!(dimensions.surface, ["app", "cli", "ide"]);
     let cli = Selector {
