@@ -49,7 +49,7 @@ describe('persisted outbox summary metadata validation', () => {
     },
   );
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 1.5])(
+  it.each([null, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 1.5])(
     'does not trust a LastExport with invalid byte size %s',
     async (bytes) => {
       const store = metadataStore({
@@ -59,7 +59,7 @@ describe('persisted outbox summary metadata validation', () => {
     },
   );
 
-  it('accepts valid records and preserves the legacy missing-bytes fallback', async () => {
+  it('accepts valid records and preserves the missing-bytes fallback', async () => {
     const deliveryStore = metadataStore({ [CONNECT_DELIVERY_KEY]: { at: 0, count: 0 } });
     expect(await loadConnectDelivery(deliveryStore)).toEqual({ at: 0, count: 0 });
 

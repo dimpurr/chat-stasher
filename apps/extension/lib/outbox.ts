@@ -641,9 +641,8 @@ export async function loadLastExport(store: BackfillStore | null): Promise<LastE
   if (!raw || typeof raw !== 'object') return null;
   const rec = raw as Partial<LastExport>;
   if (!isNonNegativeFiniteNumber(rec.at) || !isNonNegativeInteger(rec.entries)) return null;
-  // Older records may omit bytes; keep the original zero fallback for that
-  // legacy shape. A present but malformed byte count is not a trustworthy
-  // summary and must not be converted into a plausible zero.
+  // A present but malformed byte count is not a trustworthy summary and must
+  // not be converted into a plausible zero.
   if (rec.bytes !== undefined && !isNonNegativeInteger(rec.bytes)) return null;
   return {
     at: rec.at,
