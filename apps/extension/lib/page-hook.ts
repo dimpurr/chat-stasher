@@ -644,7 +644,10 @@ export function installPageFetchHook(options: PageHookOptions): void {
           }
         }, { once: true });
       }
-      originalSend.call(this, body);
+      // Preserve whether the page omitted the optional body argument. Passing
+      // `undefined` explicitly can be observed by wrappers around the native
+      // method even though both forms send no body.
+      originalSend.apply(this, arguments as never);
     };
     xhrOpenWrapper = openWrapper;
     xhrSendWrapper = sendWrapper;
