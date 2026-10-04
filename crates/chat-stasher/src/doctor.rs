@@ -3137,9 +3137,18 @@ fn gemini_json(g: &GeminiRetention) -> serde_json::Value {
 /// a count that was not measured is `unknown` (installed store we could not
 /// enumerate) or `not_applicable` (not installed on this machine).
 fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
+    let presence_reason = if f.note.is_empty() {
+        "source presence could not be determined"
+    } else {
+        &f.note
+    };
     serde_json::json!({
         "name": f.name,
-        "installed": f.installed,
+        "installed": if f.presence_unknown {
+            serde_json::json!(CountState::unknown(presence_reason))
+        } else {
+            serde_json::json!(f.installed)
+        },
         "root": f.root.as_ref().map(|root| root.display().to_string()),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
@@ -3171,7 +3180,11 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         },
         "earliest": system_time_state(f.earliest),
         "latest": system_time_state(f.latest),
-        "compressed_count": CountState::known(f.compressed_count),
+        "compressed_count": if f.presence_unknown {
+            CountState::unknown(presence_reason)
+        } else {
+            CountState::known(f.compressed_count)
+        },
         "note": f.note,
     })
 }
@@ -4727,6 +4740,62 @@ mod json_tests {
         assert_eq!(
             v["footprints"][0]["latest"],
             serde_json::json!({"kind":"unknown","why":"no timestamp recorded"})
+        );
+    }
+
+    #[test]
+    fn doctor_json_indeterminate_footprint_does_not_claim_absence_or_zero() {
+        let mut r = report();
+        r.footprints[0] = HarnessFootprint {
+            installed: false,
+            presence_unknown: true,
+            session_count: None,
+            total_bytes: None,
+            compressed_count: 0,
+            note: "source presence could not be determined".to_string(),
+            ..fp()
+        };
+
+        let row = &report_to_json(&r)["footprints"][0];
+        assert_eq!(
+            row["compressed_count"],
+            serde_json::json!({
+                "kind": "unknown",
+                "why": "source presence could not be determined"
+            })
+        );
+        assert_eq!(
+            row["installed"],
+            serde_json::json!({
+                "kind": "unknown",
+                "why": "source presence could not be determined"
+            })
+        );
+    }
+
+    #[test]
+    fn doctor_json_keeps_measured_zero_and_known_absence() {
+        let present = report_to_json(&report());
+        assert_eq!(present["footprints"][0]["installed"], true);
+        assert_eq!(
+            present["footprints"][0]["compressed_count"],
+            serde_json::json!({"kind": "known", "count": 0})
+        );
+
+        let mut absent = report();
+        absent.footprints[0] = HarnessFootprint {
+            installed: false,
+            presence_unknown: false,
+            session_count: None,
+            total_bytes: None,
+            note: "not installed".to_string(),
+            ..fp()
+        };
+        let row = &report_to_json(&absent)["footprints"][0];
+        assert_eq!(row["installed"], false);
+        assert_eq!(
+            row["compressed_count"],
+            serde_json::json!({"kind": "known", "count": 0})
         );
     }
 
