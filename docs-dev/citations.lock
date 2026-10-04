@@ -966,7 +966,9 @@ crates/chat-stasher/src/store.rs:379-383  bd0dae8980fe  lines=5
 crates/chat-stasher/src/store.rs:435  43a7a775bbdc  lines=1
   <- docs-dev/orphan-packs.md:95  :: pub fn open_indexed(
 crates/chat-stasher/src/store.rs:563-575  ea712fd262a4  lines=13
-  <- docs-dev/node-metadata.md:95  :: let build_opts = BackupOptions::default()
+  <- docs-dev/node-metadata.md:96  :: let build_opts = BackupOptions::default()
+crates/chat-stasher/src/store.rs:714-731  a29fcdd26643  lines=18
+  <- docs-dev/node-metadata.md:110  :: repo: &Repository<IndexedFullStatus>,
 crates/chat-stasher/src/store.rs:1951-1953  df67f1e3fcff  lines=3
   <- docs-dev/install.md:566, docs-dev/install.md:1072, docs-dev/privacy.md:696, docs-dev/privacy.md:1027, docs-dev/threat-model.md:80, docs-dev/threat-model.md:901  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
 crates/chat-stasher/src/store.rs:1993-2000  652f49c633e5  lines=8
@@ -993,11 +995,19 @@ crates/chat-stasher/src/view.rs:246  5ac58701d728  lines=1
   <- docs-dev/threat-model.md:163  :: fn ct_eq(a: &str, b: &str) -> bool {
 crates/chat-stasher/src/view.rs:343-376  22c308f15652  lines=34
   <- docs-dev/threat-model.md:163  :: if method != "GET" {
-crates/chat-stasher/tests/w242_interrupted_push_test.rs:535  7ebbd9feab5f  lines=1
-  <- docs-dev/node-metadata.md:167  :: assert_no_tree_bytes(
+crates/chat-stasher/tests/w242_interrupted_push_test.rs:329-340  5092a1c5b0bf  lines=12
+  <- docs-dev/node-metadata.md:174  :: fn assert_no_tree_bytes(sb: &Sandbox, stdout: &str, context…
+crates/chat-stasher/tests/w242_interrupted_push_test.rs:520-540  a77a9dd780e5  lines=21
+  <- docs-dev/node-metadata.md:174  :: let second = sb.push();
 crates/chat-stasher/tests/w245_interrupted_push_test.rs:637-648  a195fcf736a3  lines=12
   <- docs-dev/orphan-packs.md:92  :: /// The fix, at test scale: packs that reached the reposito…
-vendor/rustic_core/src/archiver/tree_archiver.rs:195-197  68988662a972  lines=3
-  <- docs-dev/node-metadata.md:12  :: if !self.index.has_tree(&id) {
+vendor/rustic_core/src/archiver/parent.rs:172-188  e6ff1fc30995  lines=17
+  <- docs-dev/node-metadata.md:105  :: p_node
+vendor/rustic_core/src/archiver/tree_archiver.rs:163-197  007efa451d6f  lines=35
+  <- docs-dev/node-metadata.md:13  :: fn backup_tree(&mut self, path: &Path, parent: &ParentResul…
 vendor/rustic_core/src/backend/ignore/mapper.rs:68-86  b4eab5d2d03b  lines=19
-  <- docs-dev/node-metadata.md:134  :: /// Set the times stored for directories [default: yes]
+  <- docs-dev/node-metadata.md:140  :: /// Set the times stored for directories [default: yes]
+vendor/rustic_core/src/backend/local_destination.rs:290-304  83680e130fce  lines=15
+  <- docs-dev/node-metadata.md:107  :: pub(crate) fn set_times(
+vendor/rustic_core/src/commands/restore.rs:391-404  e6c2b49eb8d0  lines=14
+  <- docs-dev/node-metadata.md:106  :: match node.node_type {

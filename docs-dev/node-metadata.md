@@ -8,8 +8,9 @@ stores decides whether a push of an untouched stage is a genuine no-op.
 ## The defect
 
 A push reuses a tree it already holds by serializing the new tree and comparing
-its id with the parent snapshot's: a tree whose id the index already has is not
-written at all (`vendor/rustic_core/src/archiver/tree_archiver.rs:195-197`).
+its id with the parent snapshot's: a matching tree is not rewritten, and a tree
+whose id the index already has is not written again
+(`vendor/rustic_core/src/archiver/tree_archiver.rs:163-197`).
 Serialization covers every stored field, so **a stored field that moves on its
 own re-serializes that tree — and each tree above it, whose child reference
 changed — on every push**, with no content change and nothing in the output that
@@ -100,8 +101,13 @@ All of it is stated in one place,
   `set_dir_times(TimeOption::No)`.
 
 `set_ctime(TimeOption::No)`: the field is not written, so it cannot move a tree.
-Nothing this project reads is lost — the comparison already ignores ctime, and
-no code in this crate reads one back out of a node.
+The push comparison ignores ctime, and the local restore path applies stored
+mtime and atime but not ctime (`vendor/rustic_core/src/archiver/parent.rs:172-188`,
+`vendor/rustic_core/src/commands/restore.rs:391-404`,
+`vendor/rustic_core/src/backend/local_destination.rs:290-304`). The diagnostic
+node diff does read archived nodes and serializes their fields for comparison,
+so it can still report a ctime present in an older snapshot
+(`crates/chat-stasher/src/store.rs:714-731`).
 
 `set_dir_times(TimeOption::No)`: a directory node stores no times at all, for
 the reason in the table above. What makes a directory part of the archive is the
@@ -164,9 +170,10 @@ fields the table above leaves alone.
 
 ## The check
 
-`crates/chat-stasher/tests/w242_interrupted_push_test.rs:535` asserts the plain
-case — a second push of an untouched stage adds no bytes at all, `data_added
-== 0` and not merely `data_blobs == 0` — on every platform. The two tests in
+The plain case is asserted in
+`crates/chat-stasher/tests/w242_interrupted_push_test.rs:329-340,520-540`: a
+second push of an untouched stage adds no bytes at all, `data_added == 0` and
+not merely `data_blobs == 0`, on every platform. The two tests in
 "The event, reproduced" above are the single-field reproductions, and the
 failure report they print is the instrument for a platform that cannot be run
 locally: `BackupStore::node_metadata_diff` decodes both snapshots through
