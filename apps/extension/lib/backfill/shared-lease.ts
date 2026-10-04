@@ -19,7 +19,7 @@ export async function acquireSharedLease<T extends ReleasableLease>(
 ): Promise<T | null> {
   const previous = leases.get(key);
   if (previous?.releasing) {
-    await previous.releasing;
+    await previous.releasing.catch(() => undefined);
     return acquireSharedLease(leases, key, create);
   }
   if (previous) {
