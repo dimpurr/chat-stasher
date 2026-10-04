@@ -131,13 +131,17 @@ extension has no recorded observation to distinguish an idle page from a hook
 that did not report. No capture on record is also a gap in the record, not proof
 that none arrived.
 
-An explicit note names the page's recorded observation and whether a capture
-from that platform has since been confirmed in the archive. If it says the hook
-is not in effect, reload that tab to get a fresh observation, then open a
-conversation there. Reopen the popup to check the updated note; a capture
-confirmed from that platform is evidence the path is working. If the note says
-the report was not recorded because the site is not supported, check
-[support.md](support.md) for coverage.
+A hook note names the page's recorded observation and includes the record of
+captures from that platform. If it says the hook is not in effect, reload that
+tab to get a fresh observation, then open a conversation there. Reopen the popup
+to read any current note: a successful hook verification clears the old hook
+note, so no note is not proof that capture succeeded. A capture confirmed from
+that platform in a hook note is evidence the path is working.
+
+A declined-report note is separate: it says a page sent a report that the
+extension did not record, and does not show a recorded observation or capture
+confirmation. If it says the report was not recorded because the site is not
+supported, check [support.md](support.md) for coverage.
 
 ### The popup says it cannot reach the host
 
