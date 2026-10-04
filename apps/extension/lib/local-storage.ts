@@ -24,10 +24,14 @@ function storageArea(value: unknown): StorageArea | null {
 function localStorageCandidate(value: unknown): StorageArea | null {
   if (typeof value !== 'object' || value === null) return null;
 
-  const storage = (value as { storage?: unknown }).storage;
-  if (typeof storage !== 'object' || storage === null) return null;
+  try {
+    const storage = (value as { storage?: unknown }).storage;
+    if (typeof storage !== 'object' || storage === null) return null;
 
-  return storageArea((storage as { local?: unknown }).local);
+    return storageArea((storage as { local?: unknown }).local);
+  } catch {
+    return null;
+  }
 }
 
 export function localStorageArea(): StorageArea | null {
