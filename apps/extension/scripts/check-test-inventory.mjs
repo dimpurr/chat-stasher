@@ -75,7 +75,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const VITEST = join(ROOT, 'node_modules', 'vitest', 'vitest.mjs');
@@ -87,7 +87,6 @@ const FILTERS = process.argv.slice(2);
  * `vitest.config.ts`; that file is the source of truth, and anything vitest
  * selects from outside this walk is reported below rather than ignored.
  */
-const TESTS_DIR = join(ROOT, 'tests');
 const TEST_SUFFIX = '.test.ts';
 
 /** Exit codes, named so the call sites read as the rule they encode. */
@@ -95,78 +94,74 @@ const OK = 0;
 const FAILED = 1;
 const DID_NOT_FINISH = 3;
 
-const scratch = mkdtempSync(join(tmpdir(), 'test-inventory-'));
-const listFile = join(scratch, 'selected.json');
-const reportFile = join(scratch, 'executed.json');
+export function runCheck(options = {}) {
+  const root = resolve(options.root ?? ROOT);
+  const vitest = options.vitest ?? join(root, 'node_modules', 'vitest', 'vitest.mjs');
+  const filters = options.filters ?? FILTERS;
+  const testsDir = options.testsDir ?? join(root, 'tests');
+  const scratch = mkdtempSync(join(options.scratchParent ?? tmpdir(), 'test-inventory-'));
+  const listFile = join(scratch, 'selected.json');
+  const reportFile = join(scratch, 'executed.json');
 
-function runVitest(args) {
-  return spawnSync(process.execPath, [VITEST, ...args], {
-    cwd: ROOT,
-    stdio: 'inherit',
-  });
-}
+  function runVitest(args) {
+    return spawnSync(process.execPath, [vitest, ...args], { cwd: root, stdio: 'inherit' });
+  }
 
-/** Parse a JSON file this script asked vitest to write, or `null` if it is not usable. */
-function readJson(path) {
-  if (!existsSync(path)) return null;
+  function readJson(path) {
+    if (!existsSync(path)) return null;
+    try {
+      return JSON.parse(readFileSync(path, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function testFilesOnDisk(dir) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      didNotFinish(`could not read ${dir} (${error.code ?? error.message})`);
+    }
+    const found = [];
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) found.push(...testFilesOnDisk(full));
+      else if (entry.name.endsWith(TEST_SUFFIX)) found.push(full);
+    }
+    return found;
+  }
+
+  function finish(code, lines) {
+    throw { inventoryFinished: true, code, lines };
+  }
+
+  function didNotFinish(reason) {
+    finish(DID_NOT_FINISH, [
+      '',
+      `check-test-inventory: could not carry out the check — ${reason}.`,
+      'No conclusion is available from this run, so it does not pass: the absence',
+      'of a result is not evidence that every test file ran.',
+      '',
+    ]);
+  }
+
+  function show(file) {
+    const path = relative(root, file);
+    return `  ${path.startsWith('..') ? file : path.split(sep).join('/')}`;
+  }
+
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-/** Every file under `dir` whose name ends with `TEST_SUFFIX`, as absolute paths. */
-function testFilesOnDisk(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch (error) {
-    // An unreadable directory is "we could not look", not "there is nothing
-    // there" — the two must not reach the same exit code.
-    didNotFinish(`could not read ${dir} (${error.code ?? error.message})`);
-  }
-  const found = [];
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) found.push(...testFilesOnDisk(full));
-    else if (entry.name.endsWith(TEST_SUFFIX)) found.push(full);
-  }
-  return found;
-}
-
-function finish(code, lines) {
-  for (const line of lines) console.error(line);
-  rmSync(scratch, { recursive: true, force: true });
-  process.exit(code);
-}
-
-function didNotFinish(reason) {
-  finish(DID_NOT_FINISH, [
-    '',
-    `check-test-inventory: could not carry out the check — ${reason}.`,
-    'No conclusion is available from this run, so it does not pass: the absence',
-    'of a result is not evidence that every test file ran.',
-    '',
-  ]);
-}
-
-/** Report a file the way the developer will look for it: relative to the extension. */
-function show(file) {
-  const path = relative(ROOT, file);
-  return `  ${path.startsWith('..') ? file : path.split(sep).join('/')}`;
-}
-
-if (!existsSync(VITEST)) {
-  didNotFinish(`the vitest entry point is missing at ${VITEST}`);
-}
+    if (!existsSync(vitest)) {
+      didNotFinish(`the vitest entry point is missing at ${vitest}`);
+    }
 
 // 1. What does the configuration select? Asked of vitest, so `include` and
 //    `exclude` are not transcribed here — a second copy of those rules would be
 //    the first thing to rot, and it would rot silently.
 //    `--filesOnly` stops at file names: collecting test names would import the
 //    files, which is the very step this check exists to survive.
-const list = runVitest(['list', '--filesOnly', '--json', listFile, ...FILTERS]);
+const list = runVitest(['list', '--filesOnly', '--json', listFile, ...filters]);
 if (list.status !== OK) {
   didNotFinish(`"vitest list" exited ${list.status ?? 'without a status'}`);
 }
@@ -183,7 +178,7 @@ const run = runVitest([
   '--reporter=default',
   '--reporter=json',
   `--outputFile.json=${reportFile}`,
-  ...FILTERS,
+  ...filters,
 ]);
 
 const report = readJson(reportFile);
@@ -204,15 +199,15 @@ const selectedSet = new Set(selected.map((entry) => asKey(entry.file)));
 // is asking about one file, and the other sixty-nine are not missing from it.
 // Absent a filter every file is in scope, so the walk is the whole suite.
 const onDisk =
-  FILTERS.length === 0
-    ? testFilesOnDisk(TESTS_DIR).map(asKey)
+  filters.length === 0
+    ? testFilesOnDisk(testsDir).map(asKey)
     : selected.map((entry) => asKey(entry.file)).filter((file) => existsSync(file));
 
-if (FILTERS.length === 0 && onDisk.length === 0) {
+if (filters.length === 0 && onDisk.length === 0) {
   // Nothing to compare against is a broken walk — a moved `tests/`, a suffix
   // that no longer matches — not an empty suite. Saying "all 0 files ran" here
   // would be the same substitution this whole check exists to refuse.
-  didNotFinish(`no \`${TEST_SUFFIX}\` files were found under ${TESTS_DIR}`);
+  didNotFinish(`no \`${TEST_SUFFIX}\` files were found under ${testsDir}`);
 }
 
 const unselected = onDisk.filter((file) => !selectedSet.has(file));
@@ -296,7 +291,7 @@ if (outsideWalk.length > 0) {
 
 // The inventory agrees: every file in scope was selected, and every selected
 // file ran. The run's own exit code is still the verdict on the tests.
-const scope = FILTERS.length === 0 ? 'test files on disk' : 'filtered test files';
+const scope = filters.length === 0 ? 'test files on disk' : 'filtered test files';
 if (run.status !== OK) {
   // Worded without "all N ran": with a filter that matched nothing, N is 0 and
   // that sentence would read as a pass. The inventory agreeing is not the same
@@ -309,5 +304,26 @@ if (run.status !== OK) {
   ]);
 }
 
-console.log(`check-test-inventory: all ${onDisk.length} ${scope} ran.`);
-finish(OK, []);
+return {
+  code: OK,
+  stdout: `check-test-inventory: all ${onDisk.length} ${scope} ran.\n`,
+  stderr: '',
+};
+  } catch (result) {
+    if (!result?.inventoryFinished) throw result;
+    return {
+      code: result.code,
+      stdout: '',
+      stderr: result.lines.join('\n') + (result.lines.length ? '\n' : ''),
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const result = runCheck();
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.code;
+}
