@@ -408,6 +408,10 @@ pub struct HarnessFootprint {
     pub root: Option<PathBuf>,
     /// False = not installed at all (NOT "0 sessions" — different meaning).
     pub installed: bool,
+    /// True when the probe could not determine whether the source is present.
+    /// This is distinct from a measured absence and from a source that is
+    /// present but could not be enumerated.
+    pub presence_unknown: bool,
     /// `None` when the harness stores sessions in something non-enumerable
     /// by a file walk (e.g. opencode's single SQLite).
     pub session_count: Option<u64>,
@@ -463,6 +467,7 @@ pub fn coverage_from_records<'a>(
         name: name.to_string(),
         root: Some(root),
         installed,
+        presence_unknown: false,
         session_count: if installed {
             Some(recs.len() as u64)
         } else {
@@ -556,7 +561,7 @@ fn fmt_bytes(b: u64) -> String {
 fn footprint_bytes_label(f: &HarnessFootprint) -> String {
     match f.total_bytes {
         Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
-        None if f.installed => "unknown".to_string(),
+        None if f.installed || f.presence_unknown => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -663,6 +668,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         name: probe.id.clone(),
         root: probe.root.clone(),
         installed: probe.installed_p(),
+        presence_unknown: matches!(probe.state, scanner::ProbeState::Indeterminate),
         session_count: probe.record_count,
         candidate_count: probe.candidate_count,
         unreadable_count: probe.unreadable_count,
@@ -713,6 +719,7 @@ fn footprint_from_dir_probe<'a>(
     let root = probe.root.clone().unwrap_or(fallback_root);
     if !probe.installed_p() {
         return HarnessFootprint {
+            presence_unknown: matches!(probe.state, scanner::ProbeState::Indeterminate),
             note: if probe.note.is_empty() {
                 "registry did not scan this harness — session count unknown (not 0)".to_string()
             } else {
@@ -739,6 +746,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         name: name.to_string(),
         root: Some(root),
         installed: false,
+        presence_unknown: false,
         session_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -3135,7 +3143,13 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         "root": f.root.as_ref().map(|root| root.display().to_string()),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
-            None if f.installed => CountState::unknown("session count could not be enumerated"),
+            None if f.installed || f.presence_unknown => CountState::unknown(
+                if f.note.is_empty() {
+                    "session count could not be enumerated"
+                } else {
+                    &f.note
+                },
+            ),
             None => CountState::not_applicable("not installed"),
         },
         "candidate_count": match f.candidate_count {
@@ -3146,7 +3160,13 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         "unreadable_entry_count": unreadable_tri(f.session_count.is_some(), f.unreadable_entry_count),
         "total_bytes": match f.total_bytes {
             Some(bytes) => CountState::known(bytes),
-            None if f.installed => CountState::unknown("byte count could not be measured"),
+            None if f.installed || f.presence_unknown => CountState::unknown(
+                if f.note.is_empty() {
+                    "byte count could not be measured"
+                } else {
+                    &f.note
+                },
+            ),
             None => CountState::not_applicable("not installed"),
         },
         "earliest": system_time_state(f.earliest),
@@ -3296,7 +3316,7 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
         Some(count) => count.to_string(),
         // Installed but the store is not enumerable (schema not recognised):
         // "unknown", never a fake zero.
-        None if f.installed => "unknown".to_string(),
+        None if f.installed || f.presence_unknown => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -3523,7 +3543,7 @@ pub fn print_report(r: &DoctorReport) {
         never = coverage.never_probed(),
     );
     for f in &r.footprints {
-        if !f.installed {
+        if !f.installed && !f.presence_unknown {
             eprintln!(
                 "  {:<10} not installed ({})",
                 f.name,
@@ -4480,6 +4500,7 @@ mod b90_unknown_count_tests {
             name: "opencode".to_string(),
             root: Some(PathBuf::from("/nowhere/store.db")),
             installed: true,
+            presence_unknown: false,
             session_count: Some(3),
             candidate_count: Some(414),
             unreadable_count: unreadable,
@@ -4556,6 +4577,7 @@ mod json_tests {
             name: "opencode".to_string(),
             root: Some(PathBuf::from("/nowhere/store.db")),
             installed: true,
+            presence_unknown: false,
             session_count: Some(3),
             candidate_count: Some(414),
             unreadable_count: None,

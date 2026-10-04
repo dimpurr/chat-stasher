@@ -17,6 +17,10 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 
 /// How many sessions exist in each harness store the test plants, so the
 /// assertion is against known counts, not just "the two numbers are equal".
@@ -316,4 +320,86 @@ fn doctor_tables_never_contradict_any_harness() {
         Some(GROK_SESSIONS),
         "footprint table self-check against known ground truth: should recognize our {GROK_SESSIONS} planted session_docs sessions"
     );
+}
+
+/// An existing path with the wrong shape is not a measured absence. Doctor's
+/// footprint summary must keep the scanner's indeterminate reason visible and
+/// its counts unknown in both output formats.
+#[test]
+fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let home = sandbox.path().join("home");
+    let source = sandbox.path().join("synthetic-platform-source");
+    let registry = sandbox.path().join("registry.json");
+    fs::create_dir_all(&home).unwrap();
+    // The synthetic Codex registry cell declares a directory, but the source
+    // is a file. This deterministically exercises an unavailable platform
+    // source on all platforms without relying on chmod or host permissions.
+    fs::write(&source, b"synthetic unavailable source\n").unwrap();
+    fs::write(
+        &registry,
+        format!(
+            r#"{{"schema_version":1,"generated":"synthetic doctor fixture","harnesses":[{{"id":"codex","display_name":"Synthetic Codex","paths":{{"macos":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}},"linux":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}},"windows":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}}}}}}]}}"#,
+            source.display(),
+            source.display(),
+            source.display()
+        ),
+    )
+    .unwrap();
+
+    let run_doctor = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        command
+            .arg("doctor")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", sandbox.path().join("config"))
+            .env("XDG_DATA_HOME", sandbox.path().join("data"))
+            .env("XDG_STATE_HOME", sandbox.path().join("state"))
+            .env("XDG_CACHE_HOME", sandbox.path().join("xdg-cache"))
+            .env("CHAT_STASHER_REGISTRY", &registry)
+            .env(
+                test_support::RUSTIC_CACHE_DIR_ENV,
+                test_support::rustic_cache_root(sandbox.path()),
+            );
+        if json {
+            command.arg("--json");
+        }
+        command.output().expect("run isolated doctor")
+    };
+
+    let human = run_doctor(false);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        human.contains("sessions unknown") && human.contains("path exists but is not a directory"),
+        "human doctor output must preserve the unknown source and its reason; output:\n{human}"
+    );
+    assert!(
+        !human.contains("codex      not installed"),
+        "an indeterminate source must not be rendered as measured absence; output:\n{human}"
+    );
+
+    let json = run_doctor(true);
+    assert!(json.status.success());
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("doctor --json must emit JSON ({e}): {stdout}"));
+    let footprint = report["footprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "codex")
+        .unwrap();
+    assert_eq!(footprint["session_count"]["kind"], "unknown");
+    assert_eq!(footprint["total_bytes"]["kind"], "unknown");
+    assert!(
+        footprint["note"]
+            .as_str()
+            .unwrap()
+            .contains("path exists but is not a directory"),
+        "JSON footprint must preserve the unreadable source reason: {footprint}"
+    );
+    assert_ne!(footprint["session_count"]["count"], 0);
+    assert_ne!(footprint["total_bytes"]["count"], 0);
 }
