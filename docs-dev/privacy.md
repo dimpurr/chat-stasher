@@ -44,7 +44,7 @@ that document is the honest one.
   from the page and held in memory only (step 1 of section 1). **Gemini's were
   measured too**, and its requests carry three values out of the page's own
   bootstrap blob — read at request time through the page-world hook, held in memory
-  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1098-1141`).
+  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1103-1146`).
   Claude is the one platform whose requests are addressed by an account-scoped
   identifier the page URL does not carry; the extension resolves it from the
   page's own requests, the browser's cookie, or one extra request, and stops
@@ -106,14 +106,14 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:824`, `:864`, `:666-713`). Only responses
+   (`apps/extension/lib/page-hook.ts:829`, `:869`, `:671-718`). Only responses
    matching a known platform route are kept
-   (`apps/extension/lib/contract.ts:354-850`, `:1083-1125`).
+   (`apps/extension/lib/contract.ts:356-852`, `:1085-1129`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
-   page, on the same origin (`apps/extension/lib/page-hook.ts:845-850`;
+   page, on the same origin (`apps/extension/lib/page-hook.ts:850-855`;
    `apps/extension/entrypoints/dw-bridge.content.ts:694-722`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
@@ -237,7 +237,7 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:864`, `:666-713`; the extra request and the
+  (`apps/extension/lib/page-hook.ts:869`, `:671-718`; the extra request and the
   token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:694-722`,
   `apps/extension/lib/platform-auth.ts:47`, `:92-107`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
@@ -273,11 +273,11 @@ is, the conversation itself (`apps/extension/entrypoints/background.ts:268-271`;
 and not an email, but a keyed digest of the platform's account id, computed
 in the extension with a random per-install salt
 (`apps/extension/lib/account-fingerprint.ts:416-435`;
-`apps/extension/lib/contract.ts:1330-1339`). Its purpose is to make two accounts
+`apps/extension/lib/contract.ts:1334-1343`). Its purpose is to make two accounts
 distinguishable in your archive; unlike the identity, it cannot be turned back
 into the account id, and when no account id is available the bundle says so
 explicitly rather than carrying a value
-(`apps/extension/lib/contract.ts:1293-1302`).
+(`apps/extension/lib/contract.ts:1297-1306`).
 
 🔴 W239 · **Where a platform files conversations under an _organization_ rather than an
 account, no fingerprint is recorded at all.** claude.ai addresses every conversation by
@@ -441,7 +441,7 @@ the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
 — a capture payload carrying provenance is rejected outright
-(`apps/extension/lib/contract.ts:1112-1113`) — and, like the account fingerprint,
+(`apps/extension/lib/contract.ts:1116-1117`) — and, like the account fingerprint,
 these values are written into your own archive and are not transmitted anywhere
 by this extension.
 
@@ -501,7 +501,7 @@ What is kept there:
 | `cs_ext_coordination_unavailable_v1` | A Boolean popup note recording whether this profile's most recent backfill tick found coordination unavailable. It is true when the host cannot answer EXT-3 and false after a successful coordination claim; a tick without a request channel preserves the prior result. It stores no platform, account, or conversation data. | `apps/extension/entrypoints/background.ts:915-924` |
 | `extension-coordination.sqlite3` in the native host's local state directory | Machine-local backfill coordination metadata: platform ids, install ids, masterkey-derived HMAC account keys when available, last-seen and lease/cooldown/request timestamps, and a per-day detail-request count. It contains no raw account id, conversation id, title, or message content. Install sightings older than 30 days are pruned when coordination runs. | `crates/chat-stasher/src/nativehost.rs:1236-1311`, `:1417-1423`, `:1507-1522` |
 | `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:70-71`, `:623-647` |
-| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:53`, `:156-191`; `apps/extension/lib/contract.ts:1322-1326` |
+| `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:53`, `:156-191`; `apps/extension/lib/contract.ts:1326-1330` |
 | `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1577-1679`, `:1682-1761`; `apps/extension/entrypoints/background.ts:2994-3059`, `:2964-3034` |
 | `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:78-155`, `:289-418`; `apps/extension/entrypoints/background.ts:3400-3469`, `:3382-3456` |
 | `cs_last_delivered_v1` | One entry per conversation this profile has delivered: the delivery name it went out under, and the **content fingerprint** of the response — a SHA-256 over the response body with that platform's known volatile fields removed, so two views of one unchanged conversation share it. Nothing else: no URL, no title, no account, no conversation text, and — since W50c — no stage or machine id either, because where a copy went is answered by the host from its own archive rather than remembered here. 🔴 Its only use is to decide whether asking the host is worth a round trip (`has`, "What the host answers back" above). It cannot by itself mark a conversation archived: the extension asks the `chat-stasher` binary still, and only a positive answer from the stage the host is writing to now is acted on. Up to 2000 entries, oldest forgotten first — an entry that has been forgotten costs one delivery of a conversation the archive may already hold, never a skipped one. | `apps/extension/lib/recapture.ts:46`, `:103`, `:274-304`, `:342-354` |
@@ -539,7 +539,7 @@ Three things in that table deserve to be called out rather than buried:
   of that key is your **account identifier on that platform** when the extension
   could find one (a user id, an email address, or a handle), and the literal
   string `default` when it could not (`apps/extension/entrypoints/background.ts:2072-2120`;
-  the identity itself is read by `apps/extension/lib/contract.ts:1520-1536`). It is used to
+  the identity itself is read by `apps/extension/lib/contract.ts:1524-1540`). It is used to
 
   keep two machines' archives of the same account from colliding. It stays in
   your local browser storage and is written into your own archive; it is not
@@ -707,7 +707,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:864`, `:666-713`; `apps/extension/lib/gemini-capture.ts:150-238` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:869`, `:671-718`; `apps/extension/lib/gemini-capture.ts:150-238` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:318-418`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:588-621` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key files. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -795,16 +795,16 @@ active in this browser." (`apps/extension/entrypoints/background.ts:2054`;
 The extension's content scripts are injected on an **explicit, closed list of
 origins** compiled into the code — never `<all_urls>`, never a wildcard:
 
-- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:357`)
-- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:417`)
-- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:488`)
-- `https://gemini.google.com` (`apps/extension/lib/contract.ts:512`)
-- `https://claude.ai` (`apps/extension/lib/contract.ts:561`)
-- `https://www.kimi.com` (`apps/extension/lib/contract.ts:635`)
-- `https://grok.com` (`apps/extension/lib/contract.ts:760`)
+- `https://chat.deepseek.com` (`apps/extension/lib/contract.ts:359`)
+- `https://www.perplexity.ai` (`apps/extension/lib/contract.ts:419`)
+- `https://chatgpt.com`, `https://chat.openai.com` (`apps/extension/lib/contract.ts:490`)
+- `https://gemini.google.com` (`apps/extension/lib/contract.ts:514`)
+- `https://claude.ai` (`apps/extension/lib/contract.ts:563`)
+- `https://www.kimi.com` (`apps/extension/lib/contract.ts:637`)
+- `https://grok.com` (`apps/extension/lib/contract.ts:762`)
 
 The list the browser is given is derived mechanically from that table
-(`apps/extension/lib/contract.ts:857-892`), so the sites the extension can run
+(`apps/extension/lib/contract.ts:859-894`), so the sites the extension can run
 on and the sites it can capture from are the same set by construction — they
 cannot drift apart.
 
@@ -839,12 +839,12 @@ guessing.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape
-(`apps/extension/lib/contract.ts:1071-1090`, `:1083-1125`). A body over 16 MiB is not
+(`apps/extension/lib/contract.ts:1073-1094`, `:1085-1129`). A body over 16 MiB is not
 captured, and the page console says so rather than dropping it silently
-(`apps/extension/lib/contract.ts:913`; `apps/extension/lib/page-hook.ts:476`). No shipped
+(`apps/extension/lib/contract.ts:915`; `apps/extension/lib/page-hook.ts:481`). No shipped
 platform row reads `WebSocket` frames or `EventSource` messages: every row
 states `webSocketCapture: false` explicitly, and none declares
-`eventSourceCapture` (`apps/extension/lib/contract.ts:354-850`).
+`eventSourceCapture` (`apps/extension/lib/contract.ts:356-852`).
 
 **What running on a site does *not* mean.** Being on this list means the
 extension's content script is injected there. It does not mean your history on
@@ -900,15 +900,15 @@ unchanged Grok conversation is more likely than on other platforms to deliver
 another copy of it: an extra copy in your archive, never a lost one.
 
 Responses are read from `fetch` and from `XMLHttpRequest`, and both go through
-the same capture decision above (`apps/extension/lib/page-hook.ts:443-515`).
+the same capture decision above (`apps/extension/lib/page-hook.ts:448-520`).
 An XHR body is read only when the page itself reads it as text or JSON
-(`apps/extension/lib/page-hook.ts:624-629`); a binary XHR body (arraybuffer,
-blob, document) is never read and only prints a console warning (`:630-633`,
-`:255-262`). Stream transports are opt-in too: `EventSource` messages and
+(`apps/extension/lib/page-hook.ts:629-634`); a binary XHR body (arraybuffer,
+blob, document) is never read and only prints a console warning (`:635-638`,
+`:258-265`). Stream transports are opt-in too: `EventSource` messages and
 `WebSocket` text frames are read only where the platform row opts in
 (`eventSourceCapture`, `webSocketCapture`), and no shipped row opts into
 either, so a stream that only looks like a candidate route just gets the
-console warning (`apps/extension/lib/page-hook.ts:675-679`, `:763-766`).
+console warning (`apps/extension/lib/page-hook.ts:680-684`, `:768-771`).
 
 ## 6. What each permission is for
 

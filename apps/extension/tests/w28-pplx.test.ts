@@ -181,6 +181,9 @@ describe('W28-1 · what the row registers', () => {
     expect(matchesResponseShape(row, contentBody([]))).toBe(true);
     // Drift: same route, same 200, the envelope moved under a different key.
     expect(matchesResponseShape(row, JSON.stringify({ data: { entries: [] } }))).toBe(false);
+    // Drift: same route, same 200, `entries` is present but not an array.
+    // The bridge-side copy of W424's page-hook shape gate must refuse it too.
+    expect(matchesResponseShape(row, JSON.stringify({ entries: {} }))).toBe(false);
     // The list envelope is plainly not the content envelope.
     expect(matchesResponseShape(row, listBody([SLUG]))).toBe(false);
     expect(matchesResponseShape(row, 'not json')).toBe(false);

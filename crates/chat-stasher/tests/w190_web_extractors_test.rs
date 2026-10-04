@@ -31,9 +31,9 @@
 //! session id, account or machine appears, and no request leaves the machine
 //! (the extractor tests never touch the network, and the index tests run the
 //! real `activity-index` over a temporary stage). The body shapes come from the
-//! capture contract's own rows — `apps/extension/lib/contract.ts:434-460`
+//! capture contract's own rows — `apps/extension/lib/contract.ts:488-511`
 //! (chatgpt: `requiredPaths: ['mapping','current_node']`) and
-//! `apps/extension/lib/contract.ts:498-560` (claude: `requiredPaths:
+//! `apps/extension/lib/contract.ts:561-626` (claude: `requiredPaths:
 //! ['chat_messages']`) — plus the measured claude envelope recorded by the
 //! capture-side test `apps/extension/tests/w31-claude.test.ts:161-203`.
 

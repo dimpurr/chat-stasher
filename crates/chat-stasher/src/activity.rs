@@ -1696,8 +1696,8 @@ fn web_numeric_seconds(raw: &serde_json::Value) -> Option<i64> {
 /// same source"). Two shapes are that body, and [`web_span`] decides both:
 ///
 /// * **the conversation's detail body** — the capture contract requires
-///   `mapping` + `current_node` of a chatgpt body (`contract.ts:434-450`) and
-///   `chat_messages` of a claude body (`contract.ts:493-516`), so a body
+///   `mapping` + `current_node` of a chatgpt body (`contract.ts:488-511`) and
+///   `chat_messages` of a claude body (`contract.ts:561-584`), so a body
 ///   carrying the same marker is this conversation's record;
 /// * **this conversation's own metadata record** — a body the time pass reads
 ///   as [`WebSpan::List`], i.e. one written with *one* conversation's
