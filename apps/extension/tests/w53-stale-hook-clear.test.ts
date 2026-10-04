@@ -85,7 +85,7 @@ function record(overrides: Partial<HookStatusRecord> = {}): HookStatusRecord {
   };
 }
 
-const NOW = 60_000;
+const NOW = 1_700_000_000_000;
 
 describe('W53 · a stale hook failure is retracted by age, and only by that', () => {
   it('the staleness window is strictly larger than the re-report cadence', () => {
