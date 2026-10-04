@@ -197,7 +197,11 @@ def parse_rfc3339(text: Any) -> dt.datetime | None:
     if not isinstance(text, str):
         return None
     try:
-        parsed = dt.datetime.fromisoformat(text.strip())
+        # Python before 3.11 requires the explicit UTC offset instead of Z.
+        value = text.strip()
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = dt.datetime.fromisoformat(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
