@@ -1,3 +1,10 @@
+/**
+ * W421 · Fixture-backed DeepSeek history_messages XHR capture probe.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com, and nothing leaves the machine.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { CAPTURE_MESSAGE } from '../lib/contract';
