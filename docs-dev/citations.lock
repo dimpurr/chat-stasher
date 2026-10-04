@@ -637,20 +637,22 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:868  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:868  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1003-1013  e88e5fd731c5  lines=11
+crates/chat-stasher/src/doctor.rs:1011-1021  e88e5fd731c5  lines=11
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1031-1138  bbabec918aa9  lines=108
+crates/chat-stasher/src/doctor.rs:1039-1146  bbabec918aa9  lines=108
   <- docs-dev/install.md:1008  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1141-1162  7b4d69687a1b  lines=22
+crates/chat-stasher/src/doctor.rs:1149-1170  7b4d69687a1b  lines=22
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: pub enum DestinationOutcome {
-crates/chat-stasher/src/doctor.rs:1294-1347  4176d416bb38  lines=54
+crates/chat-stasher/src/doctor.rs:1302-1355  4176d416bb38  lines=54
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
-crates/chat-stasher/src/doctor.rs:1520-1556  cb18519fdbb9  lines=37
-  <- docs-dev/install.md:278  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:1843-1844  c49d6fc9ccfa  lines=2
-  <- docs-dev/install.md:1011  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:2372-2434  0d89a3dbd659  lines=63
-  <- docs-dev/install.md:1011  :: /// D10 — inspect only local index files; this never opens …
+crates/chat-stasher/src/doctor.rs:1520-1556  8a8713b236f4  lines=37
+  <- docs-dev/install.md:278  :: /// listed) plus the reason, and says out loud which checks…
+crates/chat-stasher/src/doctor.rs:1526-1560  4bff3395e376  lines=35
+  <- docs-dev/install.md:278  :: /// *which* half of their setup is broken, and that answer …
+crates/chat-stasher/src/doctor.rs:1843-1846  59495b9dadf8  lines=4
+  <- docs-dev/install.md:1011  :: let reclaim = inspect_reclaim(&config);
+crates/chat-stasher/src/doctor.rs:2372-2434  a6aa8bddd8b1  lines=63
+  <- docs-dev/install.md:1011  :: },
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:935  :: //! Local, disposable full-text index for one archive desti…
 crates/chat-stasher/src/fts.rs:1460-1680  b6dd6f684adc  lines=221
