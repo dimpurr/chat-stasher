@@ -256,6 +256,15 @@ function usableHeaderToken(value: string | null): string | null {
   return /[\u0000-\u001F\u007F]/.test(value) ? null : value;
 }
 
+/** A page storage accessor may throw; that is still an unreadable token, not a fetch failure. */
+function readKimiHeaderToken(readToken: () => string | null): string | null {
+  try {
+    return usableHeaderToken(readToken());
+  } catch {
+    return null;
+  }
+}
+
 export interface KimiAuthOptions {
   /** Reads this origin's `access_token` from the page's own storage. Called per request, never cached. */
   readToken: () => string | null;
@@ -338,7 +347,7 @@ export function createKimiAuthorizedFetch(
 
   return async (url: string, init: RequestInit): Promise<MinimalResponse> => {
     if (!needsKimiBearer(url, pageOrigin)) return rawFetch(url, init);
-    const token = usableHeaderToken(options.readToken());
+    const token = readKimiHeaderToken(options.readToken);
     const first = await send(url, init, token);
     /**
      * 🔴 Retried **once**, and only in the one case a retry can change the answer:
@@ -357,7 +366,7 @@ export function createKimiAuthorizedFetch(
      * never read as "this account has nothing".
      */
     if (first.status !== 401 || token === null) return first;
-    return send(url, init, usableHeaderToken(options.readToken()));
+    return send(url, init, readKimiHeaderToken(options.readToken));
   };
 }
 
