@@ -92,6 +92,7 @@ describe('W113 · which records the page will show', () => {
       failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', reason: 'synthetic-failure', at: 1 }],
       parkedEmpty: ['synthetic-id'],
       halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop' },
+      relisted: { at: 1, recorded: 2, held: 1 },
     }))).toBe(true);
     expect(isReadableHeaderAt(stateKey('chatgpt', scope), header({
       scope,
@@ -126,6 +127,8 @@ describe('W113 · which records the page will show', () => {
       ['NaN daily cap', { detailToday: { day: '2026-09-24', count: 0, cap: Number.NaN } }],
       ['malformed enum cursor object', { enumCursor: { offset: '0' as unknown as number, complete: false } }],
       ['non-finite enum cursor offset', { enumCursor: { offset: Number.POSITIVE_INFINITY, complete: false } }],
+      ['non-finite enum cursor value', { enumCursor: { offset: 0, complete: false, cursor: Number.NaN } }],
+      ['wrong enum cursor type', { enumCursor: { offset: 0, complete: false, cursor: 'invalid' as unknown as number } }],
       ['missing enum cursor completion flag', { enumCursor: { offset: 0 } as unknown as BackfillHeader['enumCursor'] }],
       ['malformed last-fetch object', { lastFetchAt: { enumerate: Number.NaN, detail: null } }],
       ['non-finite detail timestamp', { lastFetchAt: { enumerate: null, detail: Number.NEGATIVE_INFINITY } }],
@@ -144,6 +147,12 @@ describe('W113 · which records the page will show', () => {
       ['halted attempt count is NaN', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: Number.NaN } }],
       ['halted attempt count is zero', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 0 } }],
       ['halted attempt count is fractional', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 1.5 } }],
+      ['re-listing notice is not an object', { relisted: 7 as unknown as BackfillHeader['relisted'] }],
+      ['re-listing time is NaN', { relisted: { at: Number.NaN, recorded: 2, held: 1 } }],
+      ['re-listing time is negative', { relisted: { at: -1, recorded: 2, held: 1 } }],
+      ['re-listing recorded count is a string', { relisted: { at: 1, recorded: '2' as unknown as number, held: 1 } }],
+      ['re-listing held count is negative', { relisted: { at: 1, recorded: 2, held: -1 } }],
+      ['re-listing held count is fractional', { relisted: { at: 1, recorded: 2, held: 1.5 } }],
     ];
 
     for (const [label, change] of malformed) {
