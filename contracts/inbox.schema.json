@@ -116,9 +116,11 @@
               "enum": [
                 "request-url-organization",
                 "response-body-platform-uid",
-                "request-header-chatgpt-account-id"
+                "request-header-chatgpt-account-id",
+                "response-body-claude-whoami",
+                "response-body-claude-user-settings"
               ],
-              "description": "Where the input id came from. 'request-url-organization' is a path segment of the page's own request (verified, page-owned). 'response-body-platform-uid' is the ADR-002 account axis read from the captured body by the generic scan, whose candidate key names are not confirmed against a logged-in page. 'request-header-chatgpt-account-id' (W299) is the ChatGPT-Account-Id value on the exact request whose response this capture is; it is read in the page's MAIN world, so it is untrusted input that distinguishes the values the header distinguishes, not a verified person."
+              "description": "Where the input id came from. 'request-url-organization' is a path segment of the page's own request (verified, page-owned). 'response-body-platform-uid' is the ADR-002 account axis read from the captured body by the generic scan, whose candidate key names are not confirmed against a logged-in page. 'request-header-chatgpt-account-id' (W299) is the ChatGPT-Account-Id value on the exact request whose response this capture is; it is untrusted page input. 'response-body-claude-whoami' (W337) is the current-user id read from a cache-disabled Claude who-am-I response. 'response-body-claude-user-settings' (W337) is the userId from the captured organization's Claude Code user_settings response, used only if who-am-I supplied no id. Both Claude values are transient raw inputs; only the per-install HMAC is recorded."
             },
             "saltId": {
               "type": "string",
@@ -142,13 +144,14 @@
                 "organization-not-in-request-url",
                 "organization-is-not-an-account",
                 "no-account-id-in-capture",
+                "account-id-unreadable",
                 "email-is-not-an-account-id",
                 "handle-is-not-an-account-id",
                 "salt-unavailable",
                 "salt-unreadable",
                 "crypto-unavailable"
               ],
-              "description": "Every value is a distinct fact. 'organization-is-not-an-account' (W239) means this platform files conversations under an organization, which two accounts can share: a value derived from it would be equal for both, so no value is recorded and the reason says why. 'salt-unreadable' means a salt record exists and does not parse, and is deliberately not replaced by a fresh one: that would re-key every later fingerprint and read as an account switch."
+              "description": "Every value is a distinct fact. 'organization-is-not-an-account' (W239) means this platform files conversations under an organization, which two accounts can share: a value derived from it would be equal for both, so no value is recorded and the reason says why. 'account-id-unreadable' (W337) means a current-user endpoint could not be read or parsed; it is distinct from a completed lookup with no user id. 'salt-unreadable' means a salt record exists and does not parse, and is deliberately not replaced by a fresh one: that would re-key every later fingerprint and read as an account switch."
             }
           }
         }
