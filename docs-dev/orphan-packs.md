@@ -202,8 +202,13 @@ could any of it be deleted" has no answer from `push` or `verify`. `prune-orphan
 answers it and nothing else:
 
 ```sh
-chat-stasher prune-orphans --destination <name> [--dry-run] [--apply] [--json]
+chat-stasher prune-orphans --destination <name> [--dry-run | --apply] [--json]
 ```
+
+`--dry-run` and `--apply` cannot be combined; omitting both also runs the
+read-only inventory. `--json` writes one JSON object to stdout, with the same
+counts and byte totals plus each candidate's full id and verified/unknown status
+(including the verifier's reason).
 
 It opens the repository read-only — no index is built, and nothing is adopted —
 lists the backend once, reads the index files, and then verifies each unindexed
