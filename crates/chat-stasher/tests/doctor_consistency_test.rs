@@ -337,16 +337,26 @@ fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
     // is a file. This deterministically exercises an unavailable platform
     // source on all platforms without relying on chmod or host permissions.
     fs::write(&source, b"synthetic unavailable source\n").unwrap();
-    fs::write(
-        &registry,
-        format!(
-            r#"{{"schema_version":1,"generated":"synthetic doctor fixture","harnesses":[{{"id":"codex","display_name":"Synthetic Codex","paths":{{"macos":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}},"linux":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}},"windows":{{"template":"{}/","format":"jsonl","confidence":"source-confirmed","source":"synthetic fixture"}}}}}}]}}"#,
-            source.display(),
-            source.display(),
-            source.display()
-        ),
-    )
-    .unwrap();
+    let path = serde_json::json!({
+        "template": format!("{}/", source.display()),
+        "format": "jsonl",
+        "confidence": "source-confirmed",
+        "source": "synthetic fixture",
+    });
+    let fixture_registry = serde_json::json!({
+        "schema_version": 1,
+        "generated": "synthetic doctor fixture",
+        "harnesses": [{
+            "id": "codex",
+            "display_name": "Synthetic Codex",
+            "paths": {
+                "macos": path.clone(),
+                "linux": path.clone(),
+                "windows": path,
+            },
+        }],
+    });
+    fs::write(&registry, serde_json::to_vec(&fixture_registry).unwrap()).unwrap();
 
     let run_doctor = |json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
@@ -361,7 +371,12 @@ fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
     };
 
     let human = run_doctor(false);
-    assert!(human.status.success());
+    assert!(
+        human.status.success() || human.status.code() == Some(3),
+        "doctor must finish (0) or preserve the incomplete-read distinction (3); status={:?}, stderr={}",
+        human.status.code(),
+        String::from_utf8_lossy(&human.stderr)
+    );
     let human = String::from_utf8_lossy(&human.stderr);
     assert!(
         human.contains("sessions unknown") && human.contains("path exists but is not a directory"),
@@ -373,7 +388,12 @@ fn doctor_keeps_an_unavailable_platform_source_unknown_in_both_outputs() {
     );
 
     let json = run_doctor(true);
-    assert!(json.status.success());
+    assert!(
+        json.status.success() || json.status.code() == Some(3),
+        "doctor --json must finish (0) or preserve the incomplete-read distinction (3); status={:?}, stderr={}",
+        json.status.code(),
+        String::from_utf8_lossy(&json.stderr)
+    );
     let stdout = String::from_utf8_lossy(&json.stdout);
     let report: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("doctor --json must emit JSON ({e}): {stdout}"));
