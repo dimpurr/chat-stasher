@@ -107,6 +107,8 @@ collapse. `collapsed-run` entries show where each such replay occurs. Separate
 `suspicious_kept_*` counts are individual repeated shards that do not form a
 complete replay; readers keep them because repetition alone does not prove a
 duplicate session.
+Zero duplicate and suspicious shard counts do not clear an L3 warning caused by
+a final shard that repeats the concatenation of earlier shards.
 
 This is an inventory only: it does not change stored shards or snapshots. Exit
 `3` or `complete: false` means the archive could not be fully read. Treat the
