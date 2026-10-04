@@ -100,7 +100,9 @@ secret_access_key = "keychain:r2"
 
 Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up on the next command, not as a silent failure at 3 a.m.
 
-A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency. A LaunchAgent runs in the user's login session and stops when that user logs out, so changing the credential reference cannot make this timer run while you are logged out ([Apple's LaunchAgents documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
+A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency.
+
+A LaunchAgent runs in the user's login session and stops when that user logs out, so changing the credential reference cannot make this timer run while you are logged out ([Apple's LaunchAgents documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
 
 Make a secret file readable only by you (`chmod 600`). To add a keychain item:
 
