@@ -31,26 +31,32 @@ apps/extension/entrypoints/background.ts:437  db15faf10a04  lines=1
   <- docs-dev/privacy.md:494  :: //    as the time.
 apps/extension/entrypoints/background.ts:717-733  0f75a7829815  lines=17
   <- docs-dev/install.md:466  :: * the only way it is still visible the next time the popup …
+apps/extension/entrypoints/background.ts:750-762  80bf34f05ed9  lines=13
+  <- docs-dev/privacy.md:621  :: if (s === null || s.pending === 0) return;
 apps/extension/entrypoints/background.ts:909-918  e84af6908271  lines=10
   <- docs-dev/privacy.md:487  :: const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_u…
 apps/extension/entrypoints/background.ts:1263-1265  46f6e0774d37  lines=3
   <- docs-dev/install.md:121  :: * actually true on my side", with no inference.
 apps/extension/entrypoints/background.ts:1342-1372  0c2f86303f73  lines=31
-  <- docs-dev/privacy.md:483, docs-dev/privacy.md:655  :: /**
+  <- docs-dev/privacy.md:483, docs-dev/privacy.md:656  :: /**
 apps/extension/entrypoints/background.ts:1423-1479  2ad812f6a098  lines=57
   <- docs-dev/threat-model.md:527  :: */
 apps/extension/entrypoints/background.ts:1550-1566  f4ee93c9ca58  lines=17
   <- docs-dev/threat-model.md:527  :: }
+apps/extension/entrypoints/background.ts:1705-1709  dbb093d737cf  lines=5
+  <- docs-dev/privacy.md:621  :: * 🔴 W44 · **A capability-class record is asked a third ques…
 apps/extension/entrypoints/background.ts:1727-1787  c1a6f7896115  lines=61
-  <- docs-dev/privacy.md:539, docs-dev/privacy.md:627, docs-dev/threat-model.md:986  :: */
+  <- docs-dev/privacy.md:539, docs-dev/privacy.md:628, docs-dev/threat-model.md:986  :: */
 apps/extension/entrypoints/background.ts:2048  853e1bc7bf8b  lines=1
-  <- docs-dev/privacy.md:775, docs-dev/threat-model.md:318  :: const lease = await acquireBackfillLease(platform);
+  <- docs-dev/privacy.md:776, docs-dev/threat-model.md:318  :: const lease = await acquireBackfillLease(platform);
 apps/extension/entrypoints/background.ts:2066-2114  b92db8f7f6f2  lines=49
   <- docs-dev/privacy.md:527  :: }
+apps/extension/entrypoints/background.ts:2073-2082  81c8835aa616  lines=10
+  <- docs-dev/privacy.md:621  :: /** Wait for the fire-and-forget tick to finish. The backfi…
 apps/extension/entrypoints/background.ts:2136-2148  b33c134498db  lines=13
-  <- docs-dev/privacy.md:555, docs-dev/privacy.md:860, docs-dev/threat-model.md:328  :: * of the user's current conversation.
+  <- docs-dev/privacy.md:555, docs-dev/privacy.md:861, docs-dev/threat-model.md:328  :: * of the user's current conversation.
 apps/extension/entrypoints/background.ts:2373-2474  71143749edb1  lines=102
-  <- docs-dev/install.md:1163, docs-dev/privacy.md:643, docs-dev/privacy.md:659  :: async function resolveScopeForTick(
+  <- docs-dev/install.md:1163, docs-dev/privacy.md:644, docs-dev/privacy.md:660  :: async function resolveScopeForTick(
 apps/extension/entrypoints/background.ts:2958-3028  48a7fe2a9644  lines=71
   <- docs-dev/privacy.md:491  :: let pendingOutboxAlarmDrain: Promise<unknown> | null = null;
 apps/extension/entrypoints/background.ts:2988-3053  d6ac20a4d041  lines=66
@@ -92,7 +98,7 @@ apps/extension/lib/account-fingerprint.ts:401-420  1294c056c50a  lines=20
 apps/extension/lib/backfill/account-lease.ts:161-226  aab2291adcda  lines=66
   <- docs-dev/threat-model.md:520  :: export async function accountLeaseForScope(
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
-  <- docs-dev/privacy.md:910  :: * In Chrome's permission-warning list, `alarms` — like `sto…
+  <- docs-dev/privacy.md:914  :: * In Chrome's permission-warning list, `alarms` — like `sto…
 apps/extension/lib/backfill/alarm.ts:123-124  f33c73ac87e1  lines=2
   <- docs-dev/install.md:1085  :: export const BACKFILL_TICK_DELAY_MIN_MINUTES = 1;
 apps/extension/lib/backfill/alarm.ts:244-245  426ffa0205af  lines=2
@@ -108,9 +114,9 @@ apps/extension/lib/backfill/alarm.ts:1003-1058  46b1c40768ff  lines=56
 apps/extension/lib/backfill/alarm.ts:1062-1100  c2f6dc895cc1  lines=39
   <- docs-dev/privacy.md:483  :: * Record one target (deduplicated by platform+scope, most r…
 apps/extension/lib/backfill/alarm.ts:1125-1135  99c311cb026d  lines=11
-  <- docs-dev/privacy.md:666  :: export async function forgetTarget(
+  <- docs-dev/privacy.md:667  :: export async function forgetTarget(
 apps/extension/lib/backfill/alarm.ts:1137-1239  d8f97d12ea24  lines=103
-  <- docs-dev/privacy.md:658  :: /**
+  <- docs-dev/privacy.md:659  :: /**
 apps/extension/lib/backfill/alarm.ts:1194-1239  b806aed4c522  lines=46
   <- docs-dev/privacy.md:483  :: export async function rememberOrganizationScopedTarget(
 apps/extension/lib/backfill/alarm.ts:1577-1679  0ec9970a66d5  lines=103
@@ -130,9 +136,9 @@ apps/extension/lib/backfill/chatgpt-workspace.ts:94-96  db3a01cba923  lines=3
 apps/extension/lib/backfill/claude-org.ts:4-11  f60f99b18b0d  lines=8
   <- docs-dev/privacy.md:604  :: * ## Why this module exists at all
 apps/extension/lib/backfill/claude-org.ts:112-138  13f59996d45c  lines=27
-  <- docs-dev/privacy.md:483, docs-dev/privacy.md:654  :: /**
+  <- docs-dev/privacy.md:483, docs-dev/privacy.md:655  :: /**
 apps/extension/lib/backfill/claude-org.ts:219-273  042cd322b76d  lines=55
-  <- docs-dev/privacy.md:626, docs-dev/threat-model.md:331, docs-dev/threat-model.md:973  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
+  <- docs-dev/privacy.md:627, docs-dev/threat-model.md:331, docs-dev/threat-model.md:973  :: export function resolveClaudeOrg(input: OrgResolutionInput)…
 apps/extension/lib/backfill/claude-page.ts:71-158  74c521ddd738  lines=88
   <- docs-dev/install.md:1156, docs-dev/privacy.md:616, docs-dev/threat-model.md:985  :: export function createClaudePageScope(deps: ClaudePageScope…
 apps/extension/lib/backfill/claude-page.ts:97-116  9dc3a96cb85a  lines=20
@@ -142,7 +148,7 @@ apps/extension/lib/backfill/day-slow.ts:91  0d9fb0635f12  lines=1
 apps/extension/lib/backfill/debt-store.ts:27-36  ef73c4e7faec  lines=10
   <- docs-dev/privacy.md:484  :: * 🔴 **W45 · The key is `(platform, scope, id)`, and it used…
 apps/extension/lib/backfill/engine.ts:159-162  6cb56615d08b  lines=4
-  <- docs-dev/privacy.md:710, docs-dev/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
+  <- docs-dev/privacy.md:711, docs-dev/threat-model.md:62  :: /** The default port: it blows up on purpose. Not wired ⇒ n…
 apps/extension/lib/backfill/engine.ts:1559-1603  f82e1f06b2ec  lines=45
   <- docs-dev/threat-model.md:521  :: | { verdict: 'agrees' | 'incomparable' | 'unleased' | 'unav…
 apps/extension/lib/backfill/engine.ts:1588-1603  982b7014129e  lines=16
@@ -154,11 +160,11 @@ apps/extension/lib/backfill/engine.ts:1681-1710  015df1216cd1  lines=30
 apps/extension/lib/backfill/engine.ts:1712-1733  2500e67399aa  lines=22
   <- docs-dev/privacy.md:594, docs-dev/threat-model.md:500  :: /** Check every ChatGPT detail HTTP response, including int…
 apps/extension/lib/backfill/engine.ts:1935-1950  65a007bfbcbd  lines=16
-  <- docs-dev/privacy.md:860, docs-dev/threat-model.md:328  :: // legacy `default` key and the two explicit unknown-worksp…
+  <- docs-dev/privacy.md:861, docs-dev/threat-model.md:328  :: // legacy `default` key and the two explicit unknown-worksp…
 apps/extension/lib/backfill/engine.ts:1936-1951  2f42e11d87e9  lines=16
   <- docs-dev/privacy.md:556  :: // carry no identity and are refused before any request is …
 apps/extension/lib/backfill/engine.ts:2013-2025  026d25c05d0a  lines=13
-  <- docs-dev/privacy.md:636  :: if (plan.scopeInPath && (
+  <- docs-dev/privacy.md:637  :: if (plan.scopeInPath && (
 apps/extension/lib/backfill/engine.ts:2160-2169  5c1eb9e0130f  lines=10
   <- docs-dev/threat-model.md:235, docs-dev/threat-model.md:297  :: * 🔴 W31 · **The one place a scope reaches a request URL.** …
 apps/extension/lib/backfill/engine.ts:2195-2207  5219b1d1d80d  lines=13
@@ -166,15 +172,15 @@ apps/extension/lib/backfill/engine.ts:2195-2207  5219b1d1d80d  lines=13
 apps/extension/lib/backfill/engine.ts:2264-2382  3cabbf6305df  lines=119
   <- docs-dev/install.md:1254, docs-dev/threat-model.md:329  :: /**
 apps/extension/lib/backfill/engine.ts:2265-2383  54449125b5ec  lines=119
-  <- docs-dev/privacy.md:882  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
+  <- docs-dev/privacy.md:883  :: * 🔴 W21 · **The repeat-page guard** (opaque-token paging on…
 apps/extension/lib/backfill/engine.ts:2594-2621  da8114c7f034  lines=28
-  <- docs-dev/privacy.md:860, docs-dev/threat-model.md:328  :: // ChatGPT's archived list, project discovery list, and eac…
+  <- docs-dev/privacy.md:861, docs-dev/threat-model.md:328  :: // ChatGPT's archived list, project discovery list, and eac…
 apps/extension/lib/backfill/engine.ts:2595-2622  978735481be6  lines=28
   <- docs-dev/privacy.md:559  :: // separate persisted cursors. One auxiliary page fits only…
 apps/extension/lib/backfill/engine.ts:2632-2643  d9e18f838342  lines=12
   <- docs-dev/privacy.md:593, docs-dev/threat-model.md:499  :: const auxiliaryAccount = await accountCheckOf(url, response…
 apps/extension/lib/backfill/engine.ts:2901-2944  0550126c4515  lines=44
-  <- docs-dev/privacy.md:704  :: await detailPacer.gate();
+  <- docs-dev/privacy.md:705  :: await detailPacer.gate();
 apps/extension/lib/backfill/engine.ts:2919-2923  dbad1b6eda0b  lines=5
   <- docs-dev/threat-model.md:235, docs-dev/threat-model.md:297  :: return halt('org-unresolved', 'detail: this plan\'s URL car…
 apps/extension/lib/backfill/engine.ts:2941-2944  136cb05c845b  lines=4
@@ -182,7 +188,7 @@ apps/extension/lib/backfill/engine.ts:2941-2944  136cb05c845b  lines=4
 apps/extension/lib/backfill/engine.ts:2999-3003  e120ffb994ab  lines=5
   <- docs-dev/privacy.md:596, docs-dev/threat-model.md:502  :: const step2Stop = await stopForUnattributableChatGptRespons…
 apps/extension/lib/backfill/engine.ts:3040-3113  9809c4d3abd5  lines=74
-  <- docs-dev/install.md:109, docs-dev/privacy.md:731, docs-dev/privacy.md:753, docs-dev/privacy.md:861, docs-dev/threat-model.md:329  :: if (!step2 && plan.detailPages) {
+  <- docs-dev/install.md:109, docs-dev/privacy.md:732, docs-dev/privacy.md:754, docs-dev/privacy.md:862, docs-dev/threat-model.md:329  :: if (!step2 && plan.detailPages) {
 apps/extension/lib/backfill/engine.ts:3040-3103  a7848259d9b5  lines=64
   <- docs-dev/threat-model.md:996  :: if (!step2 && plan.detailPages) {
 apps/extension/lib/backfill/engine.ts:3079-3083  5a26d5ad9d2f  lines=5
@@ -190,17 +196,17 @@ apps/extension/lib/backfill/engine.ts:3079-3083  5a26d5ad9d2f  lines=5
 apps/extension/lib/backfill/engine.ts:3202-3209  a2bee8d8f1a7  lines=8
   <- docs-dev/privacy.md:598, docs-dev/threat-model.md:504  :: const detailAccount = await accountCheckOf(deliveredUrl, de…
 apps/extension/lib/backfill/engine.ts:3248-3282  4ccc7369de6b  lines=35
-  <- docs-dev/install.md:109, docs-dev/install.md:1257, docs-dev/privacy.md:861, docs-dev/threat-model.md:329  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
+  <- docs-dev/install.md:109, docs-dev/install.md:1257, docs-dev/privacy.md:862, docs-dev/threat-model.md:329  :: * 🔴 W22 · **A real body that is explicitly incomplete.**
 apps/extension/lib/backfill/engine.ts:3249-3283  2416829f69ab  lines=35
-  <- docs-dev/privacy.md:877, docs-dev/threat-model.md:990  :: *
+  <- docs-dev/privacy.md:878, docs-dev/threat-model.md:990  :: *
 apps/extension/lib/backfill/engine.ts:3325-3345  7cedaa51ec6b  lines=21
-  <- docs-dev/privacy.md:863  :: * fact, a named receipt, nothing archived, and the run carr…
+  <- docs-dev/privacy.md:864  :: * fact, a named receipt, nothing archived, and the run carr…
 apps/extension/lib/backfill/enumerate.ts:314-384  2e2442b648f1  lines=71
-  <- docs-dev/privacy.md:558, docs-dev/privacy.md:860, docs-dev/threat-model.md:328  :: export interface ChatGptProjectPage {
+  <- docs-dev/privacy.md:558, docs-dev/privacy.md:861, docs-dev/threat-model.md:328  :: export interface ChatGptProjectPage {
 apps/extension/lib/backfill/enumerate.ts:1488-1556  88844e1a94e6  lines=69
   <- docs-dev/install.md:1253, docs-dev/privacy.md:523  :: const SHAPE_DEPTH = 2;
 apps/extension/lib/backfill/enumerate.ts:2432-2476  e19b9f15deb3  lines=45
-  <- docs-dev/install.md:109, docs-dev/install.md:171, docs-dev/privacy.md:862, docs-dev/threat-model.md:330, docs-dev/threat-model.md:341, docs-dev/threat-model.md:1000  :: *    `detail-paged-unsupported` — real content, explicitly …
+  <- docs-dev/install.md:109, docs-dev/install.md:171, docs-dev/privacy.md:863, docs-dev/threat-model.md:330, docs-dev/threat-model.md:341, docs-dev/threat-model.md:1000  :: *    `detail-paged-unsupported` — real content, explicitly …
 apps/extension/lib/backfill/enumerate.ts:2916-2930  ffe4f02c7973  lines=15
   <- docs-dev/install.md:151  :: */
 apps/extension/lib/backfill/enumerate.ts:2964-2965  e0ad04fbfb87  lines=2
@@ -208,11 +214,11 @@ apps/extension/lib/backfill/enumerate.ts:2964-2965  e0ad04fbfb87  lines=2
 apps/extension/lib/backfill/enumerate.ts:2964-2978  30e272d8bf3f  lines=15
   <- docs-dev/install.md:1256  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
 apps/extension/lib/backfill/enumerate.ts:2980-3007  bf7a44d7622d  lines=28
-  <- docs-dev/install.md:147, docs-dev/install.md:1256, docs-dev/privacy.md:861, docs-dev/threat-model.md:329, docs-dev/threat-model.md:961  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
+  <- docs-dev/install.md:147, docs-dev/install.md:1256, docs-dev/privacy.md:862, docs-dev/threat-model.md:329, docs-dev/threat-model.md:961  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
 apps/extension/lib/backfill/enumerate.ts:3054-3106  d8a084086d48  lines=53
   <- docs-dev/install.md:1253  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:3111-3112  e38fc9483af6  lines=2
-  <- docs-dev/install.md:109, docs-dev/install.md:162, docs-dev/privacy.md:862, docs-dev/threat-model.md:330  :: /** 🔴 W84 · The body endpoint: `GET /rest/thread/{id}`, the…
+  <- docs-dev/install.md:109, docs-dev/install.md:162, docs-dev/privacy.md:863, docs-dev/threat-model.md:330  :: /** 🔴 W84 · The body endpoint: `GET /rest/thread/{id}`, the…
 apps/extension/lib/backfill/enumerate.ts:3141-3147  f2ff5637b5a5  lines=7
   <- docs-dev/install.md:109  :: export const PERPLEXITY_DETAIL_QUERY: readonly { readonly k…
 apps/extension/lib/backfill/enumerate.ts:3226-3247  72e20ad4d004  lines=22
@@ -220,11 +226,11 @@ apps/extension/lib/backfill/enumerate.ts:3226-3247  72e20ad4d004  lines=22
 apps/extension/lib/backfill/enumerate.ts:3290-3351  494e66906feb  lines=62
   <- docs-dev/install.md:109  :: *
 apps/extension/lib/backfill/enumerate.ts:3338-3399  a613cdfc4224  lines=62
-  <- docs-dev/install.md:1253, docs-dev/install.md:1254, docs-dev/install.md:1255, docs-dev/privacy.md:861, docs-dev/threat-model.md:329  :: export const GROK_PLAN: BackfillEnumPlan = {
+  <- docs-dev/install.md:1253, docs-dev/install.md:1254, docs-dev/install.md:1255, docs-dev/privacy.md:862, docs-dev/threat-model.md:329  :: export const GROK_PLAN: BackfillEnumPlan = {
 apps/extension/lib/backfill/enumerate.ts:3360-3371  ede2c17a7ae3  lines=12
-  <- docs-dev/install.md:109, docs-dev/privacy.md:741  :: detailStep2: {
+  <- docs-dev/install.md:109, docs-dev/privacy.md:742  :: detailStep2: {
 apps/extension/lib/backfill/enumerate.ts:3375-3437  9cedb6638e39  lines=63
-  <- docs-dev/install.md:109, docs-dev/privacy.md:743  :: //    the conversation is empty, and must not be settled as…
+  <- docs-dev/install.md:109, docs-dev/privacy.md:744  :: //    the conversation is empty, and must not be settled as…
 apps/extension/lib/backfill/enumerate.ts:3377-3398  0b4239a1e3c5  lines=22
   <- docs-dev/threat-model.md:956  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:3423-3485  584fb75ba557  lines=63
@@ -234,23 +240,23 @@ apps/extension/lib/backfill/enumerate.ts:3556-3559  edf469f1853d  lines=4
 apps/extension/lib/backfill/enumerate.ts:3822-3968  bf880adc6db8  lines=147
   <- docs-dev/install.md:109  :: * page's own tokens come from `WIZ_global_data`.
 apps/extension/lib/backfill/enumerate.ts:3870-4028  3f85fa087fbd  lines=159
-  <- docs-dev/privacy.md:753  :: export const GEMINI_PLAN: BackfillEnumPlan = {
+  <- docs-dev/privacy.md:754  :: export const GEMINI_PLAN: BackfillEnumPlan = {
 apps/extension/lib/backfill/enumerate.ts:4020-4025  9822b23e6f57  lines=6
   <- docs-dev/threat-model.md:956  :: + '🔴 Unverified and handled, not guessed: the request ARGUM…
 apps/extension/lib/backfill/enumerate.ts:4031-4037  310e5595362d  lines=7
-  <- docs-dev/privacy.md:863  :: // 🔴 W31 · claude.ai
+  <- docs-dev/privacy.md:864  :: // 🔴 W31 · claude.ai
 apps/extension/lib/backfill/enumerate.ts:4278-4356  cd3e6793d8f8  lines=79
-  <- docs-dev/privacy.md:863, docs-dev/threat-model.md:331  :: export function parseClaudeDetailTree(
+  <- docs-dev/privacy.md:864, docs-dev/threat-model.md:331  :: export function parseClaudeDetailTree(
 apps/extension/lib/backfill/enumerate.ts:4492-4501  5d019ceac63d  lines=10
-  <- docs-dev/privacy.md:748  :: detailPath: CLAUDE_DETAIL_PATH_TEMPLATE,
+  <- docs-dev/privacy.md:749  :: detailPath: CLAUDE_DETAIL_PATH_TEMPLATE,
 apps/extension/lib/backfill/enumerate.ts:4502-4533  0663964bc1bb  lines=32
   <- docs-dev/threat-model.md:967  :: provenance:
 apps/extension/lib/backfill/enumerate.ts:4586-4639  f364e0e59079  lines=54
   <- docs-dev/threat-model.md:434  :: /**
 apps/extension/lib/backfill/enumerate.ts:4907-4938  3de94e683edf  lines=32
-  <- docs-dev/install.md:105, docs-dev/install.md:1166, docs-dev/privacy.md:730  :: export function unsupportedBackfillFor(platform: string): U…
+  <- docs-dev/install.md:105, docs-dev/install.md:1166, docs-dev/privacy.md:731  :: export function unsupportedBackfillFor(platform: string): U…
 apps/extension/lib/backfill/enumerate.ts:4959-4983  043d98acfa1d  lines=25
-  <- docs-dev/privacy.md:861, docs-dev/threat-model.md:329, docs-dev/threat-model.md:952  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
+  <- docs-dev/privacy.md:862, docs-dev/threat-model.md:329, docs-dev/threat-model.md:952  :: export const BACKFILL_SUPPORTED_PLATFORMS: readonly string[…
 apps/extension/lib/backfill/ledger.ts:738-749  649650412b1d  lines=12
   <- docs-dev/privacy.md:484  :: /**
 apps/extension/lib/backfill/pace.ts:109-119  ef52be5dc265  lines=11
@@ -262,7 +268,7 @@ apps/extension/lib/backfill/pace.ts:154-155  7848a0f0da9a  lines=2
 apps/extension/lib/backfill/pace.ts:158-159  bf7664c2e7e8  lines=2
   <- docs-dev/install.md:1077  :: export const QUIET_DAILY_CAP_MIN = 150;
 apps/extension/lib/backfill/schedule.ts:40  3f15d79a8fc9  lines=1
-  <- docs-dev/privacy.md:481, docs-dev/privacy.md:708  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
+  <- docs-dev/privacy.md:481, docs-dev/privacy.md:709  :: export const BACKFILL_ENABLED_KEY = 'cs_backfill_enabled_v1…
 apps/extension/lib/backfill/schedule.ts:51  51bde443ef97  lines=1
   <- docs-dev/install.md:1113  :: export const BACKFILL_DEFAULT_ENABLED = false;
 apps/extension/lib/backfill/schedule.ts:73  7fdb4078ad89  lines=1
@@ -276,9 +282,9 @@ apps/extension/lib/backfill/speed.ts:71  8d47da83e8c2  lines=1
 apps/extension/lib/backfill/speed.ts:98-142  b33c1b3788e5  lines=45
   <- docs-dev/install.md:1076  :: const GENTLE_BAND: DailyCapBand = { min: QUIET_DAILY_CAP_MI…
 apps/extension/lib/backfill/store.ts:18-27  226502892fc8  lines=10
-  <- docs-dev/privacy.md:903  :: export interface BackfillStore {
+  <- docs-dev/privacy.md:907  :: export interface BackfillStore {
 apps/extension/lib/backfill/store.ts:85-97  a2af158effd2  lines=13
-  <- docs-dev/install.md:299, docs-dev/install.md:1102, docs-dev/privacy.md:903  :: function localArea(): LocalArea | null {
+  <- docs-dev/install.md:299, docs-dev/install.md:1102, docs-dev/privacy.md:907  :: function localArea(): LocalArea | null {
 apps/extension/lib/backfill/tab-port.ts:178-181  81a2a6105e63  lines=4
   <- docs-dev/privacy.md:482  :: /** The registry of live platform tabs. Same cs_* prefix fa…
 apps/extension/lib/backfill/tab-port.ts:223-242  b276ba1d32f7  lines=20
@@ -300,93 +306,93 @@ apps/extension/lib/backfill/tab-port.ts:1312-1329  18db841e280b  lines=18
 apps/extension/lib/backfill/types.ts:1747-1757  dd63b47f4f10  lines=11
   <- docs-dev/privacy.md:484  :: accountLease?: AccountLease;
 apps/extension/lib/backfill/types.ts:1762-1779  c027777800d0  lines=18
-  <- docs-dev/privacy.md:557, docs-dev/privacy.md:860, docs-dev/threat-model.md:328  :: export type ChatGptSource = 'main' | 'archived' | 'project';
+  <- docs-dev/privacy.md:557, docs-dev/privacy.md:861, docs-dev/threat-model.md:328  :: export type ChatGptSource = 'main' | 'archived' | 'project';
 apps/extension/lib/backfill/types.ts:1895-1915  98be0bbf3348  lines=21
   <- docs-dev/privacy.md:484, docs-dev/threat-model.md:533  :: export interface AccountSuspension {
 apps/extension/lib/backfill/types.ts:1917-1957  c17882d86cfa  lines=41
   <- docs-dev/privacy.md:484  :: export interface BackfillHeader {
 apps/extension/lib/badge.ts:46-73  2a78b91d66d3  lines=28
   <- docs-dev/install.md:478  :: export function badgeFor(state: OutboxSummary | null): Badg…
-apps/extension/lib/contract.ts:6-17  83c72435c321  lines=12
+apps/extension/lib/contract.ts:6-11  4bcfc348d028  lines=6
   <- docs-dev/threat-model.md:550  :: /** Message names used by the page-world hook and the isola…
-apps/extension/lib/contract.ts:41-102  8137d0d1ef2d  lines=62
+apps/extension/lib/contract.ts:34-95  8137d0d1ef2d  lines=62
   <- docs-dev/threat-model.md:288  :: * needs them.**
-apps/extension/lib/contract.ts:104-106  212496897aef  lines=3
+apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:551  :: export const PAGE_HOOK_VERSION = 'v1';
-apps/extension/lib/contract.ts:310-349  4708fdfa1744  lines=40
+apps/extension/lib/contract.ts:303-348  0d21a1234c75  lines=46
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:355-851  e679ecb17dc8  lines=497
-  <- docs-dev/install.md:83, docs-dev/install.md:187, docs-dev/privacy.md:111  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
-apps/extension/lib/contract.ts:358  65cef6a544ee  lines=1
-  <- docs-dev/privacy.md:783  :: origins: ['https://chat.deepseek.com'],
-apps/extension/lib/contract.ts:397-403  90fc5f0d7b4a  lines=7
+apps/extension/lib/contract.ts:354-850  e679ecb17dc8  lines=497
+  <- docs-dev/install.md:83, docs-dev/install.md:187, docs-dev/privacy.md:111, docs-dev/privacy.md:833  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
+apps/extension/lib/contract.ts:357  65cef6a544ee  lines=1
+  <- docs-dev/privacy.md:784  :: origins: ['https://chat.deepseek.com'],
+apps/extension/lib/contract.ts:396-402  90fc5f0d7b4a  lines=7
   <- docs-dev/install.md:32  :: // The external API route/shape differences may represent d…
-apps/extension/lib/contract.ts:418-483  4477a226956f  lines=66
+apps/extension/lib/contract.ts:417-482  4477a226956f  lines=66
   <- docs-dev/install.md:87  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:418  779465350317  lines=1
-  <- docs-dev/privacy.md:784  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:435-450  183bd14dc050  lines=16
+apps/extension/lib/contract.ts:417  779465350317  lines=1
+  <- docs-dev/privacy.md:785  :: origins: ['https://www.perplexity.ai'],
+apps/extension/lib/contract.ts:434-449  183bd14dc050  lines=16
   <- docs-dev/threat-model.md:330  :: pathHints: ['/rest/thread/'],
-apps/extension/lib/contract.ts:470-475  1631eb0ed4f9  lines=6
+apps/extension/lib/contract.ts:469-474  1631eb0ed4f9  lines=6
   <- docs-dev/install.md:89  :: sessionIdPatterns: [
-apps/extension/lib/contract.ts:477-483  748b3e6fe537  lines=7
+apps/extension/lib/contract.ts:476-482  748b3e6fe537  lines=7
   <- docs-dev/install.md:32  :: // 'from-source': nobody on either change opened a logged-i…
-apps/extension/lib/contract.ts:488-502  3c2febd21c22  lines=15
+apps/extension/lib/contract.ts:487-501  3c2febd21c22  lines=15
   <- docs-dev/install.md:32  :: id: 'chatgpt',
-apps/extension/lib/contract.ts:489  4eda2e856655  lines=1
-  <- docs-dev/privacy.md:785  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
-apps/extension/lib/contract.ts:513  586fc9c878ac  lines=1
-  <- docs-dev/privacy.md:786  :: origins: ['https://gemini.google.com'],
-apps/extension/lib/contract.ts:539-551  ffbeb3d9ba7d  lines=13
+apps/extension/lib/contract.ts:488  4eda2e856655  lines=1
+  <- docs-dev/privacy.md:786  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
+apps/extension/lib/contract.ts:512  586fc9c878ac  lines=1
+  <- docs-dev/privacy.md:787  :: origins: ['https://gemini.google.com'],
+apps/extension/lib/contract.ts:538-550  ffbeb3d9ba7d  lines=13
   <- docs-dev/install.md:32  :: //    `WIZ_global_data` — an XSRF token in the body's `at` …
-apps/extension/lib/contract.ts:562  1f7678ac6786  lines=1
-  <- docs-dev/privacy.md:787  :: origins: ['https://claude.ai'],
-apps/extension/lib/contract.ts:613-617  d3006384d2f5  lines=5
+apps/extension/lib/contract.ts:561  1f7678ac6786  lines=1
+  <- docs-dev/privacy.md:788  :: origins: ['https://claude.ai'],
+apps/extension/lib/contract.ts:612-616  d3006384d2f5  lines=5
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:636  047cc8b8ab4e  lines=1
-  <- docs-dev/privacy.md:788  :: origins: ['https://www.kimi.com'],
-apps/extension/lib/contract.ts:747-752  81d80c1cc585  lines=6
+apps/extension/lib/contract.ts:635  047cc8b8ab4e  lines=1
+  <- docs-dev/privacy.md:789  :: origins: ['https://www.kimi.com'],
+apps/extension/lib/contract.ts:746-751  81d80c1cc585  lines=6
   <- docs-dev/install.md:32  :: // '/api/chat/...' route family, which is why that origin i…
-apps/extension/lib/contract.ts:761  23c99a148fbc  lines=1
-  <- docs-dev/privacy.md:789  :: origins: ['https://grok.com'],
-apps/extension/lib/contract.ts:832-842  757ff261970a  lines=11
+apps/extension/lib/contract.ts:760  23c99a148fbc  lines=1
+  <- docs-dev/privacy.md:790  :: origins: ['https://grok.com'],
+apps/extension/lib/contract.ts:831-841  757ff261970a  lines=11
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:858-893  ebba5d56a375  lines=36
-  <- docs-dev/privacy.md:792, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
-apps/extension/lib/contract.ts:880-893  ee0db2699c92  lines=14
+apps/extension/lib/contract.ts:857-892  ebba5d56a375  lines=36
+  <- docs-dev/privacy.md:793, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
+apps/extension/lib/contract.ts:879-892  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
-apps/extension/lib/contract.ts:914  93f15da49cac  lines=1
-  <- docs-dev/privacy.md:829  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1067-1086  795529bbf806  lines=20
-  <- docs-dev/privacy.md:827  :: }
-apps/extension/lib/contract.ts:1079-1121  4f0f947ee305  lines=43
-  <- docs-dev/privacy.md:111, docs-dev/privacy.md:827  :: } catch {
-apps/extension/lib/contract.ts:1086-1130  406bd0c50dee  lines=45
+apps/extension/lib/contract.ts:913  93f15da49cac  lines=1
+  <- docs-dev/privacy.md:830  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
+apps/extension/lib/contract.ts:1066-1085  795529bbf806  lines=20
+  <- docs-dev/privacy.md:828  :: }
+apps/extension/lib/contract.ts:1078-1120  4f0f947ee305  lines=43
+  <- docs-dev/privacy.md:111, docs-dev/privacy.md:828  :: } catch {
+apps/extension/lib/contract.ts:1085-1129  406bd0c50dee  lines=45
   <- docs-dev/threat-model.md:560  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1108-1109  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1107-1108  d72720cd403e  lines=2
   <- docs-dev/privacy.md:444  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1147-1157  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1146-1156  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:559  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1171-1176  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1170-1175  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:372  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1239-1247  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1238-1246  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:429  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1266-1275  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1265-1274  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:280, docs-dev/threat-model.md:416  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1294-1298  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1293-1297  91a5d6065664  lines=5
   <- docs-dev/privacy.md:490, docs-dev/threat-model.md:373, docs-dev/threat-model.md:413  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1302-1311  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1301-1310  b3b4db645114  lines=10
   <- docs-dev/privacy.md:276  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1325-1328  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1324-1327  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:690  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1390-1418  c5391b602b5e  lines=29
+apps/extension/lib/contract.ts:1389-1417  c5391b602b5e  lines=29
   <- docs-dev/install.md:94  :: /**
-apps/extension/lib/contract.ts:1439-1442  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1438-1441  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:355  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1492-1508  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1491-1507  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:528, docs-dev/threat-model.md:355  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
-  <- docs-dev/privacy.md:695, docs-dev/privacy.md:756, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
+  <- docs-dev/privacy.md:696, docs-dev/privacy.md:757, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
 apps/extension/lib/hook-status.ts:78-155  32138100895c  lines=78
   <- docs-dev/privacy.md:492  :: /** Storage key prefix. One record per origin; at most one …
 apps/extension/lib/hook-status.ts:289-418  8d9dfc487218  lines=130
@@ -424,25 +430,25 @@ apps/extension/lib/native-host.ts:1083-1127  4c329d3958a3  lines=45
 apps/extension/lib/native-host.ts:1118-1127  d19b8c8b9924  lines=10
   <- docs-dev/install.md:67, docs-dev/privacy.md:156, docs-dev/threat-model.md:43, docs-dev/threat-model.md:609  :: const classified = classify(outcome, (value) => {
 apps/extension/lib/outbox-alarm.ts:20-46  175432e0734b  lines=27
-  <- docs-dev/privacy.md:904  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
+  <- docs-dev/privacy.md:908  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
 apps/extension/lib/outbox.ts:35-38  8427e3c8b640  lines=4
   <- docs-dev/privacy.md:141, docs-dev/threat-model.md:554  :: export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
 apps/extension/lib/outbox.ts:54  470e33d97b7b  lines=1
-  <- docs-dev/privacy.md:905  :: export const OUTBOX_CAPACITY_BYTES = 256 * 1024 * 1024;
+  <- docs-dev/privacy.md:909  :: export const OUTBOX_CAPACITY_BYTES = 256 * 1024 * 1024;
 apps/extension/lib/outbox.ts:70-71  4fcc6c08ee3e  lines=2
   <- docs-dev/privacy.md:489  :: /** Where the last export happened. Written by the popup, r…
 apps/extension/lib/outbox.ts:102-119  ee92b756dc17  lines=18
-  <- docs-dev/privacy.md:271, docs-dev/privacy.md:988, docs-dev/threat-model.md:108  :: export interface OutboxEntry {
+  <- docs-dev/privacy.md:271, docs-dev/privacy.md:992, docs-dev/threat-model.md:108  :: export interface OutboxEntry {
 apps/extension/lib/outbox.ts:102-112  58237c6f3e36  lines=11
   <- docs-dev/privacy.md:346  :: export interface OutboxEntry {
 apps/extension/lib/outbox.ts:363-432  25c7753277a4  lines=70
   <- docs-dev/install.md:1177  :: * (the same key the host dedupes on, §7).
 apps/extension/lib/outbox.ts:365-437  aa22d3290700  lines=73
-  <- docs-dev/privacy.md:142, docs-dev/privacy.md:271, docs-dev/privacy.md:988, docs-dev/threat-model.md:33, docs-dev/threat-model.md:108, docs-dev/threat-model.md:878  :: export async function enqueue(
+  <- docs-dev/privacy.md:142, docs-dev/privacy.md:271, docs-dev/privacy.md:992, docs-dev/threat-model.md:33, docs-dev/threat-model.md:108, docs-dev/threat-model.md:878  :: export async function enqueue(
 apps/extension/lib/outbox.ts:434-449  27a082f19c53  lines=16
   <- docs-dev/install.md:1177  :: store.put(entry);
 apps/extension/lib/outbox.ts:440-455  3319eb40bf8e  lines=16
-  <- docs-dev/install.md:70, docs-dev/privacy.md:157, docs-dev/privacy.md:954, docs-dev/threat-model.md:112, docs-dev/threat-model.md:878  :: /** 🔴 The only deletion in this module. Callers must hold a…
+  <- docs-dev/install.md:70, docs-dev/privacy.md:157, docs-dev/privacy.md:958, docs-dev/threat-model.md:112, docs-dev/threat-model.md:878  :: /** 🔴 The only deletion in this module. Callers must hold a…
 apps/extension/lib/outbox.ts:458-503  f80ee94ed0c0  lines=46
   <- docs-dev/privacy.md:370  :: export interface FailureInput {
 apps/extension/lib/outbox.ts:540-621  54e6b4f2dc67  lines=82
@@ -452,34 +458,36 @@ apps/extension/lib/outbox.ts:540-578  a49f68866f2c  lines=39
 apps/extension/lib/outbox.ts:588-599  04263d8db5ad  lines=12
   <- docs-dev/install.md:508  :: /**
 apps/extension/lib/outbox.ts:588-621  f91dda6932df  lines=34
-  <- docs-dev/privacy.md:697, docs-dev/threat-model.md:118  :: /**
+  <- docs-dev/privacy.md:698, docs-dev/threat-model.md:118  :: /**
 apps/extension/lib/outbox.ts:623-647  fe9cbdf9b144  lines=25
   <- docs-dev/privacy.md:489  :: export interface LastExport {
-apps/extension/lib/page-hook.ts:259-266  ce770312c2a2  lines=8
-  <- docs-dev/privacy.md:892  :: const warnUnsupportedTransport = (transport: string, url: s…
-apps/extension/lib/page-hook.ts:361-418  d2b3f76293d5  lines=58
-  <- docs-dev/privacy.md:888, docs-dev/threat-model.md:29  :: const captureCandidate = (
-apps/extension/lib/page-hook.ts:393  0c21ea4d8b4f  lines=1
-  <- docs-dev/privacy.md:829  :: // Metadata only — never the URL, body, or identifiers.
-apps/extension/lib/page-hook.ts:530-535  791755750698  lines=6
-  <- docs-dev/privacy.md:890  :: const type = this.responseType;
-apps/extension/lib/page-hook.ts:536-539  9e0fabbb14f2  lines=4
-  <- docs-dev/privacy.md:891  :: text = JSON.stringify(this.response);
-apps/extension/lib/page-hook.ts:570-589  af47a9393a65  lines=20
-  <- docs-dev/privacy.md:893  :: }
-apps/extension/lib/page-hook.ts:582-599  346ecd46a1c0  lines=18
-  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:695  :: },
-apps/extension/lib/page-hook.ts:718  a5b96cb2e6ef  lines=1
+apps/extension/lib/page-hook.ts:255-262  ce770312c2a2  lines=8
+  <- docs-dev/privacy.md:893  :: const warnUnsupportedTransport = (transport: string, url: s…
+apps/extension/lib/page-hook.ts:443-515  5b3a55011101  lines=73
+  <- docs-dev/privacy.md:889, docs-dev/threat-model.md:29  :: const captureCandidate = (
+apps/extension/lib/page-hook.ts:476  0c21ea4d8b4f  lines=1
+  <- docs-dev/privacy.md:830  :: // Metadata only — never the URL, body, or identifiers.
+apps/extension/lib/page-hook.ts:624-629  791755750698  lines=6
+  <- docs-dev/privacy.md:891  :: const type = this.responseType;
+apps/extension/lib/page-hook.ts:630-633  9e0fabbb14f2  lines=4
+  <- docs-dev/privacy.md:892  :: text = JSON.stringify(this.response);
+apps/extension/lib/page-hook.ts:666-713  123be49bb0f2  lines=48
+  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:696  :: const eventSourceConstructor = pageWindow.EventSource;
+apps/extension/lib/page-hook.ts:675-679  4e7c56bc1085  lines=5
+  <- docs-dev/privacy.md:897  :: if (!eventSourcePlatform) {
+apps/extension/lib/page-hook.ts:763-766  05550067e2fd  lines=4
+  <- docs-dev/privacy.md:897  :: if (!observeWebSocketFrame(socket, url, event?.data)) {
+apps/extension/lib/page-hook.ts:824  a5b96cb2e6ef  lines=1
   <- docs-dev/privacy.md:109  :: return { value: chatGptAccountIdHeaderValue(accountId), pre…
-apps/extension/lib/page-hook.ts:739-744  ac2add6ee1af  lines=6
+apps/extension/lib/page-hook.ts:845-850  ac2add6ee1af  lines=6
   <- docs-dev/privacy.md:116  :: const platform = getPlatform(parsed.href);
-apps/extension/lib/page-hook.ts:742-751  ffd20a2113ae  lines=10
+apps/extension/lib/page-hook.ts:848-857  ffd20a2113ae  lines=10
   <- docs-dev/threat-model.md:268  :: // ChatGPT's in-page navigation loads only a paged window o…
-apps/extension/lib/page-hook.ts:758  c8304bee299e  lines=1
-  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:695, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: !platform.methods.includes(normalizedMethod) ||
-apps/extension/lib/page-hook.ts:765-799  45359f1a1af8  lines=35
+apps/extension/lib/page-hook.ts:864  c8304bee299e  lines=1
+  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:696, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: !platform.methods.includes(normalizedMethod) ||
+apps/extension/lib/page-hook.ts:871-905  45359f1a1af8  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:992-1035  994e4f465747  lines=44
+apps/extension/lib/page-hook.ts:1098-1141  994e4f465747  lines=44
   <- docs-dev/privacy.md:47  :: /**
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:272  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
@@ -496,7 +504,7 @@ apps/extension/lib/platform-auth.ts:119-131  6bd3753f846a  lines=13
 apps/extension/lib/platform-auth.ts:303-357  67ffa624d938  lines=55
   <- docs-dev/privacy.md:137, docs-dev/threat-model.md:283, docs-dev/threat-model.md:988  :: + ' because the page\'s own bearer token is attached to thi…
 apps/extension/lib/platform-auth.ts:313-350  03784069e1a6  lines=38
-  <- docs-dev/install.md:109, docs-dev/install.md:1258, docs-dev/privacy.md:861, docs-dev/threat-model.md:329  :: export function createKimiAuthorizedFetch(
+  <- docs-dev/install.md:109, docs-dev/install.md:1258, docs-dev/privacy.md:862, docs-dev/threat-model.md:329  :: export function createKimiAuthorizedFetch(
 apps/extension/lib/platform-auth.ts:590-628  880efefc5a3c  lines=39
   <- docs-dev/privacy.md:47  :: * 🔴 W29 · **Gemini's `batchexecute` calls need three values…
 apps/extension/lib/platform-auth.ts:712-819  87b0dcc5df3b  lines=108
@@ -514,7 +522,7 @@ apps/extension/lib/popup-view.ts:1086-1105  87946f53a631  lines=20
 apps/extension/lib/popup-view.ts:1222-1235  00dceceff078  lines=14
   <- docs-dev/install.md:183  :: /**
 apps/extension/lib/popup-view.ts:1963-2050  9f67dd3fe14c  lines=88
-  <- docs-dev/privacy.md:667  :: /**
+  <- docs-dev/privacy.md:668  :: /**
 apps/extension/lib/recapture.ts:46  cfe455b29ce5  lines=1
   <- docs-dev/privacy.md:493  :: export const LAST_DELIVERED_KEY = 'cs_last_delivered_v1';
 apps/extension/lib/recapture.ts:103-116  3d65dcd98015  lines=14
@@ -542,7 +550,7 @@ apps/extension/lib/ui-strings.ts:110-133  15d7068df650  lines=24
 apps/extension/locales/en.yml:69-85  0506238227c4  lines=17
   <- docs-dev/threat-model.md:777  :: identityConflict:
 apps/extension/locales/en.yml:485-486  62def469c931  lines=2
-  <- docs-dev/privacy.md:776, docs-dev/threat-model.md:319  :: coordinationUnavailable: >-
+  <- docs-dev/privacy.md:777, docs-dev/threat-model.md:319  :: coordinationUnavailable: >-
 apps/extension/package.json:4  3aa57759f9e4  lines=1
   <- docs-dev/install.md:1170  :: "private": true,
 apps/extension/package.json:8-20  9028dab8df44  lines=13
@@ -550,17 +558,17 @@ apps/extension/package.json:8-20  9028dab8df44  lines=13
 apps/extension/wxt.config.ts:78  8973cb78d41e  lines=1
   <- docs-dev/install.md:1246  :: default_locale: 'en',
 apps/extension/wxt.config.ts:89  c5961dc1034c  lines=1
-  <- docs-dev/privacy.md:909  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
+  <- docs-dev/privacy.md:913  :: // 🔴 W2 removed 'downloads'. The extension no longer downlo…
 apps/extension/wxt.config.ts:95-101  411bd7614c9a  lines=7
   <- docs-dev/threat-model.md:1048  :: // Why 'storage': the debt set, the backfill switch, the ba…
 apps/extension/wxt.config.ts:103-107  7507f52466ca  lines=5
-  <- docs-dev/privacy.md:904  :: // Why 'alarms' (C19): the backfill leg must have a heartbe…
+  <- docs-dev/privacy.md:908  :: // Why 'alarms' (C19): the backfill leg must have a heartbe…
 apps/extension/wxt.config.ts:115  e8b57cf64548  lines=1
-  <- docs-dev/privacy.md:905  :: // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB …
+  <- docs-dev/privacy.md:909  :: // Why 'unlimitedStorage' (W2): the outbox is an IndexedDB …
 apps/extension/wxt.config.ts:122-125  10c3369ba7fc  lines=4
   <- docs-dev/install.md:114  :: // 🔴 Nothing else. No host permissions: the backfill leg fe…
 apps/extension/wxt.config.ts:125  bdb2678d0ca3  lines=1
-  <- docs-dev/install.md:56, docs-dev/install.md:458, docs-dev/install.md:1244, docs-dev/privacy.md:230, docs-dev/privacy.md:898, docs-dev/privacy.md:911, docs-dev/privacy.md:928, docs-dev/threat-model.md:62  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
+  <- docs-dev/install.md:56, docs-dev/install.md:458, docs-dev/install.md:1244, docs-dev/privacy.md:230, docs-dev/privacy.md:902, docs-dev/privacy.md:915, docs-dev/privacy.md:932, docs-dev/threat-model.md:62  :: permissions: ['unlimitedStorage', 'storage', 'alarms', 'nat…
 apps/extension/wxt.config.ts:126-132  2a2b23999f5f  lines=7
   <- docs-dev/threat-model.md:588  :: // 🔴 ADR-014: this pins the Chrome extension ID to
 apps/extension/wxt.config.ts:148  84787b717b3c  lines=1
@@ -574,7 +582,7 @@ crates/chat-stasher/Cargo.toml:1-6  3398bf09821c  lines=6
 crates/chat-stasher/Cargo.toml:3  7e3707a8337e  lines=1
   <- SECURITY.md:47  :: version = "0.5.0"
 crates/chat-stasher/Cargo.toml:6  2d9a3079e6a6  lines=1
-  <- docs-dev/privacy.md:1057  :: license = "Apache-2.0"
+  <- docs-dev/privacy.md:1061  :: license = "Apache-2.0"
 crates/chat-stasher/Cargo.toml:25-38  096bce56001a  lines=14
   <- docs-dev/threat-model.md:1013  :: [dependencies]
 crates/chat-stasher/Cargo.toml:31-32  4a5b59a2acb8  lines=2
@@ -586,7 +594,7 @@ crates/chat-stasher/src/activity.rs:2169-2219  8c2dfeee36d6  lines=51
 crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
 crates/chat-stasher/src/collect.rs:1902-1942  b98ca2edc014  lines=41
-  <- docs-dev/privacy.md:961  :: ));
+  <- docs-dev/privacy.md:965  :: ));
 crates/chat-stasher/src/collect.rs:2062-2074  ec7e886a5844  lines=13
   <- docs-dev/openclaw-scanner.md:46  :: entry.compressed
 crates/chat-stasher/src/collect.rs:2196-2210  13f73f5bd827  lines=15
@@ -596,7 +604,7 @@ crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
   <- docs-dev/threat-model.md:62  :: pub harness_roots: BTreeMap<String, String>,
 crates/chat-stasher/src/config.rs:116  cf52ab144fd4  lines=1
-  <- docs-dev/privacy.md:679  :: /// Local rustic repository that `push`/`read` operate on.
+  <- docs-dev/privacy.md:680  :: /// Local rustic repository that `push`/`read` operate on.
 crates/chat-stasher/src/config.rs:166-182  ed3020d28acc  lines=17
   <- docs-dev/threat-model.md:62, docs-dev/threat-model.md:80  :: /// snapshot re-writes the tree of every touched session di…
 crates/chat-stasher/src/config.rs:283-284  1d4917fb6eda  lines=2
@@ -646,7 +654,7 @@ crates/chat-stasher/src/fts.rs:1682-1697  c572ae968c6b  lines=16
 crates/chat-stasher/src/fts.rs:2131-2140  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:925  :: #[cfg(unix)]
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
-  <- docs-dev/privacy.md:465, docs-dev/privacy.md:955  :: /// Subdirectory of the inbox where consumed files are reti…
+  <- docs-dev/privacy.md:465, docs-dev/privacy.md:959  :: /// Subdirectory of the inbox where consumed files are reti…
 crates/chat-stasher/src/inbox.rs:59-60  c69ecbc73d8e  lines=2
   <- docs-dev/install.md:501  :: /// Suffix of a multi-bundle export file (`nativehost-proto…
 crates/chat-stasher/src/inbox.rs:66-68  3935abac04cb  lines=3
@@ -694,7 +702,7 @@ crates/chat-stasher/src/inbox.rs:2033-2055  b73a1c5a7abb  lines=23
 crates/chat-stasher/src/main.rs:82  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
 crates/chat-stasher/src/main.rs:164-1316  b862802eb9db  lines=1153
-  <- docs-dev/install.md:1058, docs-dev/privacy.md:961, docs-dev/threat-model.md:905  :: enum Command {
+  <- docs-dev/install.md:1058, docs-dev/privacy.md:965, docs-dev/threat-model.md:905  :: enum Command {
 crates/chat-stasher/src/main.rs:165-166  6f7da3119197  lines=2
   <- docs-dev/install.md:259  :: /// Write a commented default config if none exists (non-de…
 crates/chat-stasher/src/main.rs:216-253  957f12533bab  lines=38
@@ -726,7 +734,7 @@ crates/chat-stasher/src/main.rs:492-530  4d73dbd30b3b  lines=39
 crates/chat-stasher/src/main.rs:641-645  47efaa2006bc  lines=5
   <- docs-dev/threat-model.md:941  :: /// Exit codes distinguish the three answers, because two o…
 crates/chat-stasher/src/main.rs:683-769  bab81c38b904  lines=87
-  <- docs-dev/install.md:1047, docs-dev/install.md:1061, docs-dev/privacy.md:470, docs-dev/privacy.md:959, docs-dev/threat-model.md:146, docs-dev/threat-model.md:913  :: /// Write every session the shared selector selects to file…
+  <- docs-dev/install.md:1047, docs-dev/install.md:1061, docs-dev/privacy.md:470, docs-dev/privacy.md:963, docs-dev/threat-model.md:146, docs-dev/threat-model.md:913  :: /// Write every session the shared selector selects to file…
 crates/chat-stasher/src/main.rs:807-857  4273707c50b1  lines=51
   <- docs-dev/threat-model.md:46  :: Ingest {
 crates/chat-stasher/src/main.rs:825  cf775be2a229  lines=1
@@ -742,11 +750,11 @@ crates/chat-stasher/src/main.rs:2046-2052  96d65b359ff4  lines=7
 crates/chat-stasher/src/main.rs:2102-2112  d5c09fef1666  lines=11
   <- docs-dev/install.md:439  :: // Explicitly named browsers are written even when their da…
 crates/chat-stasher/src/main.rs:2160-2175  eeafc7f7b2ec  lines=16
-  <- docs-dev/install.md:433, docs-dev/privacy.md:902, docs-dev/threat-model.md:670  :: if let Some(path) = &stage_to_record {
+  <- docs-dev/install.md:433, docs-dev/privacy.md:906, docs-dev/threat-model.md:670  :: if let Some(path) = &stage_to_record {
 crates/chat-stasher/src/main.rs:2211-2249  9ceb7d1eb0cd  lines=39
-  <- docs-dev/install.md:447, docs-dev/privacy.md:975  :: if uninstall {
+  <- docs-dev/install.md:447, docs-dev/privacy.md:979  :: if uninstall {
 crates/chat-stasher/src/main.rs:2318-2324  bd833f481e0e  lines=7
-  <- docs-dev/install.md:447, docs-dev/privacy.md:975  :: if uninstall {
+  <- docs-dev/install.md:447, docs-dev/privacy.md:979  :: if uninstall {
 crates/chat-stasher/src/main.rs:5922-5937  f605a8d10265  lines=16
   <- docs-dev/install.md:623  :: // ADR-023 — resolve the destination's trust *before* the e…
 crates/chat-stasher/src/main.rs:5927-5952  d8187ad0e097  lines=26
@@ -760,9 +768,9 @@ crates/chat-stasher/src/main.rs:6034-6042  14fed5517e0c  lines=9
 crates/chat-stasher/src/main.rs:6982-7037  8d5f91543470  lines=56
   <- docs-dev/install.md:925  :: /// The refusal message `schedule` prints on an OS this bui…
 crates/chat-stasher/src/main.rs:7742-7747  60c48a3b18d4  lines=6
-  <- docs-dev/install.md:572, docs-dev/privacy.md:1021  :: let key_file = match key_file.or_else(|| entry.key_file.clo…
+  <- docs-dev/install.md:572, docs-dev/privacy.md:1025  :: let key_file = match key_file.or_else(|| entry.key_file.clo…
 crates/chat-stasher/src/main.rs:7850-7851  8311772683ed  lines=2
-  <- docs-dev/privacy.md:681  :: let mk = MasterKey::new();
+  <- docs-dev/privacy.md:682  :: let mk = MasterKey::new();
 crates/chat-stasher/src/main.rs:7950-7957  6708be64c9ca  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:851  :: let stage_check =
 crates/chat-stasher/src/main.rs:7974-7978  c1c01a085bde  lines=5
@@ -790,15 +798,15 @@ crates/chat-stasher/src/main.rs:16921-17054  9b25725da3b1  lines=134
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:414, docs-dev/threat-model.md:705  :: //! ADR-022: content-addressed hash tracking for stage meta…
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14
-  <- docs-dev/privacy.md:902, docs-dev/threat-model.md:587  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
+  <- docs-dev/privacy.md:906, docs-dev/threat-model.md:587  :: pub const HOST_NAME: &str = "com.chat_stasher.host";
 crates/chat-stasher/src/nativehost.rs:415-626  695d9c4b44f3  lines=212
   <- docs-dev/install.md:1245  :: /// Default discovery root for a platform, derived from `ho…
 crates/chat-stasher/src/nativehost.rs:488-491  ea46ecf35e4c  lines=4
   <- docs-dev/install.md:429, docs-dev/threat-model.md:669  :: /// * **Windows** — the manifest may live anywhere and the …
 crates/chat-stasher/src/nativehost.rs:499-612  7c2c0c3a86f8  lines=114
-  <- docs-dev/install.md:427, docs-dev/privacy.md:902, docs-dev/threat-model.md:669  :: pub fn target(
+  <- docs-dev/install.md:427, docs-dev/privacy.md:906, docs-dev/threat-model.md:669  :: pub fn target(
 crates/chat-stasher/src/nativehost.rs:647-691  c611ef069f1c  lines=45
-  <- docs-dev/privacy.md:902, docs-dev/threat-model.md:587  :: pub fn render_manifest(
+  <- docs-dev/privacy.md:906, docs-dev/threat-model.md:587  :: pub fn render_manifest(
 crates/chat-stasher/src/nativehost.rs:770-772  022181b92c98  lines=3
   <- docs-dev/install.md:440  :: if !force && !target.browser_present() {
 crates/chat-stasher/src/nativehost.rs:1129-1134  f5cb62751551  lines=6
@@ -819,6 +827,8 @@ crates/chat-stasher/src/nativehost.rs:1290-1306  79c9ebd3c2f8  lines=17
   <- docs-dev/threat-model.md:384  :: fn account_key_from_masterkey_bytes(
 crates/chat-stasher/src/nativehost.rs:1310-1345  c6b2c6d91399  lines=36
   <- docs-dev/threat-model.md:394  :: /// ambiguous, or unreadable key configuration deliberately…
+crates/chat-stasher/src/nativehost.rs:1350-1357  5ff4608504b7  lines=8
+  <- docs-dev/privacy.md:622  :: /// request, so SQLite's IMMEDIATE transaction is the cross…
 crates/chat-stasher/src/nativehost.rs:1417-1423  17f51eb72b78  lines=7
   <- docs-dev/privacy.md:488  :: return nack(
 crates/chat-stasher/src/nativehost.rs:1417-1422  465434a805de  lines=6
@@ -826,11 +836,11 @@ crates/chat-stasher/src/nativehost.rs:1417-1422  465434a805de  lines=6
 crates/chat-stasher/src/nativehost.rs:1507-1522  306bf709d1fc  lines=16
   <- docs-dev/privacy.md:348, docs-dev/privacy.md:488  :: now: i64,
 crates/chat-stasher/src/nativehost.rs:1591  1bf1b96a8a89  lines=1
-  <- docs-dev/privacy.md:767, docs-dev/threat-model.md:309  :: wait = cooldown_wait.max((next - now).max(0)).max(daily_wai…
+  <- docs-dev/privacy.md:768, docs-dev/threat-model.md:309  :: wait = cooldown_wait.max((next - now).max(0)).max(daily_wai…
 crates/chat-stasher/src/nativehost.rs:1608-1611  3d782ac6f08b  lines=4
   <- docs-dev/threat-model.md:374  :: } else {
 crates/chat-stasher/src/nativehost.rs:1609  31e5c1bc25ce  lines=1
-  <- docs-dev/privacy.md:767, docs-dev/threat-model.md:309  :: conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,nex…
+  <- docs-dev/privacy.md:768, docs-dev/threat-model.md:309  :: conn.execute("UPDATE ext_platform_v2 SET lease_until=?4,nex…
 crates/chat-stasher/src/nativehost.rs:1647  647b94f559c0  lines=1
   <- docs-dev/threat-model.md:757  :: /// connections to **one** database and watch what one tran…
 crates/chat-stasher/src/nativehost.rs:1685-1702  bec1a874ab56  lines=18
@@ -876,7 +886,7 @@ crates/chat-stasher/src/nativehost.rs:3252  5f92d12a3656  lines=1
 crates/chat-stasher/src/nativehost.rs:3515-3525  6a277da09fed  lines=11
   <- docs-dev/install.md:307  :: /// What the run record says about the last successful push…
 crates/chat-stasher/src/nativehost.rs:3900-3934  e6fbfd65512b  lines=35
-  <- docs-dev/privacy.md:902, docs-dev/threat-model.md:174, docs-dev/threat-model.md:592  :: // ========================================================…
+  <- docs-dev/privacy.md:906, docs-dev/threat-model.md:174, docs-dev/threat-model.md:592  :: // ========================================================…
 crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends
 crates/chat-stasher/src/orphans.rs:327  3a21d2f444c5  lines=1
@@ -912,7 +922,7 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1226  :: }
 crates/chat-stasher/src/scanner.rs:1530-1646  099b52c62352  lines=117
-  <- docs-dev/privacy.md:961  :: sqlite_layout: Some(layout),
+  <- docs-dev/privacy.md:965  :: sqlite_layout: Some(layout),
 crates/chat-stasher/src/scanner.rs:1931-1940  f09925927335  lines=10
   <- docs-dev/openclaw-scanner.md:32  :: }
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
@@ -938,7 +948,7 @@ crates/chat-stasher/src/sqlite_probe.rs:2342-2393  e73a4594263b  lines=52
 crates/chat-stasher/src/store.rs:159-162  f2781c197162  lines=4
   <- docs-dev/install.md:611, docs-dev/install.md:701  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
 crates/chat-stasher/src/store.rs:320-420  fe1c57e64763  lines=101
-  <- docs-dev/privacy.md:161, docs-dev/privacy.md:681, docs-dev/privacy.md:696, docs-dev/privacy.md:941, docs-dev/threat-model.md:80, docs-dev/threat-model.md:218, docs-dev/threat-model.md:806  :: }
+  <- docs-dev/privacy.md:161, docs-dev/privacy.md:682, docs-dev/privacy.md:697, docs-dev/privacy.md:945, docs-dev/threat-model.md:80, docs-dev/threat-model.md:218, docs-dev/threat-model.md:806  :: }
 crates/chat-stasher/src/store.rs:381-385  bd0dae8980fe  lines=5
   <- docs-dev/install.md:611  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
 crates/chat-stasher/src/store.rs:437  43a7a775bbdc  lines=1
@@ -946,19 +956,19 @@ crates/chat-stasher/src/store.rs:437  43a7a775bbdc  lines=1
 crates/chat-stasher/src/store.rs:565-577  ea712fd262a4  lines=13
   <- docs-dev/node-metadata.md:95  :: let build_opts = BackupOptions::default()
 crates/chat-stasher/src/store.rs:1974-1976  df67f1e3fcff  lines=3
-  <- docs-dev/install.md:564, docs-dev/install.md:1070, docs-dev/privacy.md:681, docs-dev/privacy.md:1010, docs-dev/threat-model.md:80, docs-dev/threat-model.md:891  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
+  <- docs-dev/install.md:564, docs-dev/install.md:1070, docs-dev/privacy.md:682, docs-dev/privacy.md:1014, docs-dev/threat-model.md:80, docs-dev/threat-model.md:891  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
 crates/chat-stasher/src/store.rs:2016-2023  652f49c633e5  lines=8
   <- docs-dev/install.md:566  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
 crates/chat-stasher/src/store.rs:2016-2026  eeef621b37e3  lines=11
-  <- docs-dev/privacy.md:681, docs-dev/threat-model.md:80  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
+  <- docs-dev/privacy.md:682, docs-dev/threat-model.md:80  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
 crates/chat-stasher/src/store.rs:2016-2086  5118c8f5554c  lines=71
-  <- docs-dev/privacy.md:1013, docs-dev/threat-model.md:124, docs-dev/threat-model.md:885  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
+  <- docs-dev/privacy.md:1017, docs-dev/threat-model.md:124, docs-dev/threat-model.md:885  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
 crates/chat-stasher/src/store.rs:2103-2113  8ab0805e7812  lines=11
   <- docs-dev/threat-model.md:893  :: /// Load the masterkey from `cfg.key_file` (error when miss…
 crates/chat-stasher/src/store.rs:2161-2166  4a031ff70c84  lines=6
   <- docs-dev/install.md:611, docs-dev/install.md:701  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
 crates/chat-stasher/src/ui/extension_profile.rs:146-177  fb34362ebddf  lines=32
-  <- docs-dev/privacy.md:817  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…
+  <- docs-dev/privacy.md:818  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…
 crates/chat-stasher/src/ui/sessions.rs:55  ef0f4004ef5d  lines=1
   <- docs-dev/threat-model.md:210  :: pub(super) fn content_page(
 crates/chat-stasher/src/view.rs:204-216  605bc65511cd  lines=13
