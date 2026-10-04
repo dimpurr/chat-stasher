@@ -754,7 +754,7 @@ Each instance keeps a monotonic `report_seq` in `storage.local`, incremented for
 every status report and every capture delivery, and mints a fresh random
 `report_nonce` with each sequence, persisting the pair *before* the message that
 carries it is sent, through one serialised chain
-(`apps/extension/lib/report-seq.ts:1-36`, `:45`, `:167-210`;
+(`apps/extension/lib/report-seq.ts:1-36`, `:45`, `:170-213`;
 `apps/extension/lib/native-host.ts:1075-1114`). Two copies start from the same
 stored counter and advance independently, so they eventually **allocate the same
 number** — each doing so with its own random nonce. The host therefore compares

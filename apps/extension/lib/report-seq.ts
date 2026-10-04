@@ -128,7 +128,7 @@ async function allocateStamp(): Promise<ReportStamp | null> {
   //    would then look healthy again on the next read.
   if (read.kind === 'unknown') return null;
   const seq = (read.kind === 'known' ? read.seq : 0) + 1;
-  // The stored boundary value is valid, but it has no representable successor.
+  // The stored boundary value is valid, but it has no safe successor.
   // Do not persist a number that the next read would have to call corrupt.
   if (!Number.isSafeInteger(seq)) return null;
   const nonce = newReportNonce();
