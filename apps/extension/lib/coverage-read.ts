@@ -87,8 +87,10 @@ function hasReadableCoverageShape(header: BackfillHeader): boolean {
     typeof value === 'object' && value !== null && !Array.isArray(value);
   const nonNegativeInteger = (value: unknown): value is number =>
     typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const finiteTimestamp = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const timestamp = (value: unknown): value is number | null =>
-    value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+    value === null || finiteTimestamp(value);
 
   const cursor = header.enumCursor as unknown;
   if (!record(cursor)
@@ -116,6 +118,25 @@ function hasReadableCoverageShape(header: BackfillHeader): boolean {
   if (lastFetch !== undefined && (!record(lastFetch)
     || !timestamp(lastFetch.enumerate)
     || !timestamp(lastFetch.detail))) return false;
+
+  const failures = header.failures as unknown;
+  if (failures !== undefined && (!Array.isArray(failures) || !failures.every((entry: unknown) =>
+    record(entry)
+    && typeof entry.shortId === 'string'
+    && typeof entry.platform === 'string'
+    && typeof entry.reason === 'string'
+    && finiteTimestamp(entry.at)))) return false;
+
+  const parkedEmpty = header.parkedEmpty as unknown;
+  if (parkedEmpty !== undefined && (!Array.isArray(parkedEmpty)
+    || !parkedEmpty.every((id: unknown) => typeof id === 'string'))) return false;
+
+  const halted = header.halted as unknown;
+  if (halted !== null && (!record(halted)
+    || typeof halted.reason !== 'string'
+    || halted.reason.length === 0
+    || !finiteTimestamp(halted.at)
+    || typeof halted.detail !== 'string')) return false;
 
   if ((header.emptyStreak !== undefined && !nonNegativeInteger(header.emptyStreak))
     || (header.failuresDropped !== undefined && !nonNegativeInteger(header.failuresDropped))) return false;

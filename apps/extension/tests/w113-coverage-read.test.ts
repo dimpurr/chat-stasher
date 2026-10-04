@@ -89,6 +89,9 @@ describe('W113 · which records the page will show', () => {
       archivedCount: 0,
       detailToday: { day: '', count: 0 },
       lastFetchAt: { enumerate: null, detail: null },
+      failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', reason: 'synthetic-failure', at: 1 }],
+      parkedEmpty: ['synthetic-id'],
+      halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop' },
     }))).toBe(true);
   });
 
@@ -122,6 +125,16 @@ describe('W113 · which records the page will show', () => {
       ['missing enum cursor completion flag', { enumCursor: { offset: 0 } as unknown as BackfillHeader['enumCursor'] }],
       ['malformed last-fetch object', { lastFetchAt: { enumerate: Number.NaN, detail: null } }],
       ['non-finite detail timestamp', { lastFetchAt: { enumerate: null, detail: Number.NEGATIVE_INFINITY } }],
+      ['failure list is not an array', { failures: null as unknown as BackfillHeader['failures'] }],
+      ['failure list contains a null entry', { failures: [null] as unknown as BackfillHeader['failures'] }],
+      ['failure entry has no reason', { failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', at: 1 }] as unknown as BackfillHeader['failures'] }],
+      ['failure entry has a null timestamp', { failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', reason: 'synthetic-failure', at: null }] as unknown as BackfillHeader['failures'] }],
+      ['parked empty list is not an array', { parkedEmpty: 0 as unknown as string[] }],
+      ['parked empty list contains a non-string id', { parkedEmpty: ['abc', 1] as unknown as string[] }],
+      ['halted stop is missing', { halted: undefined as unknown as BackfillHeader['halted'] }],
+      ['halted stop is false', { halted: false as unknown as BackfillHeader['halted'] }],
+      ['halted stop lacks a reason', { halted: { at: 1, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
+      ['halted stop has a null timestamp', { halted: { reason: 'rate-limited', at: null, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
     ];
 
     for (const [label, change] of malformed) {
