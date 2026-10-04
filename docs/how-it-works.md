@@ -39,7 +39,7 @@ The archive is an encrypted, content-addressed repository built on the open-sour
 |---|---|
 | **Encrypted on your machine** | The destination receives encrypted objects only. It can see their number, size and timing. |
 | **One key per destination** | The key file is created when the archive is created. Without it, nobody can read that archive, and there is no recovery. |
-| **Append-only** | Each push adds a snapshot. Nothing in chat-stasher deletes from an archive, and there is no command to delete one conversation. A session a tool deleted stays in every snapshot that already holds it. |
+| **Append-only** | Each push adds a snapshot. A session disappearing from a provider or harness stays in every snapshot that already holds it; source-side deletion never propagates to the archive. Archive removal is reserved for an explicit user-initiated purge of a named session, but that feature is not shipped and there is currently no command to delete one conversation. See [Privacy and security → Keeping and deleting](privacy-security.md#keeping-and-deleting). |
 | **Deduplicated** | Identical data is stored once, so hourly snapshots of mostly unchanged sessions stay small. Shards are grouped into buckets (20 by default) so each push rewrites little. |
 | **Verifiable** | `verify --level l1` checks structure cheaply. `l2` downloads and re-hashes everything. `l3` checks every staged session against the archive. |
 
