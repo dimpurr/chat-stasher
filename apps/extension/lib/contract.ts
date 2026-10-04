@@ -10,13 +10,6 @@ export const CHATGPT_WORKSPACE_OBSERVED_MESSAGE = '__chat_stasher_chatgpt_worksp
 export const MAIN_READY_MESSAGE = '__chat_stasher_main_ready__';
 export const MAIN_PROBE_MESSAGE = '__chat_stasher_main_probe__';
 /**
- * Page-world signal for an OBSERVED WebSocket frame. Deliberately a separate
- * name from CAPTURE_MESSAGE: observation is not capture, nothing downstream
- * saves it yet, and the bridge must not mistake one for the other.
- */
-export const WS_OBSERVED_MESSAGE = '__chat_stasher_ws_observed__';
-
-/**
  * 🔴 W43 · **The page world saying "I could not install the capture hook", or
  *    "the wrapper I installed is no longer in effect".**
  *
@@ -315,6 +308,10 @@ export interface ChatPlatform {
   methods: readonly string[];
   status: { min: number; max: number };
   responseShape: ResponseShape;
+  /** Optional JSON paths that identify a stream snapshot's turn and completion state. */
+  streamTurnIdPaths?: readonly string[];
+  /** A snapshot is archived only when one configured path is `true` or a done status. */
+  streamCompletionPaths?: readonly string[];
   /** Regex source strings; the first capture group is the session id. */
   sessionIdPatterns: readonly string[];
   /** Source-backed is not the same as live verified. */
@@ -333,6 +330,8 @@ export interface ChatPlatform {
    * because it is the only switch that makes us read frame payloads at all.
    */
   webSocketCapture?: boolean;
+  /** Opt-in for EventSource messages whose data is a complete response body. */
+  eventSourceCapture?: boolean;
   /**
    * 🔴 The editorial facts of the generated support tables (SB-1). None of the
    * three fields below is read by the extension's own code; they live in this

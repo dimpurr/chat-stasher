@@ -20,7 +20,6 @@ import {
   PAGE_HOOK_STATE_KEY,
   PAGE_HOOK_VERSION,
   PLATFORMS,
-  WS_OBSERVED_MESSAGE,
   type ChatPlatform,
 } from './contract';
 import { CHATGPT_PAGED_DETAIL_PATTERN, CONVERSATION_SEEN_MESSAGE } from './platform-auth';
@@ -46,8 +45,6 @@ export interface PageHookOptions {
   readyMessage: string;
   stateKey: string;
   fetchMarkerKey: string;
-  /** Page message name for an observed WebSocket frame (not a capture). */
-  wsObservedMessage: string;
   version: string;
   /** Platform table; the hook matches against the CURRENT page's own origin. */
   platforms: ChatPlatform[];
@@ -110,7 +107,6 @@ export const PAGE_HOOK_OPTIONS: PageHookOptions = {
   readyMessage: MAIN_READY_MESSAGE,
   stateKey: PAGE_HOOK_STATE_KEY,
   fetchMarkerKey: PAGE_HOOK_FETCH_MARKER,
-  wsObservedMessage: WS_OBSERVED_MESSAGE,
   version: PAGE_HOOK_VERSION,
   platforms: PLATFORMS.map((platform) => ({
     ...platform,
@@ -284,6 +280,92 @@ export function installPageFetchHook(options: PageHookOptions): void {
     return found !== undefined && found !== null;
   };
 
+  /** Remove query, fragment and URL user-info before a stream URL is archived. */
+  const sanitizedStreamUrl = (rawUrl: string): string | undefined => {
+    try {
+      const parsed = new URL(rawUrl, baseUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Stream snapshots can evolve while a turn is in progress. When the platform
+  // declares turn identity and completion paths, hold those snapshots until the
+  // completion marker and archive only the first completed version. Otherwise,
+  // preserve exact-body suppression. Both caches are scoped to the stream and
+  // bounded for long-lived pages.
+  const seenStreamEvents = new WeakMap<object, {
+    bodies: Map<string, number>;
+    turns: Map<string, true>;
+    bytes: number;
+  }>();
+  const captureStreamEvent = (
+    source: object,
+    url: string,
+    text: string,
+    platform: ChatPlatform,
+  ): boolean => {
+    if (!matchesShape(platform, text)) return false;
+    const eventBytes = new TextEncoder().encode(text).byteLength;
+    if (eventBytes > options.maxRawBytes) return false;
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    const turnIdPaths = platform.streamTurnIdPaths ?? [];
+    const completionPaths = platform.streamCompletionPaths ?? [];
+    let turnId: string | undefined;
+    for (const path of turnIdPaths) {
+      const value = getJsonPath(body, path);
+      if ((typeof value === 'string' && value.length > 0) || (typeof value === 'number' && Number.isFinite(value))) {
+        turnId = String(value);
+        break;
+      }
+    }
+    let turnComplete = false;
+    for (const path of completionPaths) {
+      const value = getJsonPath(body, path);
+      if (
+        value === true ||
+        (typeof value === 'string' && ['complete', 'completed', 'done'].includes(value.toLowerCase()))
+      ) {
+        turnComplete = true;
+        break;
+      }
+    }
+    let seen = seenStreamEvents.get(source);
+    if (!seen) {
+      seen = { bodies: new Map<string, number>(), turns: new Map<string, true>(), bytes: 0 };
+      seenStreamEvents.set(source, seen);
+    }
+    if (turnId !== undefined) {
+      if (!turnComplete) return true;
+      if (seen.turns.has(turnId)) return true;
+      if (!captureCandidate(url, 'GET', 200, text, undefined, false, true)) return false;
+      seen.turns.set(turnId, true);
+      if (seen.turns.size > 256) {
+        const oldest = seen.turns.keys().next().value;
+        if (oldest !== undefined) seen.turns.delete(oldest);
+      }
+      return true;
+    }
+    if (seen.bodies.has(text)) return true;
+    if (!captureCandidate(url, 'GET', 200, text, undefined, false, true)) return false;
+    seen.bodies.set(text, eventBytes);
+    seen.bytes += eventBytes;
+    // The stream's dedupe memory is capped at one maximum capture payload.
+    while (seen.bytes > options.maxRawBytes) {
+      const oldest = seen.bodies.entries().next().value;
+      if (!oldest) break;
+      seen.bodies.delete(oldest[0]);
+      seen.bytes -= oldest[1];
+    }
+    return true;
+  };
+
   const matchesShape = (platform: ChatPlatform, text: string): boolean => {
     const shape = platform.responseShape;
     if (shape.encoding === 'text') {
@@ -370,10 +452,11 @@ export function installPageFetchHook(options: PageHookOptions): void {
      * global reading attach request A's account to request B's body. Optional because the
      * XHR transport reads no request headers — absent is the honest `unknown`, never a
      * guess.
-     */
+    */
     chatgptAccountIdHeader?: string | null,
     chatgptAccountIdHeaderPresent = false,
-  ): void => {
+    stripStreamUrlSecrets = false,
+  ): boolean => {
     try {
       const parsed = new URL(rawUrl, baseUrl);
       const platform = getPlatform(parsed.href);
@@ -385,28 +468,37 @@ export function installPageFetchHook(options: PageHookOptions): void {
         !platform.pathHints.some((hint) => parsed.pathname.includes(hint)) ||
         status < platform.status.min ||
         status > platform.status.max
-      ) return;
+      ) return false;
 
       const bytes = new TextEncoder().encode(text).byteLength;
       if (bytes > options.maxRawBytes) {
         // A conversation too large to carry is still a conversation: say so.
         // Metadata only — never the URL, body, or identifiers.
         console.warn('[chat-stasher] capture skipped: response exceeds the size cap');
-        return;
+        return false;
       }
       if (!matchesShape(platform, text)) {
         // Keep the signal metadata-only: never print URL, body, or identifiers.
         console.warn('[chat-stasher] capture skipped: response shape mismatch');
-        return;
+        return false;
       }
+      const captureUrl = stripStreamUrlSecrets
+        ? sanitizedStreamUrl(parsed.href)
+        : parsed.href;
+      if (!captureUrl) return false;
+      const pageUrl = typeof pageWindow.location.href === 'string'
+        ? (stripStreamUrlSecrets
+          ? sanitizedStreamUrl(pageWindow.location.href)
+          : pageWindow.location.href)
+        : undefined;
       post({
         type: options.captureMessage,
         payload: {
-          url: parsed.href,
+          url: captureUrl,
           method: normalizedMethod,
           status,
           text,
-          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
+          pageUrl,
           capturedAt: Date.now(),
           // 🔴 W299 · Only when this exact capture's request carried the header. Absent
           //    otherwise — never `undefined` coerced to an empty string, because the
@@ -415,8 +507,10 @@ export function installPageFetchHook(options: PageHookOptions): void {
           ...(platform.id === 'chatgpt' ? { chatgptAccountIdHeaderPresent } : {}),
         },
       });
+      return true;
     } catch {
       // Capture is best-effort and must never alter page behaviour.
+      return false;
     }
   };
 
@@ -570,18 +664,39 @@ export function installPageFetchHook(options: PageHookOptions): void {
   }
 
   const eventSourceConstructor = pageWindow.EventSource;
+  const eventSourcePlatform = options.platforms.find(
+    (platform) => platform.origins.includes(pageOrigin) && platform.eventSourceCapture === true,
+  ) ?? null;
   if (typeof eventSourceConstructor === 'function') {
     const eventSourceProxy = new Proxy(eventSourceConstructor, {
       construct(target, args, newTarget) {
         const source = Reflect.construct(target, args, newTarget) as EventSource;
         const url = String(args[0]);
-        const warn = () => warnUnsupportedTransport('sse', url);
-        source.addEventListener('open', warn, { once: true });
-        source.addEventListener('message', warn, { once: true });
+        if (!eventSourcePlatform) {
+          const warn = () => warnUnsupportedTransport('sse', url);
+          source.addEventListener('open', warn, { once: true });
+          source.addEventListener('message', warn, { once: true });
+          return source;
+        }
+        source.addEventListener('message', (event: MessageEvent) => {
+          try {
+            if (typeof event?.data !== 'string') return;
+            // EventSource exposes each event's data, not the HTTP response body.
+            // Capture only events that are themselves complete, response-shaped
+            // documents; deltas and protocol fragments are not assembled by guess.
+            captureStreamEvent(source, url, event.data, eventSourcePlatform);
+          } catch {
+            // Observation must never surface as a page-visible error.
+          }
+        });
         return source;
       },
     });
-    pageWindow.EventSource = eventSourceProxy;
+    try {
+      pageWindow.EventSource = eventSourceProxy;
+    } catch {
+      // Best-effort, with the failed patch reported below.
+    }
     // 🔴 W43 · Read back, for the same reason the fetch patch is read back: a
     //    refused assignment is silent in this bundle, and an EventSource the page
     //    kept is a transport we would otherwise claim to have covered.
@@ -592,9 +707,8 @@ export function installPageFetchHook(options: PageHookOptions): void {
 
   // ---- WebSocket ----------------------------------------------------------
   // Opt-in per platform row and OFF everywhere else: an origin only gets its
-  // frames looked at when its own row says webSocketCapture. Everything below
-  // is observation only — we never send a frame, never replace onmessage/send,
-  // and never keep the page from seeing its own events.
+  // frames looked at when its own row says webSocketCapture. We never send a
+  // frame, replace onmessage/send, or keep the page from seeing its own events.
   const wsUninstalledWarning =
     '[chat-stasher] websocket hook not installed on a websocket-declared origin';
   const wsPlatform =
@@ -602,8 +716,8 @@ export function installPageFetchHook(options: PageHookOptions): void {
       (platform) => platform.origins.includes(pageOrigin) && platform.webSocketCapture === true,
     ) ?? null;
 
-  /** Returns true when the frame was observed, so the caller skips the "unsupported" warn. */
-  const observeWebSocketFrame = (url: string, data: unknown): boolean => {
+  /** Captures complete response-shaped text frames; protocol fragments stay ignored. */
+  const observeWebSocketFrame = (socket: WebSocket, url: string, data: unknown): boolean => {
     if (!wsPlatform) return false;
     try {
       const parsed = new URL(url, baseUrl);
@@ -618,17 +732,9 @@ export function installPageFetchHook(options: PageHookOptions): void {
       // "hooked it but parsed it wrong" failure this capability is meant to avoid.
       if (typeof data !== 'string' || data.length === 0) return false;
       if (new TextEncoder().encode(data).byteLength > options.maxRawBytes) return false;
-      post({
-        type: options.wsObservedMessage,
-        payload: {
-          platformId: wsPlatform.id,
-          url: parsed.href,
-          text: data,
-          pageUrl: typeof pageWindow.location.href === 'string' ? pageWindow.location.href : undefined,
-          observedAt: Date.now(),
-        },
-      });
-      return true;
+      // The capture contract names HTTP(S) platform origins. Map the socket
+      // scheme to its corresponding page origin before applying that contract.
+      return captureStreamEvent(socket, `${candidateOrigin}${parsed.pathname}`, data, wsPlatform);
     } catch {
       return false;
     }
@@ -654,7 +760,7 @@ export function installPageFetchHook(options: PageHookOptions): void {
             // onmessage/onerror/onclose handlers all still run unchanged.
             socket.addEventListener('message', (event: MessageEvent) => {
               try {
-                if (!observeWebSocketFrame(url, event?.data)) {
+                if (!observeWebSocketFrame(socket, url, event?.data)) {
                   warnUnsupportedTransport('websocket', url);
                 }
               } catch {
