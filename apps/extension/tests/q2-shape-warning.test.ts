@@ -26,7 +26,10 @@ describe('Q2 response-shape visibility', () => {
 
     vi.stubGlobal('window', fakeWindow);
     installPageFetchHook(PAGE_HOOK_OPTIONS);
-    await fakeWindow.fetch('https://chat.deepseek.com/api/v0/chat/session/12345678');
+    // A candidate on the pinned DeepSeek route (W473) whose body is not the
+    // conversation envelope: '{}' is valid JSON and 200, and missing both
+    // requiredPaths fields is exactly the drift case the warning names.
+    await fakeWindow.fetch('https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=synthetic-session-id');
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(warn).toHaveBeenCalledWith(

@@ -308,7 +308,11 @@ export interface FakePlatform {
   origin: string;
   /** Page path served as HTML, e.g. /c/<session id>. */
   pagePath: string;
-  /** API path served the response body; must match the row's pathHints. */
+  /**
+   * API path served the response body; must match the row's pathHints. May
+   * carry a query — W473's DeepSeek row binds the capture to the request's
+   * `chat_session_id` query, so the fake route matches pathname and query.
+   */
   apiPath: string;
   /** The exact bytes the page's request will receive. */
   apiBody: string;
@@ -363,7 +367,7 @@ export async function installFakePlatforms(
   for (const platform of platforms) {
     await context.route(`${platform.origin}/**`, (route) => {
       const request = route.request();
-      const { pathname } = new URL(request.url());
+      const { pathname, search } = new URL(request.url());
       const label = `${request.method()} ${pathname}`;
 
       if (pathname === '/favicon.ico') {
@@ -380,7 +384,9 @@ export async function installFakePlatforms(
           body: fixturePage(platform.apiPath),
         });
       }
-      if (pathname === platform.apiPath) {
+      // The path AND its query: an apiPath that names a session in the query
+      // (DeepSeek, W473) must not be answerable to a query-less request.
+      if (`${pathname}${search}` === platform.apiPath) {
         log.apiResponses.push(label);
         return route.fulfill({
           status: 200,

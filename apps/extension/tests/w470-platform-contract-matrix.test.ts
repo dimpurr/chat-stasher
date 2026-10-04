@@ -10,6 +10,18 @@ import {
 
 const CAPTURED_AT = 1;
 
+/**
+ * W473 · A DeepSeek capture is bound to the current-session request that named
+ * it: the query carries a chat_session_id and the body repeats the same nested
+ * id, and isCapturedFetchShape refuses the body otherwise. The row's data does
+ * not express that binding (it lives in the gate), so the matrix spells it out
+ * here, beside the other declared facts it exercises.
+ */
+const BOUND_SESSION_ID = 'aaaa473e-0000-4000-8000-00000000000a';
+const QUERY_ID_BINDINGS: Partial<Record<string, { queryKey: string; path: string }>> = {
+  deepseek: { queryKey: 'chat_session_id', path: 'data.biz_data.chat_session.id' },
+};
+
 function bodyWithPaths(paths: readonly string[], leaf: unknown = 'x'): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   for (const path of paths) {
@@ -27,6 +39,22 @@ function bodyWithPaths(paths: readonly string[], leaf: unknown = 'x'): Record<st
   return body;
 }
 
+/** Point the bound body path at the same id the capture's query will carry. */
+function bindQueryNamedSession(platform: ChatPlatform, body: Record<string, unknown>): void {
+  const binding = QUERY_ID_BINDINGS[platform.id];
+  if (!binding) return;
+  const parts = binding.path.split('.');
+  let current = body;
+  for (const part of parts.slice(0, -1)) {
+    const child = current[part];
+    if (typeof child !== 'object' || child === null || Array.isArray(child)) {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts.at(-1)!] = BOUND_SESSION_ID;
+}
+
 function minimumResponse(platform: ChatPlatform): string {
   const shape = platform.responseShape;
   if (shape.encoding === 'text') {
@@ -41,6 +69,7 @@ function minimumResponse(platform: ChatPlatform): string {
     // An array path is satisfied by an EMPTY array: `[]` is a measurement.
     ...bodyWithPaths(shape.requiredArrayPaths ?? [], []),
   };
+  bindQueryNamedSession(platform, body);
   return JSON.stringify(body);
 }
 
@@ -53,8 +82,10 @@ function missingRequiredResponse(platform: ChatPlatform): string {
 
 function capture(platform: ChatPlatform, origin: string, path: string, method: string, text: string) {
   const pathname = path.startsWith('/') ? path : `/${path}`;
+  const binding = QUERY_ID_BINDINGS[platform.id];
+  const query = binding ? `?${binding.queryKey}=${BOUND_SESSION_ID}` : '';
   return {
-    url: `${origin}${pathname}`,
+    url: `${origin}${pathname}${query}`,
     method,
     status: 200,
     text,

@@ -221,12 +221,14 @@ function chatgptCapture(text: string, sid = CHATGPT_SID): CapturedFetch {
 }
 
 /** A second platform, so "one row per platform" is asserted rather than assumed. */
+// The pinned DeepSeek conversation route (W473): the query names the session and
+// the body repeats the same nested id, which is what makes it a real capture.
 function deepseekCapture(sid = DEEPSEEK_SID): CapturedFetch {
   return {
-    url: `https://chat.deepseek.com/api/v0/chat/session/${sid}`,
-    method: 'POST',
+    url: `https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${sid}`,
+    method: 'GET',
     status: 200,
-    text: JSON.stringify({ session_id: sid, message: { content: 'synthetic' } }),
+    text: JSON.stringify({ data: { biz_data: { chat_session: { id: sid }, chat_messages: [] } } }),
     capturedAt: (lastCapturedAt += 1),
   };
 }

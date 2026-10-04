@@ -6,6 +6,10 @@ const JSON_RESPONSE = {
   code: 0,
   data: {
     biz_data: {
+      // The pinned row (W473): the nested chat_session.id repeats the id the
+      // request names in its chat_session_id query, and chat_messages is the
+      // message collection the gate requires for a JSON XHR capture.
+      chat_session: { id: 'synthetic-session' },
       chat_messages: [
         { message_id: 1, role: 'USER', fragments: [{ type: 'REQUEST', content: 'synthetic question' }] },
       ],

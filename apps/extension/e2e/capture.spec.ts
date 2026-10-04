@@ -43,10 +43,10 @@ const CHATGPT_SESSION_ID = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const CHATGPT_PAGE_PATH = `/c/${CHATGPT_SESSION_ID}`;
 const CHATGPT_API_PATH = `/backend-api/conversation/${CHATGPT_SESSION_ID}`;
 
-/** deepseek · origins ['https://chat.deepseek.com'], pathHints ['/api/v0/chat', '/chat/session'], GET. */
+/** deepseek · origins ['https://chat.deepseek.com'], pathHints ['/api/v0/chat/history_messages'], GET; the request names its session in a chat_session_id query (W473). */
 const DEEPSEEK_SESSION_ID = '9f8e7d6c-5b4a-4938-8271-0a1b2c3d4e5f';
-const DEEPSEEK_PAGE_PATH = `/chat/session/${DEEPSEEK_SESSION_ID}`;
-const DEEPSEEK_API_PATH = '/api/v0/chat/history_messages';
+const DEEPSEEK_PAGE_PATH = `/a/chat/s/${DEEPSEEK_SESSION_ID}`;
+const DEEPSEEK_API_PATH = `/api/v0/chat/history_messages?chat_session_id=${DEEPSEEK_SESSION_ID}`;
 
 const CHATGPT_BODY = fixture('chatgpt-conversation.json');
 const WRONG_SHAPE_BODY = fixture('chatgpt-wrong-shape.json');
@@ -240,8 +240,10 @@ test('4 · the capture path is the platform table, not one hard-coded origin', a
   expect(entries).toHaveLength(1);
   const bundle = bundleOf(entries[0]!.payload);
   expect(bundle.platform).toBe('deepseek');
-  // The API URL carries no conversation id on this platform; the id comes from
-  // the page URL, which is what the row's second pattern is for.
+  // W473 · The session is named by the API request's own chat_session_id query
+  // — the row's only id source — and the bridge additionally refuses a body
+  // whose nested chat_session.id is not the id the query asked for (the
+  // fixture body repeats it, which is what makes this case a capture).
   expect(bundle.sessionId).toBe(DEEPSEEK_SESSION_ID);
   expect(entries[0]!.name).toBe(`deepseek-${DEEPSEEK_SESSION_ID}.json`);
 

@@ -2970,9 +2970,9 @@ export const DEEPSEEK_DETAIL_QUERY_KEY = 'chat_session_id';
  *      ② several mutually independent open-source exporters request the same route
  *         with the same query key (see the provenance string below).
  *    The live leg already matches this route through lib/contract.ts's deepseek row
- *    (pathHints '/api/v0/chat', requiredAnyPaths data.biz_data.chat_messages /
- *    data.biz_data.chat_session.id), so the backfill and live legs now stand on the
- *    same measured endpoint rather than two different ones.
+ *    (pathHints '/api/v0/chat/history_messages', requiredPaths
+ *    data.biz_data.chat_session.id, requiredArrayPaths data.biz_data.chat_messages), so
+ *    the backfill and live legs stand on the same measured endpoint rather than two different ones.
  *    This is the reason C26 recorded for leaving it null — "no multi-source
  *    provenance" — and it has been removed by evidence, not by a decision to relax
  *    the standard.
