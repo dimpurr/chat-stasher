@@ -123,23 +123,19 @@ pub fn seal_active_file(
     }
     let active_bytes = fs::read(active)
         .with_context(|| format!("read active file {} before sealing", active.display()))?;
-    if let Some(existing) =
-        crate::store::find_duplicate_shard(stage_root, machine, session_id, &active_bytes)?
-    {
-        return crate::store::parse_shard_seq(&existing)
-            .ok_or_else(|| anyhow::anyhow!("existing duplicate shard has an invalid sequence"));
-    }
-    let seq = crate::store::next_shard_seq(stage_root, machine, session_id)?;
-    let dest = crate::store::shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if dest.exists() {
-        anyhow::bail!("seal target already exists: {}", dest.display());
-    }
-    fs::rename(active, &dest)
-        .with_context(|| format!("seal rename {} -> {}", active.display(), dest.display()))?;
-    Ok(seq)
+    let written = crate::shard_writer::write_shard(
+        stage_root,
+        machine,
+        session_id,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Active {
+            path: active,
+            raw: &active_bytes,
+        },
+    )?;
+    written
+        .sequence()
+        .ok_or_else(|| anyhow::anyhow!("existing duplicate shard has an invalid sequence"))
 }
 
 /// Allowlist-checked sealing: calls [`seal_active_file`] only when

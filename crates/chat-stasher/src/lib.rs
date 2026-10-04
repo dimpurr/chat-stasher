@@ -41,6 +41,7 @@ pub mod schedule;
 pub mod seal;
 pub mod search;
 pub mod selector;
+mod shard_writer;
 pub mod sidecar;
 pub mod snapshot_cache;
 pub mod sqlite_probe;

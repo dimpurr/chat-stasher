@@ -72,8 +72,7 @@ pub const STAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGE_LOCK_POLL: Duration = Duration::from_millis(25);
 /// Staging shard line schema (same as the bundle schema).
 pub const SCHEMA: &str = "chat-stasher/inbox@1";
-/// Leftover temp name pattern for a half-written shard (`000123.jsonl.tmp`).
-const TMP_SUFFIX: &str = ".jsonl.tmp";
+/// Version of the local consumed-file audit state.
 const AUDIT_STATE_VERSION: u32 = 1;
 const AUDIT_STATE_FILE: &str = "consumed-audit-v1.json";
 
@@ -1245,9 +1244,7 @@ fn existing_file_shas(session_dir: &Path) -> anyhow::Result<BTreeMap<String, Str
     Ok(out)
 }
 
-/// Write one sealed shard crash-safely: temp file + fsync + atomic rename.
-/// Stale temp files from an interrupted earlier write are cleaned first so the
-/// same sequence number is reused, not skipped.
+/// Write an inbox shard using the shared writer's durable inbox policy.
 fn write_shard_atomic(
     stage: &Path,
     machine: &str,
@@ -1255,95 +1252,14 @@ fn write_shard_atomic(
     lines: &[String],
     bucket_cap: usize,
 ) -> anyhow::Result<String> {
-    // W306: the last gate before a session shard reaches the stage. A fixture
-    // identity (`chatgpt.synthetic-session`, the 2026-10-02 incident) must
-    // never land in a stage outside the process temp directory, whatever the
-    // caller's environment says. Every correct test writes under temp and
-    // passes; a test that lost its sandbox is refused here instead of on the
-    // author's machine.
-    crate::test_identity_guard::refuse_fixture_write(&[id], stage)?;
-    let dir = store::session_shard_dir(stage, machine, id);
-    fs::create_dir_all(&dir)?;
-    let mut raw = Vec::new();
-    for line in lines {
-        raw.extend_from_slice(line.as_bytes());
-        raw.push(b'\n');
-    }
-    if let Some(existing) = store::find_duplicate_shard(stage, machine, id, &raw)? {
-        return Ok(existing);
-    }
-    clean_stale_tmp(&dir)?;
-    let seq = store::next_shard_seq(stage, machine, id)?;
-    let final_path = store::shard_path_with_cap(stage, machine, id, seq, bucket_cap);
-    let final_dir = final_path.parent().expect("shard path has bucket parent");
-    fs::create_dir_all(final_dir)?;
-    let tmp_path = final_dir.join(format!("{seq:06}{TMP_SUFFIX}"));
-
-    let mut f =
-        fs::File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
-    for l in lines {
-        f.write_all(l.as_bytes())?;
-        f.write_all(b"\n")?;
-    }
-    f.sync_all().context("sync temp shard")?;
-    drop(f);
-    fs::rename(&tmp_path, &final_path).with_context(|| {
-        format!(
-            "seal shard {} (rename {})",
-            final_path.display(),
-            tmp_path.display()
-        )
-    })?;
-    // B74: this fsync is the *proof* that the rename above survives a power
-    // cut, and unlike every other best-effort fsync in this file it may not be
-    // swallowed. `consume_one` retires the inbox file the moment this returns
-    // Ok, and retirement is what removes the ability to redo the ingest:
-    // `<inbox>/consumed/` is never rescanned, so "shard entry not durable" plus
-    // "retirement durable" is a silent loss the content-addressed `fileSha256`
-    // dedup cannot repair — it only ever compares against files the inbox scan
-    // still sees. Failing here is deliberate and cheap on both counts:
-    //   * zero extra syscalls — the open+fsync already happened, only its
-    //     Result was being dropped;
-    //   * fatal for this one file, not for the run — `consume_one`'s Err
-    //     becomes one `report.errors` entry and the remaining bundles continue,
-    //     and because the inbox file is still in the inbox the next run either
-    //     re-consumes it or recognises its `fileSha256` and reports a duplicate.
-    // Contrast `retire` below, whose directory fsync stays best-effort on
-    // purpose: losing *that* rename is genuinely idempotent.
-    //
-    // `#[cfg(unix)]` for the same reason `persist_key_file` carries it: opening
-    // a directory handle is a Unix idiom, and on Windows `File::open` on a
-    // directory always fails, so propagating there would turn "no directory
-    // fsync available on this platform" into "every ingest errors out" — a
-    // promise the platform cannot keep either way. Windows keeps the previous
-    // behaviour (the call was already a guaranteed no-op there); making that
-    // honest is its own question, not this one.
-    #[cfg(unix)]
-    fsync_dir(final_dir).with_context(|| {
-        format!(
-            "prove sealed shard durable (fsync dir {})",
-            final_dir.display()
-        )
-    })?;
-    Ok(store::shard_filename(seq))
-}
-
-/// Remove shard temp stubs left by an interrupted seal.
-fn clean_stale_tmp(dir: &Path) -> anyhow::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.file_type()?.is_dir() {
-            clean_stale_tmp(&entry.path())?;
-        } else if name.ends_with(TMP_SUFFIX) {
-            #[allow(
-                clippy::let_underscore_must_use,
-                reason = "Stale temporary-file cleanup is intentionally best-effort; directory traversal errors still propagate."
-            )]
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    Ok(())
+    crate::shard_writer::write_shard(
+        stage,
+        machine,
+        id,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Inbox(lines),
+    )
+    .map(crate::shard_writer::ShardWrite::filename)
 }
 
 /// Rename a consumed inbox file into `<inbox>/consumed/` (atomic same-fs).

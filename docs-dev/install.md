@@ -323,7 +323,7 @@ What one install per profile means, once done:
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3548-3558`, `:3285`).
+  (`crates/chat-stasher/src/nativehost.rs:3553-3563`, `:3290`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -547,13 +547,13 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1192-1220`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1191-1219`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:3072-3074`, `:3080-3082`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:3077-3079`, `:3085-3087`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
@@ -580,9 +580,9 @@ read the repository and key file you select in config or arguments
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
 source's own words are "The masterkey is the repository's only key — losing it
-means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1951-1953`).
+means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1960-1962`).
 The key file is written with owner-only-readable permissions, on platforms that
-can express them (`crates/chat-stasher/src/store.rs:1993-2000`).
+can express them (`crates/chat-stasher/src/store.rs:2002-2009`).
 
 🔴 **And there is one key file per repository, not one per machine.** The local
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
@@ -627,7 +627,7 @@ that destination's own key — a second machine reads that copy with
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:159-162`, `:379-383`, `:2138-2143`; the config
+(`crates/chat-stasher/src/store.rs:159-162`, `:381-385`, `:2147-2152`; the config
 field itself is `crates/chat-stasher/src/config.rs:283-284`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -717,7 +717,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:159-162`, `:2138-2143`; the field itself is
+(`crates/chat-stasher/src/store.rs:159-162`, `:2147-2152`; the field itself is
 `crates/chat-stasher/src/config.rs:283-284`), so the option names below belong
 to the backend, not to this tool.
 
@@ -1086,7 +1086,7 @@ confirmed in the code, not a temporary disclaimer.
   opens.** There is no recovery process, no recovery code, no customer service.
   There is one file per repository, so losing one loses that copy and no other;
   back up every one of them (section 4.3). The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1951-1953`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1960-1962`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

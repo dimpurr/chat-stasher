@@ -2203,12 +2203,14 @@ fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
 }
 
 fn resolve_machine_at(config: &Config, path: &Path) -> std::result::Result<String, String> {
-    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
-        return Ok(machine.to_string());
-    }
-    match crate::identity::load_identity_state(&path) {
-        crate::identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
-        crate::identity::IdentityFileState::Missing => Err(format!(
+    match crate::identity::resolve_machine(
+        None,
+        config.machine.as_deref(),
+        path,
+        crate::identity::MissingIdentityPolicy::Refuse,
+    ) {
+        Ok(resolved) => Ok(resolved.machine),
+        Err(crate::identity::ResolveMachineError::Missing) => Err(format!(
             "no machine identity at {}; the host never creates one. Run any archiving command \
              once from your shell (for example `chat-stasher run-once ...`), or set `machine` \
              in {}. If your shell sets XDG_DATA_HOME, the browser does not see it: set \
@@ -2216,11 +2218,14 @@ fn resolve_machine_at(config: &Config, path: &Path) -> std::result::Result<Strin
             path.display(),
             crate::config::config_path().display()
         )),
-        crate::identity::IdentityFileState::Unusable(error) => Err(format!(
+        Err(crate::identity::ResolveMachineError::Unusable(error)) => Err(format!(
             "machine identity file {} is present but unusable ({error:?}); do not delete it — \
              it is the key to this machine's archive partition",
             path.display()
         )),
+        Err(crate::identity::ResolveMachineError::Persist(_)) => {
+            unreachable!("host refuses identity creation")
+        }
     }
 }
 

@@ -146,6 +146,60 @@ pub enum IdentityFileError {
     Parse(anyhow::Error),
 }
 
+/// Whether this entry point may initialize a missing identity (ADR-018).
+#[derive(Debug, Clone, Copy)]
+pub enum MissingIdentityPolicy {
+    Create,
+    Refuse,
+}
+
+/// Resolution keeps initialization separate from the caller's diagnostics.
+#[derive(Debug)]
+pub struct ResolvedMachine {
+    pub machine: String,
+    pub created: Option<MachineIdentity>,
+}
+
+#[derive(Debug)]
+pub enum ResolveMachineError {
+    Missing,
+    Unusable(IdentityFileError),
+    Persist(anyhow::Error),
+}
+
+/// Resolve explicit override, non-empty config value, then persisted identity.
+/// Only the CLI permits creation; the browser host must never mint a partition.
+pub fn resolve_machine(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+    path: &Path,
+    missing: MissingIdentityPolicy,
+) -> Result<ResolvedMachine, ResolveMachineError> {
+    if let Some(machine) = explicit.or_else(|| configured.filter(|m| !m.is_empty())) {
+        return Ok(ResolvedMachine {
+            machine: machine.to_string(),
+            created: None,
+        });
+    }
+    match load_identity_state(path) {
+        IdentityFileState::Loaded(id) => Ok(ResolvedMachine {
+            machine: id.as_hex(),
+            created: None,
+        }),
+        IdentityFileState::Unusable(error) => Err(ResolveMachineError::Unusable(error)),
+        IdentityFileState::Missing => match missing {
+            MissingIdentityPolicy::Refuse => Err(ResolveMachineError::Missing),
+            MissingIdentityPolicy::Create => {
+                let (id, created) = load_or_create(path).map_err(ResolveMachineError::Persist)?;
+                Ok(ResolvedMachine {
+                    machine: id.as_hex(),
+                    created: created.then_some(id),
+                })
+            }
+        },
+    }
+}
+
 /// Read and classify the identity file without losing the filesystem error
 /// kind. `Missing` is produced **only** by `io::ErrorKind::NotFound`.
 pub fn load_identity_state(path: &Path) -> IdentityFileState {

@@ -4277,30 +4277,27 @@ fn resolve_machine_at(
     explicit: Option<&str>,
     identity_path: &Path,
 ) -> Result<String, ExitCode> {
-    if let Some(machine) = explicit {
-        return Ok(machine.to_string());
-    }
-    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
-        return Ok(machine.to_string());
-    }
-    match identity::load_identity_state(identity_path) {
-        identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
-        identity::IdentityFileState::Missing => match identity::load_or_create(identity_path) {
-            Ok((id, true)) => {
+    match identity::resolve_machine(
+        explicit,
+        config.machine.as_deref(),
+        identity_path,
+        identity::MissingIdentityPolicy::Create,
+    ) {
+        Ok(resolved) => {
+            if let Some(id) = resolved.created {
                 eprintln!(
                     "{command}: generated a new machine identity {} — this is the archive partition for this machine from now on",
                     id.short_hex()
                 );
-                Ok(id.as_hex())
             }
-            Ok((id, false)) => Ok(id.as_hex()),
-            Err(e) => {
-                eprintln!("{command}: cannot persist a new machine identity: {e:#}");
-                eprintln!("{command}: nothing was read or written.");
-                Err(ExitCode::from(3))
-            }
-        },
-        identity::IdentityFileState::Unusable(error) => {
+            Ok(resolved.machine)
+        }
+        Err(identity::ResolveMachineError::Persist(e)) => {
+            eprintln!("{command}: cannot persist a new machine identity: {e:#}");
+            eprintln!("{command}: nothing was read or written.");
+            Err(ExitCode::from(3))
+        }
+        Err(identity::ResolveMachineError::Unusable(error)) => {
             eprintln!(
                 "{command}: machine identity file {} is present but unusable: {error:?}",
                 identity_path.display()
@@ -4312,6 +4309,9 @@ fn resolve_machine_at(
                 "{command}: fix the read/parse problem and re-run; nothing was read or written."
             );
             Err(ExitCode::from(3))
+        }
+        Err(identity::ResolveMachineError::Missing) => {
+            unreachable!("CLI permits identity creation")
         }
     }
 }
