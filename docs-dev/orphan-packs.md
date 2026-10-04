@@ -202,7 +202,7 @@ could any of it be deleted" has no answer from `push` or `verify`. `prune-orphan
 answers it and nothing else:
 
 ```sh
-chat-stasher prune-orphans --destination <name> [--dry-run] [--json]
+chat-stasher prune-orphans --destination <name> [--dry-run] [--apply] [--json]
 ```
 
 It opens the repository read-only — no index is built, and nothing is adopted —
@@ -241,9 +241,10 @@ whose bytes do not read back as the id it is stored under is reported `unknown`
 with the verifier's reason, never as empty and never as zero, and the command exits
 `3` — the same third state `CLAUDE.md` keeps for "did not finish reading". An index
 that names a pack the backend does not list is a contradiction rather than an
-unknown: the reading finished and the two sources disagree, so that is `1`. A run
-that read every pack and found no candidate exits `0`, and that zero is a
-measurement made after a complete survey.
+unknown: if every pack was readable, the finished survey exits `1`; if any pack is
+unknown too, incompleteness takes precedence and the exit is `3`. A run that read
+every pack, found no unindexed candidate, and found no contradiction exits `0`, and
+that zero is a measurement made after a complete survey.
 
 ## What pins it
 
