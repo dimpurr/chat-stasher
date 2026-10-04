@@ -541,7 +541,7 @@ apps/extension/lib/report-seq.ts:1-36  a0e78dc425c0  lines=36
   <- docs-dev/privacy.md:381, docs-dev/privacy.md:510, docs-dev/threat-model.md:757  :: /**
 apps/extension/lib/report-seq.ts:45  3496b8376798  lines=1
   <- docs-dev/privacy.md:381, docs-dev/privacy.md:510, docs-dev/threat-model.md:757  :: export const REPORT_SEQ_KEY = 'cs_report_seq_v1';
-apps/extension/lib/report-seq.ts:167-210  a9cba829ca71  lines=44
+apps/extension/lib/report-seq.ts:170-213  a9cba829ca71  lines=44
   <- docs-dev/threat-model.md:757  :: * The one chain every allocation runs on (rule ③).
 apps/extension/lib/ui-strings.ts:54-60  937e78526162  lines=7
   <- docs-dev/install.md:478  :: export function fixCommand(stage: string | null | undefined…
