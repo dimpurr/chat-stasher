@@ -16,6 +16,7 @@
  */
 
 import type { AlarmsApi, AlarmSyncResult } from './backfill/alarm';
+import { OUTBOX_NEAR_FULL_FRACTION } from './outbox';
 
 export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
 
@@ -25,6 +26,27 @@ export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
  * else.
  */
 export const OUTBOX_ALARM_PERIOD_MINUTES = 5;
+
+function isOutboxSummary(value: unknown): value is {
+  pending: number;
+  rejected: number;
+  bytes: number;
+  capacityBytes: number;
+  full: boolean;
+  nearFull: boolean;
+} {
+  if (!value || typeof value !== 'object') return false;
+  const summary = value as Record<string, unknown>;
+  const counts = [summary.pending, summary.rejected, summary.bytes, summary.capacityBytes];
+  if (!counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) return false;
+  if (summary.capacityBytes === 0) return false;
+  const bytes = summary.bytes as number;
+  const capacityBytes = summary.capacityBytes as number;
+  return typeof summary.full === 'boolean'
+    && typeof summary.nearFull === 'boolean'
+    && summary.full === (bytes >= capacityBytes)
+    && summary.nearFull === (bytes >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION);
+}
 
 export async function syncOutboxAlarm(
   alarms: AlarmsApi | null | undefined,
@@ -61,12 +83,11 @@ export async function syncOutboxAlarmFromRead(
   let pending: number | null = null;
   try {
     const summary = await readSummary();
-    if (summary && typeof summary === 'object') {
-      const count = (summary as { pending?: unknown }).pending;
-      if (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) pending = count;
-    }
-  } catch {
+    if (isOutboxSummary(summary)) pending = summary.pending;
+    else console.warn('[chat-stasher] outbox summary is unreadable or malformed; keeping retry alarm scheduled');
+  } catch (err) {
     // The API exists, so an unreadable queue is not evidence that it is empty.
+    console.warn('[chat-stasher] outbox summary read failed; keeping retry alarm scheduled', (err as Error).message);
   }
   return syncOutboxAlarm(alarms, pending);
 }

@@ -5,10 +5,6 @@ import {
   syncOutboxAlarmFromRead,
 } from '../lib/outbox-alarm';
 
-function fakeStore(read: () => Promise<unknown>) {
-  return { read };
-}
-
 function fakeAlarms() {
   const live = new Map<string, { periodInMinutes?: number }>();
   const calls: string[] = [];
@@ -31,15 +27,16 @@ function fakeAlarms() {
 
 describe('W477 · unknown outbox reads keep the retry alarm scheduled', () => {
   it.each([
-    ['database absent', async () => null],
+    ['summary reader returns null', async () => null],
     ['read throws', async () => { throw new Error('synthetic read failure'); }],
     ['malformed summary', async () => ({ pending: '0' })],
     ['missing pending count', async () => ({})],
+    ['malformed sibling field', async () => ({ pending: 0, rejected: '0', bytes: 0, capacityBytes: 1, full: false, nearFull: false })],
+    ['inconsistent sibling fields', async () => ({ pending: 0, rejected: 0, bytes: 1, capacityBytes: 1, full: false, nearFull: false })],
   ])('%s is unknown, never a verified empty outbox', async (_case, read) => {
     const alarms = fakeAlarms();
-    const store = fakeStore(read);
 
-    expect(await syncOutboxAlarmFromRead(alarms.api, true, store.read)).toBe('created');
+    expect(await syncOutboxAlarmFromRead(alarms.api, true, read)).toBe('created');
     expect(alarms.live.get(OUTBOX_ALARM_NAME)).toEqual({ periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
     expect(alarms.calls).toEqual([`create:${OUTBOX_ALARM_NAME}`]);
   });
@@ -58,7 +55,14 @@ describe('W477 · unknown outbox reads keep the retry alarm scheduled', () => {
     const alarms = fakeAlarms();
     alarms.live.set(OUTBOX_ALARM_NAME, { periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
 
-    expect(await syncOutboxAlarmFromRead(alarms.api, true, async () => ({ pending: 0 }))).toBe('cleared');
+    expect(await syncOutboxAlarmFromRead(alarms.api, true, async () => ({
+      pending: 0,
+      rejected: 0,
+      bytes: 0,
+      capacityBytes: 256 * 1024 * 1024,
+      full: false,
+      nearFull: false,
+    }))).toBe('cleared');
     expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(false);
     expect(alarms.calls).toEqual([`clear:${OUTBOX_ALARM_NAME}`]);
   });
