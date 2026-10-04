@@ -136,7 +136,9 @@ function hasReadableCoverageShape(header: BackfillHeader): boolean {
     || typeof halted.reason !== 'string'
     || halted.reason.length === 0
     || !finiteTimestamp(halted.at)
-    || typeof halted.detail !== 'string')) return false;
+    || typeof halted.detail !== 'string'
+    || (halted.retryAt !== undefined && !finiteTimestamp(halted.retryAt))
+    || (halted.attempts !== undefined && (!nonNegativeInteger(halted.attempts) || halted.attempts < 1)))) return false;
 
   if ((header.emptyStreak !== undefined && !nonNegativeInteger(header.emptyStreak))
     || (header.failuresDropped !== undefined && !nonNegativeInteger(header.failuresDropped))) return false;

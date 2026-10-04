@@ -93,6 +93,10 @@ describe('W113 · which records the page will show', () => {
       parkedEmpty: ['synthetic-id'],
       halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop' },
     }))).toBe(true);
+    expect(isReadableHeaderAt(stateKey('chatgpt', scope), header({
+      scope,
+      halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop', retryAt: 2, attempts: 1 },
+    }))).toBe(true);
   });
 
   it('🔴 refuses a header whose own identity disagrees with its address', () => {
@@ -135,6 +139,11 @@ describe('W113 · which records the page will show', () => {
       ['halted stop is false', { halted: false as unknown as BackfillHeader['halted'] }],
       ['halted stop lacks a reason', { halted: { at: 1, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
       ['halted stop has a null timestamp', { halted: { reason: 'rate-limited', at: null, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
+      ['halted retry time is NaN', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', retryAt: Number.NaN } }],
+      ['halted retry time is negative', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', retryAt: -1 } }],
+      ['halted attempt count is NaN', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: Number.NaN } }],
+      ['halted attempt count is zero', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 0 } }],
+      ['halted attempt count is fractional', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 1.5 } }],
     ];
 
     for (const [label, change] of malformed) {
