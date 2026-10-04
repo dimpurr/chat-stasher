@@ -119,7 +119,7 @@ test('a Kimi ListMessages response on a /chat/<id> page becomes one bundle', asy
 });
 
 test('a response that is not the messages envelope is refused rather than captured', async ({ ext }) => {
-  // The row's shape gate is `requiredPaths: ['messages']`. This body is valid
+  // The row's shape gate is `requiredArrayPaths: ['messages']`. This body is valid
   // JSON, 2xx, POST, right path — and carries the *feed* envelope instead. A
   // capture here would file a conversation-list preview as the conversation.
   const { escaped } = await serve(ext);
