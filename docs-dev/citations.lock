@@ -401,7 +401,7 @@ apps/extension/lib/hook-status.ts:289-418  8d9dfc487218  lines=130
   <- docs-dev/privacy.md:506  :: *    the two facts were one silent nothing until W47.
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs-dev/privacy.md:500  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
-apps/extension/lib/host-status.ts:88-112  f8682e917e91  lines=25
+apps/extension/lib/host-status.ts:114-138  f8682e917e91  lines=25
   <- docs-dev/privacy.md:500  :: export function toRecord(
 apps/extension/lib/install-identity.ts:1-23  35dd701f44d5  lines=23
   <- docs-dev/privacy.md:357  :: /** Per-profile extension identity. Browser APIs deliberate…

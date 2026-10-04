@@ -18,6 +18,18 @@ function nonFiniteTimestampStore(key: string, record: Record<string, unknown>) {
   return store;
 }
 
+/** In-memory store that preserves exact object references without JSON serialization. */
+function referenceStore(seed: Record<string, unknown> = {}) {
+  const stored: Record<string, unknown> = { ...seed };
+  return {
+    stored,
+    async load(key: string) { return stored[key] ?? null; },
+    async save(key: string, value: unknown) { stored[key] = value; },
+    async remove(key: string) { delete stored[key]; },
+    async keys() { return Object.keys(stored); },
+  };
+}
+
 describe('persisted host status records', () => {
   it.each([
     ['negative', -1],
@@ -69,6 +81,50 @@ describe('persisted host status records', () => {
     const store = memoryStore({ [HOST_STATUS_KEY]: expected });
 
     expect(await loadHostStatus(store)).toEqual(expected);
+  });
+
+  it('accepts status records carrying unexpected extra keys', async () => {
+    const { HOST_STATUS_KEY, loadHostStatus } = await import('../lib/host-status');
+    const record = {
+      at: AT,
+      ok: true,
+      stage: '/synthetic/stage',
+      extraDiagnosticInfo: 'synthetic-extra-info',
+    };
+    const store = memoryStore({ [HOST_STATUS_KEY]: record });
+
+    expect(await loadHostStatus(store)).toEqual(record);
+  });
+
+  it('round-trips checkHost results through a reference-preserving store', async () => {
+    const { checkHost, loadHostStatus } = await import('../lib/host-status');
+    const store = referenceStore();
+
+    // Deterministic failure path without native runtime APIs: writes kind: undefined, detail: undefined
+    const failed = await checkHost(store as never, { now: AT });
+    expect(failed.ok).toBe(false);
+    expect(await loadHostStatus(store as never)).toEqual(failed);
+
+    // Controlled success path
+    const runtime = {
+      id: 'synthetic-extension-id',
+      sendNativeMessage(_host: unknown, _message: unknown, callback: (response: unknown) => void) {
+        callback({
+          protocol: 1,
+          type: 'hello',
+          ok: true,
+          host_version: '0.0.0-synthetic',
+          machine: 'synthetic-machine',
+          stage: '/synthetic/stage',
+        });
+      },
+    };
+    vi.stubGlobal('browser', { runtime });
+    vi.stubGlobal('chrome', { runtime });
+
+    const success = await checkHost(store as never, { now: AT + 10 });
+    expect(success.ok).toBe(true);
+    expect(await loadHostStatus(store as never)).toEqual(success);
   });
 
   it('keeps the last known stage when a controlled hello fails after success', async () => {
@@ -152,5 +208,18 @@ describe('persisted host pause records', () => {
     const store = memoryStore({ [HOST_PAUSE_KEY]: expected });
 
     expect(await loadHostPause(store)).toEqual(expected);
+  });
+
+  it('round-trips setHostPause records through a reference-preserving store', async () => {
+    const { setHostPause, loadHostPause } = await import('../lib/host-status');
+    const store = referenceStore();
+
+    const recordWithDetail = { at: AT, reason: 'host-unavailable', detail: 'synthetic error' };
+    await setHostPause(store as never, recordWithDetail);
+    expect(await loadHostPause(store as never)).toEqual(recordWithDetail);
+
+    const recordWithoutDetail = { at: AT + 1, reason: 'host-unavailable', detail: undefined };
+    await setHostPause(store as never, recordWithoutDetail);
+    expect(await loadHostPause(store as never)).toEqual(recordWithoutDetail);
   });
 });

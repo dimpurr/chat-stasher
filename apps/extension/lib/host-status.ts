@@ -64,7 +64,7 @@ function optionalStringFieldsAreValid(
   value: Record<string, unknown>,
   fields: readonly string[],
 ): boolean {
-  return fields.every((field) => !(field in value) || typeof value[field] === 'string');
+  return fields.every((field) => value[field] === undefined || typeof value[field] === 'string');
 }
 
 export async function loadHostStatus(store: BackfillStore | null): Promise<HostStatusRecord | null> {
@@ -93,7 +93,7 @@ export async function loadHostPause(store: BackfillStore | null): Promise<HostPa
     || typeof raw.reason !== 'string'
     || !optionalStringFieldsAreValid(raw, ['detail'])
   ) return null;
-  return { reason: raw.reason, at: raw.at, detail: typeof raw.detail === 'string' ? raw.detail : undefined };
+  return { reason: raw.reason, at: raw.at, detail: raw.detail as string | undefined };
 }
 
 /**
@@ -172,15 +172,14 @@ async function saveHostStatus(
     // malformed, a string lastKnownStage remains the previously established
     // path evidence and must survive this replacement failure.
     const raw = await store.load(HOST_STATUS_KEY);
-    const stored = parseHostStatus(raw);
     const knownStage = isRecord(raw)
       ? (typeof raw.lastKnownStage === 'string'
         ? raw.lastKnownStage
         : raw.ok === true && typeof raw.stage === 'string' ? raw.stage : undefined)
       : undefined;
     const kept: HostStatusRecord =
-      record.lastKnownStage == null && (knownStage ?? stored?.lastKnownStage) != null
-        ? { ...record, lastKnownStage: knownStage ?? stored?.lastKnownStage }
+      record.lastKnownStage == null && knownStage != null
+        ? { ...record, lastKnownStage: knownStage }
         : record;
     await store.save(HOST_STATUS_KEY, kept);
     return kept;
