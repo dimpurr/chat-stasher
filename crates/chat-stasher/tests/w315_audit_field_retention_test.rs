@@ -176,6 +176,61 @@ fn restored_value(store: &BackupStore, key: &rustic_core::repofile::MasterKey, i
     }
 }
 
+/// Restore one session's full body from a **chosen** snapshot — unlike
+/// [`BackupStore::read_session_concat`], which always answers from the newest
+/// snapshot that holds the session. Reading the earlier generation back is
+/// what proves the append-only archive kept it, rather than only counting
+/// that it is listed.
+fn session_body_from_snapshot(
+    repo: &rustic_core::Repository<rustic_core::IndexedFullStatus>,
+    snapshot: &rustic_core::repofile::SnapshotFile,
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+) -> Vec<u8> {
+    let canon = stage_root
+        .canonicalize()
+        .expect("canonicalize synthetic stage root");
+    let dir_rel = canon
+        .strip_prefix("/")
+        .unwrap_or(&canon)
+        .join("sessions")
+        .join(machine)
+        .join(session_id);
+    let dir_node = repo
+        .node_from_snapshot_and_path(snapshot, &dir_rel.to_string_lossy())
+        .expect("session directory is present in the chosen snapshot");
+    let entries: Vec<_> = repo
+        .ls(&dir_node, &rustic_core::LsOptions::default())
+        .expect("walk the chosen snapshot's session directory")
+        .collect::<rustic_core::RusticResult<Vec<_>>>()
+        .expect("collect the chosen snapshot's session shard entries");
+    let mut shards: Vec<_> = entries
+        .into_iter()
+        .filter_map(|(path, node)| {
+            if node.node_type != rustic_core::repofile::NodeType::File {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?.to_string();
+            let seq = store::parse_shard_seq(&name)?;
+            Some((seq, path, node))
+        })
+        .collect();
+    shards.sort_by(|(seq_a, path_a, _), (seq_b, path_b, _)| {
+        seq_a.cmp(seq_b).then_with(|| path_a.cmp(path_b))
+    });
+    assert!(
+        !shards.is_empty(),
+        "the chosen snapshot holds at least one shard for the session"
+    );
+    let mut body = Vec::new();
+    for (_, _, node) in &shards {
+        repo.dump(node, &mut body)
+            .expect("restore session shard from the chosen snapshot");
+    }
+    body
+}
+
 #[test]
 fn audit_fields_survive_collect_seal_push_and_readback() {
     let sandbox = test_support::Sandbox::new();
@@ -185,6 +240,7 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     let claude_parent = json!({
         "type": "assistant", "userType": "external", "isSidechain": false,
         "entrypoint": "cli", "timestamp": "2026-10-02T12:00:00.000Z",
+        "parentUuid": null, "uuid": "uuid_claude_parent_w315",
         "cwd": "/synthetic/project", "sessionId": "claude-parent-w315",
         "message": {
             "id": "msg_claude_parent_w315", "model": "claude-synthetic-v1",
@@ -196,6 +252,7 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     let claude_api_error = json!({
         "type": "assistant", "userType": "external", "isSidechain": false,
         "entrypoint": "cli", "timestamp": "2026-10-02T12:01:00.000Z",
+        "parentUuid": "uuid_claude_parent_w315", "uuid": "uuid_claude_error_w315",
         "cwd": "/synthetic/project", "sessionId": "claude-parent-w315",
         "isApiErrorMessage": true,
         "error": {"status": 429, "class": "synthetic_rate_limit", "message": "synthetic API error"},
@@ -205,14 +262,15 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     let claude_worker = json!({
         "type": "assistant", "userType": "external", "isSidechain": true,
         "entrypoint": "agent", "timestamp": "2026-10-02T12:02:00.000Z",
+        "parentUuid": "uuid_claude_parent_w315", "uuid": "uuid_claude_worker_w315",
         "cwd": "/synthetic/project", "sessionId": "agent-worker-w315",
-        "parentUuid": "msg_claude_parent_w315",
         "message": {"id": "msg_claude_worker_w315", "model": "claude-synthetic-v1",
                     "usage": {"input_tokens": 5, "output_tokens": 4, "future_worker_counter": 29},
                     "content": [{"type": "text", "text": "synthetic worker"}]}
     });
     let claude_tool_result = json!({
         "type": "user", "timestamp": "2026-10-02T12:03:00.000Z",
+        "parentUuid": "uuid_claude_error_w315", "uuid": "uuid_claude_tool_w315",
         "cwd": "/synthetic/project", "sessionId": "claude-parent-w315",
         "message": {"id": "msg_claude_tool_w315", "role": "user",
                     "content": [{"type": "tool_result", "tool_use_id": "tool_w315",
@@ -463,10 +521,47 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     );
     assert_eq!(parent["records"][0]["cwd"], "/synthetic/project");
     assert_eq!(parent["records"][0]["sessionId"], "claude-parent-w315");
+    assert_eq!(parent["records"][0]["uuid"], "uuid_claude_parent_w315");
+    assert_eq!(
+        parent["records"][0]["parentUuid"],
+        Value::Null,
+        "the parent-session root record keeps an absent parent as null, never empty"
+    );
+    assert_eq!(parent["records"][1]["uuid"], "uuid_claude_error_w315");
+    assert_eq!(
+        parent["records"][1]["parentUuid"], "uuid_claude_parent_w315",
+        "the API error record's within-session parent link is retained"
+    );
+    assert_eq!(parent["records"][2]["uuid"], "uuid_claude_tool_w315");
+    assert_eq!(
+        parent["records"][2]["parentUuid"], "uuid_claude_error_w315",
+        "the tool-result record's within-session parent link is retained"
+    );
     assert_eq!(worker["records"][0]["isSidechain"], true);
     assert_eq!(
-        worker["records"][0]["parentUuid"], "msg_claude_parent_w315",
+        worker["records"][0]["uuid"], "uuid_claude_worker_w315",
+        "Claude worker record UUID is retained"
+    );
+    let worker_parent_uuid = worker["records"][0]["parentUuid"]
+        .as_str()
+        .expect("retained worker parentUuid is a string");
+    assert_eq!(
+        worker_parent_uuid, "uuid_claude_parent_w315",
         "Claude worker parent reference is the retained parentUuid"
+    );
+    let resolved_parent = parent["records"]
+        .as_array()
+        .expect("the restored parent body has a records array")
+        .iter()
+        .find(|record| record["uuid"].as_str() == Some(worker_parent_uuid))
+        .expect("the restored worker reference resolves to a restored parent record");
+    assert_eq!(
+        resolved_parent["message"]["id"], "msg_claude_parent_w315",
+        "the worker's retained parentUuid resolves to the restored parent message"
+    );
+    assert_eq!(
+        resolved_parent["message"]["usage"]["input_tokens"], 11,
+        "the resolved restored parent carries the parent's retained usage"
     );
     assert_eq!(worker["records"][0]["type"], "assistant");
     assert_eq!(worker["records"][0]["userType"], "external");
@@ -577,6 +672,7 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     let claude_parent_followup = json!({
         "type": "assistant", "userType": "external", "isSidechain": false,
         "entrypoint": "cli", "timestamp": "2026-10-02T12:06:00.000Z",
+        "parentUuid": "uuid_claude_tool_w315", "uuid": "uuid_claude_followup_w315",
         "cwd": "/synthetic/project", "sessionId": "claude-parent-w315",
         "message": {"id": "msg_claude_parent_followup_w315",
                     "model": "claude-synthetic-v1",
@@ -604,19 +700,41 @@ fn audit_fields_survive_collect_seal_push_and_readback() {
     assert_eq!(latest_parent, latest_parent_bytes);
     assert_eq!(digest(&latest_parent), digest(&latest_parent_bytes));
     let (repo, _) = archive.open_indexed(&key).expect("open generation archive");
+    let generations: Vec<_> = repo
+        .get_all_snapshots()
+        .expect("list source-generation snapshots")
+        .into_iter()
+        .filter(|snapshot| snapshot.hostname == MACHINE)
+        .collect();
     assert_eq!(
-        repo.get_all_snapshots()
-            .expect("list source-generation snapshots")
-            .into_iter()
-            .filter(|snapshot| snapshot.hostname == MACHINE)
-            .count(),
+        generations.len(),
         2,
         "both source generations remain in append-only archive snapshots"
     );
+    let earliest = generations
+        .iter()
+        .min()
+        .expect("the earlier generation's snapshot is still listed");
+    let earliest_parent = session_body_from_snapshot(
+        &repo,
+        earliest,
+        &stage,
+        MACHINE,
+        &id_for_path(&claude_parent_path),
+    );
+    assert_eq!(
+        earliest_parent, claude_parent_bytes,
+        "the earlier append-only snapshot restores the original generation's bytes unchanged"
+    );
+    assert_eq!(digest(&earliest_parent), digest(&claude_parent_bytes));
     let latest_parent_value = restored_value(&archive, &key, &id_for_path(&claude_parent_path));
     assert_eq!(
         latest_parent_value["records"][3], claude_parent_followup,
         "record order is preserved in the latest source generation"
+    );
+    assert_eq!(
+        latest_parent_value["records"][3]["parentUuid"], "uuid_claude_tool_w315",
+        "the appended generation's own parent link is retained"
     );
 }
 
@@ -633,7 +751,8 @@ fn subagents_source_path_provenance_is_retained() {
     let source = source_root.join("project/subagents/agent-worker-w315.jsonl");
     let record = json!({
         "type": "assistant", "timestamp": "2026-10-02T12:02:00.000Z",
-        "sessionId": "agent-worker-w315", "parentUuid": "msg_parent_w315",
+        "sessionId": "agent-worker-w315", "uuid": "uuid_worker_w315",
+        "parentUuid": "uuid_parent_w315",
         "isSidechain": true,
         "message": {"id": "msg_worker_w315", "model": "claude-synthetic-v1",
                     "usage": {"input_tokens": 5, "output_tokens": 4}}
