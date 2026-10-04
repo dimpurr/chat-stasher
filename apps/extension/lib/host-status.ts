@@ -53,21 +53,47 @@ export interface HostPauseRecord {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function optionalStringFieldsAreValid(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+): boolean {
+  return fields.every((field) => value[field] === undefined || typeof value[field] === 'string');
 }
 
 export async function loadHostStatus(store: BackfillStore | null): Promise<HostStatusRecord | null> {
   if (!store) return null;
-  const raw = await store.load(HOST_STATUS_KEY);
-  if (!isRecord(raw) || typeof raw.at !== 'number' || typeof raw.ok !== 'boolean') return null;
+  return parseHostStatus(await store.load(HOST_STATUS_KEY));
+}
+
+function parseHostStatus(raw: unknown): HostStatusRecord | null {
+  if (
+    !isRecord(raw)
+    || !isTimestamp(raw.at)
+    || typeof raw.ok !== 'boolean'
+    || !optionalStringFieldsAreValid(raw, [
+      'reason', 'kind', 'detail', 'machine', 'stage', 'hostVersion', 'lastKnownStage',
+    ])
+  ) return null;
   return raw as unknown as HostStatusRecord;
 }
 
 export async function loadHostPause(store: BackfillStore | null): Promise<HostPauseRecord | null> {
   if (!store) return null;
   const raw = await store.load(HOST_PAUSE_KEY);
-  if (!isRecord(raw) || typeof raw.at !== 'number' || typeof raw.reason !== 'string') return null;
-  return { reason: raw.reason, at: raw.at, detail: typeof raw.detail === 'string' ? raw.detail : undefined };
+  if (
+    !isRecord(raw)
+    || !isTimestamp(raw.at)
+    || typeof raw.reason !== 'string'
+    || !optionalStringFieldsAreValid(raw, ['detail'])
+  ) return null;
+  return { reason: raw.reason, at: raw.at, detail: raw.detail as string | undefined };
 }
 
 /**
@@ -142,10 +168,18 @@ async function saveHostStatus(
 ): Promise<HostStatusRecord> {
   if (!store) return record;
   try {
-    const stored = await loadHostStatus(store);
+    // Read the raw value once: even when unrelated metadata makes the record
+    // malformed, a string lastKnownStage remains the previously established
+    // path evidence and must survive this replacement failure.
+    const raw = await store.load(HOST_STATUS_KEY);
+    const knownStage = isRecord(raw)
+      ? (typeof raw.lastKnownStage === 'string'
+        ? raw.lastKnownStage
+        : raw.ok === true && typeof raw.stage === 'string' ? raw.stage : undefined)
+      : undefined;
     const kept: HostStatusRecord =
-      record.lastKnownStage == null && stored?.lastKnownStage != null
-        ? { ...record, lastKnownStage: stored.lastKnownStage }
+      record.lastKnownStage == null && knownStage != null
+        ? { ...record, lastKnownStage: knownStage }
         : record;
     await store.save(HOST_STATUS_KEY, kept);
     return kept;
