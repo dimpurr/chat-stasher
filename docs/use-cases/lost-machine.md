@@ -16,7 +16,7 @@ Nothing below runs on the lost machine and nothing below needs it. Every command
 - **The destination**, declared in your config the way the lost machine declared it, and **its key file**. A destination is a full copy of an archive, and the key file is the only thing that opens it. There is no key recovery: if that file is gone, nothing on this page can help ([troubleshooting.md](../troubleshooting.md#i-lost-the-master-key)).
 - **The right key file — this is the step people get wrong.** Each archive copy has its own key. The destination `offsite` is opened by `masterkey-offsite.json`, not by the lost machine's `masterkey.json`, which opens that machine's *local* archive and is not used here at all. Restore the destination's own key at the same path it had on the lost machine — `~/.local/share/chat-stasher/masterkey-<destination>.json`, unless that machine's config set `key_file` to somewhere else ([config.md → `[destinations.<name>]`](../config.md#destinationsname) documents `key_file`) — and put it back at exactly that path. Getting this wrong is not silent: the tool exits `3` and says `cannot read masterkey file … (lost key?)`, which means nothing was read, not that the archive is empty. [troubleshooting.md](../troubleshooting.md#i-lost-the-master-key) is the short version.
 - **`chat-stasher`, on any computer.** Reading an archive needs the tool, not the machine that wrote it. If you are on a replacement machine, [troubleshooting.md](../troubleshooting.md#i-want-to-read-my-archive-on-another-machine) is the two-minute version of getting a destination declared here.
-- **Patience for one step.** One command below reads every byte of the destination rather than its metadata, and says so where it appears.
+- **Patience for content reads.** `verify --level l2` downloads and hashes every pack; later steps that read conversation bodies or write exports describe their scope where they appear.
 
 ## Before you start: can this archive be read at all?
 
@@ -252,6 +252,10 @@ chat-stasher ui --destination offsite
 
 ## 5. Read one back
 
+`read` does not print the conversation text. It fetches the archived shards and
+reports their lengths and digests; use `export` in step 7 to write conversation
+files you can open.
+
 ```sh
 chat-stasher read --destination offsite --machine 0123456789abcdef0123456789abcdef \
   --session claude-code.0123456789abcdef0123456789abcdef.aaaa0001-1111-4111-8111-111111111111
@@ -320,7 +324,7 @@ chat-stasher read --all-machines --destination offsite --full-ids
 
 (That run's header and wall-clock lines are left out, and its two 64-character snapshot ids are shortened to fit the page; every machine and session row is verbatim.)
 
-This is the complete enumeration, and it is also the expensive one: unlike `search`, it fetches and hashes **every shard it lists**, so on a real archive it is a full download, not a listing. The cheap way to get the same names is to take the sessions out first and read the manifest, which is the last step below.
+This is the complete enumeration, and it is also the expensive one: unlike `search`, it fetches and hashes **every shard it lists**, so on a real archive it is a full download, not a listing. An export manifest gives you the full names for sessions that export selected, but the example in the next step filters by machine, tool and date, so it is not an enumeration of the whole archive.
 
 ## 6. Check the archive itself
 
@@ -387,7 +391,7 @@ Read the manifest before you trust the directory:
 python3 -m json.tool /tmp/uc/recovered/manifest.json
 ```
 
-It carries, per session, the machine, the tool, the full session id, the first and last message time, the shard count, the bytes written, the SHA-256 of the written file and the filters that were applied; and at the top level what no filter could place, which machines' indexes could not be read, and what could not be written. The `sha256` there is the same digest `read` printed, so one session can be checked twice by two different commands.
+It carries, per session, the machine, the tool, the full session id, the first and last message time, the shard count, the bytes written, the SHA-256 of the written file and the filters that were applied; and at the top level what no filter could place, which machines' indexes could not be read, and what could not be written. The manifest digest is for the exported file. It matches `read`'s archived digest only when the export preserves the full archived bytes; filters such as `--turns user` or `--trim-to-window` can change those bytes.
 
 ## When the conversation is not there
 
