@@ -97,13 +97,16 @@ describe('W612 · uniformBetween clamps before it scales', () => {
     expect(uniformBetween(draw(Number.NaN), MIN, MAX)).toBe(MIN);
   });
 
-  it('🔴 both infinities are clamped rather than propagated', () => {
-    // `Number.isFinite` is false for each, so both take the same branch `NaN`
-    // does and both land on `min`. Stated exactly because `+Infinity` landing on
-    // `min` rather than `max` is the conservative choice — it can only slow the
-    // leg down — and because propagating either one would produce a delay of
-    // `Infinity` ms (a value that satisfies no interval check downstream).
-    expect(uniformBetween(draw(Number.POSITIVE_INFINITY), MIN, MAX)).toBe(MIN);
+  it('🔴 the infinities clamp by sign: +Infinity to max, -Infinity to min', () => {
+    // An infinity has a sign, so it clamps like any other out-of-range draw:
+    // `+Infinity` is a positive draw past `1` and lands on `max`, `-Infinity` a
+    // negative draw below `0` and lands on `min`. `NaN` is the only non-finite
+    // input with no position on the line, which is why it alone takes the
+    // conservative floor. Stated exactly because propagating either infinity
+    // would produce a delay of `Infinity` ms (a value that satisfies no interval
+    // check downstream), and because `+Infinity` reaching `max` rather than
+    // `min` is the difference between a clamp and an arbitrary fallback.
+    expect(uniformBetween(draw(Number.POSITIVE_INFINITY), MIN, MAX)).toBe(MAX);
     expect(uniformBetween(draw(Number.NEGATIVE_INFINITY), MIN, MAX)).toBe(MIN);
     // No draw, hostile or broken, escapes the range — which is what
     // w3-jitter.test.ts's containment assertion covers, restated here so the two

@@ -37,11 +37,14 @@ export const systemRandom: RandomFn = () => Math.random();
  * defensive decoration: the one invariant this change must not break is "never
  * below a documented minimum", and an unclamped draw of, say, `-0.2` would
  * return a number below `min` from a function whose only documented promise is
- * that it does not. `NaN` lands on `min` (the drawing is `min + 0`), which is
- * the conservative direction.
+ * that it does not. `NaN` has no position on the number line, so it cannot be
+ * clamped and lands on `min` (the drawing is `min + 0`), the conservative
+ * direction. An infinity does have a sign, so it clamps exactly as an
+ * out-of-range finite draw of that sign would: `+Infinity` to `max`,
+ * `-Infinity` to `min`.
  */
 export function uniformBetween(random: RandomFn, min: number, max: number): number {
   const raw = random();
-  const clamped = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+  const clamped = Number.isNaN(raw) ? 0 : Math.min(1, Math.max(0, raw));
   return min + clamped * (max - min);
 }
