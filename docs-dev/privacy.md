@@ -419,7 +419,7 @@ For platforms with a known volatile field (ChatGPT's `safe_urls` today), the
 bundle since W213 also carries a **content fingerprint**: sha256 of the raw
 body with that volatile field removed, so two copies of one conversation that
 differ only in a rotating URL count as the same content
-(`apps/extension/lib/recapture.ts:103-116`, `:223-237`). It is derived from the
+(`apps/extension/lib/recapture.ts:95-116`, `:223-237`). It is derived from the
 body the bundle already carries, adds nothing a reader of the bundle did not
 already have, and exists so the export-import escape hatch keeps the archive
 able to answer "is this exact content already stored?" for a bundle that never
@@ -622,7 +622,9 @@ Three things in that table deserve to be called out rather than buried:
   is made **only when the first two answered nothing**, it fetches your account's
   list of organizations and nothing else, and it is sent through the same
   allowlisted same-origin channel as every other backfill request
-  (`apps/extension/lib/backfill/claude-page.ts:97-116`). The resolution itself runs
+  (`apps/extension/lib/backfill/claude-org.ts:48-49`, `:219-236`;
+  `apps/extension/lib/backfill/enumerate.ts:4059`;
+  `apps/extension/lib/backfill/claude-page.ts:97-116`). The resolution itself runs
   **in the claude.ai page**, over the channel the backfill already uses, and only
   when the extension actually needs the organization: when you press the popup's
   start button for that platform, and on a wake-up whose recorded scope is not an
