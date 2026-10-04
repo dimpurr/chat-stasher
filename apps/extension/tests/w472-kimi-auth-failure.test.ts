@@ -186,7 +186,39 @@ describe('W472 · Kimi auth failure probe', () => {
     expect(reads).toEqual([]);
     expect(await result.text()).toBe(PLATFORM_REFUSAL);
     expect(result.status).toBe(401);
-    expect(JSON.stringify(result)).not.toContain(TOKEN_OLD);
-    expect(JSON.stringify(result)).not.toContain(TOKEN_FRESH);
+    const serializedResponse = JSON.stringify({ status: result.status, text: await result.text() });
+    expect(serializedResponse).not.toContain(TOKEN_OLD);
+    expect(serializedResponse).not.toContain(TOKEN_FRESH);
+  });
+
+  it('sends a retry without bearer when the retry-time token read throws', async () => {
+    let readCount = 0;
+    const fake = fakeFetch([
+      response(401, PLATFORM_REFUSAL),
+      response(401, PLATFORM_REFUSAL),
+    ]);
+    const authorizedFetch = createKimiAuthorizedFetch(ORIGIN, fake.fetch, {
+      readToken: () => {
+        readCount += 1;
+        if (readCount === 1) return TOKEN_OLD;
+        throw new Error(`synthetic retry storage failure ${TOKEN_FRESH}`);
+      },
+      language: null,
+    });
+
+    const result = await authorizedFetch(`${ORIGIN}${KIMI_LIST_PATH}`, {
+      method: 'POST',
+      body: JSON.stringify({ page_size: 100, page_token: '' }),
+    });
+
+    expect(fake.calls).toHaveLength(2);
+    expect(headersOf(fake.calls[0]!).authorization).toBe(`Bearer ${TOKEN_OLD}`);
+    expect(headersOf(fake.calls[1]!).authorization).toBeUndefined();
+    expect(readCount).toBe(2);
+    expect(result.status).toBe(401);
+    const serializedResponse = JSON.stringify({ status: result.status, text: await result.text() });
+    expect(serializedResponse).toContain('synthetic auth refusal');
+    expect(serializedResponse).not.toContain(TOKEN_OLD);
+    expect(serializedResponse).not.toContain(TOKEN_FRESH);
   });
 });
