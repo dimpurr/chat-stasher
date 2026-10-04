@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+#[cfg(test)]
+#[path = "test_support.rs"]
+mod test_support;
+
 const UNRESOLVED_MACHINE: &str = "<machine-identity-unavailable>";
 
 /// Narrate one line on stdout, and let a failed write be a non-event.
@@ -2575,6 +2579,10 @@ fn rebuild_activity_index(
     // holds (see the doc comment above).
     let previous = read_previous_activity_rows(&out_path)?;
     let recorded_bodies = stage_manifest_bodies(stage, machine);
+    let session_provenance =
+        activity::load_session_provenance(stage, machine).map_err(|error| {
+            ActivityIndexError::Read(format!("cannot read session provenance: {error}"))
+        })?;
     let mut index_temp = tempfile::Builder::new()
         .prefix(".activity-index-")
         .tempfile_in(&meta_dir)
@@ -2648,7 +2656,7 @@ fn rebuild_activity_index(
                 (Some(measured), Some(recorded)) if measured == recorded => previous_row.cloned(),
                 _ => None,
             };
-            let row = match carried {
+            let mut row = match carried {
                 // Verbatim. Re-deriving it is impossible (the bytes are gone)
                 // and replacing it with zeros is the defect this rule fixes.
                 Some(row) => row,
@@ -2685,6 +2693,10 @@ fn rebuild_activity_index(
                     activity::build_row(&session_id, machine, &harness, &[])
                 }
             };
+            row.session_provenance = session_provenance
+                .get(&session_id)
+                .cloned()
+                .or(row.session_provenance);
             index_temp
                 .write_all(activity::to_jsonl(&row).as_bytes())
                 .map_err(|e| {
@@ -2738,6 +2750,12 @@ fn rebuild_activity_index(
         row.measured_body = Some(activity::MeasuredBody {
             shard_count,
             concat_sha256: hex_digest(&hasher.finalize()),
+        });
+        row.session_provenance = session_provenance.get(&session_id).cloned().or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|rows| rows.get(&session_id))
+                .and_then(|previous_row| previous_row.session_provenance.clone())
         });
         index_temp
             .write_all(activity::to_jsonl(&row).as_bytes())
@@ -12042,19 +12060,29 @@ mod decision_surface_tests {
     }
 
     #[test]
-    fn rebuild_activity_index_writes_rows_for_each_session() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let stage = dir.path().join("stage");
+    fn rebuild_activity_index_carries_collection_session_provenance() {
+        let sandbox = test_support::Sandbox::new();
+        let stage = sandbox.root().join("stage");
         let machine = "mbp-test";
+        let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
         write_shard(
             &stage,
             machine,
-            "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            session,
             &[
                 cc_line("2025-01-15T12:34:56.789Z"),
                 cc_line("2025-01-15T13:45:07Z"),
             ],
         );
+        let meta = stage.join("meta").join(machine);
+        fs::create_dir_all(&meta).unwrap();
+        fs::write(
+            meta.join("session-provenance-v1.jsonl"),
+            format!(
+                "{{\"session_id\":\"{session}\",\"source_path_class\":\"subagents\",\"parent_session_ref\":\"parent-fixture-019bf00d\"}}\n"
+            ),
+        )
+        .unwrap();
         let outcome = rebuild_activity_index(&stage, machine, false)
             .expect("rebuild should succeed on a valid stage");
         assert_eq!(outcome.sessions_indexed, 1);
@@ -12078,6 +12106,12 @@ mod decision_surface_tests {
                 && rows[0].contains(r#""last_unix":1736948707"#),
             "row must carry the conversation span: {}",
             rows[0]
+        );
+        let row: serde_json::Value = serde_json::from_str(rows[0]).unwrap();
+        assert_eq!(row["session_provenance"]["source_path_class"], "subagents");
+        assert_eq!(
+            row["session_provenance"]["parent_session_ref"],
+            "parent-fixture-019bf00d"
         );
     }
 

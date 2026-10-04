@@ -1626,7 +1626,7 @@ fn coordinate_in_transaction(
 /// this codebase already uses for coordination, and identity state needs
 /// exactly the same guarantee — a lost update there would *hide* a detected
 /// clone, which is the one direction the whole mechanism must not fail in.
-const STATE_SCHEMA: &str = "PRAGMA busy_timeout=5000;
+const STATE_SCHEMA: &str = "
      CREATE TABLE IF NOT EXISTS ext_install(platform TEXT NOT NULL, install_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id));
      CREATE TABLE IF NOT EXISTS ext_platform(machine TEXT NOT NULL, platform TEXT NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0, next_enum INTEGER NOT NULL DEFAULT 0, next_detail INTEGER NOT NULL DEFAULT 0, detail_day TEXT NOT NULL DEFAULT '', detail_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(machine,platform));
      CREATE TABLE IF NOT EXISTS ext_install_v2(platform TEXT NOT NULL, install_id TEXT NOT NULL, account_key TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY(platform,install_id,account_key));
@@ -1651,9 +1651,36 @@ fn open_state_db_at(state_dir: &Path) -> anyhow::Result<rusqlite::Connection> {
         .with_context(|| format!("prepare coordination state in {}", state_dir.display()))?;
     let conn = rusqlite::Connection::open(state_dir.join("extension-coordination.sqlite3"))
         .context("open coordination state")?;
-    conn.execute_batch(STATE_SCHEMA)
-        .context("initialize coordination state")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .context("set coordination state busy timeout")?;
+    initialize_state_schema(&conn).context("initialize coordination state")?;
     Ok(conn)
+}
+
+/// Several native-host processes can arrive together before this database has
+/// its schema. SQLite's busy handler covers `BUSY`, but does not retry
+/// `LOCKED` results from competing schema initialization, so retry that narrow
+/// startup operation explicitly. The schema is idempotent, and the bound
+/// keeps a genuinely unavailable state database a visible error.
+fn initialize_state_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
+    let deadline = std::time::Instant::now() + RETRY_WINDOW;
+    loop {
+        match conn.execute_batch(STATE_SCHEMA) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// How many `(seq, nonce)` observations one `(machine, install_id)` retains.
@@ -4032,6 +4059,34 @@ pub fn serve_stdin() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use crate::json_out::TimeState;
+
+    #[test]
+    fn simultaneous_coordination_state_initialization_completes_for_every_host() {
+        let state = tempfile::tempdir().expect("state directory");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let path = state.path().to_path_buf();
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    open_state_db_at(&path).expect("concurrent state initialization")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            let conn = worker.join().expect("initializer thread");
+            let tables = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ext_identity'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("query initialized schema");
+            assert_eq!(tables, 1);
+        }
+    }
 
     #[test]
     fn coordination_refuses_all_unmarked_chatgpt_scopes_before_host_state_access() {

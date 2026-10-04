@@ -140,6 +140,8 @@ pub struct SessionHit {
     pub title: SessionLabel,
     /// Capture-time provenance and the latest supplemental attribution.
     pub provenance: Option<ProjectProvenance>,
+    /// Collection-time source path class and parent-session reference.
+    pub session_provenance: Option<crate::activity::SessionProvenance>,
     /// W219 · The comparable account keys this session's own records carry, from
     /// its activity-index row. Empty means no comparable key was recorded — an
     /// unknown account, or an index written before the field existed — which is
@@ -257,6 +259,8 @@ pub struct UnplacedSession {
     /// be unplaced for its *harness* while its conversation time is perfectly
     /// known — reading this off `why` would collapse the two.
     pub time_source: ActivityTimeSource,
+    /// Collection-time source path class and parent-session reference.
+    pub session_provenance: Option<crate::activity::SessionProvenance>,
 }
 
 impl UnplacedSession {
@@ -749,6 +753,9 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
             if let Some(provenance) = &h.provenance {
                 hit["provenance"] = serde_json::json!(provenance);
             }
+            if let Some(provenance) = &h.session_provenance {
+                hit["session_provenance"] = serde_json::json!(provenance);
+            }
             hit
         })
         .collect();
@@ -756,7 +763,7 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
         .unplaced
         .iter()
         .map(|u| {
-            serde_json::json!({
+            let mut item = serde_json::json!({
                 "machine": u.machine,
                 "session_short_id": u.short_id(),
                 "harness": u.harness,
@@ -770,7 +777,11 @@ pub fn report_json(report: &SearchReport, cost: bool) -> String {
                     UnplacedBy::NoContent => "no_content",
                 },
                 "why": u.why,
-            })
+            });
+            if let Some(provenance) = &u.session_provenance {
+                item["session_provenance"] = serde_json::json!(provenance);
+            }
+            item
         })
         .collect();
     let c = report.fulltext_cost();
@@ -842,6 +853,7 @@ struct IndexedTime {
     /// see [`SessionLabel::LegacyIndex`]).
     title: Option<SessionTitle>,
     provenance: Option<ProjectProvenance>,
+    session_provenance: Option<crate::activity::SessionProvenance>,
 }
 
 /// Turn one index row into the tri-state this module actually needs.
@@ -865,6 +877,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
     let line_count = row.line_count;
     let title = row.title.clone();
     let provenance = row.provenance.clone();
+    let session_provenance = row.session_provenance.clone();
     match (row.first_unix, row.last_unix, why) {
         (None, None, None) if row.time_source.is_no_conversation_content() => IndexedTime {
             first_unix: None,
@@ -874,6 +887,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: ActivityTimeSource::NoConversationContent,
             title,
             provenance,
+            session_provenance,
         },
         // Bounds that are only part of the span: carried through as measured,
         // with the partiality kept on the source so no consumer answers
@@ -887,6 +901,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
                 source: row.time_source.clone(),
                 title,
                 provenance,
+                session_provenance,
             }
         }
         (Some(first), Some(last), _) => IndexedTime {
@@ -897,6 +912,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: row.time_source.clone(),
             title,
             provenance,
+            session_provenance,
         },
         (first, last, Some(why)) => IndexedTime {
             first_unix: first,
@@ -906,6 +922,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             source: ActivityTimeSource::Unknown { why },
             title,
             provenance,
+            session_provenance,
         },
         (first, last, None) => IndexedTime {
             first_unix: first,
@@ -917,6 +934,7 @@ fn indexed_time(row: &ActivityRow) -> IndexedTime {
             },
             title,
             provenance,
+            session_provenance,
         },
     }
 }
@@ -1580,6 +1598,7 @@ pub fn search_sessions(
                     time_source,
                     title,
                     provenance,
+                    session_provenance: indexed.and_then(|row| row.session_provenance.clone()),
                     account_keys,
                 }),
                 Verdict::NotSelected => report.not_matched += 1,
@@ -1610,6 +1629,7 @@ pub fn search_sessions(
                         why,
                         line_count,
                         time_source,
+                        session_provenance: indexed.and_then(|row| row.session_provenance.clone()),
                     })
                 }
             }
@@ -1653,6 +1673,7 @@ mod tests {
             },
             title: SessionLabel::NoLabelRecorded,
             provenance: None,
+            session_provenance: None,
             account_keys: Vec::new(),
         }
     }
@@ -1685,6 +1706,7 @@ mod tests {
                 time_source: ActivityTimeSource::Unknown {
                     why: "no timestamp".into(),
                 },
+                session_provenance: None,
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -1745,6 +1767,7 @@ mod tests {
                 why: "no conversation content".into(),
                 line_count: 0,
                 time_source: ActivityTimeSource::NoConversationContent,
+                session_provenance: None,
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -1813,6 +1836,7 @@ mod tests {
                 time_source: ActivityTimeSource::Unknown {
                     why: "no timestamp".into(),
                 },
+                session_provenance: None,
             }],
             not_matched: 100,
             machines_without_index: Vec::new(),
@@ -1875,6 +1899,7 @@ mod tests {
                 time_source: ActivityTimeSource::Unknown {
                     why: "no timestamp".into(),
                 },
+                session_provenance: None,
             }],
             not_matched: 0,
             machines_without_index: Vec::new(),
@@ -2000,6 +2025,7 @@ mod tests {
             time_source: ActivityTimeSource::Unknown {
                 why: "no activity index".into(),
             },
+            session_provenance: None,
         });
         assert!(report.complete(), "still read in full…");
         assert!(!report.answer_complete(), "…but the question is unanswered");
@@ -2100,6 +2126,7 @@ mod tests {
             time_source: ActivityTimeSource::Unknown {
                 why: "no index".into(),
             },
+            session_provenance: None,
         };
         assert_eq!(u.short_id(), hit("m-1", &u.session_id, 1).short_id());
         assert!(!u.short_id().contains("eacbacc09765"));
@@ -2141,6 +2168,7 @@ mod tests {
                 time_source: ActivityTimeSource::Exact,
                 title: SessionLabel::NoLabelRecorded,
                 provenance: None,
+                session_provenance: None,
                 account_keys: Vec::new(),
             }],
             unplaced: vec![UnplacedSession {
@@ -2157,6 +2185,7 @@ mod tests {
                 time_source: ActivityTimeSource::Unknown {
                     why: "no activity index".into(),
                 },
+                session_provenance: None,
             }],
             not_matched: 1,
             machines_without_index: vec!["m-2".into()],
@@ -2225,6 +2254,7 @@ mod tests {
                         .into(),
                 },
                 provenance: None,
+                session_provenance: None,
                 account_keys: Vec::new(),
             }],
             unplaced: Vec::new(),
@@ -2246,6 +2276,63 @@ mod tests {
         assert_eq!(v["time_window"], serde_json::Value::Null);
         assert!(v["answer_complete"].as_bool().unwrap());
         assert_eq!(v["fulltext_cost_if_loaded"]["note"], "not requested");
+    }
+
+    #[test]
+    fn report_json_carries_session_source_class_and_parent_reference() {
+        let mut hit = hit("m-fixture", "claude-code.m-fixture.agent-fixture", 1);
+        let provenance = crate::activity::SessionProvenance {
+            source_path_class: "subagents".into(),
+            parent_session_ref: Some("parent-fixture".into()),
+        };
+        hit.session_provenance = Some(provenance.clone());
+        let report = SearchReport {
+            destination: "dest-fixture".into(),
+            snapshots_in_repo: 1,
+            snapshots_scanned: 1,
+            snapshots_from_cache: 0,
+            sessions_seen: 1,
+            window: None,
+            all_recall: BTreeMap::new(),
+            hits: vec![hit],
+            unplaced: vec![UnplacedSession {
+                machine: "m-fixture".into(),
+                session_id: "claude-code.m-fixture.unplaced-fixture".into(),
+                harness: Some("claude-code".into()),
+                shard_count: 1,
+                bytes: 1,
+                snapshot_id: "abcdef0123456789".into(),
+                archive_time_unix: 1,
+                dimension: UnplacedBy::Time,
+                why: "no timestamp in fixture".into(),
+                line_count: 1,
+                time_source: ActivityTimeSource::Unknown {
+                    why: "no timestamp in fixture".into(),
+                },
+                session_provenance: Some(provenance),
+            }],
+            not_matched: 0,
+            machines_without_index: Vec::new(),
+            machines_with_legacy_index: Vec::new(),
+            hosts: Vec::new(),
+            unreadable: Vec::new(),
+            data_blobs_read: 0,
+            index_files_read: 1,
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&report_json(&report, false)).unwrap();
+        assert_eq!(
+            json["sessions"][0]["session_provenance"]["source_path_class"],
+            "subagents"
+        );
+        assert_eq!(
+            json["sessions"][0]["session_provenance"]["parent_session_ref"],
+            "parent-fixture"
+        );
+        assert_eq!(
+            json["sessions_not_placed"][0]["session_provenance"]["source_path_class"],
+            "subagents"
+        );
     }
 
     /// `--cost` says what the payload pass would cost; without it the same
@@ -2364,6 +2451,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            session_provenance: None,
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2391,6 +2479,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            session_provenance: None,
             account_keys: Vec::new(),
             measured_body: None,
         };
@@ -2416,6 +2505,7 @@ mod tests {
             source_zone: None,
             title: None,
             provenance: None,
+            session_provenance: None,
             account_keys: Vec::new(),
             measured_body: None,
         };
