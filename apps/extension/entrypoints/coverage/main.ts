@@ -147,7 +147,7 @@ function paintBar(card: CoverageCardView): HTMLElement | null {
   if (hasDrawn) {
     const bar = el('div', 'bar');
     bar.setAttribute('role', 'img');
-    bar.setAttribute('aria-label', card.legend.map((entry) => `${entry.label} ${entry.count}`).join(', '));
+    bar.setAttribute('aria-label', card.barAccessibleLabel);
     for (const segment of segments) {
       if (segment.tone === 'remainder') continue;
       const div = el('i', `seg-${segment.tone === 'archived' ? 'ok' : segment.tone === 'owed' ? 'hatch' : 'bad'}`);

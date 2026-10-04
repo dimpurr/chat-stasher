@@ -778,6 +778,7 @@ coverage:
   failuresShort: "{count} 条取到过正文但没有存下。它们不会被自动重试。"
   dismiss: 暂不显示
   bar:
+    accessibleLabel: "{platform} 对话计数"
     failed: 取到过正文但没存下
     remainder: 平台自报的总数里还有尚未列出的部分
   months:

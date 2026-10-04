@@ -1160,6 +1160,7 @@ coverage:
   # with no count is not drawn and not named (coverage-charts drops it), so these
   # label only what the reader can actually see.
   bar:
+    accessibleLabel: "{platform} conversation counts"
     failed: fetched but not stored
     remainder: the platform's total says more exist beyond the ones listed so far
   months:
