@@ -1438,6 +1438,11 @@ export function extractSessionId(url: string, text: string, pageUrl?: string): s
       }
     }
   }
+  // Perplexity's session identity is defined by the request/page URL patterns
+  // above. Its response envelope may contain identifiers for other purposes;
+  // using one as a fallback would let unrelated body data choose the archive
+  // name when the URL does not identify a thread.
+  if (platform?.id === 'perplexity') return null;
   try {
     const obj = JSON.parse(text);
     if (!obj || typeof obj !== 'object') return null;

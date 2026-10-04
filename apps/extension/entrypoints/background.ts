@@ -199,7 +199,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
       parsed.keys = Object.keys(obj);
     }
   } catch { /* not JSON */ }
-  const sessionId = resolveSessionId(captured) ?? 'unknown';
+  const sessionId = resolveCaptureSessionId(captured) ?? 'unknown';
   const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   const install = await getInstallIdentity();
   // 🔴 W213 · The content fingerprint, embedded in the bundle itself. `deliver`
@@ -287,7 +287,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
  * A payload from a page can never take branch 1: lib/contract.ts's
  * isCapturedFetchShape **rejects on sight** any page payload carrying a sessionId.
  */
-function resolveSessionId(captured: CapturedFetch): string | null {
+export function resolveCaptureSessionId(captured: CapturedFetch): string | null {
   if (captured.sessionId !== undefined) return captured.sessionId;
   return extractSessionId(captured.url, captured.text, captured.pageUrl);
 }
@@ -502,7 +502,7 @@ async function preparePayload(
   captured: CapturedFetch,
   store: BackfillStore | null,
 ): Promise<PreparedPayload> {
-  const sessionId = resolveSessionId(captured);
+  const sessionId = resolveCaptureSessionId(captured);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
     // stable file name and is dropped rather than polluting the inbox.
@@ -1539,7 +1539,7 @@ async function applyAccountObservationForCapture(
   try {
     if (!store || !planHoldsAccountLease(platform)) return;
     const identity = identityOf(
-      await accountFingerprintFor(captured, store, resolveSessionId(captured)),
+      await accountFingerprintFor(captured, store, resolveCaptureSessionId(captured)),
     );
     if (!identity) return;
     await applyAccountObservation(store, platform, identity, Date.now());
