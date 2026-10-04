@@ -178,6 +178,22 @@ async function installSyntheticCoordinator(extension: Extension): Promise<void> 
  *    fixture does not return until the probe has concluded, so no setup-time
  *    write can still land afterwards. Nothing here is a sleep or a retry — the
  *    signal is the product's own record of having concluded.
+ *
+ * What each step may fail with is part of the contract, not an
+ * implementation detail:
+ *
+ *  · **The event wait's timeout is the one documented fallback.** It
+ *    means the popup did not wake the worker, and the list below is
+ *    then the answer. Any other error the wait raises (a closed
+ *    context, a protocol failure) rethrows — a broken run must not
+ *    read as "no worker yet".
+ *  · **The wake-up page is this harness's own mechanism.** A `goto`
+ *    that cannot open it (a bad extension id, a dead popup URL) means
+ *    the run is broken, not merely unwoken, so the navigation's own
+ *    error propagates.
+ *  · **A settling `evaluate` error rethrows** rather than being
+ *    retried as "not recorded yet"; only the deadline proceeds, as
+ *    documented on `settleWokenPopup`.
  */
 async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
   const running = context.serviceWorkers()[0];
@@ -186,10 +202,15 @@ async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
   const extensionId = pinnedExtensionId();
   if (!extensionId) return null;
 
-  const appeared = context.waitForEvent('serviceworker', { timeout: 15_000 }).catch(() => null);
+  const appeared = context
+    .waitForEvent('serviceworker', { timeout: 15_000 })
+    .catch((error: unknown) => {
+      if (!isPlaywrightTimeout(error)) throw error;
+      return null;
+    });
   const page = await context.newPage();
   try {
-    await page.goto(`chrome-extension://${extensionId}/popup.html`).catch(() => undefined);
+    await page.goto(`chrome-extension://${extensionId}/popup.html`);
     const woken = await appeared;
     const worker = woken ?? context.serviceWorkers()[0] ?? null;
     if (worker) await settleWokenPopup(worker);
@@ -197,6 +218,18 @@ async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
   } finally {
     await page.close().catch(() => undefined);
   }
+}
+
+/**
+ * Playwright's own timeout rejection (`TimeoutError`, message
+ * `Timeout <ms>ms exceeded`) — the one error from an event wait that
+ * means "the bound was reached", which on the wake-up path is the
+ * documented signal that no worker appeared. Any other rejection is
+ * a broken run and is not this harness's to interpret.
+ */
+function isPlaywrightTimeout(error: unknown): boolean {
+  return error instanceof Error
+    && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded/.test(error.message));
 }
 
 /**
@@ -214,23 +247,24 @@ async function acquireWorker(context: BrowserContext): Promise<Worker | null> {
  * and then says nothing is cut off at that timeout (`lib/native-host.ts:47`).
  * Timing out proceeds rather than throws — a spec that needs the worker should
  * not be failed by the settling step, and this can only be reached on the path
- * that had to open a page at all.
+ * that had to open a page at all. An error from the evaluate itself — the
+ * worker gone, a serialization failure — is not "not recorded yet", so it
+ * rethrows at once instead of burning the deadline while a broken run is
+ * reported as a settling step.
  */
 async function settleWokenPopup(worker: Worker): Promise<void> {
   const deadline = Date.now() + HELLO_PROBE_TIMEOUT_MS + 1_000;
   for (;;) {
     // Self-contained for the same reason `READ_OUTBOX` is: Playwright serialises
     // the function source, so it cannot close over `HOST_STATUS_KEY`.
-    const recorded = await worker
-      .evaluate(
-        async (key: string) => {
-          const got = await chrome.storage.local.get({ [key]: null } as never);
-          const value = (got as Record<string, unknown>)[key];
-          return value !== null && value !== undefined;
-        },
-        HOST_STATUS_KEY,
-      )
-      .catch(() => false);
+    const recorded = await worker.evaluate(
+      async (key: string) => {
+        const got = await chrome.storage.local.get({ [key]: null } as never);
+        const value = (got as Record<string, unknown>)[key];
+        return value !== null && value !== undefined;
+      },
+      HOST_STATUS_KEY,
+    );
     if (recorded) return;
     if (Date.now() >= deadline) return;
     await new Promise((resolve) => { setTimeout(resolve, 25); });
