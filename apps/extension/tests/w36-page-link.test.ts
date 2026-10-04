@@ -70,6 +70,11 @@ describe('W36 · a stale page link is a named fact, and a quiet one is not a fac
     }))
       .toBe(false);
 
+    const matchingMessageGetter = Object.defineProperty({}, 'message', {
+      get() { return 'Extension context invalidated.'; },
+    });
+    expect(isInvalidatedContextError(matchingMessageGetter)).toBe(false);
+
     const throwingMessage = Object.defineProperty({}, 'message', {
       get() { throw new Error('hostile getter'); },
     });
@@ -86,6 +91,9 @@ describe('W36 · a stale page link is a named fact, and a quiet one is not a fac
     expect(gate({ message: 42 })).toBe(false);
     expect(gate(Object.defineProperty({}, 'message', {
       get() { throw new Error('hostile getter'); },
+    }))).toBe(false);
+    expect(gate(Object.defineProperty({}, 'message', {
+      get() { return 'Extension context invalidated.'; },
     }))).toBe(false);
     expect(warn).not.toHaveBeenCalled();
 

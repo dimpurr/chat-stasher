@@ -76,7 +76,11 @@ export function isInvalidatedContextError(error: unknown): boolean {
   let message: unknown;
   try {
     if (typeof error !== 'object' && typeof error !== 'function') return false;
-    message = (error as { message?: unknown }).message;
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'message');
+    // Reading `.message` directly would invoke a rejection value's arbitrary
+    // getter. Only the ordinary data-property shape is evidence of an Error.
+    if (!descriptor || !('value' in descriptor)) return false;
+    message = descriptor.value;
   } catch {
     // Rejection values are untrusted; an accessor must not break the page's
     // delivery path or consume the one-warning gate.
