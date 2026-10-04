@@ -41,6 +41,7 @@ content-type: application/json; charset=utf-8
       "destinations": [
         "dest-under-test"
       ],
+      "dimensions": {},
       "first_unix": {
         "kind": "known",
         "unix": 1769999900
@@ -68,6 +69,7 @@ content-type: application/json; charset=utf-8
       "destinations": [
         "dest-under-test"
       ],
+      "dimensions": {},
       "first_unix": {
         "kind": "known",
         "unix": 1769999400
@@ -95,6 +97,7 @@ content-type: application/json; charset=utf-8
       "destinations": [
         "dest-under-test"
       ],
+      "dimensions": {},
       "first_unix": {
         "kind": "known",
         "unix": 1769992800
@@ -122,6 +125,7 @@ content-type: application/json; charset=utf-8
       "destinations": [
         "dest-under-test"
       ],
+      "dimensions": {},
       "first_unix": {
         "kind": "unknown",
         "why": "this session's lines recorded no timestamp"

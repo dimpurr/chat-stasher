@@ -41,6 +41,7 @@ content-type: application/json; charset=utf-8
       "destinations": [
         "dest-under-test"
       ],
+      "dimensions": {},
       "first_unix": {
         "kind": "known",
         "unix": 1769992800

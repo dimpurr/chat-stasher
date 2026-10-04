@@ -2774,6 +2774,11 @@ mod tests {
                 Expected::Format(FORMAT_JSON),
             ),
             (
+                "google-antigravity",
+                br#"{"created_at":"2026-10-01T10:00:00Z","type":"USER_INPUT","content":"synthetic question"}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
                 "github-copilot-cli",
                 copilot_jsonl.as_bytes(),
                 Expected::Format(FORMAT_JSONL),

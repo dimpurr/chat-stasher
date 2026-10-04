@@ -1075,7 +1075,7 @@ fn probe_harness(
         earliest: subprobes.iter().filter_map(|p| p.earliest).min(),
         latest: subprobes.iter().filter_map(|p| p.latest).max(),
         bytes: (!any_unknown && bytes_complete)
-            .then(|| subprobes.iter().map(|p| p.bytes.unwrap()).sum()),
+            .then(|| subprobes.iter().filter_map(|p| p.bytes).sum()),
         recognized_files: subprobes
             .into_iter()
             .flat_map(|p| p.recognized_files)
