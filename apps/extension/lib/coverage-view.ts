@@ -202,6 +202,8 @@ export interface CoverageCardView {
   chip: StatusChip;
   /** The composition bar. Zero segments are the paint layer's problem (see `coverage-charts.barGeometry`). */
   bar: { archived: number; owed: number; failed: number; remainder: number };
+  /** Screen-reader label for the composition bar: the platform, what the counts describe, and visible segments. */
+  barAccessibleLabel: string;
   legend: BarLegendEntry[];
   /** From `computeProgress` via the model. A ring exists on the card **only** when this is non-null. */
   percent: number | null;
@@ -551,6 +553,7 @@ function cardOf(row: CoverageRow, now: number): CoverageCardView {
 
   const { bar, legend } = barOf(row);
   const percent = row.percent;
+  const barAccessibleLabel = `${t('coverage.bar.accessibleLabel', { platform: row.platform })}: ${legend.map((entry) => `${entry.label} ${entry.count}`).join(', ')}`;
   return {
     key: `${row.platform}:${row.scope}`,
     platform: row.platform,
@@ -559,6 +562,7 @@ function cardOf(row: CoverageRow, now: number): CoverageCardView {
     hueKey: hueKeyOf(row.platform),
     chip: chipOf(row),
     bar,
+    barAccessibleLabel,
     legend,
     percent,
     percentTitle: percent === null ? null : `${percent}% ${t('coverage.labels.percent')}`,
