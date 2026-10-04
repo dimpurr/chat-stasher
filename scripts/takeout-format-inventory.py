@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -142,8 +143,14 @@ def inventory(document: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("json_file", help="caller-supplied JSON file")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("json_file", nargs="?", help="caller-supplied JSON file")
+    mode.add_argument("--selftest", action="store_true", help="exercise the probe on synthetic data")
     args = parser.parse_args(argv)
+    if args.selftest:
+        return selftest()
+    if args.json_file is None:
+        parser.error("a JSON file is required")
     try:
         size = os.path.getsize(args.json_file)
         if size > MAX_INPUT_BYTES:
@@ -156,6 +163,53 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(json.dumps(inventory(document), sort_keys=True, separators=(",", ":")))
     return 0
+
+
+def selftest() -> int:
+    """Exercise bounded output and missing-versus-empty handling synthetically."""
+    message = "synthetic-private-message-5841"
+    identifier = "synthetic-account-id-7392"
+    document = {
+        "conversations": [
+            {"messages": [], "title": "", "metadata": None, "id": identifier},
+            {"messages": [{"content": message}], "title": "synthetic title"},
+        ],
+        "synthetic-private-key-42": "synthetic-private-value-42",
+    }
+    with tempfile.TemporaryDirectory(prefix="takeout-inventory-selftest-") as directory:
+        path = os.path.join(directory, "synthetic-takeout.json")
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(document, handle)
+            size = os.path.getsize(path)
+            if size > MAX_INPUT_BYTES:
+                raise OSError("synthetic fixture exceeded input bound")
+            with open(path, "r", encoding="utf-8") as handle:
+                report = inventory(json.load(handle))
+        except OSError:
+            print("takeout inventory: SELFTEST FAIL (synthetic fixture)", file=sys.stderr)
+            return 1
+    fields = {item["path"]: item for item in report["fields"]}
+    expected = (
+        fields.get("$.conversations[].messages", {}).get("empty") == {"empty_array": 1}
+        and fields.get("$.conversations[].title", {}).get("empty") == {"empty_string": 1}
+        and fields.get("$.conversations[].metadata", {}).get("empty") == {"null": 1}
+        and fields.get("$.conversations[].metadata", {}).get("missing") == 1
+    )
+    rendered = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    bounded = (
+        len(report["fields"]) <= MAX_FIELDS
+        and report["nodes_examined"] <= MAX_NODES
+        and len(rendered) < 24_000
+    )
+    private_free = all(value not in rendered for value in (message, identifier, path))
+    passed = expected and bounded and private_free and report["unrecognized_keys_omitted"] == 1
+    print(
+        "takeout inventory: SELFTEST "
+        + ("PASS" if passed else "FAIL")
+        + f" (fields={len(report['fields'])}, nodes={report['nodes_examined']}, output_bytes={len(rendered)})"
+    )
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
