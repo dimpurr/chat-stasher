@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -25,6 +26,44 @@ describe('popup: `hidden` really hides', () => {
     // These are exactly the ones the [hidden] rule exists for; if the rule is
     // removed, the first test fails.
     expect(withDisplay.length).toBeGreaterThan(0);
+  });
+});
+
+describe('popup: long notes and coverage text wrap', () => {
+  it('keeps a long synthetic scope inside the popup text containers', () => {
+    const styles = popupHtml.match(/<style>([\s\S]*?)<\/style>/)?.[1];
+    expect(styles).toBeDefined();
+    const style = document.createElement('style');
+    style.textContent = styles!;
+    document.head.appendChild(style);
+    document.body.innerHTML = '<div id="dashboard-note"></div><div class="notes" id="notes"></div><div id="coverage"></div><div id="coverage-card"></div>';
+    const scope = `synthetic-scope-${'account-segment-'.repeat(24)}`;
+    const dashboardNote = document.querySelector<HTMLElement>('#dashboard-note')!;
+    dashboardNote.textContent = `Diagnostic for ${scope}`;
+    const note = document.createElement('p');
+    note.textContent = `Diagnostic for ${scope}`;
+    document.querySelector('#notes')!.appendChild(note);
+
+    const coverage = document.querySelector<HTMLElement>('#coverage')!;
+    coverage.textContent = `Coverage for ${scope}`;
+    const card = document.querySelector<HTMLElement>('#coverage-card')!;
+    const line = document.createElement('div');
+    line.className = 'line';
+    line.textContent = `Coverage note for ${scope}`;
+    card.appendChild(line);
+    const rowText = document.createElement('div');
+    rowText.className = 'cv-text';
+    rowText.textContent = `chatgpt (${scope}): archived 1`;
+    card.appendChild(rowText);
+
+    for (const element of [dashboardNote, note, coverage, line, rowText]) {
+      expect(getComputedStyle(element).overflowWrap).toBe('anywhere');
+    }
+    expect(dashboardNote.textContent).toContain(scope);
+    expect(note.textContent).toContain(scope);
+    expect(coverage.textContent).toContain(scope);
+    expect(line.textContent).toContain(scope);
+    expect(rowText.textContent).toContain(scope);
   });
 });
 
