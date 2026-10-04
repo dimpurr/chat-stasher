@@ -217,6 +217,9 @@ popup:
     unnamed: Name this profile
     profilePlaceholder: Name this browser profile
     save: Save name
+    savePending: Saving profile name…
+    saveSucceeded: Profile name saved.
+    saveFailed: Could not save the profile name. Try again.
   # How `popupText` renders a button in the flattened text, so a test can see
   # whether the button appeared at all.
   buttonTag: "[Button] {label}"

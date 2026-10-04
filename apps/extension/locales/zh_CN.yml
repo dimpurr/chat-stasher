@@ -169,6 +169,9 @@ popup:
     unnamed: 请为此配置文件命名
     profilePlaceholder: 为此浏览器配置文件命名
     save: 保存名称
+    savePending: 正在保存配置文件名称…
+    saveSucceeded: 配置文件名称已保存。
+    saveFailed: 无法保存配置文件名称。请重试。
   buttonTag: "[按钮] {label}"
   toggle:
     label: 自动回溯历史对话
