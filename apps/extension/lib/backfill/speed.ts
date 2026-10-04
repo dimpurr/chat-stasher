@@ -192,5 +192,12 @@ export async function readSpeedPlan(store: BackfillStore | null): Promise<SpeedP
 export async function writeSpeedPreset(store: BackfillStore | null, preset: SpeedPreset): Promise<SpeedPreset> {
   if (!store) throw new Error('[chat-stasher] no storage to record the speed preset in');
   await store.save(SPEED_PRESET_KEY, preset);
-  return await readSpeedPreset(store);
+  const raw = await store.load(SPEED_PRESET_KEY);
+  const actual = presetFrom(raw);
+  // A missing or unreadable value ordinarily means the gentle default. On a write,
+  // that fallback must not make an unpersisted request for gentle look successful.
+  if (raw !== preset && actual === preset) {
+    throw new Error('[chat-stasher] speed preset write did not persist');
+  }
+  return actual;
 }
