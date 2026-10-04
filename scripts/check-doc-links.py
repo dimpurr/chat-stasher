@@ -45,8 +45,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {".git", "target", "node_modules", ".wxt", ".output", "__pycache__", "dist"}
 
 # `[text](target)` and `![alt](target)`, with an optional title after the
-# target. The target is taken up to the first whitespace or the closing paren.
-INLINE_LINK = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^\"']*[\"'])?\s*\)")
+# target. Bare targets keep the historical whitespace/paren boundary; angle-
+# bracket targets may contain spaces and parentheses until their closing `>`.
+INLINE_LINK = re.compile(
+    r"!?\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s>]+))"
+    r"(?:\s+[\"'][^\"']*[\"'])?\s*\)"
+)
 # `[label]: target` link definitions.
 LINK_DEFINITION = re.compile(r"^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?")
 # A heading, ATX only: our documents do not use setext headings, and guessing
@@ -120,7 +124,7 @@ def targets_in(text: str) -> list[tuple[int, str]]:
         if fenced[index]:
             continue
         for match in INLINE_LINK.finditer(line):
-            found.append((index + 1, match.group(1)))
+            found.append((index + 1, match.group(1) or match.group(2)))
         definition = LINK_DEFINITION.match(line)
         if definition:
             found.append((index + 1, definition.group(1)))
@@ -221,6 +225,8 @@ def selftest() -> int:
     b = "# B\n\n## A heading here\n"
     cases: list[tuple[str, dict[str, str], bool]] = [
         ("a link to a file that exists", {"docs/a.md": "# A\n\nSee [b](b.md).\n", "docs/b.md": b}, False),
+        ("an angle-bracket link to a spaced path", {"docs/a.md": "# A\n\nSee [b](<guide (advanced).md>).\n", "docs/guide (advanced).md": b}, False),
+        ("an angle-bracket link to a missing spaced path", {"docs/a.md": "# A\n\nSee [b](<missing (advanced).md>).\n"}, True),
         ("a link to a file that does not", {"docs/a.md": "# A\n\nSee [b](missing.md).\n"}, True),
         ("a fragment that exists", {"docs/a.md": "# A\n\nSee [b](b.md#a-heading-here).\n", "docs/b.md": b}, False),
         ("a fragment that does not", {"docs/a.md": "# A\n\nSee [b](b.md#nope).\n", "docs/b.md": b}, True),
@@ -245,11 +251,28 @@ def selftest() -> int:
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 with open(full, "w", encoding="utf-8") as handle:
                     handle.write(body)
-            problems, _, _ = check(tmp)
+            problems, local, _ = check(tmp)
             got_fail = bool(problems)
-            if got_fail != want_fail:
+            case_ok = got_fail == want_fail
+            if label == "an angle-bracket link to a spaced path":
+                source = os.path.join(tmp, "docs/a.md")
+                with open(source, encoding="utf-8") as handle:
+                    parsed = targets_in(handle.read())
+                case_ok = case_ok and parsed == [(3, "guide (advanced).md")]
+                case_ok = case_ok and local == 1
+                case_ok = case_ok and not problems
+            elif label == "an angle-bracket link to a missing spaced path":
+                source = os.path.join(tmp, "docs/a.md")
+                with open(source, encoding="utf-8") as handle:
+                    parsed = targets_in(handle.read())
+                case_ok = case_ok and parsed == [(3, "missing (advanced).md")]
+                case_ok = case_ok and local == 1
+                case_ok = case_ok and len(problems) == 1
+                case_ok = case_ok and problems[0].target == "missing (advanced).md"
+                case_ok = case_ok and problems[0].why == "target does not exist"
+            if not case_ok:
                 failures += 1
-            verdict = "ok" if got_fail == want_fail else "WRONG"
+            verdict = "ok" if case_ok else "WRONG"
             print(f"[doc-links] selftest {verdict}: {label} (want_fail={want_fail}, got={got_fail})")
     print(f"[doc-links] SELFTEST: {'PASS' if failures == 0 else 'FAIL'} ({failures} wrong)")
     return 0 if failures == 0 else 1
