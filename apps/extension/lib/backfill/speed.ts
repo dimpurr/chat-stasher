@@ -195,8 +195,9 @@ export async function writeSpeedPreset(store: BackfillStore | null, preset: Spee
   const raw = await store.load(SPEED_PRESET_KEY);
   const actual = presetFrom(raw);
   // A missing or unreadable value ordinarily means the gentle default. On a write,
-  // that fallback must not make an unpersisted request for gentle look successful.
-  if (raw !== preset && actual === preset) {
+  // any read-back other than the requested raw value means the request did not persist,
+  // including a different valid preset that would otherwise look successful to the page.
+  if (raw !== preset) {
     throw new Error('[chat-stasher] speed preset write did not persist');
   }
   return actual;

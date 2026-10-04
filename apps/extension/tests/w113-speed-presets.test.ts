@@ -172,11 +172,11 @@ describe('W113 · reading and writing the choice', () => {
     }
   });
 
-  it('a mismatched read-back reports the preset the store actually exposes', async () => {
+  it('a mismatched read-back rejects even when the store exposes another valid preset', async () => {
     const store = memoryStore({ [SPEED_PRESET_KEY]: 'standard' });
     store.save = async () => {}; // Accept the call without persisting the requested value.
 
-    expect(await writeSpeedPreset(store, 'faster')).toBe('standard');
+    await expect(writeSpeedPreset(store, 'faster')).rejects.toThrow(/did not persist/i);
     expect(await readSpeedPreset(store)).toBe('standard');
   });
 
