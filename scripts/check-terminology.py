@@ -201,7 +201,7 @@ RULES = [
 # share one rule:
 #
 #   crates/          the CLI. .rs and .json, at any depth.
-#   apps/extension/  the browser extension. .ts, .json and .html.
+#   apps/extension/  the browser extension. .ts, .tsx, .json and .html.
 #
 # What is deliberately NOT covered, and why:
 #   · .yml under apps/extension/locales — that is where the Chinese lives on
@@ -223,7 +223,7 @@ T5_SCOPES = (
     },
     {
         "dir": os.path.join("apps", "extension"),
-        "extensions": (".ts", ".json", ".html"),
+        "extensions": (".ts", ".tsx", ".json", ".html"),
         "skip_dirs": frozenset({"node_modules", ".output", ".wxt", "dist", "build", "coverage"}),
         "skip_files": frozenset({os.path.join("apps", "extension", "locales", "zh_CN.yml")}),
     },
@@ -242,9 +242,9 @@ def check_cjk(root: str, rule: dict) -> list[tuple[FileLineHit, dict]]:
 
     `.json` is included under crates/ because the harness registry there ships
     with the binary and some of its fields reach users; it is as much part of the
-    public English surface as the source. The extension side adds `.ts` and
-    `.html` for the same reason — those are the popup's markup and the code that
-    fills it.
+    public English surface as the source. The extension side adds `.ts`, `.tsx`
+    and `.html` for the same reason — those are the popup's markup and the code
+    that fills it.
 
     A file that cannot be read or decoded is reported, not skipped: a gate that
     treats "could not look" as "clean" is the exact failure this repository
@@ -442,6 +442,10 @@ FIXTURE_VIOLATING_EXTENSION = {
         '// 这是扩展里的中文注释\n'
         'export const bad = 1;\n'
     ),
+    os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.tsx"): (
+        '// 这是 TSX 里的中文注释\n'
+        'export const Bad = () => <div />;\n'
+    ),
     os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.html"): (
         '<div id="status">中文</div>\n'
     ),
@@ -461,6 +465,10 @@ FIXTURE_CLEAN_EXTENSION = {
     os.path.join("apps", "extension", "lib", "t5_clean.ts"): (
         '// English comments only\n'
         'export const good = 1;\n'
+    ),
+    os.path.join("apps", "extension", "entrypoints", "popup", "t5_clean.tsx"): (
+        '// English comments only\n'
+        'export const Good = () => <div>Plain English</div>;\n'
     ),
     # Installed dependencies and build artifacts: excluded directories, so the
     # Chinese inside them is nobody\'s business — they are generated from the
@@ -598,9 +606,9 @@ def selftest() -> int:
             say(f"  {line}")
 
         expect(proc.returncode == 1, "violating tree exits 1")
-        # 14 from crates/ (the 13 plus T6's CLI fixture) + 2 from apps/extension/
+        # 14 from crates/ (the 13 plus T6's CLI fixture) + 3 from apps/extension/
         # (T5) + 2 from the locale files (T6 extension half).
-        expect("FAILED:18" in report, "violating tree reports exactly 18 violations")
+        expect("FAILED:19" in report, "violating tree reports exactly 19 violations")
         expect("t1_violation.rs" in report, "T1 fixture is named in the report")
         expect("t2_violation.rs" in report, "T2 fixture is named in the report")
         expect("t3_violation.rs" in report, "T3 fixture is named in the report")
@@ -630,6 +638,10 @@ def selftest() -> int:
         expect(
             os.path.join("apps", "extension", "lib", "t5_violation.ts") in report,
             "T5 also covers .ts under apps/extension/",
+        )
+        expect(
+            os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.tsx") in report,
+            "T5 also covers .tsx under apps/extension/",
         )
         expect(
             os.path.join("apps", "extension", "entrypoints", "popup", "t5_violation.html") in report,
