@@ -18,7 +18,7 @@ This page explains the moving parts: where a conversation goes, what is encrypte
 | **Source** | Each AI tool keeps its sessions in its own files or database. chat-stasher opens them read-only and never renames, truncates or deletes them. | As the tool left them |
 | **Extension queue** | A web chat captured by the extension waits in that browser profile's storage until the host confirms delivery. | No |
 | **Stage** | New data is copied into a folder you chose, as **sealed shards**: numbered, append-only files per session. | No |
-| **Destination** | `push` encrypts the stage's new shards and adds them to the archive as a new **snapshot**. | Yes, before anything leaves the machine |
+| **Destination** | `push` encrypts and snapshots the stage tree. A successful push adds a **snapshot**; `run-once` skips the push when collection finds no change. | Yes, before anything leaves the machine |
 
 `run-once` is `collect` followed by `push`, with the push skipped when nothing changed.
 
@@ -26,7 +26,7 @@ This page explains the moving parts: where a conversation goes, what is encrypte
 
 For each supported tool, a built-in **registry** records where its sessions live on each operating system, in what format, and how that path was established (from the tool's source code, its documentation, a local measurement, or an unconfirmed claim). [support.md](support.md) prints that registry.
 
-- **Only what is new is read.** For a file that grows, chat-stasher remembers how far it has read and a hash of what it has already taken. For a database, it remembers a high-water mark. That state lives in chat-stasher's own data folder, never inside a tool's folder.
+- **Only what is new is read when a source grows normally.** For a file that grows, chat-stasher remembers how far it has read and a hash of what it has already taken. If the committed prefix changes or the file shrinks, it rereads and seals the current content as another shard; earlier staged shards are retained. For a database, it remembers a high-water mark. That state lives in chat-stasher's own data folder, never inside a tool's folder.
 - **A file is never renamed out from under a tool** unless the registry has confirmed that tool tolerates it. Tools that keep a file open, or store sessions in a database, are only ever read.
 - **An unverified path is not guessed.** Where the registry has no confirmed path for your system, the scanner reports *unknown* rather than scanning a guess. `[harness_roots]` in the config tells it where to look ([config.md](config.md#harness_roots)).
 - **Sessions a build cannot archive are named.** If a tool has sessions in a shape this version cannot read, `collect` says so and exits `3` (partial), rather than reporting success.
@@ -39,7 +39,7 @@ The archive is an encrypted, content-addressed repository built on the open-sour
 |---|---|
 | **Encrypted on your machine** | The destination receives encrypted objects only. It can see their number, size and timing. |
 | **One key per destination** | The key file is created when the archive is created. Without it, nobody can read that archive, and there is no recovery. |
-| **Append-only** | Each push adds a snapshot. A session disappearing from a provider or harness stays in every snapshot that already holds it; source-side deletion never propagates to the archive. Archive removal is reserved for an explicit user-initiated purge of a named session, but that feature is not shipped and there is currently no command to delete one conversation. See [Privacy and security → Keeping and deleting](privacy-security.md#keeping-and-deleting). |
+| **Append-only** | Each successful push adds a snapshot; a no-change `run-once` creates none. A session disappearing from its source stays in its staged shards and every snapshot that already holds it; source-side deletion never propagates to the archive. Archive removal is reserved for an explicit user-initiated purge of a named session, but that feature is not shipped and there is currently no command to delete one conversation. See [Privacy and security → Keeping and deleting](privacy-security.md#keeping-and-deleting). |
 | **Deduplicated** | Identical data is stored once, so hourly snapshots of mostly unchanged sessions stay small. Shards are grouped into buckets (20 by default) so each push rewrites little. |
 | **Verifiable** | `verify --level l1` checks structure cheaply. `l2` downloads and re-hashes everything. `l3` checks every staged session against the archive. |
 
@@ -118,7 +118,7 @@ The extension also works before the CLI is installed, or without it (next releas
 
 ## What the stage keeps, and when it shrinks
 
-The stage is a full local copy of everything sealed, so on its own it only grows. `reclaim-stage` removes a session's staged copy only when **every** declared destination proves, by the archive's own digest (shard count, bytes and SHA-256), that it holds exactly those bytes. One unreachable destination blocks the whole run. Nothing is deleted on a guess. See [schedule.md → The weekly stage clean-up](schedule.md#the-weekly-stage-clean-up-optional).
+Collection retains previously sealed shards, including when a source is rewritten, truncated or removed. The stage shrinks only when `reclaim-stage --apply` removes a session's shard body after **every** declared destination proves, by the archive's own digest (shard count, bytes and SHA-256), that it holds exactly those bytes. The digest summary and shard sequence counter remain in the stage. One unreachable destination blocks the whole run; nothing is deleted on a guess. See [schedule.md → The weekly stage clean-up](schedule.md#the-weekly-stage-clean-up-optional).
 
 ## Why "unknown" is never "0"
 
