@@ -82,7 +82,7 @@ A destination name with characters that are not letters, digits, `-`, `_` or `.`
 
 A timer is started by launchd or systemd, not by your shell. It does **not** see variables you exported in your shell profile. That matters for R2 and S3, whose credentials you may have written as `env:NAME` ([destinations.md](destinations.md#keeping-the-secret-out-of-the-config-file-env)): under a timer, the variable is not there, the option is dropped, and the run cannot reach the bucket.
 
-A credential written in one of these forms is resolved without a shell, so it works from a terminal and from a timer, subject to the keychain being available to the scheduled user:
+A credential written in one of these forms is resolved without a shell, so it works from a terminal and from a timer, subject to the file, the line or the keychain item being readable by the scheduled user:
 
 | Written as | The secret is read from |
 |---|---|
@@ -98,7 +98,9 @@ access_key_id = "file:~/.config/chat-stasher/r2-access-key-id"
 secret_access_key = "keychain:r2"
 ```
 
-Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up on the next command, not as a silent failure at 3 a.m. A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency. A LaunchAgent runs in the user's login session and stops when that user logs out, so changing the credential reference cannot make this timer run while you are logged out ([Apple's LaunchAgents documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
+Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up on the next command, not as a silent failure at 3 a.m.
+
+A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency. A LaunchAgent runs in the user's login session and stops when that user logs out, so changing the credential reference cannot make this timer run while you are logged out ([Apple's LaunchAgents documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
 
 Make a secret file readable only by you (`chmod 600`). To add a keychain item:
 
