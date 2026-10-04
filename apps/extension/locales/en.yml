@@ -655,16 +655,15 @@ popup:
       deleted from this browser's records.
     halted:
       unsupportedPlatform: >-
-        This platform ({platform}) has no history backfill implemented, so this
-        leg stopped before issuing any request. This is not a platform change
-        and not rate-limiting. Technical detail: {detail}
+        Backfill is not available for {platform} in this build. To capture a
+        conversation now, open it on {platform} and let live capture run; use a
+        supported platform to backfill older conversations. Technical detail:
+        {detail}
       detailUnsupported: >-
-        This platform ({platform}) has already had its past conversations LISTED
-        ({pending} waiting), but the step that fetches each conversation's body
-        is not implemented yet, so this leg stopped before fetching the first
-        body and nothing has been stored so far. This is not a platform change
-        and not rate-limiting; the listed ones stay put and are worked through
-        once that step lands. Technical detail: {detail}
+        This build can list {pending} past conversations on {platform}, but
+        cannot fetch their contents for backfill. To capture one now, open it on
+        {platform} and let live capture run; the listed conversations remain
+        pending. Technical detail: {detail}
       # 🔴 W31c · The two organization halts, in plain words and in their own
       # sentences. They are NOT the `other` fallback: that one would print the
       # reason code and the technical detail at a user whose actual question is
