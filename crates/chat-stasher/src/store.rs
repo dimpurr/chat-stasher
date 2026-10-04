@@ -1064,11 +1064,21 @@ fn dump_cumulative_session<S: rustic_core::IndexedFull>(
         let short = &snap_id[..8.min(snap_id.len())];
         let root = repo
             .node_from_snapshot_and_path(snap, "")
-            .with_context(|| format!("snapshot {short} tree root"))?;
+            .with_context(|| {
+                format!(
+                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree root",
+                    crate::id::short_session_id(session_id)
+                )
+            })?;
         let entries = repo
             .ls(&root, &LsOptions::default())
             .and_then(|iter| iter.collect::<rustic_core::RusticResult<Vec<_>>>())
-            .with_context(|| format!("snapshot {short} tree walk"))?;
+            .with_context(|| {
+                format!(
+                    "UNKNOWN: session `{}` cannot be resolved for machine `{machine}`: snapshot {short} tree walk",
+                    crate::id::short_session_id(session_id)
+                )
+            })?;
         for (path, node) in entries {
             if node.node_type != NodeType::File {
                 continue;

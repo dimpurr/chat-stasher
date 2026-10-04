@@ -693,7 +693,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1941-1943,1983-1993`; `crates/chat-stasher/src/main.rs:7930-7931`).
+kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1951-1953,1993-2003`; `crates/chat-stasher/src/main.rs:7930-7931`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1024,10 +1024,10 @@ dominant risk.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1941-1943`). The key file
+archive (`crates/chat-stasher/src/store.rs:1951-1953`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1983-2053`).
+(`crates/chat-stasher/src/store.rs:1993-2063`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to

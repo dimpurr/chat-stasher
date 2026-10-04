@@ -408,12 +408,26 @@ fn read_session_reads_a_reclaimed_body_back_byte_identical() {
         "shards come back in sequence order, under their archived names"
     );
 
-    // The continued session resolves to the *newest* copy — the same rule the
-    // search reports it under.
-    let (continued, _) = store
+    // C holds only a new sequence after reclaim. Older sequences remain part
+    // of the session; the search labels its latest observation, not its body.
+    let (continued, continued_hashes) = store
         .read_session_concat(MACHINE, CONTINUED, &f.mk)
         .unwrap();
-    assert_eq!(continued, f.continued_bytes);
+    assert_eq!(
+        continued,
+        [
+            f.continued_old_bytes.as_slice(),
+            f.continued_bytes.as_slice()
+        ]
+        .concat()
+    );
+    assert_eq!(
+        continued_hashes
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["000001.jsonl", "000002.jsonl", "000003.jsonl"]
+    );
 
     // A machine with no snapshot at all is a different answer from "no body".
     let err = store

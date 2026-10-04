@@ -967,17 +967,17 @@ crates/chat-stasher/src/store.rs:435  43a7a775bbdc  lines=1
   <- docs-dev/orphan-packs.md:95  :: pub fn open_indexed(
 crates/chat-stasher/src/store.rs:563-575  ea712fd262a4  lines=13
   <- docs-dev/node-metadata.md:95  :: let build_opts = BackupOptions::default()
-crates/chat-stasher/src/store.rs:1941-1943  df67f1e3fcff  lines=3
+crates/chat-stasher/src/store.rs:1951-1953  df67f1e3fcff  lines=3
   <- docs-dev/install.md:566, docs-dev/install.md:1072, docs-dev/privacy.md:696, docs-dev/privacy.md:1027, docs-dev/threat-model.md:80, docs-dev/threat-model.md:901  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
-crates/chat-stasher/src/store.rs:1983-1990  652f49c633e5  lines=8
+crates/chat-stasher/src/store.rs:1993-2000  652f49c633e5  lines=8
   <- docs-dev/install.md:568  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:1983-1993  eeef621b37e3  lines=11
+crates/chat-stasher/src/store.rs:1993-2003  eeef621b37e3  lines=11
   <- docs-dev/privacy.md:696, docs-dev/threat-model.md:80  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:1983-2053  5118c8f5554c  lines=71
+crates/chat-stasher/src/store.rs:1993-2063  5118c8f5554c  lines=71
   <- docs-dev/privacy.md:1030, docs-dev/threat-model.md:124, docs-dev/threat-model.md:895  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:2070-2080  8ab0805e7812  lines=11
+crates/chat-stasher/src/store.rs:2080-2090  8ab0805e7812  lines=11
   <- docs-dev/threat-model.md:903  :: /// Load the masterkey from `cfg.key_file` (error when miss…
-crates/chat-stasher/src/store.rs:2128-2133  4a031ff70c84  lines=6
+crates/chat-stasher/src/store.rs:2138-2143  4a031ff70c84  lines=6
   <- docs-dev/install.md:613, docs-dev/install.md:703  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
 crates/chat-stasher/src/ui/extension_profile.rs:146-177  fb34362ebddf  lines=32
   <- docs-dev/privacy.md:832  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…
