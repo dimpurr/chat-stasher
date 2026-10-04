@@ -580,7 +580,7 @@ describe('W47 · a report background declines is a fact, not a silence', () => {
     expect(text).toContain(UNKNOWN_ORIGIN);
     expect(text).toContain('not recorded');
     // The streak, so "this is happening on a timer" is legible from the popup.
-    expect(text).toContain('refused in a row so far: 1');
+    expect(text).toContain('Repeated reports refused: 1');
 
     // And the unreadable case reads differently, because it is a different fact:
     // the origin is not known and the sentence may not pretend it is.
