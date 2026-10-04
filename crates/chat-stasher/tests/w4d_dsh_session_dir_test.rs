@@ -153,9 +153,12 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// runs on machines where `DSH_HOME` is genuinely exported (inside a DSH
 /// session, for instance). So those tests clear it for their duration. The
 /// guard restores the value before it releases the lock, so no other test can
-/// observe the variable while it is missing.
+/// observe the variable while it is missing. The leading underscore says the
+/// field is held for its `Drop`, not read; the declaration order is what makes
+/// it restore *before* the lock is released, exactly as `w37_kimi_test.rs`'s
+/// `ScanEnv` does.
 struct DshHomeCleared {
-    restore: EnvRestore,
+    _restore: EnvRestore,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -166,7 +169,7 @@ fn without_ambient_dsh_home() -> DshHomeCleared {
     let restore = EnvRestore("DSH_HOME", std::env::var_os("DSH_HOME"));
     std::env::remove_var("DSH_HOME");
     DshHomeCleared {
-        restore,
+        _restore: restore,
         _guard: guard,
     }
 }
