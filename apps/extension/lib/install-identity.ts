@@ -119,6 +119,9 @@ export async function setProfileLabel(label: string): Promise<InstallIdentity> {
   const storage = localStorageArea();
   if (!storage) throw new Error('install identity storage unavailable');
   await storage.set({ [INSTALL_IDENTITY_KEY]: updated });
+  const confirmed = await storage.get({ [INSTALL_IDENTITY_KEY]: null });
+  const persisted = confirmed[INSTALL_IDENTITY_KEY] as Partial<InstallIdentity> | undefined;
+  if (persisted?.profile_label !== cleaned) throw new Error('profile label was not persisted');
   identityPromise = Promise.resolve(updated);
   return updated;
 }

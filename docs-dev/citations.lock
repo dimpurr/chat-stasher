@@ -415,7 +415,7 @@ apps/extension/lib/install-identity.ts:39-69  933b869f26bc  lines=31
   <- docs-dev/privacy.md:509, docs-dev/threat-model.md:699  :: let identityPromise: Promise<InstallIdentity> | null = null;
 apps/extension/lib/install-identity.ts:71-110  fc4432f65c1d  lines=40
   <- docs-dev/privacy.md:397, docs-dev/threat-model.md:783  :: /**
-apps/extension/lib/install-identity.ts:114-124  a4eafd971570  lines=11
+apps/extension/lib/install-identity.ts:114-124  0931510dff38  lines=11
   <- docs-dev/privacy.md:509, docs-dev/threat-model.md:699  :: export async function setProfileLabel(label: string): Promi…
 apps/extension/lib/live-capture.ts:149-151  a42f85895173  lines=3
   <- docs-dev/privacy.md:508  :: /** Storage key prefix. One row per platform. */
