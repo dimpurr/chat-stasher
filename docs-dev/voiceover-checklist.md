@@ -17,14 +17,16 @@ Start a dashboard the usual way (`chat-stasher ui`), turn VoiceOver on with
    once. VoiceOver must announce "Skip to content, link" — not the pages nav
    and not a table row. Pressing it must land on `<main>`, which announces as
    the main landmark.
-2. **The pages nav is a nav.** Open the rotor with `VO+U` and the landmarks
-   list: *pages* (the three links overview · sessions · search) and *main* must
-   both be there, plus *message pages* on a paginated list or conversation.
+2. **The named navs are distinct.** Open the rotor with `VO+U` and the
+   landmarks list: *pages* (overview · sessions · search · Extensions) and
+   *main* must both be there. On `/sessions`, also check *platform groups* and,
+   when paginated, *session pages*; on a paginated `/reader`, check *message
+   pages*. On `/search`, the search form is a search landmark.
 3. **One `h1` per page.** Walk headings with `VO+Cmd+H`: the first heading is
    the page's subject, the rest are `h2` sections below it.
-4. **The list is a table with a caption** (`/sessions`): `VO+Cmd+X` walks by
-   table, and the health/label cells read as words — "unknown", "no label
-   recorded" — never as a zero that was not measured.
+4. **The list is a table** (`/sessions`; it currently has no caption):
+   `VO+Cmd+X` walks by table, and the time/label cells read as words —
+   "unknown", "no label recorded" — never as a zero that was not measured.
 5. **The reader's messages are articles** (`/reader`): each bubble announces
    its role and time from the header, the collapsible blocks (thinking, tool
    calls) are inside native disclosures that VoiceOver reads as expandable,
@@ -38,13 +40,14 @@ Start a dashboard the usual way (`chat-stasher ui`), turn VoiceOver on with
 8. **The footer help line reads out**: the keyboard paragraph names every key
    (1, 2, f, `[`, `]`, r) and states the first Tab stop.
 
-Known caveat, not a defect to file: VoiceOver's own modifier (`VO`, `Ctrl+Option`)
-is also the modifier several macOS browsers assign to access keys, so with
-VoiceOver running a key like `VO+]` may be eaten by the reader before the page
-sees it. The walk does not depend on the keys — Tab order is the baseline and
-the access keys are the accelerand; on a keyboard-only session without
-VoiceOver, Chrome answers `Ctrl+Option+1` and Firefox answers
-`Alt+Shift+1`.
+Known caveat, not a defect to file: VoiceOver's own modifier (`VO`,
+`Ctrl+Option`) overlaps the access-key modifier macOS browsers use. Chrome and
+Safari use `Ctrl+Option+key`; Firefox uses `Ctrl+Option+key` or
+`Ctrl+Alt+key`. With VoiceOver running, a chord such as `VO+]` may be handled
+by the reader before the page sees it. The walk does not depend on access keys:
+Tab order is the baseline and the access keys are an accelerator. See the
+[browser and platform access-key combinations](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Global_attributes/accesskey#accessibility_concerns)
+for current combinations and conflicts.
 
 ## Record of runs
 
