@@ -346,7 +346,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2850-3065`,
-`crates/chat-stasher/src/inbox.rs:509-519`, `:878-880`).
+`crates/chat-stasher/src/inbox.rs:509-519`, `:862-864`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -359,13 +359,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:446-451`,
-`:508-516`, `:879-882`). 🔴 A copied browser profile brings its copied
+`:508-516`, `:863-866`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:838-848`, `:917-978`;
+(`crates/chat-stasher/src/inbox.rs:822-832`, `:901-962`;
 `crates/chat-stasher/src/nativehost.rs:3080-3084`;
 `apps/extension/lib/outbox.ts:458-503`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the

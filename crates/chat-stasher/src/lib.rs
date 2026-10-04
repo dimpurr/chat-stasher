@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod body_cache;
+pub mod bundle_transport;
 pub mod collect;
 pub mod config;
 pub mod credentials;

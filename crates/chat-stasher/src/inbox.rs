@@ -660,68 +660,52 @@ pub fn ingest_with_cap(
     bucket_cap: usize,
 ) -> anyhow::Result<IngestReport> {
     store::assert_stage_writer_audited(store::StageWriter::Ingest)?;
-    let consumed_dir = inbox.join(CONSUMED_DIR);
-    fs::create_dir_all(&consumed_dir)
-        .with_context(|| format!("create {}", consumed_dir.display()))?;
+    let transport = crate::bundle_transport::LocalFolder::new(inbox)?;
     fs::create_dir_all(stage).with_context(|| format!("create {}", stage.display()))?;
+    ingest_transport(&transport, stage, machine, bucket_cap)
+}
 
-    let mut report = IngestReport::default();
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let mut metadata_errors = 0usize;
-
-    for entry in fs::read_dir(inbox).with_context(|| format!("read inbox {}", inbox.display()))? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == CONSUMED_DIR {
-            continue; // our own retirement dir, never rescanned
-        }
-        match fs::metadata(entry.path()) {
-            Ok(m) if m.is_file() => {}
-            Ok(_) => continue, // subdirectories are not inbox candidates
-            Err(e) => {
-                // A failed stat leaves the entry's kind unknown; skipping it
-                // would make the remaining candidate count look complete.
-                metadata_errors += 1;
-                report.errors.push(ErrorEntry {
-                    source_file: name,
-                    message: format!("metadata unreadable: {e}"),
-                });
-                continue;
-            }
-        }
-        if name.ends_with(PART_SUFFIX) {
-            report.part_files_seen += 1;
-            continue; // two-phase ext, mid-write
-        }
-        candidates.push(entry.path());
-    }
-    candidates.sort(); // deterministic seq order across runs
-    report.total_inbox_files = candidates.len() + metadata_errors;
-
-    for path in &candidates {
-        let name = path
-            .file_name()
-            // reason: all paths in candidates come from read_dir entry.path(), guaranteed to have valid file_name; empty string is safe fallback
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+/// Drain a waiting transport through the same sink as native messaging.
+pub fn ingest_transport<T: crate::bundle_transport::BundleTransport>(
+    transport: &T,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+) -> anyhow::Result<IngestReport> {
+    let listing = transport.list()?;
+    let mut report = IngestReport {
+        part_files_seen: listing.part_files_seen,
+        total_inbox_files: listing.total_inbox_files,
+        errors: listing
+            .errors
+            .into_iter()
+            .map(|(source_file, message)| ErrorEntry {
+                source_file,
+                message,
+            })
+            .collect(),
+        ..IngestReport::default()
+    };
+    for candidate in &listing.items {
+        let name = &candidate.name;
+        let item = &candidate.item;
         if name.ends_with(EXPORT_SUFFIX) {
             ingest_export_file(
-                &name,
-                path,
+                name,
+                item,
                 stage,
                 machine,
-                &consumed_dir,
+                transport,
                 bucket_cap,
                 &mut report,
             );
             continue;
         }
-        match consume_one(&name, path, stage, machine, &consumed_dir, bucket_cap) {
+        match consume_one(name, item, stage, machine, transport, bucket_cap) {
             Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
             Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
             Err(e) => report.errors.push(ErrorEntry {
-                source_file: name,
+                source_file: name.clone(),
                 message: e.to_string(),
             }),
         }
@@ -1028,15 +1012,15 @@ fn check_bundle_parsed(bytes: &[u8]) -> Result<ParseOutcome, String> {
 
 /// Consume one plain `*.json` bundle file: read, seal through the shared core,
 /// then retire.
-fn consume_one(
+fn consume_one<T: crate::bundle_transport::BundleTransport>(
     name: &str,
-    path: &Path,
+    item: &T::Item,
     stage: &Path,
     machine: &str,
-    consumed_dir: &Path,
+    transport: &T,
     bucket_cap: usize,
 ) -> anyhow::Result<SealOutcome> {
-    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = transport.fetch(item)?;
     // No fingerprint: an inbox file is the user's own drop box and carries no
     // capture-body derivation. The shard records the exact bytes instead.
     // 🔴 W213 · That is a channel rule, not an oversight: unlike an §8 export
@@ -1046,7 +1030,7 @@ fn consume_one(
     //    at all.
     let outcome = seal_payload(name, &bytes, stage, machine, bucket_cap, None, None)?;
     // Seal first, retire second.
-    retire(name, path, consumed_dir)?;
+    transport.retire(name, item)?;
     Ok(outcome)
 }
 
@@ -1064,22 +1048,22 @@ fn consume_one(
 /// land is content-addressed and reports as a duplicate.
 ///
 /// Blank lines are skipped and counted, never sealed and never an error.
-fn ingest_export_file(
+fn ingest_export_file<T: crate::bundle_transport::BundleTransport>(
     name: &str,
-    path: &Path,
+    item: &T::Item,
     stage: &Path,
     machine: &str,
-    consumed_dir: &Path,
+    transport: &T,
     bucket_cap: usize,
     report: &mut IngestReport,
 ) {
     report.export_files_seen += 1;
-    let bytes = match fs::read(path) {
+    let bytes = match transport.fetch(item) {
         Ok(bytes) => bytes,
         Err(e) => {
             report.errors.push(ErrorEntry {
                 source_file: name.to_string(),
-                message: format!("read {}: {e}", path.display()),
+                message: format!("{e:#}"),
             });
             return;
         }
@@ -1145,7 +1129,7 @@ fn ingest_export_file(
     }
 
     if report.errors.len() == errors_before {
-        if let Err(e) = retire(name, path, consumed_dir) {
+        if let Err(e) = transport.retire(name, item) {
             report.errors.push(ErrorEntry {
                 source_file: name.to_string(),
                 message: e.to_string(),
@@ -1260,36 +1244,6 @@ fn write_shard_atomic(
         crate::shard_writer::ShardSource::Inbox(lines),
     )
     .map(crate::shard_writer::ShardWrite::filename)
-}
-
-/// Rename a consumed inbox file into `<inbox>/consumed/` (atomic same-fs).
-fn retire(name: &str, src: &Path, consumed_dir: &Path) -> anyhow::Result<()> {
-    let dst = consumed_dir.join(name);
-    if dst.exists() {
-        #[allow(
-            clippy::let_underscore_must_use,
-            reason = "Removing an existing destination is best-effort; the required rename below reports whether retirement succeeded."
-        )]
-        let _ = fs::remove_file(&dst);
-    }
-    fs::rename(src, &dst)
-        .with_context(|| format!("retire {} -> {}", src.display(), dst.display()))?;
-    // B74: deliberately best-effort, and deliberately *not* the same rule as
-    // the shard seal above. If this rename is lost to a power cut the file is
-    // simply back in the inbox, and the next run reads it, matches its
-    // `fileSha256` against the already-sealed shard and reports a duplicate —
-    // nothing is lost, nothing is written twice. Guarding an idempotent,
-    // self-healing step with a fatal error would block a user over something a
-    // re-run already fixes, so the cost of the swallowed Result here is one
-    // redundant re-read, not a durability lie.
-    fsync_dir(consumed_dir).ok();
-    Ok(())
-}
-
-/// Best-effort directory fsync (durability of renames).
-fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    let f = fs::File::open(dir)?;
-    f.sync_all()
 }
 
 // ---------------------------------------------------------------- parsing
