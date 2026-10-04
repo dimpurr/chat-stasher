@@ -587,6 +587,39 @@ export async function readStorage(
 }
 
 /**
+ * Poll `storage.local` until `settled` accepts the reading, and return that reading.
+ *
+ * 🔴 W618 · The storage twin of `waitForOutbox`, and it exists for the same reason:
+ *    a fixed `page.waitForTimeout` is the suite's known flake source, and this
+ *    config has `retries: 0`, so one impatient sleep fails the run rather than
+ *    being papered over. A spec that sleeps for the product to write a record is
+ *    guessing how long the write takes; polling on the record's own shape is not.
+ *
+ *    The **shape the next assertion reads** is the only thing worth waiting on: a
+ *    shorter wait cannot prove the state exists, and a longer one buys nothing the
+ *    timeout below does not already bound.
+ *
+ * Returning the last reading on timeout is the same rule `waitForOutbox` and
+ * `waitForTickRecord` follow, and for the same reason: the caller's own
+ * assertions are the judge, so a missing record fails with the sentence that
+ * names which field was absent rather than with "a poll ran out of time".
+ */
+export async function waitForStorage(
+  extension: Extension,
+  keys: string[] | null,
+  settled: (state: Record<string, unknown>) => boolean,
+  timeoutMs = 20_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await readStorage(extension, keys);
+  while (!settled(last) && Date.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    last = await readStorage(extension, keys);
+  }
+  return last;
+}
+
+/**
  * Wait until the extension has **armed** one of its own alarms.
  *
  * 🔴 W82 · `fireAlarm` below does not add a second alarm — `alarms.create` on a
