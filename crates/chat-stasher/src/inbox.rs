@@ -704,9 +704,13 @@ pub fn ingest_transport<T: crate::bundle_transport::BundleTransport>(
         match consume_one(name, item, stage, machine, transport, bucket_cap) {
             Ok(SealOutcome::Stored(c)) => report.consumed.push(c),
             Ok(SealOutcome::Duplicate(d)) => report.duplicates.push(d),
+            // `{e:#}`, like every other entry below: a bare `to_string()` on an
+            // `anyhow::Error` prints only the outermost context, so a fetch
+            // failure would reach the user as `read <path>` with the reason it
+            // could not be read gone. Both file kinds must name the same cause.
             Err(e) => report.errors.push(ErrorEntry {
                 source_file: name.clone(),
-                message: e.to_string(),
+                message: format!("{e:#}"),
             }),
         }
     }
@@ -1132,7 +1136,9 @@ fn ingest_export_file<T: crate::bundle_transport::BundleTransport>(
         if let Err(e) = transport.retire(name, item) {
             report.errors.push(ErrorEntry {
                 source_file: name.to_string(),
-                message: e.to_string(),
+                // `{e:#}` for the same reason as the read failure above: the
+                // context names the rename, the cause says why it did not happen.
+                message: format!("{e:#}"),
             });
         }
     }
@@ -1628,6 +1634,69 @@ mod tests {
             rec.get("identity").is_none(),
             "an @1 bundle must not gain an identity key",
         );
+    }
+
+    /// A `BundleTransport` whose `fetch` always fails with the same context
+    /// `LocalFolder::fetch` attaches, so the two ingest channels can be compared
+    /// without a permission rig (which a root sandbox cannot express).
+    struct UnreadableTransport {
+        name: &'static str,
+    }
+
+    impl crate::bundle_transport::BundleTransport for UnreadableTransport {
+        type Item = String;
+        fn list(&self) -> anyhow::Result<crate::bundle_transport::BundleListing<Self::Item>> {
+            Ok(crate::bundle_transport::BundleListing {
+                items: vec![crate::bundle_transport::ListedBundle {
+                    name: self.name.to_string(),
+                    item: self.name.to_string(),
+                }],
+                part_files_seen: 0,
+                total_inbox_files: 1,
+                errors: Vec::new(),
+            })
+        }
+        fn fetch(&self, item: &String) -> anyhow::Result<Vec<u8>> {
+            Err(anyhow::Error::msg("Is a directory (os error 21)"))
+                .with_context(|| format!("read {item}"))
+        }
+        fn retire(&self, _name: &str, _item: &String) -> anyhow::Result<()> {
+            unreachable!("a file that could not be read is never retired")
+        }
+    }
+
+    /// A read failure must name *why* the read failed, on both ingest channels.
+    ///
+    /// `anyhow::Error`'s `Display` prints only the outermost context, so the
+    /// plain `to_string()` this replaced reached the user as `read <path>` — the
+    /// operation without the cause, which is the difference between "I tried" and
+    /// "here is what happened". The export channel already formatted `{e:#}`;
+    /// both must now produce the same message for the same failure.
+    #[test]
+    fn an_unreadable_candidate_names_its_cause_on_both_channels() {
+        let stage = tempfile::tempdir().unwrap();
+        for name in ["synthetic-readfail.json", "synthetic-readfail.jsonl"] {
+            let report = ingest_transport(
+                &UnreadableTransport { name },
+                stage.path(),
+                "synthetic-machine",
+                1,
+            )
+            .unwrap();
+            assert_eq!(report.errors.len(), 1, "{name}: one error per candidate");
+            let entry = &report.errors[0];
+            assert_eq!(entry.source_file, name);
+            assert!(
+                entry.message.starts_with(&format!("read {name}")),
+                "{name}: the context must still name the read; message={}",
+                entry.message
+            );
+            assert!(
+                entry.message.contains("Is a directory (os error 21)"),
+                "{name}: the cause must survive formatting; message={}",
+                entry.message
+            );
+        }
     }
 
     /// `level:"default"` means "unreliable", which is different from absent —
