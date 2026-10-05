@@ -1026,7 +1026,7 @@ mod tests {
                 .expect("hash")
                 .expect("some"),
             first,
-            "an mtime two years ago must not change the digest"
+            "an mtime ninety days ago must not change the digest"
         );
         fs::write(&report, body).expect("rewrite identical");
         assert_eq!(
