@@ -140,19 +140,22 @@ export function looksLikeHookStatus(value: unknown): value is HookStatusRecord {
   const record = value as Record<string, unknown>;
   if (typeof record.origin !== 'string' || record.origin.length === 0) return false;
   if (typeof record.platform !== 'string' || record.platform.length === 0) return false;
-  if (typeof record.at !== 'number' || !Number.isFinite(record.at)) return false;
+  if (typeof record.at !== 'number' || !Number.isFinite(record.at) || record.at < 0) return false;
   if (!Array.isArray(record.reasons) || record.reasons.length === 0) return false;
+  const reasons = new Set<HookObservation>();
   return record.reasons.every((entry) => {
     if (!entry || typeof entry !== 'object') return false;
     const row = entry as Record<string, unknown>;
     if (!isHookObservation(row.reason)) return false;
-    if (typeof row.at !== 'number' || !Number.isFinite(row.at)) return false;
+    if (reasons.has(row.reason)) return false;
+    reasons.add(row.reason);
+    if (typeof row.at !== 'number' || !Number.isFinite(row.at) || row.at < 0) return false;
     // A `since` that is not a time is not "no `since`" — see the field's own
     // comment: the one thing that must never be invented here is a first time,
     // because a reader would use it to decide whether a capture settles the
     // question. Missing is accepted and means "not recorded"; junk is not.
     if (row.since === undefined) return true;
-    return typeof row.since === 'number' && Number.isFinite(row.since);
+    return typeof row.since === 'number' && Number.isFinite(row.since) && row.since >= 0;
   });
 }
 
