@@ -613,13 +613,17 @@ export async function waitForStorage(
   const deadline = Date.now() + timeoutMs;
   // A worker restart mid-poll makes `readStorage` throw; that is "not settled
   // yet", not a failed wait, so the poll continues and the timeout still bounds
-  // it. The last successful reading is returned either way, per the rule above.
+  // it. A read that threw produced no reading, so the reading the poll already
+  // has is kept, and what a deadline returns is the last reading `readStorage`
+  // actually took — `{}` only before a first successful read, an "unread" no
+  // `settled` predicate accepts, so a wait whose every read threw degrades to
+  // the timeout and the caller's assertions name the missing field.
   let last: Record<string, unknown> = {};
   for (;;) {
     try {
       last = await readStorage(extension, keys);
     } catch {
-      last = {};
+      // A read that threw is not a reading; keep the one the poll already has.
     }
     if (settled(last) || Date.now() >= deadline) return last;
     await new Promise((resolve) => { setTimeout(resolve, 50); });
@@ -801,8 +805,22 @@ export async function waitForTickRecord(
 ): Promise<Record<string, unknown>> {
   const { since = 0, timeoutMs = 20_000 } = options;
   const deadline = Date.now() + timeoutMs;
+  // 🔴 W618 · The same poll shape as `waitForStorage`: a worker restart
+  //    mid-poll makes `readStorage` throw, and that is "not concluded yet",
+  //    not the tick's answer, so the reading the poll already has is kept and
+  //    the deadline still bounds the loop — one poll shape for the suite's
+  //    waiters rather than a restart failing this one outright. `all` is `{}`
+  //    only before a first successful read, which is a reading
+  //    `cs_backfill_lasttick_v1` cannot be in, so a wait whose every read
+  //    threw degrades to the timeout and the caller's assertions name the
+  //    missing record.
+  let all: Record<string, unknown> = {};
   for (;;) {
-    const all = await readStorage(ext, null);
+    try {
+      all = await readStorage(ext, null);
+    } catch {
+      // A read that threw is not a reading; keep the one the poll already has.
+    }
     const record = all['cs_backfill_lasttick_v1'];
     if (record && typeof record === 'object') {
       const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
@@ -877,12 +895,25 @@ export async function waitForOutbox(
   timeoutMs = 20_000,
 ): Promise<OutboxEntry[]> {
   const deadline = Date.now() + timeoutMs;
-  let last = await readOutbox(extension);
-  while (!settled(last) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    last = await readOutbox(extension);
+  // 🔴 W618 · The same poll shape as `waitForStorage`: a worker restart
+  //    mid-poll makes `readOutbox` throw — never `[]` on its own, per its own
+  //    three-state rule — and that is "not settled yet" here, not a failed
+  //    wait, so the reading the poll already has is kept and the deadline still
+  //    bounds the loop. `last` is `[]` only before a first successful read —
+  //    an "unread", not a measured emptiness, which no `settled` predicate
+  //    accepts (every one waits for a row to appear) — so a wait whose every
+  //    read threw degrades to the timeout and the caller's assertions name the
+  //    empty result.
+  let last: OutboxEntry[] = [];
+  for (;;) {
+    try {
+      last = await readOutbox(extension);
+    } catch {
+      // A read that threw is not a reading; keep the one the poll already has.
+    }
+    if (settled(last) || Date.now() >= deadline) return last;
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
   }
-  return last;
 }
 
 // ---------------------------------------------------------------------------
