@@ -327,7 +327,7 @@ apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:561  :: export const PAGE_HOOK_VERSION = 'v1';
 apps/extension/lib/contract.ts:305-350  0d21a1234c75  lines=46
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:356-852  9dc1973404c2  lines=497
+apps/extension/lib/contract.ts:356-852  9cc743e76d85  lines=497
   <- docs-dev/install.md:83, docs-dev/install.md:187, docs-dev/privacy.md:111, docs-dev/privacy.md:849  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
 apps/extension/lib/contract.ts:359  65cef6a544ee  lines=1
   <- docs-dev/privacy.md:800  :: origins: ['https://chat.deepseek.com'],
