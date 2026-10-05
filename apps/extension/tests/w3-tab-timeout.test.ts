@@ -213,6 +213,23 @@ let host: SyntheticHost;
 const detailAttempts: string[] = [];
 
 /**
+ * Resolves the moment the round first asks for a conversation body.
+ *
+ * 🔴 Why the end-to-end cases below wait on this event instead of polling a
+ *    bounded number of event-loop turns: the round's own chain — the ledger's
+ *    IndexedDB opens and writes, the account fingerprint's digest — needs a
+ *    scheduler-dependent number of turns before it reaches the body fetch, so
+ *    a fixed turn budget is a race, not a wait (it cleared locally in 15 turns
+ *    and failed on a loaded CI runner past 40). The body fetch is the exact
+ *    request part (c) exists to put a timeout on, so the wait is the event
+ *    itself and needs no budget: however many turns the round takes, the wait
+ *    ends when the round gets there, and a round that never gets there is a
+ *    timeout, not a false pass.
+ */
+let signalFirstDetailAttempt: (() => void) | undefined;
+let firstDetailAttempted: Promise<void> = Promise.resolve();
+
+/**
  * 🔴 The injected port. It answers the **list** page like a healthy page would (so
  * real debts exist), and then never answers a **body** fetch at all — the failure
  * mode the bug report describes.
@@ -220,6 +237,7 @@ const detailAttempts: string[] = [];
  * default is asserted in (b2).
  */
 function halfDeadPort() {
+  firstDetailAttempted = new Promise<void>((resolve) => { signalFirstDetailAttempt = resolve; });
   return tabHttpPort(1, async (_id, msg) => {
     const m = msg as { type?: string; url?: string };
     if (m.type === 'cs-backfill-chatgpt-workspace') {
@@ -234,6 +252,7 @@ function halfDeadPort() {
       };
     }
     detailAttempts.push(m.url ?? '');
+    signalFirstDetailAttempt?.();
     return new Promise(() => { /* never settles */ });
   }, 50, browserLocalStore());
 }
@@ -359,10 +378,11 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     // ---- round 1: the page answers the list and then goes silent ----
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     const firstSettled = mod.backfillTickSettled();
-    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
-      await Promise.resolve();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    // 🔴 The round's own progress is the wait: the body fetch is the request
+    //    whose timeout this case exists to fire, so wait for exactly that
+    //    event (firstDetailAttempted) rather than a budget of event-loop
+    //    turns the round does not have a fixed number of.
+    await firstDetailAttempted;
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
@@ -433,10 +453,8 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     const firstSettled = mod.backfillTickSettled();
-    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
-      await Promise.resolve();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    // 🔴 Same event-driven wait as round 1 above: no turn budget to lose.
+    await firstDetailAttempted;
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
