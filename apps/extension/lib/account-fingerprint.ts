@@ -274,7 +274,7 @@ export async function fingerprintAccountId(
  *    instruction; see the report's open-question note.
  *
  * `sessionId` is passed in rather than re-derived so the session-id guard below
- * uses the same value the bundle is named by (background.ts's `resolveSessionId`,
+ * uses the same value the bundle is named by (background.ts's `resolveCaptureSessionId`,
  * C21). A value that IS the session id is not an account id.
  */
 export function accountIdFromCapture(captured: CapturedFetch, sessionId: string | null): AccountIdReading {

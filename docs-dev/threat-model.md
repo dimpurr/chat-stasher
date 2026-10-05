@@ -352,7 +352,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:1471-1474`, `:1524-1540`). That value is written
+(`apps/extension/lib/contract.ts:1476-1479`, `:1529-1545`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:256-258`). It never leaves your
 machine, but it means your archive contains your account identifier.

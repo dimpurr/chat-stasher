@@ -570,7 +570,7 @@ describe('C17 task 3 · seam A: are the debt key and the on-disk file name the s
     // Both ids start with the same hex-dash run, and sessionIdPatterns' greedy match stops there:
     //   'deadbeef01-zzz' and 'deadbeef01-yyy' both used to ⇒ sessionId 'deadbeef01-'
     // 🔴 After C21 the write-down side **no longer scrapes an identity out of the URL at all** (see lib/backfill/engine.ts's
-    //    `sessionId: id` and entrypoints/background.ts's resolveSessionId),
+    //    `sessionId: id` and entrypoints/background.ts's resolveCaptureSessionId),
     //    so however greedy that regex is, it no longer affects the file name.
     const ids = ['deadbeef01-zzz', 'deadbeef01-yyy'];
     const server = makeServer({ ids, total: 2, pageSize: 4 });

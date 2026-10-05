@@ -276,7 +276,7 @@ export function agreesWithLease(
  * 🔴 **Honest note on the refusal branch**, so it is not read as more than it is: this
  *    build cannot produce such a record — the lease is derived from the scope key
  *    itself, two derivations of one input cannot differ, and the two session-id
- *    resolutions on the two paths are the same call (`resolveSessionId` delegates to
+ *    resolutions on the two paths are the same call (`resolveCaptureSessionId` delegates to
  *    `extractSessionId`, which is what `backfillTargetFor` uses). So in production this
  *    arm fires only on a record this build did not write. It is kept because it is the
  *    same guard `lib/coverage-read.ts`'s `isReadableHeaderAt` already applies for the
