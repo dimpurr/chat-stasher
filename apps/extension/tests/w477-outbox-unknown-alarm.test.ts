@@ -117,6 +117,14 @@ describe('W477 · isOutboxSummary · what the outbox itself could have written',
     ['a full queue', {
       ...emptySummary(), pending: 1, bytes: OUTBOX_CAPACITY_BYTES, full: true, nearFull: true,
     }],
+    // 🔴 The capacity floor is a value the writers can reach (`capacityOf()` passes
+    //    an override of 0 through), and at it both flags are vacuously true. It is
+    //    listed here, not among the refusals below, because refusing it would be the
+    //    guard rejecting a summary this module writes.
+    ['a zero-capacity queue', { pending: 0, rejected: 0, bytes: 0, capacityBytes: 0, full: true, nearFull: true }],
+    ['a zero-capacity queue holding something', {
+      pending: 2, rejected: 0, bytes: 128, capacityBytes: 0, full: true, nearFull: true,
+    }],
   ])('%s is a measurement', (_case, value) => {
     expect(isOutboxSummary(value)).toBe(true);
   });
@@ -127,7 +135,6 @@ describe('W477 · isOutboxSummary · what the outbox itself could have written',
     ['a string', 'pending'],
     ['a number', 0],
     ['an array', []],
-    ['a zero-capacity summary', { ...emptySummary(), capacityBytes: 0 }],
     ['a negative count', { ...emptySummary(), rejected: -1 }],
     ['a fractional count', { ...emptySummary(), pending: 0.5 }],
     ['a non-finite count', { ...emptySummary(), bytes: Number.NaN }],
@@ -184,6 +191,43 @@ describe('W477 · the outbox’s own refusal summary is a summary its guard acce
     const refused = await ob.enqueue(NAME_B, PAYLOAD_B, { capacityBytes: used });
     expect(refused.reason).toBe('outbox-full');
     expect(refused.summary).toMatchObject({ full: true });
+    expect(ob.isOutboxSummary(refused.summary)).toBe(true);
+  });
+
+  /**
+   * 🔴 The capacity floor, reached through the writers rather than around them.
+   *    `OutboxOptions.capacityBytes` is documented as existing so the capacity rule
+   *    can be exercised, and `capacityOf()` passes an override of `0` straight
+   *    through — so `summary()` really does write `capacityBytes: 0`, with both
+   *    derived flags vacuously true. A guard that refused those would be refusing
+   *    this module's own output, which is the one thing its contract forbids.
+   */
+  it('🔴 accepts the zero-capacity summary summary() itself writes', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    // `bytes` is whatever earlier cases left queued — both flags are true at zero
+    // capacity either way, which is the whole point of the floor.
+    const measured = await ob.summary({ capacityBytes: 0 });
+    expect(measured).toMatchObject({ capacityBytes: 0, full: true, nearFull: true });
+    expect(ob.isOutboxSummary(measured)).toBe(true);
+  });
+
+  it('accepts the refusal summary it writes at zero capacity', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    // Nothing can ever fit at zero capacity, so a payload not already queued is
+    // refused outright — the refusal-with-no-predecessor case a hand-picked
+    // fixture cannot produce.
+    const refused = await ob.enqueue(
+      'chatgpt-cccccccc-9999-8888-7777-666666666666.json',
+      '{"sessionId":"cccccccc-9999-8888-7777-666666666666"}',
+      { capacityBytes: 0 },
+    );
+    expect(refused.accepted).toBe(false);
+    expect(refused.reason).toBe('outbox-full');
+    expect(refused.summary).toMatchObject({ capacityBytes: 0, full: true, nearFull: true });
     expect(ob.isOutboxSummary(refused.summary)).toBe(true);
   });
 });
