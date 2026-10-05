@@ -36,6 +36,25 @@ The generated tables also carry three columns that no capture run fills in for y
 
 If a tool keeps its sessions somewhere else on your machine, set its path under `[harness_roots]` ([config.md](config.md#harness_roots)). A path you set is always scanned, whatever the table says.
 
+## Hermes Agent
+
+The CLI scanner reads `~/.hermes/state.db` through a SQLite read-only
+connection. SQLite resolves committed WAL records as part of that read, so the
+scanner does not rely on copying only the main database file. Sessions and
+messages are exported as source-shaped records, including inactive and
+compacted messages. The `session_model_usage` rows are preserved separately as
+session-level provider, model, token, and cost metadata; they are not assigned
+to individual messages.
+
+For older installations, `~/.hermes/sessions/*.json` and `*.jsonl` are also
+scanned. Files with a native session ID already present in `state.db` are
+deduplicated against the database session. SQLite schema mismatches and read
+errors remain visible as scan uncertainty rather than an empty session list.
+When you set the Hermes Agent root under
+[`harness_roots`](config.md#harness_roots), that root is the whole source:
+the `state.db` and the legacy compatibility paths above are not consulted
+around it.
+
 ## The support matrix
 
 <!-- support-matrix:full:start -->
@@ -67,6 +86,9 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | OpenClaw | macOS | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
 | OpenClaw | Linux | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
 | OpenClaw | Windows | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
+| Hermes Agent | macOS | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
+| Hermes Agent | Linux | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
+| Hermes Agent | Windows | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
 | Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Linux | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
 | Cursor | Windows | `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | sqlite | community-claim-unverified | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
@@ -117,6 +139,7 @@ If a tool keeps its sessions somewhere else on your machine, set its path under 
 | Local | Google Antigravity | 2026-10-03 | normal | - |
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
 | Local | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
+| Local | Hermes Agent | - | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |
 | Local | Grok Bot (desktop) | - | low | local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |

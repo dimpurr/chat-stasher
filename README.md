@@ -171,6 +171,7 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | OpenClaw | supported | - |
+| Local | Hermes Agent | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |

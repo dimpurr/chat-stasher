@@ -122,6 +122,7 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "crush",
     "cursor",
     "gemini-cli",
+    "hermes-agent",
     "github-copilot-cli",
     "google-antigravity",
     "grok-bot",

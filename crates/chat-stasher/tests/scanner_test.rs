@@ -11,6 +11,9 @@ use serde_json::json;
 use std::fs;
 use std::sync::Mutex;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a registry with just claude-code + codex, every platform cell
@@ -288,4 +291,76 @@ fn opencode_db_env_override_wins_for_scanner() {
 
     std::env::remove_var("OPENCODE_DB");
     std::env::remove_var("XDG_DATA_HOME");
+}
+
+#[test]
+fn hermes_scanner_reads_sqlite_and_deduplicates_legacy_session_ids() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let sandbox = test_support::Sandbox::new();
+    sandbox.ensure_dirs();
+    let hermes_home = sandbox.home().join(".hermes");
+    let legacy = hermes_home.join("sessions");
+    fs::create_dir_all(&legacy).unwrap();
+    let db = hermes_home.join("state.db");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sessions(id TEXT PRIMARY KEY); CREATE TABLE messages(id INTEGER, session_id TEXT, role TEXT); CREATE TABLE session_model_usage(session_id TEXT, model TEXT, billing_provider TEXT); INSERT INTO sessions VALUES ('duplicate-id');") .unwrap();
+    fs::write(
+        legacy.join("duplicate-id.json"),
+        br#"{"id":"duplicate-id"}"#,
+    )
+    .unwrap();
+    fs::write(legacy.join("legacy-only.jsonl"), b"{}\n").unwrap();
+
+    let previous: Vec<_> = sandbox
+        .envs()
+        .into_iter()
+        .map(|(name, value)| {
+            let old = std::env::var_os(name);
+            std::env::set_var(name, value);
+            (name, old)
+        })
+        .collect();
+    let cell = json!({
+        "template":"~/.hermes/state.db","format":"sqlite","confidence":"source-confirmed",
+        "source":"fixture","sql_table":"sessions","sql_id_column":"id","sql_required_columns":["id"]
+    });
+    let paths = match scanner::current_platform() {
+        "macos" => json!({"macos":cell}),
+        "linux" => json!({"linux":cell}),
+        "windows" => json!({"windows":cell}),
+        other => panic!("unexpected platform: {other}"),
+    };
+    let registry: HarnessRegistry = serde_json::from_value(json!({
+        "schema_version":1,"generated":"2026-10-03","harnesses":[{
+            "id":"hermes-agent","display_name":"Hermes Agent","paths":paths,
+            "legacy_roots":["~/.hermes/sessions"]
+        }]
+    }))
+    .unwrap();
+    // No `[harness_roots]` entry: a root the user states covers the whole
+    // harness and turns the legacy scan off, so the both-sources-together
+    // path this test exercises is the unresolved default one, where the
+    // templates are what point the scanner at the planted files.
+    let config = Config::default();
+    let result = scanner::scan_with_registry(&config, &registry).unwrap();
+    for (name, old) in previous {
+        if let Some(value) = old {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+    assert_eq!(
+        result.records.len(),
+        2,
+        "one SQLite session plus one distinct legacy session"
+    );
+    assert!(result
+        .records
+        .iter()
+        .any(|row| row.id.ends_with(".duplicate-id") && row.sqlite_layout.is_some()));
+    assert!(result
+        .records
+        .iter()
+        .any(|row| row.id.ends_with(".legacy-only") && row.sqlite_layout.is_none()));
 }
