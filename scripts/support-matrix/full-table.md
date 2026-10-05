@@ -38,9 +38,6 @@
 | Grok (xAI CLI) | macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | verified end-to-end (2026-10-03) | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
-| Grok Bot | macOS | - | - | - | supported | - |
-| Grok Bot | Linux | - | - | - | supported | - |
-| Grok Bot | Windows | - | - | - | supported | - |
 | GitHub Copilot CLI | macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Linux | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Windows | `%USERPROFILE%\.copilot\` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
@@ -81,8 +78,8 @@
 | Local | Gemini CLI | 2026-09-25 | normal | the tool's own 30-day cleanup can delete chats in the source before a first archive runs; archive often |
 | Local | Google Antigravity | 2026-10-03 | normal | - |
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
-| Local | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
-| Local | Hermes Agent | - | normal | - |
+| Agent platform | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
+| Agent platform | Hermes Agent | - | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |
 | Agent platform | Grok Bot (desktop) | - | low | local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |

@@ -170,8 +170,8 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | OpenClaw | supported | - |
-| Local | Hermes Agent | supported | - |
+| Agent platform | OpenClaw | supported | - |
+| Agent platform | Hermes Agent | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Agent platform | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
