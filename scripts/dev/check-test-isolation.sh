@@ -91,7 +91,18 @@
 #     inbox**: any entry appearing, vanishing, renaming, or appearing and
 #     vanishing inside the run is a leak. Nothing the product does on its own
 #     writes these during a test run, so for them the old whole-snapshot rule
-#     is still the right one.
+#     is still the right one. The diff compares the entry set and each entry's
+#     identity; a *directory's* own mtime is the one thing it leaves out,
+#     because that is the evidence of an entry that appeared and vanished
+#     again, which the run-boundary marker below reports — and a snapshot
+#     asking the same question at whole-second resolution made the two rules
+#     race, with the create-then-delete finding turning on which second the run
+#     happened to land in (CI run 37253529168). The marker's resolution is the
+#     filesystem's, so on one that stores whole-second mtimes an entry created
+#     and removed inside the boundary's own second is not separable from one
+#     that was never there; APFS, ext4 and NTFS all record sub-second times,
+#     and the selftest pins the attribution with a run wide enough to cross a
+#     second on purpose.
 #
 # What this deliberately does not catch, stated so it is a decision and not an
 # oversight: a write into a real root that carries no fingerprint at all — a
@@ -313,16 +324,12 @@ scan_roots() {
   printf 'marker\t%s\n' "$STATE_HOME"
 }
 
-# Snapshot the structure roots named in `$2` (one path per line) into `$1`, one
-# path per entry, so a changed root is a readable diff. An absent root is
-# recorded as `ABSENT <path>` so a run that creates it is a diff. Only names are
-# recorded, not stat data: a create-then-delete leaves the entry set identical
-# and is caught by the run-boundary check below, whereas recording mtime here
-# made the same event a *snapshot* diff whose whole-second granularity is a
-# race — the generic "changed a real inbox" message would pre-empt the specific
-# create-then-delete message whenever the probe straddled a second boundary. An
-# in-place rewrite (same name, newer mtime) is still caught by the boundary
-# check, so dropping stat data loses no detection.
+# Snapshot the roots named in `$2` (one path per line) into `$1`, one line per
+# entry, keyed by path so a changed root is a readable diff. An absent root is
+# recorded as `ABSENT <path>` so a run that creates it is a diff. What counts as
+# a change is the entry set and each entry's identity — not a directory's own
+# mtime, which is the run boundary's evidence rather than a difference; see the
+# note in the loop below.
 snapshot_structure() {
   # $1 = output file, $2 = roots file.
   : >"$1"
@@ -339,7 +346,34 @@ snapshot_structure() {
       exit 1
     fi
     while IFS= read -r -d '' entry; do
-      printf '%s\n' "$entry"
+      # Identity for every entry — the inode, so an entry that was replaced or
+      # renamed over is a diff even when the name set is unchanged — plus mtime
+      # and size for a *file*, so a manifest rewritten in place is a diff too.
+      #
+      # A directory's own mtime and size are deliberately not part of it, and
+      # this is the load-bearing distinction of the whole structure rule. A
+      # directory's mtime is not structure: it moves because an entry under it
+      # appeared or vanished, which the entry set already reports, or because
+      # one appeared and vanished again, which is the run-boundary check's
+      # finding below. `stat` reports whole seconds, and the two rules were
+      # asked the same question at two resolutions: a create-then-delete inside
+      # the snapshot's second reported as a structure change, and the boundary
+      # check — which is the mechanism that can decide it, because `find
+      # -newer` compares at the filesystem's resolution — is skipped as soon as
+      # the diff has spoken. So which mechanism answered depended on where the
+      # run fell in the wall clock, on a probe whose finding was never in doubt
+      # (CI run 37253529168). Identity is what the diff compares; the boundary
+      # marker owns "touched here, and the entry set says otherwise".
+      if [ -d "$entry" ]; then
+        stat -c 'd %i' "$entry" 2>/dev/null ||
+          stat -f 'd %i' "$entry" 2>/dev/null ||
+          printf 'd stat-unavailable'
+      else
+        stat -c 'f %i %Y %s' "$entry" 2>/dev/null ||
+          stat -f 'f %i %m %z' "$entry" 2>/dev/null ||
+          printf 'f stat-unavailable'
+      fi
+      printf ' %s\n' "$entry"
     done <"$SNAP_DIR/names.raw" >>"$1"
   done <"$2"
   LC_ALL=C sort -o "$1" "$1"
@@ -478,7 +512,10 @@ fi
 
 # The run boundary: everything the run does happens with a timestamp after
 # this, so `find -newer` catches a create-then-delete whose entry names cancel
-# out, and bounds the fingerprint scan to what the run actually touched.
+# out, and bounds the fingerprint scan to what the run actually touched. It
+# compares at the filesystem's resolution, which is why the structure snapshot
+# leaves a directory's own mtime out rather than answering the same question
+# here at whole-second resolution.
 BOUNDARY="$SNAP_DIR/boundary"
 : >"$BOUNDARY"
 
@@ -501,9 +538,10 @@ if ! diff -q "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.after" >/dev/null
 fi
 
 # Unchanged entry set, but a structure directory was touched during the run: a
-# create-then-delete, or an in-place rewrite of an entry that kept its name.
-# Reported only when the name-set snapshot diff was clean, so one change is
-# never announced twice.
+# create-then-delete. This is now the only detector of that shape, because the
+# snapshot deliberately does not record a directory's mtime; the gate below is
+# there so one change is never announced twice, not because the diff might be
+# reporting the same thing.
 if [ "$failed" -eq 0 ]; then
   while IFS= read -r root; do
     [ -n "$root" ] || continue

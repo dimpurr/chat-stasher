@@ -333,6 +333,26 @@ run_host -- bash -c 'd="$HOME/Downloads/chat-stasher/inbox/gone"
 record "structure create-then-delete is red" 1
 contains "create-then-delete"
 
+# The same create-then-delete, with the run deliberately wide enough to cross a
+# wall-clock second — the shape that made the probe above a coin flip and CI
+# (run 37253529168) red on runs where it landed wrong. The structure snapshot
+# used to record whole-second mtimes, so whenever the run straddled a second it
+# reported the inbox's own moved mtime as a structure change, and the boundary
+# check was skipped the moment the diff had spoken: the create-then-delete
+# finding this pair of probes pins was never the one that answered, and only
+# the answer was in doubt, never the leak. The snapshot no longer asks about a
+# directory's mtime at all; this probe is what keeps it from starting again.
+# `sleep` turns the coin-flip into a certainty, and it sits *inside* the run
+# window, so the boundary marker is still the mechanism that can see it.
+reset_host
+mkdir -p "$INBOX_ROOT"
+run_host -- bash -c 'd="$HOME/Downloads/chat-stasher/inbox/gone"
+  sleep 1.1
+  mkdir -p "$d"
+  rmdir "$d"'
+record "create-then-delete across a second is red" 1
+contains "create-then-delete"
+
 # A wrapped command that fails does not bypass the verdict.
 reset_host
 seed_data_root
