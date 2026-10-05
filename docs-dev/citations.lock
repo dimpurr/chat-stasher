@@ -661,11 +661,11 @@ crates/chat-stasher/src/doctor.rs:2376-2438  0d89a3dbd659  lines=63
   <- docs-dev/install.md:1028  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1464-1684  b6dd6f684adc  lines=221
+crates/chat-stasher/src/fts.rs:1468-1688  b6dd6f684adc  lines=221
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1686-1701  c572ae968c6b  lines=16
+crates/chat-stasher/src/fts.rs:1690-1705  c572ae968c6b  lines=16
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: pub fn clear(&self) -> Result<bool> {
-crates/chat-stasher/src/fts.rs:2135-2144  64fcac75f933  lines=10
+crates/chat-stasher/src/fts.rs:2139-2148  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:934  :: #[cfg(unix)]
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
   <- docs-dev/privacy.md:465, docs-dev/privacy.md:975  :: /// Subdirectory of the inbox where consumed files are reti…
@@ -939,9 +939,9 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
   <- docs-dev/install.md:967  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1248  :: }
-crates/chat-stasher/src/scanner.rs:1876-1992  099b52c62352  lines=117
+crates/chat-stasher/src/scanner.rs:1884-2000  099b52c62352  lines=117
   <- docs-dev/privacy.md:981  :: sqlite_layout: Some(layout),
-crates/chat-stasher/src/scanner.rs:2305-2314  f09925927335  lines=10
+crates/chat-stasher/src/scanner.rs:2313-2322  f09925927335  lines=10
   <- docs-dev/openclaw-scanner.md:32  :: }
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:922  :: /// Resolve the executable that a persistent scheduler may …
