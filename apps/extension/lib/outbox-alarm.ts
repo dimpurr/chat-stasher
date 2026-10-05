@@ -10,13 +10,14 @@
  *  · pending > 0  ⇒ an alarm exists (an existing one is kept, so its period is
  *    not restarted on every service-worker wake);
  *  · pending = 0  ⇒ no alarm;
- *  · pending unknown (the outbox could not be read) ⇒ keep an alarm.
+ *  · pending unknown (the outbox could not be read, or what came back is not a
+ *    summary this build wrote) ⇒ keep an alarm.
  *    🔴 Unknown is never treated as empty: a timer that fires on an empty
  *    outbox costs one read; a missing timer on a full one loses retries.
  */
 
 import type { AlarmsApi, AlarmSyncResult } from './backfill/alarm';
-import { OUTBOX_NEAR_FULL_FRACTION } from './outbox';
+import { isOutboxSummary } from './outbox';
 
 export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
 
@@ -26,27 +27,6 @@ export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
  * else.
  */
 export const OUTBOX_ALARM_PERIOD_MINUTES = 5;
-
-function isOutboxSummary(value: unknown): value is {
-  pending: number;
-  rejected: number;
-  bytes: number;
-  capacityBytes: number;
-  full: boolean;
-  nearFull: boolean;
-} {
-  if (!value || typeof value !== 'object') return false;
-  const summary = value as Record<string, unknown>;
-  const counts = [summary.pending, summary.rejected, summary.bytes, summary.capacityBytes];
-  if (!counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) return false;
-  if (summary.capacityBytes === 0) return false;
-  const bytes = summary.bytes as number;
-  const capacityBytes = summary.capacityBytes as number;
-  return typeof summary.full === 'boolean'
-    && typeof summary.nearFull === 'boolean'
-    && summary.full === (bytes >= capacityBytes)
-    && summary.nearFull === (bytes >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION);
-}
 
 export async function syncOutboxAlarm(
   alarms: AlarmsApi | null | undefined,
@@ -68,10 +48,20 @@ export async function syncOutboxAlarm(
 }
 
 /**
- * Read the outbox state for alarm scheduling. A missing IndexedDB API means
- * the outbox cannot exist in this context, so it is a verified empty queue.
- * Once the API exists, a failed read or malformed summary is unknown and must
- * keep the retry alarm armed.
+ * Read the outbox state for alarm scheduling, keeping this module's rule (see
+ * the file header) true of every way the read can come back.
+ *
+ * 🔴 The three states stay three states. A missing IndexedDB API means the
+ *    outbox cannot exist in this context, so absence there *is* measured and the
+ *    queue is empty. Once the API exists, a read that throws, returns `null`, or
+ *    returns something `isOutboxSummary` refuses is **unknown** — never zero —
+ *    and `syncOutboxAlarm(null)` keeps the timer armed. A timer that fires on
+ *    an empty outbox costs one IndexedDB read; a missing timer on a full one
+ *    loses retries with nothing to say so.
+ *
+ * 🔴 The reader is injected rather than imported so this rule is exercised
+ *    against every shape the read can produce, including the ones no IndexedDB
+ *    stub in the tree returns.
  */
 export async function syncOutboxAlarmFromRead(
   alarms: AlarmsApi | null | undefined,
