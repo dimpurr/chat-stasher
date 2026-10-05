@@ -219,6 +219,37 @@ describe('W666 · channelConnected / channelDisconnected', () => {
     );
   });
 
+  /**
+   * 🔴 An *empty* fact is not a fact. `optionalStringFieldsAreValid`
+   *    (lib/host-status.ts) accepts `''` for every optional field, and `hello`
+   *    itself can report a host with no stage path that way — so "absent" and
+   *    "present but blank" reach this builder as two different records that
+   *    must not read as two different things. Both read "unknown"; neither
+   *    renders the blank, which is the same missing-fact-as-a-value defect one
+   *    step down from `undefined`.
+   */
+  it('an empty connected fact reads "unknown" too, never a blank in the sentence', async () => {
+    const ui = await uiStrings();
+    const line = ui.channelConnected({ at: 1700000000000, ok: true, stage: '', machine: '', hostVersion: '' });
+    expect(line).toBe(
+      'Delivery channel: connected to the chat-stasher host — stage unknown · machine unknown · host version unknown (checked 2023-11-14 22:13:20 UTC).',
+    );
+    expect(line).not.toMatch(/stage\s+·|stage unknown unknown/);
+  });
+
+  /**
+   * 🔴 Same property for the reason. An empty `reason` is a host that was never
+   *    given one, so it takes the same "unknown reason" sentence an absent
+   *    reason takes — the reason and the kind stay independent either way.
+   */
+  it('an empty reason reads "unknown reason" beside the kind it does carry', async () => {
+    const ui = await uiStrings();
+    const line = ui.channelDisconnected({ at: 1700000000000, ok: false, reason: '', kind: 'config' });
+    expect(line).toBe(
+      'Delivery channel: NOT connected to the chat-stasher host — reason: unknown reason (config) (checked 2023-11-14 22:13:20 UTC). No stage path has ever been learned on this machine. Fix: curl -fsSL https://chatstasher.com/install.sh | sh',
+    );
+  });
+
   // 🔴 `reason` and `kind` are independent fields. A kind present does not make
   //    the reason known, and reading it that way rendered "reason: undefined
   //    (config)" — the same missing-fact-as-a-value defect, in the sentence that
