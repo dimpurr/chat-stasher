@@ -401,9 +401,9 @@ apps/extension/lib/contract.ts:1524-1540  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:542, docs-dev/threat-model.md:355  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:712, docs-dev/privacy.md:773, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
-apps/extension/lib/hook-status.ts:78-155  32138100895c  lines=78
+apps/extension/lib/hook-status.ts:79-134  21b4eb249512  lines=56
   <- docs-dev/privacy.md:506  :: /** Storage key prefix. One record per origin; at most one …
-apps/extension/lib/hook-status.ts:289-418  8d9dfc487218  lines=130
+apps/extension/lib/hook-status.ts:292-421  8d9dfc487218  lines=130
   <- docs-dev/privacy.md:506  :: *    the two facts were one silent nothing until W47.
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs-dev/privacy.md:500  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
@@ -481,23 +481,23 @@ apps/extension/lib/page-hook.ts:629-634  791755750698  lines=6
   <- docs-dev/privacy.md:907  :: const type = this.responseType;
 apps/extension/lib/page-hook.ts:635-638  9e0fabbb14f2  lines=4
   <- docs-dev/privacy.md:908  :: text = JSON.stringify(this.response);
-apps/extension/lib/page-hook.ts:671-718  123be49bb0f2  lines=48
+apps/extension/lib/page-hook.ts:671-719  23434ba6d6e6  lines=49
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:712  :: const eventSourceConstructor = pageWindow.EventSource;
 apps/extension/lib/page-hook.ts:680-684  4e7c56bc1085  lines=5
   <- docs-dev/privacy.md:913  :: if (!eventSourcePlatform) {
-apps/extension/lib/page-hook.ts:768-771  05550067e2fd  lines=4
+apps/extension/lib/page-hook.ts:769-772  05550067e2fd  lines=4
   <- docs-dev/privacy.md:913  :: if (!observeWebSocketFrame(socket, url, event?.data)) {
-apps/extension/lib/page-hook.ts:829  a5b96cb2e6ef  lines=1
+apps/extension/lib/page-hook.ts:830  a5b96cb2e6ef  lines=1
   <- docs-dev/privacy.md:109  :: return { value: chatGptAccountIdHeaderValue(accountId), pre…
-apps/extension/lib/page-hook.ts:850-855  ac2add6ee1af  lines=6
+apps/extension/lib/page-hook.ts:851-856  ac2add6ee1af  lines=6
   <- docs-dev/privacy.md:116  :: const platform = getPlatform(parsed.href);
-apps/extension/lib/page-hook.ts:853-862  ffd20a2113ae  lines=10
+apps/extension/lib/page-hook.ts:854-863  ffd20a2113ae  lines=10
   <- docs-dev/threat-model.md:268  :: // ChatGPT's in-page navigation loads only a paged window o…
-apps/extension/lib/page-hook.ts:869  c8304bee299e  lines=1
-  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:712, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: !platform.methods.includes(normalizedMethod) ||
-apps/extension/lib/page-hook.ts:876-910  45359f1a1af8  lines=35
+apps/extension/lib/page-hook.ts:877  c2a5f81a7761  lines=1
+  <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:712, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
+apps/extension/lib/page-hook.ts:877-911  45359f1a1af8  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:1103-1146  994e4f465747  lines=44
+apps/extension/lib/page-hook.ts:1104-1147  994e4f465747  lines=44
   <- docs-dev/privacy.md:47  :: /**
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:272  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
@@ -559,7 +559,7 @@ apps/extension/lib/ui-strings.ts:110-133  15d7068df650  lines=24
   <- docs-dev/install.md:478  :: export function channelDisconnected(f: ChannelFacts): strin…
 apps/extension/locales/en.yml:69-85  0506238227c4  lines=17
   <- docs-dev/threat-model.md:787  :: identityConflict:
-apps/extension/locales/en.yml:485-486  62def469c931  lines=2
+apps/extension/locales/en.yml:488-489  62def469c931  lines=2
   <- docs-dev/privacy.md:793, docs-dev/threat-model.md:319  :: coordinationUnavailable: >-
 apps/extension/package.json:4  3aa57759f9e4  lines=1
   <- docs-dev/install.md:1172  :: "private": true,
