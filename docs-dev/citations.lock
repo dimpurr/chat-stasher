@@ -795,23 +795,23 @@ crates/chat-stasher/src/main.rs:8054-8058  c1c01a085bde  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:859  :: // This guard used to refuse any shard-less stage: while re…
 crates/chat-stasher/src/main.rs:8545-8705  ec138f872ade  lines=161
   <- docs-dev/threat-model.md:919  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:12531-12539  78f23654916e  lines=9
+crates/chat-stasher/src/main.rs:12530-12538  78f23654916e  lines=9
   <- docs-dev/install.md:271  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12549-12572  3f797bdc8c26  lines=24
+crates/chat-stasher/src/main.rs:12548-12571  3f797bdc8c26  lines=24
   <- docs-dev/install.md:271  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:13709-13723  af69d09d53a2  lines=15
+crates/chat-stasher/src/main.rs:13708-13722  af69d09d53a2  lines=15
   <- docs-dev/install.md:593  :: fn setup_refused_awaiting_declaration_why(destination_step_…
-crates/chat-stasher/src/main.rs:14146-14153  e5a9c1eb5374  lines=8
+crates/chat-stasher/src/main.rs:14145-14152  e5a9c1eb5374  lines=8
   <- docs-dev/install.md:592  :: fn setup_create_repo_and_key(config: &Config) -> Result<std…
-crates/chat-stasher/src/main.rs:16677-16711  2b9ef8eaa940  lines=35
+crates/chat-stasher/src/main.rs:16676-16710  2b9ef8eaa940  lines=35
   <- docs-dev/install.md:988  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:16730-16758  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:16729-16757  563498443d71  lines=29
   <- docs-dev/install.md:949  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:16999-17004  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:16998-17003  00bb766bbeb7  lines=6
   <- docs-dev/install.md:978  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:17018-17020  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:17017-17019  28b586b3526e  lines=3
   <- docs-dev/install.md:944  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:17020-17153  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:17019-17152  9b25725da3b1  lines=134
   <- docs-dev/install.md:965  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:414, docs-dev/threat-model.md:715  :: //! ADR-022: content-addressed hash tracking for stage meta…
