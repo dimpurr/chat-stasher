@@ -1699,32 +1699,18 @@ fn write_sealed_shard_raw_with_policy(
     allow_exact_repeat: bool,
 ) -> anyhow::Result<String> {
     assert_stage_writer_audited(writer)?;
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    fs::create_dir_all(&dir)?;
-    // Restore reproduces the archive's physical shard set for reconciliation;
-    // it must retain repeated historical shards. Ingest/collect/seal are new
-    // writes, where an exact replay is idempotent.
-    if !allow_exact_repeat && writer != StageWriter::Restore {
-        if let Some(name) = find_duplicate_shard(stage_root, machine, session_id, raw)? {
-            return Ok(name);
-        }
-    }
-    let seq = next_shard_seq(stage_root, machine, session_id)?;
-    let path = shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
-    fs::create_dir_all(path.parent().expect("shard path has bucket parent"))?;
-    let tmp = path.with_file_name(format!(".{}tmp", shard_filename(seq)));
-    if tmp.exists() {
-        fs::remove_file(&tmp)?;
-    }
-    let mut f = fs::File::create(&tmp)?;
-    f.write_all(raw)?;
-    f.sync_all()?;
-    drop(f);
-    if path.exists() {
-        anyhow::bail!("sealed shard target already exists: {}", path.display());
-    }
-    fs::rename(&tmp, &path)?;
-    Ok(shard_filename(seq))
+    crate::shard_writer::write_shard(
+        stage_root,
+        machine,
+        session_id,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Store {
+            raw,
+            writer,
+            allow_exact_repeat,
+        },
+    )
+    .map(crate::shard_writer::ShardWrite::filename)
 }
 
 /// Find an already sealed shard with the same SHA-256 in one session.
@@ -2145,6 +2131,80 @@ impl StoreConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_store_shard_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = b"{\"synthetic\":1}\r\n\xffunterminated";
+        let name = write_sealed_shard_raw_with_cap(
+            StageWriter::Collect,
+            dir.path(),
+            "synthetic-machine",
+            "synthetic-session",
+            raw,
+            1,
+        )
+        .unwrap();
+        assert_eq!(name, "000001.jsonl");
+        let path = shard_path_with_cap(dir.path(), "synthetic-machine", "synthetic-session", 1, 1);
+        assert!(fs::read(path).unwrap() == raw);
+        assert_eq!(
+            write_sealed_shard_raw_with_cap(
+                StageWriter::Collect,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                raw,
+                1
+            )
+            .unwrap(),
+            name
+        );
+        assert_eq!(
+            write_sealed_shard_raw_with_cap(
+                StageWriter::Restore,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                raw,
+                1
+            )
+            .unwrap(),
+            "000002.jsonl"
+        );
+        assert!(
+            fs::read(shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                2,
+                1
+            ))
+            .unwrap()
+                == raw
+        );
+        let lines = vec![b"synthetic".to_vec(), vec![], vec![0xff]];
+        write_sealed_shard_bytes_with_cap(
+            StageWriter::Collect,
+            dir.path(),
+            "synthetic-machine",
+            "synthetic-lines",
+            &lines,
+            1,
+        )
+        .unwrap();
+        assert!(
+            fs::read(shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-lines",
+                1,
+                1
+            ))
+            .unwrap()
+                == b"synthetic\n\n\xff\n"
+        );
+    }
     use super::*;
     use std::fs;
 

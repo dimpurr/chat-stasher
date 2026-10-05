@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod body_cache;
+pub mod bundle_transport;
 pub mod collect;
 pub mod config;
 pub mod credentials;
@@ -41,6 +42,7 @@ pub mod schedule;
 pub mod seal;
 pub mod search;
 pub mod selector;
+mod shard_writer;
 pub mod sidecar;
 pub mod snapshot_cache;
 pub mod sqlite_probe;

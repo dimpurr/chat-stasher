@@ -123,23 +123,19 @@ pub fn seal_active_file(
     }
     let active_bytes = fs::read(active)
         .with_context(|| format!("read active file {} before sealing", active.display()))?;
-    if let Some(existing) =
-        crate::store::find_duplicate_shard(stage_root, machine, session_id, &active_bytes)?
-    {
-        return crate::store::parse_shard_seq(&existing)
-            .ok_or_else(|| anyhow::anyhow!("existing duplicate shard has an invalid sequence"));
-    }
-    let seq = crate::store::next_shard_seq(stage_root, machine, session_id)?;
-    let dest = crate::store::shard_path_with_cap(stage_root, machine, session_id, seq, bucket_cap);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if dest.exists() {
-        anyhow::bail!("seal target already exists: {}", dest.display());
-    }
-    fs::rename(active, &dest)
-        .with_context(|| format!("seal rename {} -> {}", active.display(), dest.display()))?;
-    Ok(seq)
+    let written = crate::shard_writer::write_shard(
+        stage_root,
+        machine,
+        session_id,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Active {
+            path: active,
+            raw: &active_bytes,
+        },
+    )?;
+    written
+        .sequence()
+        .ok_or_else(|| anyhow::anyhow!("existing duplicate shard has an invalid sequence"))
 }
 
 /// Allowlist-checked sealing: calls [`seal_active_file`] only when
@@ -162,6 +158,50 @@ pub fn maybe_seal_active(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_seal_shard_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("active.jsonl");
+        let raw = b"{\"synthetic\":1}\r\n\xffunterminated";
+        fs::write(&active, raw).unwrap();
+        assert_eq!(
+            seal_active_file(
+                &active,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!active.exists());
+        assert!(
+            fs::read(store::shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1,
+                1
+            ))
+            .unwrap()
+                == raw
+        );
+        fs::write(&active, raw).unwrap();
+        assert_eq!(
+            seal_active_file(
+                &active,
+                dir.path(),
+                "synthetic-machine",
+                "synthetic-session",
+                1
+            )
+            .unwrap(),
+            1
+        );
+        assert!(fs::read(active).unwrap() == raw);
+    }
     use super::*;
     use crate::scanner::{CONF_CONFIRMED, CONF_UNASCERTAINED};
     use crate::store::{self, session_shard_dir, write_sealed_shard};

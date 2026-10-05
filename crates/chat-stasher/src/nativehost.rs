@@ -2196,13 +2196,21 @@ fn resolve_target() -> HostTarget {
 /// missing identity is therefore a `config` refusal that names the fix,
 /// exactly like a missing stage.
 fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
-    if let Some(machine) = config.machine.as_deref().filter(|m| !m.is_empty()) {
-        return Ok(machine.to_string());
-    }
-    let path = crate::config::default_data_root().join("machine-identity");
-    match crate::identity::load_identity_state(&path) {
-        crate::identity::IdentityFileState::Loaded(id) => Ok(id.as_hex()),
-        crate::identity::IdentityFileState::Missing => Err(format!(
+    resolve_machine_at(
+        config,
+        &crate::config::default_data_root().join("machine-identity"),
+    )
+}
+
+fn resolve_machine_at(config: &Config, path: &Path) -> std::result::Result<String, String> {
+    match crate::identity::resolve_machine(
+        None,
+        config.machine.as_deref(),
+        path,
+        crate::identity::MissingIdentityPolicy::Refuse,
+    ) {
+        Ok(resolved) => Ok(resolved.machine),
+        Err(crate::identity::ResolveMachineError::Missing) => Err(format!(
             "no machine identity at {}; the host never creates one. Run any archiving command \
              once from your shell (for example `chat-stasher run-once ...`), or set `machine` \
              in {}. If your shell sets XDG_DATA_HOME, the browser does not see it: set \
@@ -2210,11 +2218,14 @@ fn resolve_machine(config: &Config) -> std::result::Result<String, String> {
             path.display(),
             crate::config::config_path().display()
         )),
-        crate::identity::IdentityFileState::Unusable(error) => Err(format!(
+        Err(crate::identity::ResolveMachineError::Unusable(error)) => Err(format!(
             "machine identity file {} is present but unusable ({error:?}); do not delete it — \
              it is the key to this machine's archive partition",
             path.display()
         )),
+        Err(crate::identity::ResolveMachineError::Persist(_)) => {
+            unreachable!("host refuses identity creation")
+        }
     }
 }
 
@@ -4057,6 +4068,36 @@ pub fn serve_stdin() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ri2_characterize_host_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity");
+        let mut config = Config::default();
+        let missing = resolve_machine_at(&config, &path).unwrap_err();
+        assert!(missing.starts_with(&format!("no machine identity at {};", path.display())));
+        assert!(missing.contains("the host never creates one"));
+        assert!(!path.exists());
+        config.machine = Some(" ".into());
+        assert_eq!(resolve_machine_at(&config, &path).unwrap(), " ");
+        assert!(!path.exists());
+        config.machine = Some("".into());
+        fs::write(&path, "ABCDEF0123456789ABCDEF0123456789\n").unwrap();
+        assert_eq!(
+            resolve_machine_at(&config, &path).unwrap(),
+            "abcdef0123456789abcdef0123456789"
+        );
+        fs::write(&path, "synthetic-invalid").unwrap();
+        assert!(resolve_machine_at(&config, &path)
+            .unwrap_err()
+            .contains("do not delete it"));
+        assert!(fs::read(&path).unwrap() == b"synthetic-invalid");
+        config.machine = Some("synthetic-config".into());
+        assert_eq!(
+            resolve_machine_at(&config, &path).unwrap(),
+            "synthetic-config"
+        );
+    }
     use super::*;
     use crate::json_out::TimeState;
 

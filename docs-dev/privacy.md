@@ -149,7 +149,7 @@ the sentence.
    `runtime.sendNativeMessage`
    (`apps/extension/lib/native-host.ts:32`, `:769-819`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:2992-3003`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:3003-3014`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
@@ -345,8 +345,8 @@ Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
-`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2839-3054`,
-`crates/chat-stasher/src/inbox.rs:510-520`, `:879-881`).
+`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2850-3065`,
+`crates/chat-stasher/src/inbox.rs:509-519`, `:862-864`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -358,15 +358,15 @@ schema documents as claiming nothing about which profile produced the capture)
 this extension lives in — one user, several machines, several browsers, several
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
-conversation (`crates/chat-stasher/src/inbox.rs:447-452`,
-`:509-517`, `:880-883`). 🔴 A copied browser profile brings its copied
+conversation (`crates/chat-stasher/src/inbox.rs:446-451`,
+`:508-516`, `:863-866`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:839-849`, `:918-979`;
-`crates/chat-stasher/src/nativehost.rs:3069-3073`;
+(`crates/chat-stasher/src/inbox.rs:822-832`, `:901-962`;
+`crates/chat-stasher/src/nativehost.rs:3080-3084`;
 `apps/extension/lib/outbox.ts:499-544`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
@@ -410,7 +410,7 @@ install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
 (`apps/extension/entrypoints/background.ts:3099-3128`;
-`crates/chat-stasher/src/nativehost.rs:2572`, `:2597-2613`;
+`crates/chat-stasher/src/nativehost.rs:2583`, `:2608-2624`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
 a version string and timestamps — and it carries no conversation text, no session
 id and no account scope label.
@@ -425,7 +425,7 @@ already have, and exists so the export-import escape hatch keeps the archive
 able to answer "is this exact content already stored?" for a bundle that never
 reached the host live (`contracts/nativehost-protocol.md` §8, W213): the host
 records it beside the bytes on the sealed shard and compares it as a string
-(`crates/chat-stasher/src/inbox.rs:528-550`).
+(`crates/chat-stasher/src/inbox.rs:527-549`).
 
 A ChatGPT bundle also carries **project provenance**: the workspace the
 conversation was fetched under and the project it belongs to, as the capture leg
@@ -681,7 +681,7 @@ Three things in that table deserve to be called out rather than buried:
   popup ignores a header whose scope is not a registered target, so an abandoned
   halt cannot outrank the organization's own ledger
   (`apps/extension/lib/backfill/alarm.ts:1125-1135, 1160-1205`;
-  `apps/extension/lib/popup-view.ts:1963-2050`).
+  `apps/extension/lib/popup-view.ts:1998-2085`).
 - **The trace of a declined hook report may name a site this extension is not
   built for.** That record says which page's report was refused, and a refusal
   happens precisely when that origin is *not* one of the eight in the platform
@@ -695,7 +695,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1951-1953,1993-2003`; `crates/chat-stasher/src/main.rs:7930-7931`).
+kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1937-1939,1979-1989`; `crates/chat-stasher/src/main.rs:7930-7931`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -919,7 +919,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3927-3961`, `:499-612`; `crates/chat-stasher/src/main.rs:2163-2178`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3938-3972`, `:499-612`; `crates/chat-stasher/src/main.rs:2163-2178`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-27`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:22-48`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:54`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |
@@ -1026,10 +1026,10 @@ dominant risk.
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1951-1953`). The key file
+archive (`crates/chat-stasher/src/store.rs:1937-1939`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1993-2063`).
+(`crates/chat-stasher/src/store.rs:1979-2049`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
