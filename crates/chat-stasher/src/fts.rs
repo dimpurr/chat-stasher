@@ -2776,8 +2776,10 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
+                // The desktop replica is JSON persistence, but this change
+                // does not implement a reader for it.
                 "grok-bot",
-                br#"{"seq":1,"kind":"message"}"#,
+                br#"{"replica":{"sequence":1,"entries":[]}}"#,
                 Expected::Format(FORMAT_JSON),
             ),
             (
@@ -2881,6 +2883,13 @@ mod tests {
         let shard = format!("{broken}\n{broken}\n");
         let extracted = extract_index_document_for("chatgpt", shard.as_bytes()).unwrap();
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
+    }
+
+    #[test]
+    fn grok_bot_message_records_without_transcript_text_remain_unindexable() {
+        let extracted =
+            extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
     }
 
     /// The registry ids, read from the same file the scanner loads.

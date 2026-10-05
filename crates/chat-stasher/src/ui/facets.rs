@@ -1,7 +1,7 @@
 //! facets — the platform/agent grouping table and the session list's facet bar.
 //!
 //! 29-UI-DESIGN §2 (W137/UIA-3): every session's harness belongs to one of
-//! three groups — **web platforms**, **coding agents**, or an honest
+//! four groups — **web platforms**, **coding agents**, **agent platforms**, or an honest
 //! **ungrouped** bucket for ids this build does not classify. The grouping is
 //! a static map on purpose: an id nobody classified stays visibly
 //! unclassified until a release classifies it, never guessed into a group by
@@ -31,7 +31,8 @@ use crate::selector::{Resolved, Selector, Verdict};
 
 use super::{percent_encode, Query, UiData};
 
-/// The three honest groups a harness id can fall into (29-UI-DESIGN §2.1).
+/// The four honest buckets a harness id can fall into — web platforms, coding
+/// agents, agent platforms, and ungrouped (29-UI-DESIGN §2.1).
 /// `Ungrouped` is a named bucket, never a silent catch-all: anything this
 /// build does not classify lands there and is *labelled* as unclassified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum PlatformGroup {
     WebPlatforms,
     /// A terminal/editor coding agent: claude-code, codex, opencode, …
     CodingAgents,
+    /// A desktop agent product with its own session and conversation model.
+    AgentPlatforms,
     /// An id this build does not classify. A new platform's first sessions
     /// land here, and stay filterable on their own id meanwhile.
     Ungrouped,
@@ -52,6 +55,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "Web platforms",
             PlatformGroup::CodingAgents => "Coding agents",
+            PlatformGroup::AgentPlatforms => "Agent platforms",
             PlatformGroup::Ungrouped => "ungrouped",
         }
     }
@@ -61,6 +65,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "web-platforms",
             PlatformGroup::CodingAgents => "coding-agents",
+            PlatformGroup::AgentPlatforms => "agent-platforms",
             PlatformGroup::Ungrouped => "ungrouped",
         }
     }
@@ -73,6 +78,7 @@ impl PlatformGroup {
         match self {
             PlatformGroup::WebPlatforms => "g-web",
             PlatformGroup::CodingAgents => "g-agents",
+            PlatformGroup::AgentPlatforms => "g-agent-platforms",
             PlatformGroup::Ungrouped => "g-ungrouped",
         }
     }
@@ -111,7 +117,8 @@ const WEB_PLATFORM_HARNESSES: &[&str] = &[
 
 /// The coding-agent harness ids — one per harness in
 /// `data/harness-registry-v1.json`, minus `grok` (that id belongs to the web
-/// platform group above). A registry harness that appears without a home here
+/// platform group above) and minus `grok-bot` (a product agent platform, in
+/// the group below). A registry harness that appears without a home here
 /// fails the map's test, so a new registry entry must be classified the same
 /// release it is added — it may not silently fall into `ungrouped`.
 const CODING_AGENT_HARNESSES: &[&str] = &[
@@ -125,12 +132,15 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "hermes-agent",
     "github-copilot-cli",
     "google-antigravity",
-    "grok-bot",
     "kimi-code",
     "opencode",
     "openclaw",
     "zed",
 ];
+
+/// Product agent platforms. This category describes the product, not the
+/// mechanism used to read or archive its local persistence.
+const AGENT_PLATFORM_HARNESSES: &[&str] = &["grok-bot"];
 
 /// Classify a harness id. Web platforms are matched **first**: `grok` lives
 /// in both lists' worlds and its group is the web one by design. Everything
@@ -139,6 +149,8 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
 pub fn group_of(harness: &str) -> PlatformGroup {
     if WEB_PLATFORM_HARNESSES.contains(&harness) {
         PlatformGroup::WebPlatforms
+    } else if AGENT_PLATFORM_HARNESSES.contains(&harness) {
+        PlatformGroup::AgentPlatforms
     } else if CODING_AGENT_HARNESSES.contains(&harness) {
         PlatformGroup::CodingAgents
     } else {
@@ -168,6 +180,10 @@ fn group_values(group: PlatformGroup, data: &UiData) -> Vec<String> {
             .map(|h| (*h).to_string())
             .collect(),
         PlatformGroup::CodingAgents => CODING_AGENT_HARNESSES
+            .iter()
+            .map(|h| (*h).to_string())
+            .collect(),
+        PlatformGroup::AgentPlatforms => AGENT_PLATFORM_HARNESSES
             .iter()
             .map(|h| (*h).to_string())
             .collect(),
@@ -203,6 +219,7 @@ struct Buckets {
     all: usize,
     web: usize,
     agents: usize,
+    agent_platforms: usize,
     ungrouped: usize,
     no_prefix: usize,
     /// Sessions whose harness contains the list separator: real sources,
@@ -215,6 +232,7 @@ fn buckets(data: &UiData, base: &Selector) -> Buckets {
         all: 0,
         web: 0,
         agents: 0,
+        agent_platforms: 0,
         ungrouped: 0,
         no_prefix: 0,
         unexpressible: 0,
@@ -230,6 +248,7 @@ fn buckets(data: &UiData, base: &Selector) -> Buckets {
             Some(h) => match group_of(h) {
                 PlatformGroup::WebPlatforms => out.web += 1,
                 PlatformGroup::CodingAgents => out.agents += 1,
+                PlatformGroup::AgentPlatforms => out.agent_platforms += 1,
                 PlatformGroup::Ungrouped => out.ungrouped += 1,
             },
         }
@@ -300,8 +319,8 @@ struct FacetItem {
     values: Option<Vec<String>>,
 }
 
-/// The facet bar of `/sessions` (29-UI-DESIGN §2.3): `All · Web platforms ·
-/// Coding agents · ungrouped`, each with the count the click yields, each
+/// The facet bar of `/sessions`: `All · Web platforms · Coding agents · Agent
+/// platforms · ungrouped`, each with the count the click yields, each
 /// non-current item a plain GET link that inherits every other facet in
 /// force, the current item marked `aria-current` — and only the item whose
 /// value set is **exactly** the page's harness constraint: a strict subset
@@ -314,6 +333,7 @@ pub(super) fn facet_bar(resolved: &Resolved, params: &Query, token: &str, data: 
     let groups = [
         (PlatformGroup::WebPlatforms, b.web),
         (PlatformGroup::CodingAgents, b.agents),
+        (PlatformGroup::AgentPlatforms, b.agent_platforms),
         (PlatformGroup::Ungrouped, b.ungrouped),
     ];
     let items: Vec<FacetItem> = std::iter::once(FacetItem {
@@ -484,6 +504,7 @@ mod tests {
         assert_eq!(group_of("kimi-code"), PlatformGroup::CodingAgents);
         assert_eq!(group_of("claude"), PlatformGroup::WebPlatforms);
         assert_eq!(group_of("claude-code"), PlatformGroup::CodingAgents);
+        assert_eq!(group_of("grok-bot"), PlatformGroup::AgentPlatforms);
         assert_eq!(
             group_of("grok"),
             PlatformGroup::WebPlatforms,
@@ -493,7 +514,7 @@ mod tests {
             .expect("the embedded harness registry must parse for this test");
         for h in &registry.harnesses {
             match group_of(&h.id) {
-                PlatformGroup::CodingAgents => {}
+                PlatformGroup::CodingAgents | PlatformGroup::AgentPlatforms => {}
                 PlatformGroup::WebPlatforms => {
                     assert_eq!(
                         h.id, "grok",
@@ -510,11 +531,52 @@ mod tests {
         // And an id this build has never heard of — the new-platform case the
         // TODO's fixture asks for — is ungrouped, not guessed.
         assert_eq!(group_of("omega-web"), PlatformGroup::Ungrouped);
-        assert_eq!(group_of("grok-bot"), PlatformGroup::CodingAgents);
         assert_eq!(
             group_of("brand-new-platform-from-the-extension"),
             PlatformGroup::Ungrouped
         );
+    }
+
+    /// The three static vocabularies are **disjoint**, which classification
+    /// alone cannot guarantee: `group_of` returns the first group that lists
+    /// an id, so an id listed twice still classifies consistently while the
+    /// *other* group's link — whose href is its whole static list — keeps
+    /// selecting it. The row is then counted in one group and matched by
+    /// another, and that group's advertised count is a number its own link
+    /// contradicts. A link must name the rows it counts and no others.
+    #[test]
+    fn the_static_group_vocabularies_are_disjoint() {
+        let groups = [
+            (PlatformGroup::WebPlatforms, WEB_PLATFORM_HARNESSES),
+            (PlatformGroup::CodingAgents, CODING_AGENT_HARNESSES),
+            (PlatformGroup::AgentPlatforms, AGENT_PLATFORM_HARNESSES),
+        ];
+        for (group, list) in groups {
+            for id in list {
+                assert_eq!(
+                    group_of(id),
+                    group,
+                    "`{id}` is listed in the {} vocabulary but classifies elsewhere",
+                    group.label()
+                );
+            }
+        }
+        for (group, a) in groups {
+            for (other, b) in groups {
+                if other == group {
+                    continue;
+                }
+                for id in a {
+                    assert!(
+                        !b.contains(id),
+                        "`{id}` is in both the {} and {} vocabularies: it counts in one \
+                         group and matches the other's link",
+                        group.label(),
+                        other.label()
+                    );
+                }
+            }
+        }
     }
 
     /// `fixture::groups_data`'s hand-laid rows, as the known answers every
@@ -549,9 +611,9 @@ mod tests {
     }
 
     /// The counts the bar names over the unfiltered view, derived by hand:
-    /// All 7, Web platforms 2 (deepseek, grok), Coding agents 2, ungrouped 1
-    /// (omega-web — `we,ird` cannot be linked and is excluded), and the two
-    /// gap notes with their counts.
+    /// All 7, Web platforms 2 (deepseek, grok), Coding agents 2, Agent
+    /// platforms 0, ungrouped 1 (omega-web — `we,ird` cannot be linked and is
+    /// excluded), and the two gap notes with their counts.
     #[test]
     fn bar_counts_are_the_hand_laid_bucket_totals() {
         let d = fixture::groups_data();
@@ -563,6 +625,7 @@ mod tests {
         );
         assert!(bar.contains(">Web platforms 2</a>"), "bar: {bar}");
         assert!(bar.contains(">Coding agents 2</a>"), "bar: {bar}");
+        assert!(bar.contains(">Agent platforms 0</a>"), "bar: {bar}");
         assert!(bar.contains(">ungrouped 1</a>"), "bar: {bar}");
         assert!(
             page.contains(
@@ -590,7 +653,7 @@ mod tests {
         let b = buckets(&d, &base_selector(&resolved));
         assert_eq!(
             b.all,
-            b.web + b.agents + b.ungrouped + b.no_prefix + b.unexpressible,
+            b.web + b.agents + b.agent_platforms + b.ungrouped + b.no_prefix + b.unexpressible,
             "every matched row lands in exactly one bucket"
         );
         assert_eq!(
@@ -598,11 +661,12 @@ mod tests {
                 b.all,
                 b.web,
                 b.agents,
+                b.agent_platforms,
                 b.ungrouped,
                 b.no_prefix,
                 b.unexpressible
             ),
-            (7, 2, 2, 1, 1, 1)
+            (7, 2, 2, 0, 1, 1, 1)
         );
 
         let plain = fixture::data();
@@ -614,6 +678,7 @@ mod tests {
         );
         assert!(bar.contains(">Web platforms 1</a>"), "bar: {bar}");
         assert!(bar.contains(">Coding agents 2</a>"), "bar: {bar}");
+        assert!(bar.contains(">Agent platforms 0</a>"), "bar: {bar}");
         let ungrouped_cell = bar
             .split("·")
             .find(|cell| cell.contains("ungrouped 0"))

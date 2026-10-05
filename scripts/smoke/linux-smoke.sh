@@ -704,13 +704,9 @@ missing = [h["id"] for h in registry["harnesses"] if h["id"] not in probes]
 if missing:
     bad.append(f"registry harnesses absent from the probe table: {missing}")
 
-# Invariant 1, applied to the smoke itself: a skip must never carry a count,
-# and the two skip shapes say different things — `unknown` ("did not look")
-# versus `not_applicable` ("no cell for this platform, nothing here to count").
-# Either direction can break, and either break would make every number below
-# mean nothing: a skip rendered as 0 turns "did not scan" into "checked and
-# empty", and a no-cell harness rendered as `unknown` says "might have missed
-# something" about an app this platform cannot install.
+# A skip must never carry a count, and the two skip shapes say different
+# things — `unknown` ("did not look") versus `not_applicable` ("no cell for
+# this platform, nothing here to count").
 SKIP_COUNT_KIND = {
     "skip_unascertained": "unknown",
     "skip_unresolvable": "unknown",
@@ -726,6 +722,8 @@ for hid, p in sorted(probes.items()):
                        "name it in SKIP_COUNT_KIND to assert it")
         elif sc["kind"] != want:
             bad.append(f"{hid}: state={state} yet session_count={sc} (this skip must stay {want})")
+        elif state == "skip_wrong_platform" and sc.get("why") != "registry has no cell for this platform":
+            bad.append(f"{hid}: state={state} but N/A reason is {sc.get('why')!r}")
     elif sc["kind"] != "known":
         bad.append(f"{hid}: state={state} yet session_count={sc} (a probe that ran must count)")
 
@@ -911,8 +909,8 @@ for hid, want in sorted(seeded.items()):
 # asserted rather than left implicit.
 EXPECTED_STATE = {
     "confidence_unascertained": "skip_unascertained",
-    "template_unresolvable": "skip_unresolvable",
     "no_cell_for_platform": "skip_wrong_platform",
+    "template_unresolvable": "skip_unresolvable",
     "cell_rejects_json": "missing",
     "id_not_keyable": "missing",
     "no_schema_in_build": "missing",

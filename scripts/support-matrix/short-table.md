@@ -1,4 +1,4 @@
-**5+ platforms.** Local AI coding tools and web chats, archived the same way.
+**5+ platforms.** Local AI tools, agent platforms, and web chats.
 
 | Surface | Platform | Status | Last verified |
 |---|---|---|---|
@@ -7,10 +7,10 @@
 | Local | Gemini CLI | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | OpenClaw | supported | - |
-| Local | Hermes Agent | supported | - |
+| Agent platform | OpenClaw | supported | - |
+| Agent platform | Hermes Agent | supported | - |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
-| Local | Grok Bot (desktop) | supported | - |
+| Agent platform | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | GitHub Copilot CLI | supported | - |
 | Local | aider | supported | - |

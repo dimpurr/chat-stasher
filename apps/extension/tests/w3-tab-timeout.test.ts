@@ -296,6 +296,39 @@ const runtimeClock = {
   sleep: async (ms: number) => { runtimeNow += ms; },
 };
 
+/**
+ * Wait until the round has asked the page for one conversation body.
+ *
+ * 🔴 Why a **deadline** and not a count of event-loop turns: this round's path
+ *    crosses real asynchronous I/O that fake timers cannot reach and that a
+ *    turn-counting loop therefore races. `fake-indexeddb` schedules every
+ *    transaction callback on `setImmediate`, and the synthetic host hashes each
+ *    bundle with `crypto.subtle.digest`, which runs on libuv's thread pool — the
+ *    same hazard `w2-native-host.test.ts` names in its own `waitUntilSent`. On an
+ *    idle machine several steps of the round advance per turn; on a loaded CI
+ *    runner a single digest can outlast forty turns of a loop that needs no I/O
+ *    at all. That is exactly how this file went red in CI with `detailAttempts`
+ *    empty while the same round completed in a fraction of that locally — and
+ *    which of the two `it`s below went red was just which one won the race.
+ *
+ * 🔴 It stops the moment the round **settles** as well as when the body fetch
+ *    happens, so a round that really is stuck — the bug this file exists for —
+ *    still fails on the assertion at once instead of after the whole budget, and
+ *    the tick's own reason is on record next to it.
+ */
+async function waitForDetailAttempt(settled: Promise<unknown>, budgetMs = 2_000): Promise<void> {
+  let roundFinished = false;
+  const markFinished = () => { roundFinished = true; };
+  void settled.then(markFinished, markFinished);
+  // 🔴 `Date` is not faked here (only setTimeout/clearTimeout are), so this is
+  //    wall-clock time — the one clock this wait is allowed to be measured in.
+  const deadline = Date.now() + budgetMs;
+  while (detailAttempts.length === 0 && !roundFinished && Date.now() < deadline) {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 function liveCapture(): CapturedFetch {
   const sid = 'aaaaaaaa-1111-2222-3333-444444444444';
   return {
@@ -381,8 +414,11 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     // 🔴 The round's own progress is the wait: the body fetch is the request
     //    whose timeout this case exists to fire, so wait for exactly that
     //    event (firstDetailAttempted) rather than a budget of event-loop
-    //    turns the round does not have a fixed number of.
-    await firstDetailAttempted;
+    //    turns the round does not have a fixed number of. The wall-clock
+    //    watchdog rides along: it also ends the wait the moment the round
+    //    settles without ever reaching the body fetch, so a round that is
+    //    really stuck fails on the assertion at once instead of hanging.
+    await Promise.race([firstDetailAttempted, waitForDetailAttempt(firstSettled)]);
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
@@ -453,8 +489,9 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     const firstSettled = mod.backfillTickSettled();
-    // 🔴 Same event-driven wait as round 1 above: no turn budget to lose.
-    await firstDetailAttempted;
+    // 🔴 Same wait as round 1 above: the body-fetch event, with the
+    //    wall-clock watchdog riding along so a stuck round cannot hang.
+    await Promise.race([firstDetailAttempted, waitForDetailAttempt(firstSettled)]);
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
