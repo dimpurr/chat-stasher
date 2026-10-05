@@ -555,9 +555,9 @@ apps/extension/lib/report-seq.ts:170-213  a9cba829ca71  lines=44
   <- docs-dev/threat-model.md:757  :: * The one chain every allocation runs on (rule ③).
 apps/extension/lib/ui-strings.ts:54-60  937e78526162  lines=7
   <- docs-dev/install.md:495  :: export function fixCommand(stage: string | null | undefined…
-apps/extension/lib/ui-strings.ts:101-126  4ff1a38c0487  lines=26
-  <- docs-dev/install.md:484  :: export function channelConnected(f: ChannelFacts): string {
-apps/extension/lib/ui-strings.ts:110-133  15d7068df650  lines=24
+apps/extension/lib/ui-strings.ts:113-150  006e2fb005d0  lines=38
+  <- docs-dev/install.md:484  :: function known(fact: string | undefined): string {
+apps/extension/lib/ui-strings.ts:126-150  294f99595a74  lines=25
   <- docs-dev/install.md:495  :: export function channelDisconnected(f: ChannelFacts): strin…
 apps/extension/locales/en.yml:69-85  0506238227c4  lines=17
   <- docs-dev/threat-model.md:787  :: identityConflict:
