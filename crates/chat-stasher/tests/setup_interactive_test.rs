@@ -38,6 +38,34 @@
 //! this file checks that the path it hands the wizard is the kernel's own
 //! answer for that master.
 //!
+//! W348 is the second face of the same empty transcript, and it is not about
+//! allocation at all: a pty discards whatever the reader has not drained when
+//! the last slave descriptor closes. The child's own descriptors close when it
+//! exits, so a reader that has not reached its first `read` yet — a real window
+//! under a loaded runner, even with the reader started before the child — can
+//! find the buffer already gone. So this suite plays the terminal emulator
+//! rather than the child's parent: [`ParentTerminal`] opens the slave once and
+//! holds that descriptor for the whole run, exactly as a real emulator does,
+//! which is what keeps the tty — and its buffer — alive after the child is gone.
+//!
+//! Holding it settles the order the two ends are released in, and the kernel
+//! does not forgive the other order: draining has to happen before the parent
+//! lets go, because closing the last slave is what ends the stream, and the
+//! unread buffer goes down with it.
+//! [`a_reader_that_starts_after_the_child_exited_still_drains_the_transcript`]
+//! pins that where it is observed — the transcript this suite's own `finish`
+//! returns, read by a reader started after the child exited, which is the
+//! window rather than a race the test might win — and
+//! [`a_kept_terminal_still_holds_output_written_before_the_child_exited`] pins
+//! the mechanism underneath it with a direct read.
+//!
+//! None of that rests on starting the reader before the child, so the harness
+//! does not claim it: a signal from the reader's own thread would only say the
+//! thread was scheduled, not that it was inside `read`. Every run therefore
+//! prints a sentinel from a throwaway child on the same terminal first, and the
+//! wizard starts only once the reader has reported seeing it — which it can
+//! only have done from inside its read loop.
+//!
 //! `#[cfg(unix)]` states the platform gap rather than hiding it: the mechanism
 //! is `posix_openpt`, which has no counterpart in this workspace's
 //! dependencies — Windows needs ConPTY, an FFI surface this repo has no
@@ -82,6 +110,30 @@ use std::time::{Duration, Instant};
 /// wait ends in either a found prompt or a panic that prints the transcript.
 #[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(120);
+
+/// How long the terminal must print nothing before what the reader has is
+/// treated as the whole of it.
+///
+/// A run cannot wait for the end of the stream to know that, because the parent
+/// is holding the terminal open ([`ParentTerminal`]) and there is nothing left to
+/// close it until the run is over. Silence is the substitute, and it is only
+/// sound because the callers are past the child's exit: nothing more can be
+/// written, so a quiet period means the reader has caught up. Generous, because
+/// the alternative is a busy runner's scheduling gap reading as the end of the
+/// wizard's output; four interactive tests pay it once each.
+#[cfg(unix)]
+const QUIET: Duration = Duration::from_secs(1);
+
+/// What a run prints from a throwaway child to prove the reader is draining
+/// before the wizard can print. Never answered and never read: it exists to be
+/// seen by the reader, and is discarded rather than added to any transcript.
+#[cfg(unix)]
+const READER_READY_SENTINEL: &str = "w348-reader-ready";
+
+/// What the late-reader regression test's child prints, standing in for a
+/// wizard's output.
+#[cfg(unix)]
+const LATE_READER_SENTINEL: &str = "w348-late-reader";
 
 /// The bundled registry narrowed to `claude-code`, for the same reason
 /// `setup_cli_test.rs` narrows it: a test whose session count depends on what
@@ -250,6 +302,11 @@ struct InteractiveWizard {
     /// The pty master, write half: what is written here is what the wizard's
     /// stdin reads.
     master_write: fs::File,
+    /// This suite's own hold on the terminal, as a terminal emulator holds one.
+    /// It is what is still open when the wizard's descriptors are not, so it is
+    /// what decides whether the wizard's output can still be read. See
+    /// [`ParentTerminal`].
+    parent_terminal: ParentTerminal,
     transcript: String,
     terminal: mpsc::Receiver<Terminal>,
 }
@@ -319,64 +376,149 @@ fn allocate_pty() -> (fs::File, fs::File, String) {
     (master_read, master_write, slave_path)
 }
 
+/// This suite's terminal, and the parent's own hold on it.
+///
+/// A pty is torn down when its last slave descriptor closes, and the kernel
+/// throws away whatever the reader has not drained on the way down. The child's
+/// descriptors close the moment it exits, so without a descriptor of the
+/// parent's own the tty dies with the child and every byte the wizard printed is
+/// lost — which is the empty transcript W300 and W348 both reported. A real
+/// terminal emulator does not close its terminal when the program in it exits,
+/// and neither does this one: the descriptor is opened once, before any child
+/// runs, and held until the run has drained what it has to drain.
+///
+/// It is a *write* descriptor on purpose. Holding the slave's read side open
+/// would be the same kind of hold on the tty, but it would also put a
+/// descriptor on the child's stdin, and a wizard that has not been answered yet
+/// must not see end-of-input it did not get. Every prompt in the tool is one
+/// `read_line` and no loop on end-of-input, so this cannot hang one either way;
+/// it is the narrower hold that is wanted.
+#[cfg(unix)]
+struct ParentTerminal {
+    slave_path: String,
+    /// Never read, only held: the descriptor is the whole point, and it is
+    /// released when the struct is dropped. The leading underscore says so, the
+    /// way the `_dir` and `_sandbox` fields in this suite's sibling tests say it
+    /// for a temp directory kept alive for its side effect.
+    _slave: fs::File,
+}
+
+#[cfg(unix)]
+impl ParentTerminal {
+    /// Take the parent's own descriptor on the terminal at `slave_path`.
+    fn hold(slave_path: &str) -> Self {
+        let slave = fs::OpenOptions::new()
+            .write(true)
+            .open(slave_path)
+            .unwrap_or_else(|error| {
+                panic!("open the pty slave for this suite's own terminal: {error}")
+            });
+        ParentTerminal {
+            slave_path: slave_path.to_owned(),
+            _slave: slave,
+        }
+    }
+
+    /// Spawn `command` with stdin and stdout on this terminal and stderr piped.
+    ///
+    /// Two more opens of the slave path — read end for stdin, write end for
+    /// stdout — because `Stdio` takes an owned file per stream. Both close in
+    /// the parent as soon as `spawn` has duplicated them into the child; the
+    /// one in [`ParentTerminal::hold`] does not, and that difference is the
+    /// whole of W348.
+    fn spawn(&self, mut command: Command) -> std::process::Child {
+        let slave_stdin = fs::File::open(&self.slave_path)
+            .unwrap_or_else(|error| panic!("open the pty slave for stdin: {error}"));
+        let slave_stdout = fs::OpenOptions::new()
+            .write(true)
+            .open(&self.slave_path)
+            .unwrap_or_else(|error| panic!("open the pty slave for stdout: {error}"));
+        command
+            .stdin(Stdio::from(slave_stdin))
+            .stdout(Stdio::from(slave_stdout))
+            .stderr(Stdio::piped());
+        command
+            .spawn()
+            .unwrap_or_else(|error| panic!("run the child on the terminal: {error}"))
+    }
+}
+
+/// Start the thread that drains a terminal's master into a channel, and hand the
+/// channel back.
+///
+/// Nothing here knows about wizards. The thread owns the master read half for
+/// as long as the terminal lasts and reports `Terminal::End` when that is over,
+/// which is the one signal a run gets for "the terminal has nothing left" — and
+/// only once this suite lets the terminal go ([`ParentTerminal`]).
+#[cfg(unix)]
+fn spawn_terminal_reader(master_read: fs::File) -> mpsc::Receiver<Terminal> {
+    let (sender, terminal) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = master_read;
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => {
+                    // End of the slave side: the child exited and this suite's
+                    // own descriptor has been dropped (or the terminal broke).
+                    // Both mean no more output; the driver's deadline,
+                    // transcript, and exit status are what report the
+                    // difference. A send that finds nobody listening is the
+                    // driver being gone — not a failure worth reporting — so it
+                    // is dropped rather than `let _`-ed.
+                    drop(sender.send(Terminal::End));
+                    return;
+                }
+                Ok(read) => {
+                    if sender
+                        .send(Terminal::Chunk(buffer[..read].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    terminal
+}
+
+/// A child that prints one line and exits, for the two places that need a
+/// writer on the terminal that is not the wizard.
+#[cfg(unix)]
+fn sentinel_child(sentinel: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(format!("printf '{sentinel}\\n'"));
+    command
+}
+
 #[cfg(unix)]
 impl InteractiveWizard {
     /// Run the binary on the slave side of a freshly allocated terminal.
     fn run(sandbox: &Sandbox, args: &[&str]) -> Self {
         let (master_read, master_write, slave_path) = allocate_pty();
+        // Held before anything runs on the terminal, so it also covers the
+        // readiness probe below.
+        let parent_terminal = ParentTerminal::hold(&slave_path);
+        let terminal = spawn_terminal_reader(master_read);
 
-        // Two opens of the slave path — read end for stdin, write end for
-        // stdout — because `Stdio` takes an owned file per stream. Both close
-        // in the parent when `spawn` has duplicated them into the child, so
-        // the pty ends when the child does and the reader below sees it.
-        let slave_stdin = fs::File::open(&slave_path)
-            .unwrap_or_else(|error| panic!("open the pty slave for stdin: {error}"));
-        let slave_stdout = fs::OpenOptions::new()
-            .write(true)
-            .open(&slave_path)
-            .unwrap_or_else(|error| panic!("open the pty slave for stdout: {error}"));
+        // Prove the reader is draining before the wizard can print. Sending a
+        // signal from the reader's own thread would only say the thread was
+        // scheduled — it can be descheduled again before it reaches `read`, and
+        // the send is not a statement about where the thread is. A sentinel
+        // printed by a child on this same terminal is the other kind of
+        // evidence: the reader can only have reported it from inside its read
+        // loop, and the wizard starts only afterwards.
+        let mut probe = parent_terminal.spawn(sentinel_child(READER_READY_SENTINEL));
+        probe.wait().expect("reap the readiness probe");
+        discard_until_seen(&terminal, READER_READY_SENTINEL);
 
-        let mut command = sandbox.command(args);
-        command
-            .stdin(Stdio::from(slave_stdin))
-            .stdout(Stdio::from(slave_stdout))
-            .stderr(Stdio::piped());
-        let child = command
-            .spawn()
-            .unwrap_or_else(|error| panic!("run the wizard on the terminal: {error}"));
-
-        let (sender, terminal) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = master_read;
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => {
-                        // End of the slave side: the child exited (or the
-                        // terminal broke). Both mean no more output; the
-                        // driver's deadline, transcript, and exit status are
-                        // what report the difference. A send that finds
-                        // nobody listening is the driver being gone — not a
-                        // failure worth reporting — so it is dropped rather
-                        // than `let _`-ed.
-                        drop(sender.send(Terminal::End));
-                        return;
-                    }
-                    Ok(read) => {
-                        if sender
-                            .send(Terminal::Chunk(buffer[..read].to_vec()))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-            }
-        });
+        let child = parent_terminal.spawn(sandbox.command(args));
 
         InteractiveWizard {
             child,
             master_write,
+            parent_terminal,
             transcript: String::new(),
             terminal,
         }
@@ -390,6 +532,21 @@ impl InteractiveWizard {
     fn expect_within(&mut self, needle: &str, what: &str) {
         let deadline = Instant::now() + WAIT;
         while !self.transcript.contains(needle) {
+            // The parent keeps the terminal open, so a child that has already
+            // exited is not a closed terminal: drain what it wrote and report,
+            // rather than waiting out the deadline on a buffer that is already
+            // complete.
+            if let Some(status) = self.child.try_wait().expect("poll the wizard") {
+                drain_until_quiet(&mut self.transcript, &self.terminal, QUIET);
+                if self.transcript.contains(needle) {
+                    return;
+                }
+                panic!(
+                    "the wizard exited before printing {what} (`{needle}`); status: {status:?}; \
+                     terminal transcript so far:\n{}",
+                    self.transcript
+                );
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 panic!(
@@ -447,12 +604,111 @@ impl InteractiveWizard {
                 | Err(RecvTimeoutError::Disconnected) => {}
             }
         };
-        // The child is gone, so its stderr is finite; drain it whole.
+        // The child is gone, so nothing more can be written to the terminal and
+        // the reader has only the output it is holding left to hand over. The
+        // parent still holds the terminal open, and that decides the order of
+        // the next two steps: draining has to come first, because closing the
+        // last slave descriptor is what ends the stream and the kernel discards
+        // whatever is undrained as it does so. Letting go first would lose
+        // exactly the bytes this harness exists not to lose — so the tty stays
+        // open until the reader has been given its silence.
+        drain_until_quiet(&mut self.transcript, &self.terminal, QUIET);
+        let parent_terminal = self.parent_terminal;
+        drop(parent_terminal);
+        // Now the stream really does end, and the reader says so. This drain
+        // returns on that end rather than on quiet.
+        drain_until_quiet(&mut self.transcript, &self.terminal, QUIET);
+        // Only then is stderr, which is finite now, read whole.
         let mut stderr = String::new();
         let mut pipe = self.child.stderr.take().expect("stderr was piped");
         pipe.read_to_string(&mut stderr)
             .expect("read the wizard's stderr");
         (status, stderr, self.transcript)
+    }
+}
+
+/// Drain what the reader has queued into `transcript`, until the terminal
+/// reports its end or `quiet` passes with nothing arriving.
+///
+/// The end of the stream is not something a run can wait for while it is still
+/// going, because this suite holds the terminal open ([`ParentTerminal`]); the
+/// quiet period is what stands in for it, and it is only sound where every
+/// caller uses it: the child has already exited, so silence means the reader has
+/// caught up rather than that the wizard is still thinking.
+#[cfg(unix)]
+fn drain_until_quiet(
+    transcript: &mut String,
+    terminal: &mpsc::Receiver<Terminal>,
+    quiet: Duration,
+) {
+    let deadline = Instant::now() + quiet;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match terminal.recv_timeout(remaining) {
+            Ok(Terminal::Chunk(chunk)) => {
+                transcript.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            Ok(Terminal::End)
+            | Err(RecvTimeoutError::Timeout)
+            | Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Wait until the reader reports having read `needle`, then until the terminal
+/// goes quiet, throwing away everything it reads.
+///
+/// The readiness probe is the only writer on the terminal at this point and it
+/// has been reaped, so every byte it will ever produce is already in the pty or
+/// already in the channel, and none of it may reach the transcript the wizard
+/// assertions read. The quiet tail is what keeps its trailing `\r\n` — the
+/// line discipline's `ONLCR` translation of the `\n` — out of that transcript
+/// in the case where the newline arrived separately from the sentinel.
+///
+/// Panics rather than returning a verdict, because there is no verdict to
+/// return: a run that starts its wizard without having seen this is a run whose
+/// reader may never be proved to be draining, which is the thing this waits for.
+#[cfg(unix)]
+fn discard_until_seen(terminal: &mpsc::Receiver<Terminal>, needle: &str) {
+    let deadline = Instant::now() + WAIT;
+    let mut seen = String::new();
+    let mut quiet_deadline: Option<Instant> = None;
+    loop {
+        let now = Instant::now();
+        let waiting = match quiet_deadline {
+            Some(quiet_deadline) => quiet_deadline.saturating_duration_since(now),
+            None => deadline.saturating_duration_since(now),
+        };
+        if waiting.is_zero() {
+            if quiet_deadline.is_some() {
+                return;
+            }
+            panic!(
+                "the readiness probe's sentinel (`{needle}`) never came back through the reader \
+                 within {WAIT:?}, so this run cannot claim a reader that was already draining \
+                 before the wizard started; what the terminal printed instead:\n{seen}"
+            );
+        }
+        match terminal.recv_timeout(waiting) {
+            Ok(Terminal::Chunk(chunk)) => {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                if quiet_deadline.is_none() && seen.contains(needle) {
+                    quiet_deadline = Some(Instant::now() + QUIET);
+                }
+            }
+            Ok(Terminal::End) => panic!(
+                "the terminal ended before the readiness probe's sentinel (`{needle}`) reached \
+                 the reader, so nothing was draining it; what it printed:\n{seen}"
+            ),
+            Err(RecvTimeoutError::Disconnected) => panic!(
+                "the reader thread is gone before the readiness probe's sentinel (`{needle}`) \
+                 reached it; what the terminal printed:\n{seen}"
+            ),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
@@ -936,5 +1192,98 @@ fn every_allocated_terminal_is_the_one_the_kernel_gave_its_master() {
          master: the wizard would run on another test's terminal, or on one nothing reads, and \
          the test that owns it would block until its deadline with an empty transcript (W300): \
          {crossed:#?}"
+    );
+}
+
+/// W348, the mechanism: a terminal this suite still holds keeps what a child
+/// wrote before it exited, so a read that arrives after the child is gone still
+/// finds it.
+///
+/// Read directly off the master, with no reader thread in between, so a failure
+/// names the property rather than the harness. The child has been reaped and
+/// the machine has been given a moment to behave like a loaded runner before
+/// the read; without [`ParentTerminal`]'s descriptor the tty is torn down on the
+/// child's exit and the kernel discards the unread buffer, and the read comes
+/// back empty every time rather than occasionally — which is what makes this a
+/// test of the mechanism and not of a race.
+#[cfg(unix)]
+#[test]
+fn a_kept_terminal_still_holds_output_written_before_the_child_exited() {
+    let (master_read, _master_write, slave_path) = allocate_pty();
+    let parent_terminal = ParentTerminal::hold(&slave_path);
+    let mut child = parent_terminal.spawn(sentinel_child(LATE_READER_SENTINEL));
+
+    let status = child.wait().expect("wait for the sentinel child");
+    assert!(
+        status.success(),
+        "the sentinel child must exit cleanly: {status:?}"
+    );
+    // Let the tty settle, the way a loaded runner delays the reader.
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut reader = master_read;
+    let mut buffer = [0u8; 4096];
+    let read = reader.read(&mut buffer).expect("read the kept terminal");
+    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    assert!(
+        text.contains(LATE_READER_SENTINEL),
+        "the kept terminal lost the child's output, which is the empty transcript this harness \
+         must never produce: {text:?}"
+    );
+    // Released only after the read, which is the order [`ParentTerminal`]
+    // documents and the order `finish` follows: closing first would throw the
+    // bytes away with the terminal.
+    drop(parent_terminal);
+}
+
+/// W348, at the harness: a run whose reader arrives after the child exited still
+/// has the child's output in its transcript.
+///
+/// This is the empty transcript itself, and it is asserted where it was
+/// observed — on the string [`InteractiveWizard::finish`] returns, which is what
+/// every wizard assertion in this file waits on. The reader is started *after*
+/// the child has written and exited, which is the window a loaded runner opens
+/// around the start of any run, and it is made deliberate here so the test
+/// exercises that window every time instead of hoping to land in it.
+///
+/// Nothing about [`ParentTerminal`] is faked: the descriptor is held by the same
+/// type every run holds, and the reader is the same thread [`spawn_terminal_reader`]
+/// starts. Both halves have to be right for this to pass — the descriptor has to
+/// be held for the tty to outlive the child, and `finish` has to drain before it
+/// lets go, since closing the last slave is what ends the stream and takes the
+/// unread buffer with it. Fix only the first and the drain finds a closed
+/// terminal; fix only the second and the tty dies with the child. On the harness
+/// as it was before W348 — no held descriptor at all — the transcript here is
+/// empty and this assertion fails.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_starts_after_the_child_exited_still_drains_the_transcript() {
+    let (master_read, master_write, slave_path) = allocate_pty();
+    let parent_terminal = ParentTerminal::hold(&slave_path);
+    let mut child = parent_terminal.spawn(sentinel_child(LATE_READER_SENTINEL));
+
+    // Reaped with nothing reading the terminal: the writer has finished and the
+    // reader has not started, which is the whole of the window.
+    let status = child.wait().expect("wait for the sentinel child");
+    assert!(
+        status.success(),
+        "the sentinel child must exit cleanly: {status:?}"
+    );
+
+    let terminal = spawn_terminal_reader(master_read);
+    let wizard = InteractiveWizard {
+        child,
+        master_write,
+        parent_terminal,
+        transcript: String::new(),
+        terminal,
+    };
+    let (status, _stderr, transcript) = wizard.finish();
+    assert!(status.success(), "the run finished cleanly: {status:?}");
+    assert!(
+        transcript.contains(LATE_READER_SENTINEL),
+        "a reader that arrived after the child exited must still be given what the child wrote; \
+         an empty transcript here is the failure W300 and W348 both reported, and every wizard \
+         assertion in this file is downstream of it not happening; transcript:\n{transcript}"
     );
 }
