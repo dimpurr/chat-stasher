@@ -478,6 +478,28 @@ def plant_kimi(root, n):
         )
 
 
+def plant_deepseek_harness(root, n):
+    # Two recorded synthetic Zstandard frames: a v4 session header, then a
+    # user/message. Keeping frames here needs no Python compression package or
+    # external compressor on the smoke host, and exercises concatenated decoding.
+    assert n == 1, "the recorded fixture holds one session"
+    frames = bytes.fromhex(
+        "28b52ffd20bec50400b28a2220504b9c0333312cfab70d883f645348c9e908d68cb9ebb8b70ddee0"
+        "c6cc3abd07000fce0793c1552feff5cfc1324fa0d12d27ac7303a6591613573c8dae0a5496f3f923"
+        "e862e42b340b45388b45303423432507821cc8192a3196b720bff8a719f94ee0ae35640d9f0814a6"
+        "d2c19ea40196a894770a53c6a55c8c02d6f3052333cda27af5f29d86b5430300841442f4b945dbd2"
+        "0428b52ffd20b3fd0300d2c7191c606b7586bf5811636c5b6950d2dc411098f41ff734668108800b"
+        "47048018058b3daf78f019bf1c5356c1e5f1f310bfca6b1c50ac37d18ee16bbe1bdb067dbb6df7d4"
+        "1b7deab49e850439103a10e124c8d16f63fd3c7ac6f2f38b48ccdb067079b97e174cbf0907001d23"
+        "c4105c338c983e922004eb54a30ea50866"
+    )
+    transcript = pathlib.Path(root) / "--tmp-smoke--" / (
+        "session-019bf00d-97b6-7eb2-9bf8-eacbacc00500/session.v4.jsonl.zstd"
+    )
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_bytes(frames)
+
+
 def plant_grok_bot(root, n):
     # tests/grok_bot_scanner_test.rs + src/test_support.rs
     # (grok_bot_blob_name): the Grok Bot desktop app names each persistence
@@ -550,6 +572,7 @@ RECIPES = {
     "opencode": (3, plant_opencode),
     "openclaw": (1, plant_openclaw),
     "hermes-agent": (1, plant_hermes),
+    "deepseek-harness": (1, plant_deepseek_harness),
     "cursor": (2, plant_cursor),
     "grok": (1, plant_grok),
     "kimi-code": (1, plant_kimi),
@@ -820,7 +843,7 @@ step "7/8 · schedule renders a systemd user unit (renders only; installs nothin
 # (schedule.rs, `resolve_binary`). Held in one variable because the pair of
 # assertions below is only worth something if both sides test the same string:
 # absent for a stable path, present — with a non-zero exit — for an artifact.
-BINARY_REFUSAL="must be an installed path outside target"
+BINARY_REFUSAL="must be an installed path outside Cargo build directories"
 SCHED_OK="$WORK/schedule-stable.txt"
 rc=0; "$INSTALLED" schedule --format systemd --stage "$STAGE" --binary "$INSTALLED" >"$SCHED_OK" 2>&1 || rc=$?
 check "schedule --format systemd exits 0" 0 "$rc"
