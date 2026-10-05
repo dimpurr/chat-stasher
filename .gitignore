@@ -26,3 +26,6 @@ npm/**/*.tgz
 # A literal `~` directory: a config path that was never tilde-expanded
 # must never become a committed file in a public repo.
 ~/
+node_modules/
+__pycache__/
+scripts/tests/__pycache__/
