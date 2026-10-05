@@ -44,7 +44,7 @@ that document is the honest one.
   from the page and held in memory only (step 1 of section 1). **Gemini's were
   measured too**, and its requests carry three values out of the page's own
   bootstrap blob — read at request time through the page-world hook, held in memory
-  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1103-1146`).
+  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1104-1147`).
   Claude is the one platform whose requests are addressed by an account-scoped
   identifier the page URL does not carry; the extension resolves it from the
   page's own requests, the browser's cookie, or one extra request, and stops
@@ -106,14 +106,14 @@ the sentence.
 1. **Capture.** A content script, injected only on a fixed list of chat origins,
    wraps `fetch` in the page and keeps a **clone** of the response text of
    requests **the page itself already made** in your already-logged-in session
-   (`apps/extension/lib/page-hook.ts:829`, `:869`, `:671-718`). Only responses
+   (`apps/extension/lib/page-hook.ts:830`, `:877`, `:671-719`). Only responses
    matching a known platform route are kept
    (`apps/extension/lib/contract.ts:356-852`, `:1085-1129`).
    **One exception, on ChatGPT.** When you move between conversations inside
    the page, ChatGPT now loads only the most recent part of a conversation.
    Keeping that part would store an incomplete conversation, so it is never
    kept; the extension instead requests the full conversation itself, from your
-   page, on the same origin (`apps/extension/lib/page-hook.ts:850-855`;
+   page, on the same origin (`apps/extension/lib/page-hook.ts:851-856`;
    `apps/extension/entrypoints/dw-bridge.content.ts:694-722`). That request —
    and every backfill request to ChatGPT's conversation list or a conversation
    body — carries your session's access token, which the extension reads from
@@ -237,7 +237,7 @@ taking our word for it:
   adds no request of its own. On ChatGPT it adds one same-origin request for
   the full conversation when you move between conversations in the page, plus
   one to `/api/auth/session` for the token (see step 1 of section 1)
-  (`apps/extension/lib/page-hook.ts:869`, `:671-718`; the extra request and the
+  (`apps/extension/lib/page-hook.ts:877`, `:671-719`; the extra request and the
   token it carries: `apps/extension/entrypoints/dw-bridge.content.ts:694-722`,
   `apps/extension/lib/platform-auth.ts:47`, `:92-107`). The one feature that does
   add requests, backfill, is off unless you turn it on — see
@@ -709,7 +709,7 @@ The parties who *do* see something, stated plainly:
 
 | Party | What they see | Why |
 |---|---|---|
-| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:869`, `:671-718`; `apps/extension/lib/gemini-capture.ts:150-238` |
+| **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:877`, `:671-719`; `apps/extension/lib/gemini-capture.ts:150-238` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:318-418`; see `docs-dev/threat-model.md` |
 | **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:588-621` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key files. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
@@ -910,7 +910,7 @@ blob, document) is never read and only prints a console warning (`:635-638`,
 `WebSocket` text frames are read only where the platform row opts in
 (`eventSourceCapture`, `webSocketCapture`), and no shipped row opts into
 either, so a stream that only looks like a candidate route just gets the
-console warning (`apps/extension/lib/page-hook.ts:680-684`, `:768-771`).
+console warning (`apps/extension/lib/page-hook.ts:680-684`, `:769-772`).
 
 ## 6. What each permission is for
 
