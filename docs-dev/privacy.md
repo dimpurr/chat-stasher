@@ -367,7 +367,7 @@ your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
 (`crates/chat-stasher/src/inbox.rs:822-832`, `:901-962`;
 `crates/chat-stasher/src/nativehost.rs:3080-3084`;
-`apps/extension/lib/outbox.ts:466-511`). The label is a name you typed, and it
+`apps/extension/lib/outbox.ts:499-544`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
 it nowhere but to your own host.
