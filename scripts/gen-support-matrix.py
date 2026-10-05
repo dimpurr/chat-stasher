@@ -578,15 +578,6 @@ def harness_verified(h: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def is_pathless_inbox_agent(h: dict[str, Any]) -> bool:
-    paths = h.get("paths") or {}
-    return (
-        h.get("surface") == "agent-platform"
-        and h.get("ingest") == "inbox"
-        and not any(paths.get(os_name) is not None for os_name in OS_ORDER)
-    )
-
-
 def cell_status(
     cell: dict[str, Any] | None,
     verified: dict[str, Any] | None,
@@ -626,8 +617,6 @@ def harness_status(h: dict[str, Any]) -> str:
     verified = harness_verified(h)
     if verified is not None and verified.get("platform") is None:
         return f"{STATUS_VERIFIED} ({verified['date']})"
-    if is_pathless_inbox_agent(h):
-        return STATUS_SUPPORTED
     roots = harness_root_entries(h)
     # For one OS, all roots are required and the weakest root decides. Across
     # OSes, any supported platform keeps the harness available, as before.
