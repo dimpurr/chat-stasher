@@ -75,20 +75,6 @@ export function haltNote(
         attempts: halted.attempts ?? 1,
         minutes: retryMinutesLeft(halted, now),
       });
-    } else if (haltClassOf(halted.reason) === 'transient') {
-      // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
-      //    real account sat at 0 archived for over an hour. A transient stop must
-      //    NOT read like the `other` fallback below ("this leg has stopped"): it has
-      //    not stopped. It is waiting out a backoff, it will come back by itself,
-      //    and not one debt was written off while it waited. So the note says all
-      //    four of those things, plus the one number the user actually wants —
-      //    when the next attempt is.
-      return t('popup.notes.halted.waitingRetry', {
-        reason: halted.reason,
-        attempts: halted.attempts ?? 1,
-        minutes: retryMinutesLeft(halted, now),
-        detail: halted.detail,
-      });
     } else if (halted.reason === 'org-ambiguous' || halted.reason === 'org-unresolved') {
       // 🔴 W31c · The two organization halts. Each gets its own sentence, and
       //    neither may fall through to `other`: `other` prints the reason code and
@@ -121,6 +107,20 @@ export function haltNote(
       //    detail is appended for whoever reads the record, and it names the two segments'
       //    comparison without either id.
       return t('popup.notes.halted.accountChanged', { detail: halted.detail });
+    } else if (haltClassOf(halted.reason) === 'transient') {
+      // 🔴 W13 · This is the sentence that did not exist, and its absence is why a
+      //    real account sat at 0 archived for over an hour. A transient stop must
+      //    NOT read like the `other` fallback below ("this leg has stopped"): it has
+      //    not stopped. It is waiting out a backoff, it will come back by itself,
+      //    and not one debt was written off while it waited. So the note says all
+      //    four of those things, plus the one number the user actually wants —
+      //    when the next attempt is.
+      return t('popup.notes.halted.waitingRetry', {
+        reason: halted.reason,
+        attempts: halted.attempts ?? 1,
+        minutes: retryMinutesLeft(halted, now),
+        detail: halted.detail,
+      });
     } else if (halted.reason === 'detail-unsupported') {
       // 🔴 C26 · This one must **not** say "stopped before issuing any request" —
       //    the list request really went out and conversations really were listed.
@@ -138,4 +138,3 @@ export function haltNote(
     }
   return null;
 }
-
