@@ -772,6 +772,14 @@ Nothing here is in the shipped binary.
 - A guide for coding agents working in this repository was added at its root,
   and its install path is the setup wizard, so an agent's first archive and
   its checks are the ones a person would run.
+- The extension-reload test's fake DevTools server was given five seconds to
+  report its port, which was enough on an idle machine and not on a shared CI
+  runner starting a cold Node, so the gate failed there for a reason that had
+  nothing to do with the code under test. The wait is now bounded at thirty
+  seconds, a mock that has died ends the wait immediately instead of after the
+  full budget, and a failure prints the mock's own output and says which of the
+  two it was — a slow start and a broken mock were previously indistinguishable
+  from the single line they shared.
 
 ## 0.5.0-rc.2 — 2026-09-25
 
