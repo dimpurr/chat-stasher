@@ -29,7 +29,7 @@ continue to be scanned.
 
 Cold files under `sessions/` are considered when the file name's extension is
 `.zst`; a `.jsonl` name component is not required
-(`crates/chat-stasher/src/scanner.rs:2313-2322`). The part of the name before
+(`crates/chat-stasher/src/scanner.rs:2306-2315`). The part of the name before
 the first `.jsonl` supplies the session ID — the whole file name when the name
 contains no `.jsonl` — and a file whose part before `.jsonl` is empty is
 skipped. A file is also skipped when an identifiable SQLite archive row for the
@@ -54,3 +54,47 @@ window record. Each direct child of the configured agents root is checked;
 parent and spawn relationships come from source fields rather than inference
 from labels. Scanner tests build synthetic SQLite stores and cold files in the
 shared test `Sandbox`.
+
+## Bounded IDs
+
+The native form is `oc-<hex agent>-<hex session>`; cold archives append
+`~cold-<hex file name>`. Hex encoding doubles the UTF-8 byte count, so a valid
+source filename can produce an ID longer than a filesystem component permits.
+Cold and live native IDs preserve that exact form through 255 bytes. Longer
+values use a UTF-8 prefix followed by `~` and the first 32 lowercase hexadecimal
+digits (128 bits) of SHA-256 of the **full unbounded native value**. The prefix
+fills the remaining byte budget. This rule depends only on the source values,
+so the native ID is identical across machines and repeated scans.
+
+The canonical `<source>.<machine>.<native>` ID applies the same rule to its
+whole value with a 255-byte budget. Existing canonical IDs within the budget
+remain byte-for-byte unchanged, including native IDs above 176 bytes. If both
+bounds apply, the canonical digest covers the composed value containing the
+bounded native ID. Machine partitions continue to distinguish machines.
+
+The shared bound uses bytes, cutting only at a UTF-8 character boundary. This
+matches APFS and common POSIX component limits and is conservative for NTFS,
+which counts UTF-16 units. The hash distinguishes values whose readable prefixes
+match; it is collision-resistant rather than mathematically collision-free.
+
+Other ID-derived paths were checked too: extension stage directories apply the
+bound to `<platform>.<sanitized session>`, shared by `has` and delivery. Export
+bounds its session filename stem at 249 bytes before appending `.jsonl`, while
+the manifest keeps the canonical session ID and records the derived path.
+Store writes and readback join the canonical ID directly, without a second
+transformation. Machine partition names are retained under their existing
+normalization/identity rules; native-host install IDs are validated UUIDs or
+at most 128 ASCII bytes, so their `.json` filenames fit. Raw inbox filename fallbacks use the same
+shared bound.
+
+The synthetic regression in
+`crates/chat-stasher/tests/w680_cold_id_name_max_test.rs` attempts the same
+shard-directory creation as collect. Against the original code, a rotated cold
+filename triggers `File name too long` (macOS error 63). It also checks short-ID
+compatibility and distinct archive generations.
+
+Implementation: `crates/chat-stasher/src/sqlite_probe.rs:347-402`,
+`crates/chat-stasher/src/id.rs:232-287`,
+`crates/chat-stasher/src/inbox.rs:593-622`,
+`crates/chat-stasher/src/export.rs:962-979`, and
+`crates/chat-stasher/src/store.rs:1217-1220`.

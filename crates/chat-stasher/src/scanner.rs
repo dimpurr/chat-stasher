@@ -1976,21 +1976,14 @@ fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> G
                     continue;
                 }
             };
-            let parent_id = crate::id::SessionIdentity {
-                source_short: "grok",
-                machine: machine.to_string(),
-                native_id: session_id.clone(),
-            }
-            .id();
             let usage_id = crate::id::SessionIdentity {
                 source_short: "grok",
                 machine: machine.to_string(),
                 native_id: format!("{session_id}.usage"),
             }
             .id();
-            // The suffix preserves an explicit, inspectable association while
-            // keeping the raw source bytes untouched in the shard.
-            debug_assert_eq!(usage_id, format!("{parent_id}.usage"));
+            // The native suffix associates usage with its source session; the
+            // composed ID may be bounded when that suffix exceeds NAME_MAX.
             scan.records.push(SessionRecord {
                 id: usage_id,
                 absolute_path: absolutize(&path),

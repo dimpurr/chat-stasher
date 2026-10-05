@@ -344,24 +344,52 @@ pub struct OpenClawSessionSnapshot {
     pub json_line: Vec<u8>,
 }
 
-/// Filesystem-safe, collision-free native ID for an OpenClaw agent/session
+/// Filesystem-safe, collision-resistant native ID for an OpenClaw agent/session
 /// pair. Both components are UTF-8 hex encoded so slashes, colons and dots in
 /// upstream identifiers cannot become path separators or identity delimiters.
+///
+/// The result is bounded by [`OPENCLAW_NATIVE_ID_MAX_BYTES`] below, because it
+/// becomes a directory name; an ID short enough is returned unchanged.
 pub fn openclaw_native_id(agent_id: &str, session_id: &str) -> String {
-    format!(
-        "oc-{}-{}",
-        encode_openclaw_component(agent_id),
-        encode_openclaw_component(session_id)
-    )
+    bounded_openclaw_id(&raw_openclaw_native_id(agent_id, session_id))
 }
 
 /// Include the cold file name in its identity so distinct archive generations
 /// of one native session cannot collapse into the same source slot.
+///
+/// 🔴 Bounded by [`OPENCLAW_NATIVE_ID_MAX_BYTES`] below, and this is the encoder
+/// that needed it: the third component is a file name the upstream harness
+/// writes, and hex doubles every byte of it. See that constant for the limit,
+/// the arithmetic behind it, and the failure a real run hit.
 pub fn openclaw_cold_native_id(agent_id: &str, session_id: &str, file_name: &str) -> String {
-    format!(
+    bounded_openclaw_id(&format!(
         "{}~cold-{}",
-        openclaw_native_id(agent_id, session_id),
+        raw_openclaw_native_id(agent_id, session_id),
         encode_openclaw_component(file_name)
+    ))
+}
+
+/// Keep every native ID that could already fit as a directory component.
+/// The composed source/machine/native ID has its own 255-byte bound, so machine
+/// prefixes and generation suffixes cannot overflow it. A smaller native budget
+/// would re-identify existing sessions whose composed IDs already fit.
+const OPENCLAW_NATIVE_ID_MAX_BYTES: usize = crate::id::MAX_PATH_COMPONENT_BYTES;
+
+/// A native id that already fits is unchanged, so every session archived
+/// before this bound keeps the id it was archived under; a longer one becomes
+/// the readable head plus a SHA-256 tag of the whole id
+/// ([`crate::id::bounded_path_component`]).
+fn bounded_openclaw_id(id: &str) -> String {
+    crate::id::bounded_path_component(id, OPENCLAW_NATIVE_ID_MAX_BYTES)
+}
+
+/// The unbounded composition, so the cold form is bounded as one value rather
+/// than as a bounded base with a hex tail re-appended.
+fn raw_openclaw_native_id(agent_id: &str, session_id: &str) -> String {
+    format!(
+        "oc-{}-{}",
+        encode_openclaw_component(agent_id),
+        encode_openclaw_component(session_id)
     )
 }
 
@@ -2450,6 +2478,79 @@ mod tests {
         assert_ne!(
             snapshot.cursor.content_sha256, updated.cursor.content_sha256,
             "in-place session usage changes must advance the session cursor"
+        );
+    }
+
+    /// W680. The native-id budget is only meaningful if everything the scanner
+    /// wraps around it still fits `NAME_MAX`, so the arithmetic the constant's
+    /// doc comment claims is pinned here rather than left to the reader to trust:
+    /// `openclaw.` + a 40-character machine + `.` + the longest native id +
+    /// `~g<generation>` must still be a component a filesystem accepts.
+    #[test]
+    fn the_bounded_native_id_still_composes_into_a_creatable_session_id() {
+        let longest_generation = "~g-9223372036854775808";
+        // Every input at the filesystem limit for its own component.
+        let long_agent = "a".repeat(255);
+        let long_session = "b".repeat(255);
+        let long_file_name = format!("{}.zst", "c".repeat(250));
+        for (agent, session, file_name) in [
+            // The reported shape: a rotated transcript name.
+            (
+                "main",
+                "11111111-2222-3333-4444-555555555555",
+                "11111111-2222-3333-4444-555555555555.jsonl.deleted.2026-09-08T21-01-01.201Z.aabbccddeeff00112233445566778899.zst",
+            ),
+            (long_agent.as_str(), long_session.as_str(), long_file_name.as_str()),
+        ] {
+            for native in [
+                super::openclaw_native_id(agent, session),
+                format!(
+                    "{}{longest_generation}",
+                    super::openclaw_native_id(agent, session)
+                ),
+                super::openclaw_cold_native_id(agent, session, file_name),
+            ] {
+                let id = crate::id::SessionIdentity {
+                    source_short: "openclaw",
+                    // The longest machine `normalize_machine` will produce.
+                    machine: "m".repeat(40),
+                    native_id: native,
+                }
+                .id();
+                assert!(
+                    id.len() <= crate::id::MAX_PATH_COMPONENT_BYTES,
+                    "{} bytes, past NAME_MAX: {id}",
+                    id.len()
+                );
+            }
+        }
+    }
+
+    /// A cold archive's file name is hex-encoded, so two names of the same
+    /// length always used to be told apart; the bound must not undo that by
+    /// cutting the file name off before the part that differs.
+    #[test]
+    fn bounded_cold_ids_still_separate_the_archives_of_one_session() {
+        let stem = "11111111-2222-3333-4444-555555555555.jsonl.deleted.2026-09-08T21-0";
+        let ids: Vec<String> = [
+            "1-01.201Z.aabbccddeeff00112233445566778899",
+            "9-01.202Z.aa11bb22cc33dd44ee55ff6677889900",
+        ]
+        .iter()
+        .map(|tail| {
+            super::openclaw_cold_native_id(
+                "main",
+                "11111111-2222-3333-4444-555555555555",
+                &format!("{stem}{tail}.zst"),
+            )
+        })
+        .collect();
+        assert_ne!(ids[0], ids[1], "two cold archives of one session collapsed");
+        assert!(
+            ids.iter()
+                .all(|id| id.len() <= super::OPENCLAW_NATIVE_ID_MAX_BYTES),
+            "{:?}",
+            ids
         );
     }
 

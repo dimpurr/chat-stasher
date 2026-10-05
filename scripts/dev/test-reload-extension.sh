@@ -284,6 +284,14 @@ note "an undeletable worktree is reported and left no stale entry"
 if ! command -v node >/dev/null 2>&1; then
   echo "note: node not found; skipping the --cdp-port cases"
 else
+  # How long start_mock waits for the mock to report its port, in 50ms steps.
+  # Sized for the slowest machine the suite runs on rather than the fastest: a
+  # shared CI runner starting a cold node under load took longer than the 5s this
+  # was before, and the run failed with a message that did not say which of the
+  # two ways it failed it was. 30s is still bounded, and a mock that dies is
+  # detected at once (see start_mock), so this ceiling is only reached by a mock
+  # that is alive and slow.
+  MOCK_START_TRIES=600
   cat > "$SCRATCH/cdp-mock.mjs" <<'EOF'
 // A fake Chrome DevTools endpoint for test-reload-extension.sh. Test-only.
 import http from 'node:http';
@@ -400,12 +408,33 @@ EOF
     rm -f "$SCRATCH/cdp-port"
     node "$SCRATCH/cdp-mock.mjs" --mode "$1" --old-version "$2" \
       --expected-version "$3" --port-file "$SCRATCH/cdp-port" >"$SCRATCH/mock.log" 2>&1 &
-    echo "$!" >> "$MOCK_PIDS_FILE"
-    for _ in $(seq 1 100); do
+    mock_pid="$!"
+    echo "$mock_pid" >> "$MOCK_PIDS_FILE"
+    # Two ways to stop waiting, and the budget is neither of them. A mock that
+    # has died cannot come back, so its exit ends the wait at once instead of
+    # spending the whole budget discovering it; a mock that is merely slow gets
+    # the budget, which is generous because a loaded CI runner can take several
+    # seconds to start node at all. The 5s this replaced was sized for an idle
+    # developer machine and expired on the runner, and because both causes
+    # reported the same one-line message it was impossible to tell a slow start
+    # from a broken mock.
+    for _ in $(seq 1 "$MOCK_START_TRIES"); do
       [ -s "$SCRATCH/cdp-port" ] && break
+      kill -0 "$mock_pid" 2>/dev/null || break
       sleep 0.05
     done
-    [ -s "$SCRATCH/cdp-port" ] || fail "the CDP mock did not report a port"
+    if [ ! -s "$SCRATCH/cdp-port" ]; then
+      # The mock's own output, because "did not report a port" on its own says
+      # nothing about which of the two causes above it was.
+      echo "--- the CDP mock's output ---" >&2
+      cat "$SCRATCH/mock.log" >&2 || true
+      echo "------------------------------" >&2
+      if kill -0 "$mock_pid" 2>/dev/null; then
+        fail "the CDP mock did not report a port within $((MOCK_START_TRIES / 20))s (still running)"
+      else
+        fail "the CDP mock exited before reporting a port"
+      fi
+    fi
   }
   mock_port() { cat "$SCRATCH/cdp-port"; }
   stop_mock() {

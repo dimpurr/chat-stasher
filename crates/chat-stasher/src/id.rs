@@ -14,6 +14,8 @@
 //! Everything here is deliberately pure and testable — no filesystem side
 //! effects in this module.
 
+use sha2::{Digest, Sha256};
+
 /// Short label used as the `<source>` component for each harness.
 pub const SOURCE_CODE_DIR: &str = "claude-code";
 pub const SOURCE_CODEX: &str = "codex";
@@ -203,18 +205,62 @@ const SHORT_TAG_CHARS: usize = 6;
 /// `~` is the separator because it appears in neither shape (`.` and `-` both
 /// occur inside ids), so the tag is always unambiguously the tag.
 pub fn short_session_id(id: &str) -> String {
-    use sha2::{Digest, Sha256};
     let head: String = id.chars().take(SHORT_HEAD_CHARS).collect();
-    let digest = Sha256::digest(id.as_bytes());
-    let mut tag = String::with_capacity(SHORT_TAG_CHARS);
-    for byte in digest.iter() {
-        if tag.len() >= SHORT_TAG_CHARS {
+    format!("{head}~{}", sha256_hex_prefix(id, SHORT_TAG_CHARS))
+}
+
+/// SHA-256 of `value` as lowercase hex, first `hex_digits` digits.
+///
+/// One helper for both digests this module appends to something, so the
+/// "first N hex digits of the digest of the *whole* value" rule is written
+/// down once.
+fn sha256_hex_prefix(value: &str, hex_digits: usize) -> String {
+    let mut out = String::with_capacity(hex_digits);
+    for byte in Sha256::digest(value.as_bytes()) {
+        if out.len() >= hex_digits {
             break;
         }
-        tag.push_str(&format!("{byte:02x}"));
+        out.push_str(&format!("{byte:02x}"));
     }
-    tag.truncate(SHORT_TAG_CHARS);
-    format!("{head}~{tag}")
+    out.truncate(hex_digits);
+    out
+}
+
+/// Portable byte budget for a single path component (255 on APFS and most
+/// POSIX filesystems). NTFS counts UTF-16 units; this UTF-8 byte bound is
+/// conservative there.
+pub const MAX_PATH_COMPONENT_BYTES: usize = 255;
+
+/// Hex digits of SHA-256 in the bounded form's tag. 32 digits is 128 bits: the
+/// tag is the whole reason two values that share a head stay distinct.
+const PATH_COMPONENT_TAG_HEX: usize = 32;
+
+/// Preserve values within `budget` verbatim; otherwise use a UTF-8 prefix plus
+/// `~` and the first 32 lowercase hex digits of SHA-256 of the full UTF-8 value.
+/// The result fits the byte budget and depends only on the input and budget.
+pub fn bounded_path_component(value: &str, budget: usize) -> String {
+    if value.len() <= budget {
+        return value.to_string();
+    }
+    let tag = sha256_hex_prefix(value, budget.min(PATH_COMPONENT_TAG_HEX));
+    // `saturating_sub`, not a subtraction: a budget smaller than the tag must
+    // not underflow.
+    let head = truncate_to_byte_boundary(value, budget.saturating_sub(1 + tag.len()));
+    if head.is_empty() {
+        tag
+    } else {
+        format!("{head}~{tag}")
+    }
+}
+
+/// Longest prefix of `value` at most `limit` bytes that ends on a character
+/// boundary, so a multi-byte character is never cut in half.
+fn truncate_to_byte_boundary(value: &str, limit: usize) -> &str {
+    let mut end = limit.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// Pieces of identity needed to build an id from a file path.
@@ -230,8 +276,14 @@ pub struct SessionIdentity {
 
 impl SessionIdentity {
     /// Compose the canonical `<source>.<machine>.<native-id>` string.
+    /// Values that already fit remain unchanged. Suffix-bearing filenames must
+    /// reserve their own suffix budget. Machine directory names remain governed
+    /// by their existing configuration/identity rules.
     pub fn id(&self) -> String {
-        format!("{}.{}.{}", self.source_short, self.machine, self.native_id)
+        bounded_path_component(
+            &format!("{}.{}.{}", self.source_short, self.machine, self.native_id),
+            MAX_PATH_COMPONENT_BYTES,
+        )
     }
 }
 
@@ -363,5 +415,140 @@ mod tests {
         assert_ne!(short_session_id("a"), short_session_id("b"));
         assert!(short_session_id("a").starts_with("a~"));
         assert_eq!(short_session_id(""), short_session_id(""));
+    }
+
+    /// W680. The rule the field failure turned into: a value at or under the
+    /// budget comes back byte for byte, so nothing already written under it
+    /// moves. Pinned on the boundary from both sides, because "under" and "at"
+    /// are the two cases a `<=`/`</` slip lands on.
+    #[test]
+    fn bounded_component_returns_a_value_within_budget_verbatim() {
+        let budget = 64;
+        let exact = "a".repeat(budget);
+        assert_eq!(bounded_path_component(&exact, budget), exact);
+        let under = "a".repeat(budget - 1);
+        assert_eq!(bounded_path_component(&under, budget), under);
+        // Not even a length rule when there is nothing to enforce.
+        assert_eq!(bounded_path_component("", 0), "");
+    }
+
+    /// The property the bound exists for, stated as arithmetic rather than as a
+    /// filesystem call (the integration test does that): whatever goes in, what
+    /// comes out fits.
+    #[test]
+    fn bounded_component_never_exceeds_the_budget() {
+        for budget in [33, 40, 64, MAX_PATH_COMPONENT_BYTES] {
+            for length in [0, 1, 32, 33, budget, budget + 1, 2_000] {
+                let value = "v".repeat(length);
+                let bounded = bounded_path_component(&value, budget);
+                assert!(
+                    bounded.len() <= budget,
+                    "budget {budget}, input {length}: got {} bytes",
+                    bounded.len()
+                );
+            }
+        }
+    }
+
+    /// The head is a prefix, so the bounded name still reads as the thing it
+    /// stands for, and the tag after it carries the part that was dropped. Both
+    /// numbers are pinned, so the digest choice cannot drift from the rule the
+    /// doc comment states: the tag is the first 32 hex digits of the SHA-256 of
+    /// the **whole** value (`printf '%s' "$value" | shasum -a 256 | cut -c1-32`).
+    #[test]
+    fn bounded_component_keeps_a_readable_head_and_a_tag() {
+        let value = format!("oc-6d61696e-{}", "30316636373364632d".repeat(40));
+        let bounded = bounded_path_component(&value, 176);
+        assert!(
+            bounded.starts_with("oc-6d61696e-3031"),
+            "the head is not the value's own head: {bounded}"
+        );
+        assert!(
+            bounded.ends_with("~e3abeae592e755f9f1d6e1a7518cf932"),
+            "{bounded}"
+        );
+        let (head, tag) = bounded.rsplit_once('~').expect("a tag after the last ~");
+        assert_eq!(head.len(), 143, "the head fills what the tag leaves");
+        assert_eq!(tag.len(), PATH_COMPONENT_TAG_HEX);
+        assert!(tag.chars().all(|c| c.is_ascii_hexdigit()), "{tag}");
+        assert!(
+            value.starts_with(head),
+            "the head is not a prefix of the value"
+        );
+    }
+
+    /// Two values that share every byte a head can hold are still two values.
+    /// This is the case a prefix truncation cannot answer, and the one the
+    /// OpenClaw cold archives are made of: their file names differ only in a
+    /// trailing timestamp and hash.
+    #[test]
+    fn bounded_component_distinguishes_values_that_share_a_head() {
+        let head = format!("oc-6d61696e-{}", "ab".repeat(200));
+        let tag_of = |tail: &str| {
+            bounded_path_component(&format!("{head}{tail}"), 176)
+                .rsplit_once('~')
+                .map(|(_, tag)| tag.to_string())
+                .expect("a tag after the last ~")
+        };
+        let first = tag_of("-01-01.201Z.aa.zst");
+        assert_eq!(first.len(), PATH_COMPONENT_TAG_HEX);
+        assert_ne!(first, tag_of("-01-09.201Z.bb.zst"), "trailing hash");
+        assert_ne!(first, tag_of("-09-01.201Z.aa.zst"), "trailing timestamp");
+        assert_ne!(first, tag_of("-01-01.202Z.aa.zst"), "trailing year");
+    }
+
+    /// Deterministic across calls: no clock, no rng, nothing machine-specific.
+    /// This is what makes the bounded form an identity rather than a per-run
+    /// name, and the reason it is safe to use as one.
+    #[test]
+    fn bounded_component_is_a_pure_function() {
+        let value = "x".repeat(400);
+        assert_eq!(
+            bounded_path_component(&value, 176),
+            bounded_path_component(&value, 176)
+        );
+        // The same value under a different budget is a different name, and both
+        // fit — which is why a budget is a documented choice per caller rather
+        // than a default somebody may assume.
+        let wider = bounded_path_component(&value, 200);
+        assert_ne!(wider, bounded_path_component(&value, 176));
+        assert!(wider.len() <= 200);
+    }
+
+    /// A multi-byte character is never cut in half. A native id that is not
+    /// hex-encoded — a file stem from a source harness, or a chat platform's own
+    /// session id — can carry any UTF-8, and a component ending in a half
+    /// character is a name no filesystem will accept.
+    #[test]
+    fn bounded_component_never_splits_a_character() {
+        let bounded = bounded_path_component(&"é".repeat(300), 101);
+        assert!(bounded.len() <= 101, "{} bytes", bounded.len());
+        let (head, tag) = bounded.rsplit_once('~').expect("a tag after the last ~");
+        assert_eq!(tag.len(), PATH_COMPONENT_TAG_HEX);
+        assert!(head.starts_with("é"), "the head is not the value's head");
+        // Every character of the head survived whole, so the head is still an
+        // even number of bytes: two per `é`, never one and a half.
+        assert_eq!(head.chars().count() * 2, head.len(), "{head}");
+    }
+
+    /// A budget too small to hold a head yields the tag alone, and one too small
+    /// for the tag shortens the tag — bounded in every case, and never a panic.
+    #[test]
+    fn bounded_component_survives_a_budget_smaller_than_its_tag() {
+        let value = "v".repeat(400);
+        for budget in [0, 1, 8, PATH_COMPONENT_TAG_HEX - 1, PATH_COMPONENT_TAG_HEX] {
+            let bounded = bounded_path_component(&value, budget);
+            assert!(
+                bounded.len() <= budget,
+                "budget {budget}: got {} bytes",
+                bounded.len()
+            );
+            // What survives is the value's own head, when there is room for a
+            // head at all; below 33 bytes there is only the tag, which is a
+            // digest of the whole value and deliberately not a prefix of it.
+            if let Some((head, _)) = bounded.split_once('~') {
+                assert!(value.starts_with(head), "the head is not a prefix: {head}");
+            }
+        }
     }
 }
