@@ -128,6 +128,7 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "continue",
     "crush",
     "cursor",
+    "deepseek-harness",
     "gemini-cli",
     "hermes-agent",
     "github-copilot-cli",

@@ -71,21 +71,41 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
     )
     .unwrap();
 
-    let mut harness_roots: BTreeMap<String, String> = scanner::load_registry_from_repo()
-        .unwrap()
-        .harnesses
+    // A registry-declared environment override outranks `harness_roots`: the
+    // resolver checks the environment first. So pointing every harness at an
+    // empty directory is not enough on a machine where one of those variables
+    // is exported — a suite run inside a DSH session exports DSH_HOME, and this
+    // scan then finds the real store beside an empty one. Pin every declared
+    // override at the same empty directory, and restore the environment as soon
+    // as the scan is done so the assertions below cannot skip the restore.
+    let registry = scanner::load_registry_from_repo().unwrap();
+    let empty_source = sandbox
+        .root()
+        .join("empty-source")
+        .to_string_lossy()
+        .into_owned();
+    let mut harness_roots: BTreeMap<String, String> = BTreeMap::new();
+    let mut pinned: Vec<(String, Option<std::ffi::OsString>)> = Vec::new();
+    for harness in &registry.harnesses {
+        harness_roots.insert(harness.id.clone(), empty_source.clone());
+        for cell in [
+            harness.paths.macos.as_ref(),
+            harness.paths.linux.as_ref(),
+            harness.paths.windows.as_ref(),
+        ]
         .into_iter()
-        .map(|harness| {
-            (
-                harness.id,
-                sandbox
-                    .root()
-                    .join("empty-source")
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        })
-        .collect();
+        .flatten()
+        {
+            let Some(name) = cell.env_override.as_deref() else {
+                continue;
+            };
+            if pinned.iter().any(|(pinned, _)| pinned == name) {
+                continue;
+            }
+            pinned.push((name.to_string(), std::env::var_os(name)));
+            std::env::set_var(name, &empty_source);
+        }
+    }
     harness_roots.insert(
         "grok-bot".to_string(),
         app_support.to_string_lossy().into_owned(),
@@ -95,6 +115,12 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
         ..Config::default()
     };
     let report = scanner::scan_with_machine(&config, "synthetic-machine").unwrap();
+    for (name, value) in pinned {
+        match value {
+            Some(value) => std::env::set_var(&name, value),
+            None => std::env::remove_var(&name),
+        }
+    }
     if scanner::current_platform() == "macos" {
         assert_eq!(report.records.len(), 1);
         assert_eq!(

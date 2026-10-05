@@ -686,6 +686,10 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("zed", FORMAT_SQLITE),
     ("continue", "json"),
     ("kimi-code", "jsonl"),
+    // The cell declares `jsonl.zstd`; this names the shape of the shard the
+    // archive holds, which is that file decoded (`collect` strips the frame
+    // structure), so the word is `jsonl` exactly as it is for codex.
+    ("deepseek-harness", "jsonl"),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -2745,6 +2749,16 @@ mod tests {
                 // `turn.prompt` mirror is not rendered as a second copy.
                 "kimi-code",
                 br#"{"type":"context.append_message","time":1770000000000,"message":{"role":"user","origin":{"kind":"user"},"content":[{"type":"text","text":"synthetic question"}]}}"#,
+                Expected::Text("synthetic question"),
+            ),
+            (
+                // One decoded record of a `dsh` event log: the archived shard
+                // is the transcript with its frame structure already stripped.
+                // The header's `source.kind` is what tells a human turn from
+                // the harness injecting its own context, so a row without it
+                // would be counted rather than indexed.
+                "deepseek-harness",
+                br#"{"type":"user/message","seq":1,"time":1791032332798,"data":{"content":[{"type":"text","text":"synthetic question"}],"source":{"kind":"user"},"role":"user","id":"m1"}}"#,
                 Expected::Text("synthetic question"),
             ),
             (
