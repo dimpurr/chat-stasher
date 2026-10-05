@@ -68,7 +68,7 @@ use crate::models::{SessionRecord, SqliteSessionLayout};
 use crate::scanner;
 use crate::sqlite_probe::{
     cursor_global_schema, grok_schema, opencode_session_cursor, read_cursor_legacy_session,
-read_hermes_session, read_openclaw_session, read_opencode_session, read_sqlite_session,
+    read_hermes_session, read_openclaw_session, read_opencode_session, read_sqlite_session,
     read_zed_session, sqlite_session_cursor, sqlite_store_fingerprint, zed_schema, OpenCodeCursor,
 };
 use crate::store;

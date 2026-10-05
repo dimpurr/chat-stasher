@@ -1806,7 +1806,7 @@ pub fn run() -> DoctorReport {
             .filter(|r| r.source == crate::models::HarnessSource::GeminiCli),
     ));
 
-// opencode, Hermes Agent, Cursor, Grok and Zed are single-SQLite stores driven by
+    // opencode, Hermes Agent, Cursor, Grok and Zed are single-SQLite stores driven by
     // the registry: their footprint rows are built straight from the registry probe
     // results, so the two tables can never disagree on count/bytes/times.
     for id in ["opencode", "hermes-agent", "cursor", "grok", "zed"] {
