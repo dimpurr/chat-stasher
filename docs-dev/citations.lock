@@ -477,23 +477,23 @@ apps/extension/lib/page-hook.ts:629-634  791755750698  lines=6
   <- docs-dev/privacy.md:907  :: const type = this.responseType;
 apps/extension/lib/page-hook.ts:635-638  9e0fabbb14f2  lines=4
   <- docs-dev/privacy.md:908  :: text = JSON.stringify(this.response);
-apps/extension/lib/page-hook.ts:671-719  23434ba6d6e6  lines=49
+apps/extension/lib/page-hook.ts:674-722  23434ba6d6e6  lines=49
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:712  :: const eventSourceConstructor = pageWindow.EventSource;
-apps/extension/lib/page-hook.ts:680-684  4e7c56bc1085  lines=5
+apps/extension/lib/page-hook.ts:683-687  4e7c56bc1085  lines=5
   <- docs-dev/privacy.md:913  :: if (!eventSourcePlatform) {
-apps/extension/lib/page-hook.ts:769-772  05550067e2fd  lines=4
+apps/extension/lib/page-hook.ts:772-775  05550067e2fd  lines=4
   <- docs-dev/privacy.md:913  :: if (!observeWebSocketFrame(socket, url, event?.data)) {
-apps/extension/lib/page-hook.ts:830  a5b96cb2e6ef  lines=1
+apps/extension/lib/page-hook.ts:833  a5b96cb2e6ef  lines=1
   <- docs-dev/privacy.md:109  :: return { value: chatGptAccountIdHeaderValue(accountId), pre…
-apps/extension/lib/page-hook.ts:851-856  ac2add6ee1af  lines=6
+apps/extension/lib/page-hook.ts:854-859  ac2add6ee1af  lines=6
   <- docs-dev/privacy.md:116  :: const platform = getPlatform(parsed.href);
-apps/extension/lib/page-hook.ts:854-863  ffd20a2113ae  lines=10
+apps/extension/lib/page-hook.ts:857-866  ffd20a2113ae  lines=10
   <- docs-dev/threat-model.md:268  :: // ChatGPT's in-page navigation loads only a paged window o…
-apps/extension/lib/page-hook.ts:877  c2a5f81a7761  lines=1
+apps/extension/lib/page-hook.ts:880  c2a5f81a7761  lines=1
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:712, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:877-911  45359f1a1af8  lines=35
+apps/extension/lib/page-hook.ts:880-914  45359f1a1af8  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:1104-1147  994e4f465747  lines=44
+apps/extension/lib/page-hook.ts:1107-1150  994e4f465747  lines=44
   <- docs-dev/privacy.md:47  :: /**
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:272  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
