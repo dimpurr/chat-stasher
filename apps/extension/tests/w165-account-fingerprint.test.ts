@@ -166,6 +166,92 @@ describe('W165-A2 · the salt: one per install, created once, never silently rep
     );
     expect(reading).toEqual({ kind: 'unknown', reason: 'salt-unavailable' });
   });
+
+  /**
+   * 🔴 **Two callers that overlap on a fresh install get one salt, not two.**
+   *
+   * The window is real rather than theoretical: the salt is absent on exactly the
+   * first run, which is when a capture and a backfill tick both need it, and the
+   * store resolves in a later turn — so both read "none" and both mint. The
+   * second `save` wins the key while the loser keeps hashing with the salt it was
+   * handed, and the two halves then disagree about one unchanged account: the
+   * loser's `saltId` matches nothing, so `compareAccountLease` says
+   * `incomparable` instead of `agrees`, and a backfill round halts as though the
+   * account were unknown.
+   *
+   * Shown failing against the unfixed module: the two `id`s came back different.
+   */
+  it('🔴 two concurrent first calls on one fresh install share a single salt', async () => {
+    const store = memoryStore();
+    const [first, second] = await Promise.all([
+      loadOrCreateAccountSalt(store),
+      loadOrCreateAccountSalt(store),
+    ]);
+    expect(first).not.toBeNull();
+    expect(first).not.toBe('unreadable');
+    expect(second).toEqual(first);
+
+    // 🔴 And the salt they agree on is the one that is actually on disk — not two
+    //    calls that merely agree with each other while the store holds a third.
+    const stored = store.data[ACCOUNT_SALT_KEY] as { id: string };
+    expect((first as { id: string }).id).toBe(stored.id);
+    // Exactly one write: the second caller must not have minted over the top.
+    expect(store.writes).toBe(1);
+  });
+
+  /**
+   * 🔴 The same race as the field reaches it: two callers that overlap *through
+   * different entry points* — here two captures, which is two tabs reporting at
+   * once on a first run.
+   *
+   * Shown failing against the unfixed module: two captures of the same body
+   * produced the same `value` under two different `saltId`s, which is precisely
+   * the shape `compareAccountLease` reads as `incomparable` and the engine reads
+   * as a first-run account the tool knows nothing about.
+   */
+  it('🔴 two captures racing on one fresh install are comparable to each other', async () => {
+    const store = memoryStore();
+    const body = capture(CAPTURE_URL.chatgpt!, bodyWithUid('acct-fixture-1'));
+    const [first, second] = await Promise.all([
+      accountFingerprintFor(body, store, null),
+      accountFingerprintFor(body, store, null),
+    ]);
+    expect(first.kind).toBe('fingerprint');
+    expect(second).toEqual(first);
+  });
+
+  /**
+   * 🔴 And the same through the workspace path, which is the one the backfill
+   * leg uses. Two scopes for one account that disagree are what
+   * `coordinatedTick` turns into a `scope-mismatch` halt — the round stops
+   * before its first body fetch, which is how this was found.
+   */
+  it('🔴 two workspace observations racing on one fresh install are one scope', async () => {
+    const { fingerprintChatGptWorkspace } = await import('../lib/backfill/chatgpt-workspace');
+    const store = memoryStore();
+    const [first, second] = await Promise.all([
+      fingerprintChatGptWorkspace(store, 'acct-fixture-1'),
+      fingerprintChatGptWorkspace(store, 'acct-fixture-1'),
+    ]);
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+  });
+
+  /**
+   * 🔴 The memo must not outlive the answer. A store whose salt became
+   * unreadable *after* a successful read reports `unreadable` on the next call —
+   * a memo that kept serving the first answer would report a salt forever and
+   * keep hashing with a secret the record no longer vouches for.
+   */
+  it('the memo is dropped when the creation settles, so a later unreadable salt is still seen', async () => {
+    const store = memoryStore();
+    const first = await loadOrCreateAccountSalt(store);
+    expect(first).not.toBeNull();
+    expect(first).not.toBe('unreadable');
+    // The record stops parsing while this process is still alive.
+    (store.data as Record<string, unknown>)[ACCOUNT_SALT_KEY] = { id: 'x', key: 'not base64!!', createdAt: 1 };
+    expect(await loadOrCreateAccountSalt(store)).toBe('unreadable');
+  });
 });
 
 describe('W165-A3 · unknown is a value with a reason, never an absence and never a guess', () => {

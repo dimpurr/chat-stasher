@@ -27,6 +27,27 @@
  *
  * Zero real network and zero logged-in state throughout: the fetch is a pure
  * function in this file and the port is injected through background's own test seam.
+ *
+ * ## Two things this file has to get right besides the timeout
+ *
+ * (c) drives the **whole** real entry point, so it is at the mercy of everything
+ * between the message and the page: the pace gate, the account lease, the debt
+ * store, the workspace observation. Two of those are load-bearing for whether (c)
+ * means anything at all, and both have bitten this file:
+ *
+ *  · **The wait must be for the event.** It waits on "the port was asked for a
+ *    body", not on a count of event-loop turns — see `firstDetailAttempted`.
+ *  · **One salt per install, even when callers overlap.** The account salt is
+ *    missing on exactly the first run, which is when the capture path and the
+ *    backfill path both need it. If they each mint their own, the two halves
+ *    disagree about one unchanged account, `compareAccountLease` says
+ *    `incomparable`, and the round halts as `scope-mismatch` before its first
+ *    body fetch — which reads, from in here, as "the round never ran". That was a
+ *    real race in `loadOrCreateAccountSalt`, not a scheduling artefact; it is
+ *    fixed there and pinned in `tests/w165-account-fingerprint.test.ts`.
+ *
+ * Either one makes (c) fail without the lock ever being involved, so this file's
+ * value depends on both staying fixed.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';

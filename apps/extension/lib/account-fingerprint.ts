@@ -146,6 +146,32 @@ function readSalt(raw: unknown): AccountSalt | { unreadable: true } | null {
 }
 
 /**
+ * 🔴 **The one creation in flight, per store.**
+ *
+ * `loadOrCreateAccountSalt` is `async` all the way down — it awaits `store.load`
+ * before it knows whether a salt exists — so on a fresh install two callers can
+ * both read "none" and each mint its own. The second `store.save` then wins the
+ * key while the first caller keeps hashing with the salt it was handed, and the
+ * two disagree about what one unchanged account looks like: one bundle's
+ * `saltId` no longer matches the stored one, and `compareAccountLease` reads
+ * that as `incomparable` rather than `agrees`.
+ *
+ * This is not a test-only ordering. On a real install the salt is missing on
+ * exactly the first run, which is when a capture (`accountFingerprintFor`) and a
+ * backfill tick (the lease, and `fingerprintChatGptWorkspace`) both need it, and
+ * `browser.storage.local` resolves in a later turn rather than synchronously —
+ * so the window is open in the field and only its width is scheduler-dependent.
+ * That is the property `tests/w165-account-fingerprint.test.ts` pins.
+ *
+ * A `WeakMap` rather than a module-level variable: the memo is scoped to the
+ * store it belongs to, so a test that swaps stores (and the real service worker,
+ * which is re-created on every reload) never reads another store's answer. The
+ * entry is dropped as soon as the creation settles, so the entry for a salt that
+ * later became unreadable is not kept alive past the answer that reported it.
+ */
+const inFlightSaltCreations = new WeakMap<BackfillStore, Promise<AccountSalt | 'unreadable' | null>>();
+
+/**
  * The install's salt, created on first use.
  *
  * Three outcomes, and the third is not the second: a salt, "there is none yet"
@@ -157,6 +183,23 @@ export async function loadOrCreateAccountSalt(
   store: BackfillStore | null,
 ): Promise<AccountSalt | 'unreadable' | null> {
   if (!store) return null;
+  const inFlight = inFlightSaltCreations.get(store);
+  if (inFlight) return await inFlight;
+  const creation = createOrLoadAccountSalt(store);
+  inFlightSaltCreations.set(store, creation);
+  try {
+    return await creation;
+  } finally {
+    // Dropped on the way out, including the failure paths: the memo exists to
+    // collapse callers that overlap, not to become a second source of truth that
+    // could outlive the record it was derived from.
+    if (inFlightSaltCreations.get(store) === creation) inFlightSaltCreations.delete(store);
+  }
+}
+
+async function createOrLoadAccountSalt(
+  store: BackfillStore,
+): Promise<AccountSalt | 'unreadable' | null> {
   let existing: unknown = null;
   try {
     existing = await store.load(ACCOUNT_SALT_KEY);
