@@ -322,10 +322,7 @@ mod session_provenance_tests {
 }
 
 fn provenance_empty(value: &crate::provenance::SessionProvenance) -> bool {
-    value.surface.is_empty()
-        && value.tenant.is_empty()
-        && value.container.is_empty()
-        && value.status.is_empty()
+    value.is_empty()
 }
 
 /// The identity of one conversation body, as `manifest::SessionManifest` records
@@ -2335,6 +2332,78 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
+/// The 4D dimensions this session's own records state, read per harness.
+///
+/// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
+/// the archived records themselves say about where the session came from, as
+/// opposed to what the collection path or the registry already recorded. Only
+/// `claude-code` has a reader today; every other harness answers with the empty
+/// set, which is the honest answer for a dimension nothing was read from — and
+/// never a value inferred from the harness name.
+///
+/// A record that does not parse is skipped, exactly as it is everywhere else in
+/// this module: an unreadable line is not evidence about a dimension.
+fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::SessionProvenance {
+    let mut dimensions = crate::provenance::SessionProvenance::default();
+    if harness != "claude-code" {
+        return dimensions;
+    }
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        fold_claude_code_dimensions(&mut dimensions, &record);
+    }
+    dimensions
+}
+
+/// Claude Code writes two provenance facts on the **top level** of a transcript
+/// record, beside the conversation itself.
+///
+/// `cwd` is the working directory the session ran in, and it is a **path, not a
+/// repository identity**: the project directory a transcript lives in is a
+/// sanitized spelling of a path like this one rather than an entity the harness
+/// recorded, so it never becomes a `container` (the `cwd ≠ repo identity` rule).
+/// Every distinct directory is kept, because a session that `cd`s into a
+/// subdirectory recorded each place it ran and the last one alone would report
+/// where the conversation ended as where it ran.
+///
+/// `ownerOrganizationUuid` and `ownerAccountUuid` name the tenancy the
+/// conversation was authored under, and the organization wins per record: two
+/// accounts can be members of one organization, so recording the account beside
+/// an organization the same record already names would file one tenancy under
+/// two. The value is a namespace, never a person — two sessions by one person
+/// under one organization share it, which is what makes it a tenancy rather than
+/// an identity.
+///
+/// Neither field is required and neither is inferred: a record without them, a
+/// line whose value is not a non-empty string, and a line that does not parse at
+/// all each leave the dimension exactly as empty as it was — "not recorded" and
+/// "not recorded yet" are the same honest answer here.
+fn fold_claude_code_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if let Some(cwd) = non_empty_str(record.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
+    let tenant = non_empty_str(record.get("ownerOrganizationUuid"))
+        .or_else(|| non_empty_str(record.get("ownerAccountUuid")));
+    if let Some(tenant) = tenant {
+        dimensions.insert_tenant(tenant);
+    }
+}
+
+/// A string a record actually recorded, as opposed to one that is absent, of
+/// another type, or empty. An empty string is the case this exists for: it would
+/// otherwise become a dimension value that every such session shares.
+fn non_empty_str(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 /// Build an [`ActivityRow`] for one session from its lines.
 pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str]) -> ActivityRow {
     let a = analyze_session(harness, lines);
@@ -2350,7 +2419,7 @@ pub fn build_row(session_id: &str, machine: &str, harness: &str, lines: &[&str])
         title: Some(a.title),
         provenance: project_provenance(lines),
         session_provenance: None,
-        dimensions: crate::provenance::SessionProvenance::default(),
+        dimensions: session_dimensions(harness, lines),
         account_keys: account_keys(lines),
         // This function only ever sees lines, never the shard files they came
         // from, so it cannot record what it measured. A caller that read the
@@ -2538,6 +2607,165 @@ mod tests {
         format!(
             r#"{{"timestamp":"{ts}","type":"{ty}","payload":{{"message":{{"role":"user","content":"hi"}}}},"cwd":"/x"}}"#
         )
+    }
+
+    // --------------------------------------------- TICKET-4D-02 · claude-code
+    //
+    // The two facts a Claude Code transcript states about itself: the directory
+    // it ran in, and the organization (else the account) that authored it.
+
+    /// One transcript record carrying whatever provenance the caller spells in,
+    /// so each case states exactly which fields it is about.
+    fn cc_with(fields: &str) -> String {
+        format!(
+            r#"{{"parentUuid":null,"type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{RFC_T1}"{fields}}}"#
+        )
+    }
+
+    #[test]
+    fn claude_code_records_its_cwd_and_its_organization_as_tenant() {
+        let line = cc_with(r#","cwd":"/w/one","ownerOrganizationUuid":"org-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(row.dimensions.tenant, ["org-fixture"]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "a path is not a repository identity, so nothing becomes a container: {:?}",
+            row.dimensions.container
+        );
+    }
+
+    #[test]
+    fn claude_code_tenant_falls_back_to_the_account_uuid() {
+        let line = cc_with(r#","cwd":"/w/one","ownerAccountUuid":"account-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.tenant,
+            ["account-fixture"],
+            "an unauthenticated-team session has no organization, and the account \
+             that did author it is still a tenancy that was recorded"
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+    }
+
+    #[test]
+    fn the_organization_wins_over_the_account_that_may_belong_to_it() {
+        let line = cc_with(
+            r#","ownerOrganizationUuid":"org-fixture","ownerAccountUuid":"account-fixture""#,
+        );
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.tenant,
+            ["org-fixture"],
+            "two accounts can be members of one organization, so filing both would \
+             record one tenancy as two"
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_cwd_leaves_cwd_unobserved() {
+        let line = cc_with(r#","ownerOrganizationUuid":"org-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(row.dimensions.cwd.is_empty());
+        assert_eq!(row.dimensions.tenant, ["org-fixture"]);
+    }
+
+    #[test]
+    fn a_record_without_tenancy_leaves_tenant_unobserved() {
+        let line = cc_with(r#","cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.tenant.is_empty(),
+            "an unauthenticated local run recorded no tenancy, and none is invented"
+        );
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "claude-code",
+            &[
+                r#"not json at all"#,
+                cc_with(r#","cwd":"","ownerOrganizationUuid":null"#).as_str(),
+                cc_with(r#","cwd":7,"ownerAccountUuid":""#).as_str(),
+                cc_with(r#","cwd":["/w/one"],"ownerAccountUuid":{"id":"x"}"#).as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty or mistyped value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn every_directory_a_session_ran_in_is_kept_as_one_sorted_set() {
+        // One session that cd'd into a subdirectory: the last line is the place
+        // the conversation *ended*, so keeping only it would misreport the run.
+        let first = cc_with(r#","cwd":"/w/one/apps","ownerOrganizationUuid":"org-fixture""#);
+        let second = cc_with(r#","cwd":"/w/one""#);
+        let third = cc_with(r#","cwd":"/w/one""#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "claude-code",
+            &[first.as_str(), second.as_str(), third.as_str()],
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one", "/w/one/apps"]);
+        assert_eq!(row.dimensions.tenant, ["org-fixture"]);
+    }
+
+    #[test]
+    fn a_second_tenancy_observed_in_one_session_is_both_retained() {
+        let first = cc_with(r#","ownerOrganizationUuid":"org-one""#);
+        let second = cc_with(r#","ownerAccountUuid":"account-two""#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "claude-code",
+            &[first.as_str(), second.as_str()],
+        );
+        assert_eq!(row.dimensions.tenant, ["account-two", "org-one"]);
+    }
+
+    #[test]
+    fn another_harness_reads_no_claude_code_dimensions() {
+        // Codex records carry a top-level `cwd` of their own. Reading it here
+        // would be this ticket's answer for a field another one owns, and would
+        // report a directory as observed for a harness nobody asked about.
+        let line = codex(RFC_T1, "user_message");
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are read per harness, not from whatever key a line has: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn the_projected_dimensions_travel_in_the_index_line() {
+        let line = cc_with(r#","cwd":"/w/one","ownerAccountUuid":"account-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        let json = to_jsonl(&row);
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""tenant":["account-fixture"]"#),
+            "line: {json}"
+        );
+
+        // A row with nothing observed omits the whole object rather than
+        // writing four empty arrays: an index written before this field existed
+        // must still read as the same shape it always did.
+        let bare = cc_user(RFC_T1);
+        let json = to_jsonl(&build_row("s", "mbp", "aider", &[bare.as_str()]));
+        assert!(!json.contains("\"dimensions\""), "line: {json}");
     }
 
     // ------------------------------------------------- W219 · account keys

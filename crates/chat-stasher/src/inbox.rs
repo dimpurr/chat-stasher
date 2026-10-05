@@ -2495,6 +2495,64 @@ mod tests {
         assert!(schema["properties"]["provenanceSupplement"].is_object());
     }
 
+    /// The published schema and the type that reads a bundle must name the same
+    /// dimensions, in both directions, and this is the check that says so.
+    ///
+    /// It exists because they can drift silently and in opposite ways. The
+    /// schema closes the object with `additionalProperties: false`, so a
+    /// dimension added to `SessionProvenance` and not here is one this parser
+    /// accepts and every schema-conforming producer is forbidden to send — and
+    /// one `dimensions_from_jsonl` drops on the floor for a bundle that carries
+    /// it, because that read is a `deny_unknown_fields` deserialisation. A
+    /// dimension declared here and absent from the type has the mirror failure:
+    /// the contract promises a value no reader will ever keep.
+    ///
+    /// The type's own axes are read by serialising one value into each, which is
+    /// why the assertion is over a *fully populated* provenance: every axis is
+    /// `skip_serializing_if = "Vec::is_empty"`, so a default value would leave
+    /// an axis out of the comparison and let it drift exactly as quietly.
+    #[test]
+    fn committed_inbox_schema_declares_exactly_the_dimensions_the_type_carries() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/inbox.schema.json");
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(root).unwrap()).unwrap();
+        let dimensions = &schema["properties"]["dimensions"];
+        assert_eq!(
+            dimensions["additionalProperties"],
+            serde_json::json!(false),
+            "this comparison holds only while the object is closed; if it is ever \
+             reopened the two sides can differ again without this test noticing"
+        );
+
+        let mut populated = crate::provenance::SessionProvenance::default();
+        for axis in [
+            &mut populated.surface,
+            &mut populated.tenant,
+            &mut populated.container,
+            &mut populated.cwd,
+            &mut populated.status,
+        ] {
+            axis.push("fixture".to_string());
+        }
+        let declared: Vec<String> = dimensions["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let carried: Vec<String> = serde_json::to_value(&populated)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            declared, carried,
+            "a bundle this parser keeps must also be one the published contract \
+             admits, and an axis it admits must be one a reader keeps"
+        );
+    }
+
     // ------------------------------------------------------------------
     // W213 / EXT-4 · a §8 export line's fingerprint
     //

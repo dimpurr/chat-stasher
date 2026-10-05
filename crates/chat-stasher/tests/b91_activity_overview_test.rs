@@ -46,6 +46,14 @@ fn cc_line(ts: &str) -> String {
     )
 }
 
+/// One synthetic claude-code line that also states where the session ran and
+/// which tenancy authored it.
+fn cc_line_with_provenance(ts: &str, cwd: &str, organization: &str) -> String {
+    format!(
+        r#"{{"parentUuid":null,"type":"user","message":{{"role":"user","content":"hi"}},"uuid":"u1","timestamp":"{ts}","cwd":"{cwd}","ownerOrganizationUuid":"{organization}"}}"#
+    )
+}
+
 /// Write one sealed shard for a session named `session` under `machine`.
 fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
     let dir = stage
@@ -202,6 +210,113 @@ fn activity_index_counts_an_identical_shard_once() {
     let row: serde_json::Value =
         serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
     assert_eq!(row["line_count"], 2, "duplicate shard lines count once");
+}
+
+/// TICKET-4D-02 · the dimensions a Claude Code transcript states about itself
+/// reach the written index: the working directories the session ran in and the
+/// organization that authored it.
+///
+/// This is the end-to-end half of the projection, and it is where the reading
+/// could be lost: the index rebuild also folds in the typed dimensions an
+/// archived *capture envelope* carries, and for a harness's own records there
+/// are none — so a rebuild that replaces the row's dimensions with that reading
+/// rather than merging it would publish an empty `dimensions` for every session
+/// whose provenance this module had just read.
+#[test]
+fn activity_index_records_the_cwd_and_tenancy_the_transcript_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    // A session that moved: two directories, one organization.
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            cc_line_with_provenance("2025-01-15T12:34:56.789Z", "/w/one/apps", "org-fixture"),
+            cc_line_with_provenance("2025-01-15T13:45:07Z", "/w/one", "org-fixture"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one", "/w/one/apps"]),
+        "both directories the session ran in are recorded, in one stable order"
+    );
+    assert_eq!(
+        row["dimensions"]["tenant"],
+        serde_json::json!(["org-fixture"])
+    );
+    assert!(
+        row["dimensions"].get("container").is_none(),
+        "a path is not a repository identity, so nothing becomes a container: {}",
+        row["dimensions"]
+    );
+}
+
+/// A transcript whose records state no tenancy and no directory leaves both
+/// dimensions **absent** from the index line — unobserved, not an empty string
+/// and not a placeholder the reader could mistake for a fact.
+#[test]
+fn activity_index_leaves_an_unrecorded_dimension_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2025-01-15T12:34:56.789Z"}"#.to_string(),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}",
+        out.status
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "no dimension was observed, so no dimension object is written: {}",
+        row
+    );
 }
 
 /// A machine that has a snapshot but no activity index must be *named* — it

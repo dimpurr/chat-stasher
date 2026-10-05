@@ -2,6 +2,14 @@
 //!
 //! The values are facts observed at capture time. Empty dimensions mean no
 //! value was recorded; callers must not infer a value from the harness name.
+//!
+//! Two origins write these observations, and they are folded together rather
+//! than replacing one another: the typed `dimensions` an archived **capture
+//! bundle** carries (see [`dimensions_from_jsonl`]), and the **harness-side
+//! readers** that read what a session's own records say about themselves —
+//! `activity::build_row` for a Claude Code transcript's working directory and
+//! owning organization. Neither origin can overwrite the other's facts, and a
+//! bundle that carries no dimension says nothing about the ones it omits.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,9 +18,13 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-/// The four orthogonal, optional dimensions used to describe a session's
-/// observed origin and lifecycle. Multiple values are retained because one
-/// stable session may be resumed through several surfaces.
+/// The optional dimensions used to describe a session's observed origin and
+/// lifecycle: the `surface` it was seen through, plus the four orthogonal axes
+/// — tenant, container, cwd and status — that its records are read along.
+///
+/// Multiple values are retained because one stable session may be resumed
+/// through several surfaces, and because one session may have run in more than
+/// one working directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionProvenance {
@@ -22,6 +34,21 @@ pub struct SessionProvenance {
     pub tenant: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub container: Vec<String>,
+    /// Working directories the source itself recorded for this session, spelled
+    /// the way it spelled them.
+    ///
+    /// Empty means **no directory was observed**: not "this session ran
+    /// nowhere", and never the directory the archive itself happens to live in.
+    /// More than one value is ordinary rather than contradictory — a session
+    /// that moved (a `cd` into a subdirectory, a second checkout) recorded each
+    /// place it ran, and keeping only the last would report where a
+    /// conversation *ended* as where it ran.
+    ///
+    /// A path here is an OS execution location and never a repository or
+    /// workspace identity: that distinction is what keeps `cwd ≠ repo identity`
+    /// (`cwd` in `/x`, the repository in `container`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cwd: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status: Vec<String>,
 }
@@ -34,12 +61,18 @@ impl SessionProvenance {
 
     /// The inbox schema requires non-empty, unique strings in every dimension.
     pub fn is_valid(&self) -> bool {
-        [&self.surface, &self.tenant, &self.container, &self.status]
-            .into_iter()
-            .all(|values| {
-                values.iter().all(|value| !value.is_empty())
-                    && values.iter().collect::<BTreeSet<_>>().len() == values.len()
-            })
+        [
+            &self.surface,
+            &self.tenant,
+            &self.container,
+            &self.cwd,
+            &self.status,
+        ]
+        .into_iter()
+        .all(|values| {
+            values.iter().all(|value| !value.is_empty())
+                && values.iter().collect::<BTreeSet<_>>().len() == values.len()
+        })
     }
 }
 
@@ -70,11 +103,35 @@ pub fn dimensions_from_jsonl<'a>(lines: impl IntoIterator<Item = &'a str>) -> Se
 impl SessionProvenance {
     /// Add one fact without replacing observations made by another origin.
     pub fn insert_surface(&mut self, value: impl Into<String>) {
-        let value = value.into();
-        if !self.surface.contains(&value) {
-            self.surface.push(value);
-            self.surface.sort();
-        }
+        insert(&mut self.surface, value.into());
+    }
+
+    /// Add one observed tenancy without replacing another's. An empty value is
+    /// not a tenancy: it is nothing observed, and recording it would make every
+    /// session that recorded none comparable with every other one.
+    pub fn insert_tenant(&mut self, value: impl Into<String>) {
+        insert(&mut self.tenant, value.into());
+    }
+
+    /// Add one observed working directory, keeping every other place the same
+    /// session ran. See [`SessionProvenance::cwd`] for why several is ordinary.
+    pub fn insert_cwd(&mut self, value: impl Into<String>) {
+        insert(&mut self.cwd, value.into());
+    }
+}
+
+/// Add one value to one dimension, keeping that vector a sorted set: a value the
+/// dimension already holds is a second sighting of the same fact, not a second
+/// fact.
+///
+/// An empty value is not recorded at all. It would make every session that
+/// recorded none of that dimension comparable with every other one — which is
+/// the one thing [`SessionProvenance::is_valid`] exists to prevent, and the
+/// reason a caller must not be able to slip one past it by inserting it.
+fn insert(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.contains(&value) {
+        values.push(value);
+        values.sort();
     }
 }
 
@@ -228,23 +285,27 @@ fn is_empty(value: &SessionProvenance) -> bool {
     value.surface.is_empty()
         && value.tenant.is_empty()
         && value.container.is_empty()
+        && value.cwd.is_empty()
         && value.status.is_empty()
 }
 
 /// Merge another observation while preserving every distinct value.
 pub fn merge(into: &mut SessionProvenance, from: &SessionProvenance) {
-    fn add(to: &mut Vec<String>, values: &[String]) {
-        for value in values {
-            if !to.contains(value) {
-                to.push(value.clone());
-            }
-        }
-        to.sort();
+    for value in &from.surface {
+        insert(&mut into.surface, value.clone());
     }
-    add(&mut into.surface, &from.surface);
-    add(&mut into.tenant, &from.tenant);
-    add(&mut into.container, &from.container);
-    add(&mut into.status, &from.status);
+    for value in &from.tenant {
+        insert(&mut into.tenant, value.clone());
+    }
+    for value in &from.container {
+        insert(&mut into.container, value.clone());
+    }
+    for value in &from.cwd {
+        insert(&mut into.cwd, value.clone());
+    }
+    for value in &from.status {
+        insert(&mut into.status, value.clone());
+    }
 }
 
 /// Merge legacy observations bound to the exact raw shard prefix of this
@@ -419,6 +480,81 @@ pub fn merge_verified_single_shard_observations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cwd_alone_is_an_observation_and_an_empty_one_is_not_a_value() {
+        let mut observed = SessionProvenance::default();
+        assert!(observed.is_empty(), "nothing read yet is nothing observed");
+        observed.insert_cwd("/w/one");
+        observed.insert_cwd("/w/two");
+        observed.insert_cwd("/w/one");
+        assert_eq!(
+            observed.cwd,
+            ["/w/one", "/w/two"],
+            "a session that ran in two places keeps both, and a re-observation of \
+             one place is that same place"
+        );
+        assert!(
+            !observed.is_empty(),
+            "a working directory is a recorded fact even when it is the only one"
+        );
+        assert!(observed.is_valid());
+
+        let mut blank = SessionProvenance::default();
+        blank.cwd = vec![String::new()];
+        assert!(
+            !blank.is_valid(),
+            "an empty path would make every session that recorded none comparable \
+             with every other one"
+        );
+
+        let mut refused = SessionProvenance::default();
+        refused.insert_tenant("");
+        refused.insert_cwd("");
+        assert!(
+            refused.is_empty(),
+            "a caller must not be able to slip an empty value past the guard that \
+             reads the vector: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn merging_keeps_each_cwd_and_tenant_another_origin_observed() {
+        let mut from_harness = SessionProvenance::default();
+        from_harness.insert_cwd("/w/one");
+        from_harness.insert_tenant("org-fixture");
+        let mut from_capture = SessionProvenance::default();
+        from_capture.insert_cwd("/w/two");
+        from_capture.insert_cwd("/w/one");
+        from_capture.insert_surface("ide");
+
+        let mut merged = SessionProvenance::default();
+        merge(&mut merged, &from_harness);
+        merge(&mut merged, &from_capture);
+        assert_eq!(merged.cwd, ["/w/one", "/w/two"]);
+        assert_eq!(merged.tenant, ["org-fixture"]);
+        assert_eq!(merged.surface, ["ide"]);
+    }
+
+    #[test]
+    fn a_cwd_survives_the_index_line_it_travels_in_and_omits_itself_when_empty() {
+        let mut observed = SessionProvenance::default();
+        observed.insert_cwd("/w/one");
+        observed.insert_tenant("org-fixture");
+        let line = serde_json::to_string(&observed).unwrap();
+        assert!(line.contains(r#""cwd":["/w/one"]"#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<SessionProvenance>(&line).unwrap(),
+            observed
+        );
+
+        // An observation written before this dimension existed has no `cwd` key
+        // at all, and must still read — as *not observed*, never as a path.
+        let legacy = r#"{"surface":["cli"]}"#;
+        let read: SessionProvenance = serde_json::from_str(legacy).unwrap();
+        assert!(read.cwd.is_empty());
+        assert_eq!(read.surface, ["cli"]);
+    }
 
     #[test]
     fn append_only_observations_keep_resumed_surfaces_and_body_binding() {

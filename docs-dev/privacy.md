@@ -436,7 +436,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:210-222`; `crates/chat-stasher/src/activity.rs:2435-2485`). A project name is a label from
+(`contracts/inbox.schema.json:212-224`; `crates/chat-stasher/src/activity.rs:2504-2554`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -480,10 +480,30 @@ returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
 `crates/chat-stasher/src/collect.rs:1207-1219`,
-`crates/chat-stasher/src/main.rs:2709-2717,2781-2789`,
+`crates/chat-stasher/src/main.rs:2709-2717,2790-2798`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
 a subagent to its parent conversation.
+
+The index also records what a session's **own records state about themselves**,
+which is a different fact from where the archive found them. A Claude Code
+transcript names the working directory it ran in and the organization that
+authored it — the account, where there is no organization — and both land on the
+session's row beside the collection-time provenance
+(`crates/chat-stasher/src/activity.rs:2346-2410`,
+`crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
+stating plainly. A working directory is a **path, not a repository**: it says
+where the harness ran, never which project or repository the work belonged to,
+and a session that `cd`s into a subdirectory records each place it ran rather
+than only the last. An organization id is a **namespace, not a person**: two
+accounts can be members of one organization, so two people can share the value,
+and where no organization was recorded the account is recorded instead — an
+unauthenticated local run records neither, and a session that recorded nothing
+carries no field at all rather than an empty one, because "this transcript said
+nothing about where it ran" and "it ran nowhere" are different facts and the row
+only has room for the first of them. No path is ever inferred: the archive's own
+location, and any directory that appears in the path a transcript was found
+under, are not a working directory the session ran in.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
@@ -695,7 +715,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1937-1939,1979-1989`; `crates/chat-stasher/src/main.rs:7930-7931`).
+kept on your machine (`crates/chat-stasher/src/store.rs:318-418,1937-1939,1979-1989`; `crates/chat-stasher/src/main.rs:7947-7948`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1037,7 +1057,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:7822-7827`).
+(`crates/chat-stasher/src/main.rs:7839-7844`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
