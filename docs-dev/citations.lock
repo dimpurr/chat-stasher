@@ -607,11 +607,11 @@ crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
 crates/chat-stasher/src/collect.rs:1207-1219  c768f56be50b  lines=13
   <- docs-dev/privacy.md:482  :: match collect_one(
-crates/chat-stasher/src/collect.rs:2050-2090  a9e6cfcecaac  lines=41
+crates/chat-stasher/src/collect.rs:2066-2106  a9e6cfcecaac  lines=41
   <- docs-dev/privacy.md:981  :: .id
-crates/chat-stasher/src/collect.rs:2223-2235  ec7e886a5844  lines=13
+crates/chat-stasher/src/collect.rs:2239-2251  ec7e886a5844  lines=13
   <- docs-dev/openclaw-scanner.md:46  :: entry.compressed
-crates/chat-stasher/src/collect.rs:2357-2371  13f73f5bd827  lines=15
+crates/chat-stasher/src/collect.rs:2373-2387  13f73f5bd827  lines=15
   <- docs-dev/openclaw-scanner.md:46  :: // reason: reaching here means no prefix passed validation …
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:261  :: /// Directory + filename of the config relative to the user…
@@ -645,27 +645,27 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:868  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:868  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1004-1014  e88e5fd731c5  lines=11
+crates/chat-stasher/src/doctor.rs:1005-1015  e88e5fd731c5  lines=11
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1032-1139  bbabec918aa9  lines=108
+crates/chat-stasher/src/doctor.rs:1033-1140  bbabec918aa9  lines=108
   <- docs-dev/install.md:1008  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1142-1163  7b4d69687a1b  lines=22
+crates/chat-stasher/src/doctor.rs:1143-1164  7b4d69687a1b  lines=22
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: pub enum DestinationOutcome {
-crates/chat-stasher/src/doctor.rs:1295-1348  4176d416bb38  lines=54
+crates/chat-stasher/src/doctor.rs:1296-1349  4176d416bb38  lines=54
   <- docs-dev/install.md:1004, docs-dev/install.md:1013  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
-crates/chat-stasher/src/doctor.rs:1521-1557  cb18519fdbb9  lines=37
+crates/chat-stasher/src/doctor.rs:1522-1558  cb18519fdbb9  lines=37
   <- docs-dev/install.md:278  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:1845-1846  c49d6fc9ccfa  lines=2
+crates/chat-stasher/src/doctor.rs:1847-1848  c49d6fc9ccfa  lines=2
   <- docs-dev/install.md:1011  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:2374-2436  0d89a3dbd659  lines=63
+crates/chat-stasher/src/doctor.rs:2376-2438  0d89a3dbd659  lines=63
   <- docs-dev/install.md:1011  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1462-1682  b6dd6f684adc  lines=221
+crates/chat-stasher/src/fts.rs:1464-1684  b6dd6f684adc  lines=221
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1684-1699  c572ae968c6b  lines=16
+crates/chat-stasher/src/fts.rs:1686-1701  c572ae968c6b  lines=16
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:934  :: pub fn clear(&self) -> Result<bool> {
-crates/chat-stasher/src/fts.rs:2133-2142  64fcac75f933  lines=10
+crates/chat-stasher/src/fts.rs:2135-2144  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:934  :: #[cfg(unix)]
 crates/chat-stasher/src/inbox.rs:57-60  5dde96cb7b9a  lines=4
   <- docs-dev/privacy.md:465, docs-dev/privacy.md:975  :: /// Subdirectory of the inbox where consumed files are reti…
@@ -939,9 +939,9 @@ crates/chat-stasher/src/runstate.rs:184-232  036d69fcbd03  lines=49
   <- docs-dev/install.md:950  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:186-192  525f5b894e82  lines=7
   <- docs-dev/install.md:1231  :: }
-crates/chat-stasher/src/scanner.rs:1742-1858  099b52c62352  lines=117
+crates/chat-stasher/src/scanner.rs:1876-1992  099b52c62352  lines=117
   <- docs-dev/privacy.md:981  :: sqlite_layout: Some(layout),
-crates/chat-stasher/src/scanner.rs:2143-2152  f09925927335  lines=10
+crates/chat-stasher/src/scanner.rs:2305-2314  f09925927335  lines=10
   <- docs-dev/openclaw-scanner.md:32  :: }
 crates/chat-stasher/src/schedule.rs:128-163  2da862ae79ee  lines=36
   <- docs-dev/install.md:905  :: /// Resolve the executable that a persistent scheduler may …
@@ -961,11 +961,11 @@ crates/chat-stasher/src/snapshot_cache.rs:587-621  3d14c6ed2e13  lines=35
   <- docs-dev/privacy.md:70  :: // ---- owner-only permissions ----------------------------…
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs-dev/threat-model.md:833  :: //! Read-only guarantee: every connection opens with `mode=…
-crates/chat-stasher/src/sqlite_probe.rs:1863-1870  ae091c19ff12  lines=8
+crates/chat-stasher/src/sqlite_probe.rs:2014-2021  ae091c19ff12  lines=8
   <- SECURITY.md:68  :: /// so:
-crates/chat-stasher/src/sqlite_probe.rs:1863-1872  5dea81db4c26  lines=10
+crates/chat-stasher/src/sqlite_probe.rs:2014-2023  5dea81db4c26  lines=10
   <- docs-dev/threat-model.md:831  :: /// so:
-crates/chat-stasher/src/sqlite_probe.rs:2565-2613  0dfae1a37b9a  lines=49
+crates/chat-stasher/src/sqlite_probe.rs:2767-2815  0dfae1a37b9a  lines=49
   <- docs-dev/threat-model.md:834  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:159-162  f2781c197162  lines=4
   <- docs-dev/install.md:613, docs-dev/install.md:703  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
