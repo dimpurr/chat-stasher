@@ -3,6 +3,7 @@ import {
   extractSessionId,
   SCHEMA,
   pathSafeSessionId,
+  sessionIdFromUrl,
   findPlatformForUrl,
   getPlatformByOrigin,
   HOOK_STATUS_MESSAGE,
@@ -199,7 +200,7 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
       parsed.keys = Object.keys(obj);
     }
   } catch { /* not JSON */ }
-  const sessionId = resolveSessionId(captured) ?? 'unknown';
+  const sessionId = resolveCaptureSessionId(captured) ?? 'unknown';
   const platform = findPlatformForUrl(captured.url) ?? (captured.pageUrl ? findPlatformForUrl(captured.pageUrl) : null);
   const install = await getInstallIdentity();
   // 🔴 W213 · The content fingerprint, embedded in the bundle itself. `deliver`
@@ -274,20 +275,57 @@ async function buildBundle(captured: CapturedFetch, store: BackfillStore | null)
 }
 
 /**
- * 🔴 C21 · **The one place on this path that decides "whose conversation is this".**
+ * 🔴 C21 · **The one place on this path that decides "whose conversation is this" —
+ *    and, as of W519, the answer is the URL's.**
  *
  * The order is not a preference, it is the root-cause fix itself:
  *  1. `captured.sessionId` — the authoritative value carried down from upstream
  *     when it **already knows** the identity (backfill leg: debt key = the list
  *     API's items[].id, see lib/backfill/engine.ts). When it is present we
  *     **never derive again** — the second expression dies right here.
- *  2. Only without it do we fall back to extractSessionId (live leg: the identity
- *     exists in the URL and nowhere else).
+ *  2. Only without it do we fall back to lib/contract.ts's `sessionIdFromUrl`, the
+ *     row's own registered URL rule.
+ *
+ * 🔴 W519 · **Why branch 2 is the URL rule and not `extractSessionId`.** The body
+ *    fallback used to sit here, and on Perplexity it let a response envelope name
+ *    the file: the route's own id is in the path (`/rest/thread/<slug-or-uuid>`,
+ *    and the page URL carries the same slug the backfill list gives that thread),
+ *    so a body value was never evidence of *which* conversation arrived — only a
+ *    claim by the body. Perplexity's content envelope may carry identifiers for
+ *    other purposes, and reading one as the thread id files a conversation under a
+ *    name the route never claimed. 🔴 HONESTY: whether it carries one of those
+ *    keys was never measured (the row is `from-source`); this is a precaution
+ *    against a wrong file name, and the refusal is reported, never silent.
+ *
+ *    The refusal is **not** "the capture has no identity" — it is "the body does
+ *    not get to choose the name". `claimedSessionId` below is what keeps that
+ *    distinction from costing the C21 guard its witness.
  *
  * A payload from a page can never take branch 1: lib/contract.ts's
  * isCapturedFetchShape **rejects on sight** any page payload carrying a sessionId.
  */
-function resolveSessionId(captured: CapturedFetch): string | null {
+export function resolveCaptureSessionId(captured: CapturedFetch): string | null {
+  if (captured.sessionId !== undefined) return captured.sessionId;
+  return sessionIdFromUrl(captured.url, captured.pageUrl);
+}
+
+/**
+ * 🔴 W519 · **What this payload claims to be — deliberately not the name above.**
+ *
+ * C21's guard is "a value that IS the session id is not an account id"
+ * (`lib/account-fingerprint.ts`'s `accountIdFromCapture`, and `extractIdentity`).
+ * Its witness has to be whatever this capture says it is, **including the body**:
+ * if a body carries one string under both `session_id` and `user_id`, that string
+ * is the conversation's own id and must be refused as an account id. Passing the
+ * *name* instead would hand that guard `null` on exactly the captures where the
+ * body is the only witness, and the per-conversation string would then be read as
+ * an account id — the mis-attribution this guard exists to prevent, reintroduced
+ * through the naming refusal that was meant to prevent a different one.
+ *
+ * So the two values are kept apart on purpose: `resolveCaptureSessionId` names the
+ * file and may refuse, this one witnesses identity and must not.
+ */
+export function claimedSessionId(captured: CapturedFetch): string | null {
   if (captured.sessionId !== undefined) return captured.sessionId;
   return extractSessionId(captured.url, captured.text, captured.pageUrl);
 }
@@ -502,7 +540,7 @@ async function preparePayload(
   captured: CapturedFetch,
   store: BackfillStore | null,
 ): Promise<PreparedPayload> {
-  const sessionId = resolveSessionId(captured);
+  const sessionId = resolveCaptureSessionId(captured);
   if (cancelledIdLike(sessionId)) {
     // Per-session naming is the inbox contract; a session-less capture has no
     // stable file name and is dropped rather than polluting the inbox.
@@ -1528,8 +1566,9 @@ async function patchScopeAccount(
  *    no id is visible, and that case is a **return, not a comparison**: a capture whose
  *    body carried nothing account-shaped says nothing about which account is signed in,
  *    and treating an absence as evidence is the one move this whole task forbids. The
- *    session id is resolved exactly as `buildBundle` resolves it, so the C21 guard
- *    ("a per-session id is never an account id") is applied to one value, not two.
+ *    session id handed to the guard is `claimedSessionId`, **not** the file name
+ *    `resolveCaptureSessionId` produces — see that function for why the two are kept
+ *    apart (W519). The guard is still applied to one value, not two derivations of it.
  */
 async function applyAccountObservationForCapture(
   store: BackfillStore | null,
@@ -1539,7 +1578,7 @@ async function applyAccountObservationForCapture(
   try {
     if (!store || !planHoldsAccountLease(platform)) return;
     const identity = identityOf(
-      await accountFingerprintFor(captured, store, resolveSessionId(captured)),
+      await accountFingerprintFor(captured, store, claimedSessionId(captured)),
     );
     if (!identity) return;
     await applyAccountObservation(store, platform, identity, Date.now());

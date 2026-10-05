@@ -1421,23 +1421,71 @@ export function platformForTraffic(url: string, method: string, channel?: Releas
 }
 
 /**
- * Extract a session id from URL or parsed body so the inbox file is stable per session.
- * Returns null when no id can be found — such captures are skipped (logged, not saved).
+ * 🔴 W519 · **What the platform's own registered URL rule names, and nothing else.**
+ *
+ * This is the archive-naming half of session identity, split out from
+ * `extractSessionId` so the two jobs cannot quietly become one:
+ *
+ *  · **Naming** asks "which conversation is this capture?". Only the request or
+ *    page URL can answer that: the id is in the URL by construction (the row's
+ *    `sessionIdPatterns`, read out of the platform's own front-end route), so a
+ *    body value that reaches here was never evidence of *which* thread this is.
+ *  · **Exclusion** asks "is this value the conversation's own id?" (C21, below),
+ *    and the body is a perfectly good witness for it — that is precisely why a
+ *    body-derived value must be kept off the account axis rather than promoted
+ *    onto it.
+ *
+ * Doing both with one function is what made Perplexity regress: refusing the
+ * body here also erased the value C21 needs to exclude, so a body that carried
+ * the same string under `session_id` and `user_id` had that string *promoted*
+ * to an account id (`lib/account-fingerprint.ts`'s `accountIdFromCapture`, and
+ * with it the cross-machine dedupe axis). Returns null when no registered
+ * pattern matches, which is a measurement, not a fallback.
  */
-export function extractSessionId(url: string, text: string, pageUrl?: string): string | null {
+export function sessionIdFromUrl(url: string, pageUrl?: string): string | null {
   const platform = findPlatformForUrl(url) ?? (pageUrl ? findPlatformForUrl(pageUrl) : null);
-  if (platform) {
-    for (const pattern of platform.sessionIdPatterns) {
-      const match = new RegExp(pattern).exec(url) ?? (pageUrl ? new RegExp(pattern).exec(pageUrl) : null);
-      if (match?.[1]) {
-        try {
-          return decodeURIComponent(match[1]);
-        } catch {
-          return match[1];
-        }
+  if (!platform) return null;
+  for (const pattern of platform.sessionIdPatterns) {
+    const match = new RegExp(pattern).exec(url) ?? (pageUrl ? new RegExp(pattern).exec(pageUrl) : null);
+    if (match?.[1]) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        return match[1];
       }
     }
   }
+  return null;
+}
+
+/**
+ * 🔴 **What this payload claims to be**, URL first and the body second.
+ *
+ * 🔴 This is deliberately **not** the archive file name, and the difference is
+ *    load-bearing rather than cosmetic:
+ *  · the **name** comes from `sessionIdFromUrl` alone (entrypoints/background.ts's
+ *    `resolveCaptureSessionId`), so no response body can choose which conversation
+ *    a capture is filed as;
+ *  · this function's answer is what C21 excludes from the account axis
+ *    (`extractIdentity` / `accountIdFromCapture`: "a value that IS the session id
+ *    is not an account id"). A body is a legitimate witness for *that* question —
+ *    dropping it would leave nothing to exclude, and a per-conversation string
+ *    read as an account id is the mis-attribution this repo refuses everywhere
+ *    else. Refusing to **name** a file by body data must not also mean admitting
+ *    that same string to the account axis.
+ *
+ * 🔴 HONESTY: whether Perplexity's content envelope actually carries one of the
+ *    candidate keys below was **never measured** — the row is `from-source`, never
+ *    opened in a logged-in session. The naming refusal above is a precaution, and
+ *    this one is the reason the precaution costs nothing: it changes no answer,
+ *    it only keeps the two questions apart.
+ *
+ * Returns null when no id can be found — such captures are skipped (logged, not
+ * saved).
+ */
+export function extractSessionId(url: string, text: string, pageUrl?: string): string | null {
+  const fromUrl = sessionIdFromUrl(url, pageUrl);
+  if (fromUrl !== null) return fromUrl;
   try {
     const obj = JSON.parse(text);
     if (!obj || typeof obj !== 'object') return null;

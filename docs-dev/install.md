@@ -89,12 +89,29 @@ that platform."** The extension has two legs; please read them separately:
   (`apps/extension/lib/contract.ts:471-476`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
-  So, reading the code, passive capture on Perplexity **does name the
-  conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:1422-1450`) — but this is still a conclusion
-  drawn from reading the code, and the route itself was read out of public
-  source rather than measured: **we have not tested it on a real perplexity.ai
-  page.**
+  🔴 **The name comes from the URL and from nothing else.** Where the row's own
+  patterns match, passive capture on Perplexity **does name the conversation you
+  are viewing and delivers it** — but where they match nothing (a request path
+  with no thread in it, or a named sibling route such as
+  `/rest/thread/list_ask_threads`) the capture is **refused**, not named from an
+  identifier in the response body. A body's identifier is a claim by the body, and
+  on this platform the route already carries the thread's own id in the path, so a
+  body value was never evidence of *which* conversation arrived; reading one would
+  file a conversation under a name the route never claimed
+  (`apps/extension/lib/contract.ts:1423-1502`,
+  `apps/extension/entrypoints/background.ts:277-310`).
+  🔴 Refusing the **name** is not the same as finding no identity, and the two are
+  kept apart on purpose: the account-identity guard still reads what the body
+  claims the capture is, so a body carrying one string under both `session_id` and
+  `user_id` has that per-conversation string refused as an account id rather than
+  promoted onto the axis that deduplicates two machines' archives of one account
+  (`apps/extension/entrypoints/background.ts:312-331`).
+  🔴 All of this is still a conclusion drawn from reading the code: the route and
+  the envelope were read out of public source rather than measured, and nobody has
+  opened a logged-in perplexity.ai page, so **we have not tested this on a real
+  perplexity.ai page** — and whether the content envelope carries a
+  session-shaped key at all is unknown, which is why the refusal above is a
+  precaution against a wrong file name rather than a repair of an observed one.
 - **History backfill** (off by default; see section 6): digs up your **past**
   conversations and saves them. This leg's **capability differs per platform**,
   spelled out in section 1.1 below.
@@ -118,7 +135,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:237`;
-`apps/extension/entrypoints/background.ts:1262-1264`). That page does not have to
+`apps/extension/entrypoints/background.ts:1300-1302`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -465,7 +482,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:101-126`;
-`apps/extension/entrypoints/background.ts:716-732`).
+`apps/extension/entrypoints/background.ts:754-770`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
@@ -1162,7 +1179,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2372-2473`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2411-2512`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4907-4938`) is covered.
@@ -1254,7 +1271,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | The minimum Node / pnpm version to build the extension | **Unverified** (the repository does not declare it) |
 | The concrete installation steps for a launchd timer | **Partly verified** (the command uses an injectable launchctl runner in tests; a real launchd session was not touched here) |
 | How `known_hosts_strategy` behaves against a real server | **Partly verified** (the three values and their `StrictHostKeyChecking` equivalents were read from the pinned dependency's source — opendal-service-sftp 0.57.0 `src/backend.rs` lines 148-165 and the `openssh` crate it maps onto — but we have not exercised `add` or `accept` against a live host. Section 4.4 describes what each one gives up.) |
-| Whether passive capture on Perplexity delivers the conversation it names | **Unverified** (reading the code, the conclusion is now "it recognizes the id and delivers"; see section 1. The route itself was read out of public source, not measured, and we have not tried it on a real page.) |
+| Whether passive capture on Perplexity delivers the conversation it names | **Unverified** (reading the code, the conclusion is now "where the URL names a thread, it names that one and delivers"; see section 1. Where the URL names none — a path with no thread in it, or a named sibling route such as `/rest/thread/list_ask_threads` — the capture is refused rather than named from an identifier in the body, so "it always delivers" is not the conclusion. The route itself was read out of public source, not measured, and we have not tried it on a real page.) |
 | Whether the DeepSeek / Perplexity / Grok conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:3054-3106`, `:3226-3247`, `:3338-3399`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress. That trace carries the shape of the response that did not match — the key names, types and array lengths at the level that disagreed — and carries no conversation text, no id and no title from it (`apps/extension/lib/backfill/enumerate.ts:1488-1556`), so a shape change can be diagnosed from the trace itself instead of from a second logged-in session.) |
 | Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:3338-3399`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:2266-2384`.) |
 | Whether a **long** Grok conversation comes back complete from the backfill content endpoint | **Unverified** (its two-step route — a skeleton call then a content call — was cross-checked across implementations, but none of them pages the content call and this extension adds no paging, so a long conversation may be stored as only its first part; `apps/extension/lib/backfill/enumerate.ts:3338-3399`.) |

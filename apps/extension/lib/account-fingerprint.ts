@@ -274,8 +274,14 @@ export async function fingerprintAccountId(
  *    instruction; see the report's open-question note.
  *
  * `sessionId` is passed in rather than re-derived so the session-id guard below
- * uses the same value the bundle is named by (background.ts's `resolveSessionId`,
- * C21). A value that IS the session id is not an account id.
+ * has a witness even when the body is the only place one exists. 🔴 W519: it is
+ * background.ts's `claimedSessionId`, **not** its `resolveCaptureSessionId` — the
+ * file name may be refused (a Perplexity capture whose URL names no thread is
+ * named by nothing), and handing *this* guard that refusal would leave it with
+ * nothing to exclude, so a body carrying one string under both `session_id` and
+ * `user_id` would have that per-conversation string promoted to an account id.
+ * A value that IS the session id is not an account id, and the value that decides
+ * that is what the payload claims to be.
  */
 export function accountIdFromCapture(captured: CapturedFetch, sessionId: string | null): AccountIdReading {
   const row = findPlatformForUrl(captured.url)
