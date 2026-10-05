@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import {
   OUTBOX_ALARM_NAME,
   OUTBOX_ALARM_PERIOD_MINUTES,
   syncOutboxAlarmFromRead,
 } from '../lib/outbox-alarm';
 import { OUTBOX_CAPACITY_BYTES, isOutboxSummary } from '../lib/outbox';
+
+const NAME_A = 'chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json';
+const NAME_B = 'chatgpt-bbbbbbbb-1111-2222-3333-444444444444.json';
+const PAYLOAD_A = '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}';
+const PAYLOAD_B = '{"sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}';
 
 function fakeAlarms() {
   const live = new Map<string, { periodInMinutes?: number }>();
@@ -135,5 +141,49 @@ describe('W477 · isOutboxSummary · what the outbox itself could have written',
     }],
   ])('%s is not a summary, so a caller must read it as unknown', (_case, value) => {
     expect(isOutboxSummary(value)).toBe(false);
+  });
+});
+
+/**
+ * 🔴 The guard accepts every summary this module writes. `enqueue` reports a
+ *    refusal with a summary of its own, and the guard is what decides
+ *    measured-vs-unknown for whoever reads one next — so a writer that produces a
+ *    value its own guard refuses is a trap for the next caller, not a formality.
+ *
+ *    The case that matters is a refusal with room still left: the newcomer did not
+ *    fit, but the queue is not at capacity. `full` means "nothing more can be
+ *    accepted" and is `bytes >= capacityBytes` everywhere else in the module, so it
+ *    is derived here too rather than asserted from the refusal. The refusal itself
+ *    is still reported, in `reason`.
+ */
+describe('W477 · the outbox’s own refusal summary is a summary its guard accepts', () => {
+  it('🔴 refuses the newcomer with room to spare, and the summary beside it is still a measurement', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    expect((await ob.enqueue(NAME_A, PAYLOAD_A, { capacityBytes: 10_000 })).accepted).toBe(true);
+    const used = (await ob.summary({ capacityBytes: 10_000 }))!.bytes;
+
+    // One byte of room against a payload that needs far more: refused, yet `bytes`
+    // is still under capacity, which is exactly where a hard-coded `full: true`
+    // contradicted the guard's own derivation.
+    const refused = await ob.enqueue(NAME_B, PAYLOAD_B, { capacityBytes: used + 1 });
+    expect(refused.accepted).toBe(false);
+    expect(refused.reason).toBe('outbox-full');
+    expect(refused.summary).toMatchObject({ bytes: used, capacityBytes: used + 1, full: false });
+    expect(ob.isOutboxSummary(refused.summary)).toBe(true);
+  });
+
+  it('still reports `full` when the queue really is at capacity', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    expect((await ob.enqueue(NAME_A, PAYLOAD_A, { capacityBytes: 10_000 })).accepted).toBe(true);
+    const used = (await ob.summary({ capacityBytes: 10_000 }))!.bytes;
+
+    const refused = await ob.enqueue(NAME_B, PAYLOAD_B, { capacityBytes: used });
+    expect(refused.reason).toBe('outbox-full');
+    expect(refused.summary).toMatchObject({ full: true });
+    expect(ob.isOutboxSummary(refused.summary)).toBe(true);
   });
 });

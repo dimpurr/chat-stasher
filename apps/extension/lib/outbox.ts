@@ -442,13 +442,19 @@ export async function enqueue(
       reason: 'outbox-full',
       sha256,
       // The counts describe what is actually queued, so the caller can show the
-      // user what is at stake. `full` is the refusal itself, not a guess.
+      // user what is at stake. `full` is derived exactly as `summary()` derives
+      // it, not asserted from the refusal: this newcomer can fail to fit while the
+      // queue is still under capacity (`used + storageBytes > capacityBytes` with
+      // `used < capacityBytes`), and a summary whose `full` disagrees with its own
+      // `bytes` is one `isOutboxSummary` refuses. This module's guard has to
+      // accept every summary this module writes; the refusal itself is reported
+      // in `reason`, which is a different statement from "the queue is full".
       summary: {
         pending: pendingCount,
         rejected: rejectedCount,
         bytes: used,
         capacityBytes,
-        full: true,
+        full: used >= capacityBytes,
         nearFull: used >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION,
       },
     };

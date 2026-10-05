@@ -29,47 +29,47 @@ apps/extension/entrypoints/background.ts:378-395  1c15ab706ecb  lines=18
   <- docs-dev/privacy.md:145, docs-dev/threat-model.md:34  :: // 🔴 ADR-025 §10 · **write-ahead**: get it into the outbox …
 apps/extension/entrypoints/background.ts:443  db15faf10a04  lines=1
   <- docs-dev/privacy.md:508  :: //    as the time.
-apps/extension/entrypoints/background.ts:723-739  0f75a7829815  lines=17
+apps/extension/entrypoints/background.ts:716-732  0f75a7829815  lines=17
   <- docs-dev/install.md:468  :: * the only way it is still visible the next time the popup …
-apps/extension/entrypoints/background.ts:756-768  80bf34f05ed9  lines=13
+apps/extension/entrypoints/background.ts:749-761  80bf34f05ed9  lines=13
   <- docs-dev/privacy.md:637  :: if (s === null || s.pending === 0) return;
-apps/extension/entrypoints/background.ts:915-924  e84af6908271  lines=10
+apps/extension/entrypoints/background.ts:908-917  e84af6908271  lines=10
   <- docs-dev/privacy.md:501  :: const COORDINATION_UNAVAILABLE_KEY = 'cs_ext_coordination_u…
-apps/extension/entrypoints/background.ts:1269-1271  46f6e0774d37  lines=3
+apps/extension/entrypoints/background.ts:1262-1264  46f6e0774d37  lines=3
   <- docs-dev/install.md:121  :: * actually true on my side", with no inference.
-apps/extension/entrypoints/background.ts:1348-1378  0c2f86303f73  lines=31
+apps/extension/entrypoints/background.ts:1341-1371  0c2f86303f73  lines=31
   <- docs-dev/privacy.md:497, docs-dev/privacy.md:672  :: /**
-apps/extension/entrypoints/background.ts:1429-1485  2ad812f6a098  lines=57
+apps/extension/entrypoints/background.ts:1422-1478  2ad812f6a098  lines=57
   <- docs-dev/threat-model.md:537  :: */
-apps/extension/entrypoints/background.ts:1556-1572  f4ee93c9ca58  lines=17
+apps/extension/entrypoints/background.ts:1549-1565  f4ee93c9ca58  lines=17
   <- docs-dev/threat-model.md:537  :: }
-apps/extension/entrypoints/background.ts:1711-1715  dbb093d737cf  lines=5
+apps/extension/entrypoints/background.ts:1704-1708  dbb093d737cf  lines=5
   <- docs-dev/privacy.md:637  :: * 🔴 W44 · **A capability-class record is asked a third ques…
-apps/extension/entrypoints/background.ts:1733-1793  c1a6f7896115  lines=61
+apps/extension/entrypoints/background.ts:1726-1786  c1a6f7896115  lines=61
   <- docs-dev/privacy.md:553, docs-dev/privacy.md:644, docs-dev/threat-model.md:995  :: */
-apps/extension/entrypoints/background.ts:2054  853e1bc7bf8b  lines=1
+apps/extension/entrypoints/background.ts:2047  853e1bc7bf8b  lines=1
   <- docs-dev/privacy.md:792, docs-dev/threat-model.md:318  :: const lease = await acquireBackfillLease(platform);
-apps/extension/entrypoints/background.ts:2072-2120  b92db8f7f6f2  lines=49
+apps/extension/entrypoints/background.ts:2065-2113  b92db8f7f6f2  lines=49
   <- docs-dev/privacy.md:541  :: }
-apps/extension/entrypoints/background.ts:2079-2088  81c8835aa616  lines=10
+apps/extension/entrypoints/background.ts:2072-2081  81c8835aa616  lines=10
   <- docs-dev/privacy.md:637  :: /** Wait for the fire-and-forget tick to finish. The backfi…
-apps/extension/entrypoints/background.ts:2142-2154  b33c134498db  lines=13
+apps/extension/entrypoints/background.ts:2135-2147  b33c134498db  lines=13
   <- docs-dev/privacy.md:569, docs-dev/privacy.md:877, docs-dev/threat-model.md:328  :: * of the user's current conversation.
-apps/extension/entrypoints/background.ts:2379-2480  71143749edb1  lines=102
+apps/extension/entrypoints/background.ts:2372-2473  71143749edb1  lines=102
   <- docs-dev/install.md:1165, docs-dev/privacy.md:660, docs-dev/privacy.md:676  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2964-3034  48a7fe2a9644  lines=71
+apps/extension/entrypoints/background.ts:2957-3027  48a7fe2a9644  lines=71
   <- docs-dev/privacy.md:505  :: let pendingOutboxAlarmDrain: Promise<unknown> | null = null;
-apps/extension/entrypoints/background.ts:2994-3059  d6ac20a4d041  lines=66
+apps/extension/entrypoints/background.ts:2987-3052  d6ac20a4d041  lines=66
   <- docs-dev/privacy.md:505  :: */
-apps/extension/entrypoints/background.ts:3067-3096  1101b5d5d29d  lines=30
+apps/extension/entrypoints/background.ts:3060-3089  1101b5d5d29d  lines=30
   <- docs-dev/privacy.md:412, docs-dev/threat-model.md:724  :: // Status reporting is best-effort and runs only after the …
-apps/extension/entrypoints/background.ts:3234-3248  8035f6efccd3  lines=15
+apps/extension/entrypoints/background.ts:3227-3241  8035f6efccd3  lines=15
   <- docs-dev/privacy.md:599, docs-dev/threat-model.md:501  :: export default defineBackground(() => {
-apps/extension/entrypoints/background.ts:3299-3312  35daddde87b8  lines=14
+apps/extension/entrypoints/background.ts:3292-3305  35daddde87b8  lines=14
   <- docs-dev/privacy.md:399, docs-dev/threat-model.md:784  :: /**
-apps/extension/entrypoints/background.ts:3382-3456  178f20c6154e  lines=75
+apps/extension/entrypoints/background.ts:3375-3449  178f20c6154e  lines=75
   <- docs-dev/privacy.md:506  :: }
-apps/extension/entrypoints/background.ts:3400-3469  67f465f10b1a  lines=70
+apps/extension/entrypoints/background.ts:3393-3462  67f465f10b1a  lines=70
   <- docs-dev/privacy.md:506  :: /**
 apps/extension/entrypoints/dw-bridge.content.ts:248-275  3a035d5fd708  lines=28
   <- docs-dev/privacy.md:598, docs-dev/threat-model.md:500  :: && (event.data as { type?: unknown }).type === CHATGPT_WORK…
@@ -439,7 +439,7 @@ apps/extension/lib/native-host.ts:1083-1127  4c329d3958a3  lines=45
   <- docs-dev/privacy.md:347  :: export async function deliver(
 apps/extension/lib/native-host.ts:1118-1127  d19b8c8b9924  lines=10
   <- docs-dev/install.md:67, docs-dev/privacy.md:156, docs-dev/threat-model.md:43, docs-dev/threat-model.md:619  :: const classified = classify(outcome, (value) => {
-apps/extension/lib/outbox-alarm.ts:20-46  175432e0734b  lines=27
+apps/extension/lib/outbox-alarm.ts:22-48  175432e0734b  lines=27
   <- docs-dev/privacy.md:924  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
 apps/extension/lib/outbox.ts:35-38  8427e3c8b640  lines=4
   <- docs-dev/privacy.md:141, docs-dev/threat-model.md:564  :: export const OUTBOX_DB_NAME = 'chat-stasher-outbox';
@@ -451,25 +451,21 @@ apps/extension/lib/outbox.ts:110-127  ee92b756dc17  lines=18
   <- docs-dev/privacy.md:271, docs-dev/privacy.md:1007, docs-dev/threat-model.md:108  :: export interface OutboxEntry {
 apps/extension/lib/outbox.ts:110-120  58237c6f3e36  lines=11
   <- docs-dev/privacy.md:346  :: export interface OutboxEntry {
-apps/extension/lib/outbox.ts:371-440  25c7753277a4  lines=70
-  <- docs-dev/install.md:1179  :: * (the same key the host dedupes on, §7).
-apps/extension/lib/outbox.ts:373-445  aa22d3290700  lines=73
-  <- docs-dev/privacy.md:142, docs-dev/privacy.md:271, docs-dev/privacy.md:1007, docs-dev/threat-model.md:33, docs-dev/threat-model.md:108, docs-dev/threat-model.md:888  :: export async function enqueue(
-apps/extension/lib/outbox.ts:442-457  27a082f19c53  lines=16
-  <- docs-dev/install.md:1179  :: store.put(entry);
-apps/extension/lib/outbox.ts:448-463  3319eb40bf8e  lines=16
-  <- docs-dev/install.md:70, docs-dev/privacy.md:157, docs-dev/privacy.md:974, docs-dev/threat-model.md:112, docs-dev/threat-model.md:888  :: /** 🔴 The only deletion in this module. Callers must hold a…
-apps/extension/lib/outbox.ts:466-511  f80ee94ed0c0  lines=46
+apps/extension/lib/outbox.ts:400-478  19d67ac19785  lines=79
+  <- docs-dev/install.md:1179, docs-dev/privacy.md:142, docs-dev/privacy.md:271, docs-dev/privacy.md:1007, docs-dev/threat-model.md:33, docs-dev/threat-model.md:108, docs-dev/threat-model.md:888  :: export async function enqueue(
+apps/extension/lib/outbox.ts:481-496  3319eb40bf8e  lines=16
+  <- docs-dev/install.md:70, docs-dev/install.md:1179, docs-dev/privacy.md:157, docs-dev/privacy.md:974, docs-dev/threat-model.md:112, docs-dev/threat-model.md:888  :: /** 🔴 The only deletion in this module. Callers must hold a…
+apps/extension/lib/outbox.ts:499-544  f80ee94ed0c0  lines=46
   <- docs-dev/privacy.md:370  :: export interface FailureInput {
-apps/extension/lib/outbox.ts:548-629  54e6b4f2dc67  lines=82
+apps/extension/lib/outbox.ts:581-662  54e6b4f2dc67  lines=82
   <- docs-dev/install.md:491, docs-dev/privacy.md:461  :: /**
-apps/extension/lib/outbox.ts:548-586  a49f68866f2c  lines=39
+apps/extension/lib/outbox.ts:581-619  a49f68866f2c  lines=39
   <- docs-dev/threat-model.md:136  :: /**
-apps/extension/lib/outbox.ts:596-607  04263d8db5ad  lines=12
+apps/extension/lib/outbox.ts:629-640  04263d8db5ad  lines=12
   <- docs-dev/install.md:510  :: /**
-apps/extension/lib/outbox.ts:596-629  f91dda6932df  lines=34
+apps/extension/lib/outbox.ts:629-662  f91dda6932df  lines=34
   <- docs-dev/privacy.md:714, docs-dev/threat-model.md:118  :: /**
-apps/extension/lib/outbox.ts:631-658  d99e4ed6b344  lines=28
+apps/extension/lib/outbox.ts:664-691  d99e4ed6b344  lines=28
   <- docs-dev/privacy.md:503  :: export interface LastExport {
 apps/extension/lib/page-hook.ts:258-265  ce770312c2a2  lines=8
   <- docs-dev/privacy.md:909  :: const warnUnsupportedTransport = (transport: string, url: s…
