@@ -559,7 +559,7 @@ apps/extension/lib/ui-strings.ts:110-133  15d7068df650  lines=24
   <- docs-dev/install.md:478  :: export function channelDisconnected(f: ChannelFacts): strin…
 apps/extension/locales/en.yml:69-85  0506238227c4  lines=17
   <- docs-dev/threat-model.md:787  :: identityConflict:
-apps/extension/locales/en.yml:485-486  62def469c931  lines=2
+apps/extension/locales/en.yml:488-489  62def469c931  lines=2
   <- docs-dev/privacy.md:793, docs-dev/threat-model.md:319  :: coordinationUnavailable: >-
 apps/extension/package.json:4  3aa57759f9e4  lines=1
   <- docs-dev/install.md:1172  :: "private": true,

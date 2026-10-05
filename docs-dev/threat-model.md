@@ -316,7 +316,7 @@ coordination channel is unavailable — an older host, or a host that cannot be
 reached — the leg does not run at all, live capture continues, and the popup says
 exactly that, "Update chat-stasher to enable backfill. Live capture remains
 active in this browser." (`apps/extension/entrypoints/background.ts:2054`;
-`apps/extension/locales/en.yml:485-486`). Refusing to backfill is the safe
+`apps/extension/locales/en.yml:488-489`). Refusing to backfill is the safe
 direction, but that sentence is not a statement about your other machines.
 
 **Which platforms backfill actually touches, and what you get back.** This

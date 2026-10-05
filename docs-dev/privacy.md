@@ -790,7 +790,7 @@ local coordination channel is unavailable — an older host, or a host it cannot
 reach — the leg refuses to run at all, live capture carries on, and the popup
 says exactly that, "Update chat-stasher to enable backfill. Live capture remains
 active in this browser." (`apps/extension/entrypoints/background.ts:2054`;
-`apps/extension/locales/en.yml:485-486`).
+`apps/extension/locales/en.yml:488-489`).
 
 ## 5. Where the extension runs
 
