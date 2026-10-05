@@ -346,7 +346,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2850-3065`,
-`crates/chat-stasher/src/inbox.rs:509-519`, `:874-876`).
+`crates/chat-stasher/src/inbox.rs:511-521`, `:884-886`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -359,13 +359,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:446-451`,
-`:508-516`, `:875-878`). 🔴 A copied browser profile brings its copied
+`:510-518`, `:885-888`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:834-844`, `:913-974`;
+(`crates/chat-stasher/src/inbox.rs:843-853`, `:923-984`;
 `crates/chat-stasher/src/nativehost.rs:3080-3084`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
@@ -425,18 +425,18 @@ already have, and exists so the export-import escape hatch keeps the archive
 able to answer "is this exact content already stored?" for a bundle that never
 reached the host live (`contracts/nativehost-protocol.md` §8, W213): the host
 records it beside the bytes on the sealed shard and compares it as a string
-(`crates/chat-stasher/src/inbox.rs:527-549`).
+(`crates/chat-stasher/src/inbox.rs:529-551`).
 
 A ChatGPT bundle also carries **project provenance**: the workspace the
 conversation was fetched under and the project it belongs to, as the capture leg
-recorded them (`contracts/inbox.schema.json:180-198`). 🔴 A capture taken before
+recorded them (`contracts/inbox.schema.json:162-180`). 🔴 A capture taken before
 the project was known records the literal `unknown` rather than leaving the field
 out — "not learned yet" and "this conversation belongs to no project" are
 different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:212-224`; `crates/chat-stasher/src/activity.rs:2504-2554`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2504-2554`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
