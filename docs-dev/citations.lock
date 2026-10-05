@@ -401,9 +401,9 @@ apps/extension/lib/contract.ts:1524-1540  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:542, docs-dev/threat-model.md:355  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:712, docs-dev/privacy.md:773, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
-apps/extension/lib/hook-status.ts:78-155  32138100895c  lines=78
+apps/extension/lib/hook-status.ts:79-134  21b4eb249512  lines=56
   <- docs-dev/privacy.md:506  :: /** Storage key prefix. One record per origin; at most one …
-apps/extension/lib/hook-status.ts:289-418  8d9dfc487218  lines=130
+apps/extension/lib/hook-status.ts:292-421  8d9dfc487218  lines=130
   <- docs-dev/privacy.md:506  :: *    the two facts were one silent nothing until W47.
 apps/extension/lib/host-status.ts:24-53  8037bbe82900  lines=30
   <- docs-dev/privacy.md:500  :: export const HOST_STATUS_KEY = 'cs_native_host_status_v1';
