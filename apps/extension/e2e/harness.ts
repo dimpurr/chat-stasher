@@ -611,12 +611,19 @@ export async function waitForStorage(
   timeoutMs = 20_000,
 ): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
-  let last = await readStorage(extension, keys);
-  while (!settled(last) && Date.now() < deadline) {
+  // A worker restart mid-poll makes `readStorage` throw; that is "not settled
+  // yet", not a failed wait, so the poll continues and the timeout still bounds
+  // it. The last successful reading is returned either way, per the rule above.
+  let last: Record<string, unknown> = {};
+  for (;;) {
+    try {
+      last = await readStorage(extension, keys);
+    } catch {
+      last = {};
+    }
+    if (settled(last) || Date.now() >= deadline) return last;
     await new Promise((resolve) => { setTimeout(resolve, 50); });
-    last = await readStorage(extension, keys);
   }
-  return last;
 }
 
 /**
