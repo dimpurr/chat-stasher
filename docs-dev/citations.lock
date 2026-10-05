@@ -57,20 +57,20 @@ apps/extension/entrypoints/background.ts:2135-2147  b33c134498db  lines=13
   <- docs-dev/privacy.md:569, docs-dev/privacy.md:877, docs-dev/threat-model.md:328  :: * of the user's current conversation.
 apps/extension/entrypoints/background.ts:2372-2473  71143749edb1  lines=102
   <- docs-dev/install.md:1165, docs-dev/privacy.md:660, docs-dev/privacy.md:676  :: async function resolveScopeForTick(
-apps/extension/entrypoints/background.ts:2957-3027  48a7fe2a9644  lines=71
-  <- docs-dev/privacy.md:505  :: let pendingOutboxAlarmDrain: Promise<unknown> | null = null;
-apps/extension/entrypoints/background.ts:2987-3052  d6ac20a4d041  lines=66
-  <- docs-dev/privacy.md:505  :: */
+apps/extension/entrypoints/background.ts:2964-3034  f60f20e1f1e3  lines=71
+  <- docs-dev/privacy.md:505  :: lastDrain = report;
+apps/extension/entrypoints/background.ts:2994-3059  b84067c6dfb0  lines=66
+  <- docs-dev/privacy.md:505  :: * migration's preflight (W36b) or a current-layout record t…
 apps/extension/entrypoints/background.ts:3060-3089  1101b5d5d29d  lines=30
   <- docs-dev/privacy.md:412, docs-dev/threat-model.md:724  :: // Status reporting is best-effort and runs only after the …
 apps/extension/entrypoints/background.ts:3227-3241  8035f6efccd3  lines=15
   <- docs-dev/privacy.md:599, docs-dev/threat-model.md:501  :: export default defineBackground(() => {
 apps/extension/entrypoints/background.ts:3292-3305  35daddde87b8  lines=14
   <- docs-dev/privacy.md:399, docs-dev/threat-model.md:784  :: /**
-apps/extension/entrypoints/background.ts:3375-3449  178f20c6154e  lines=75
-  <- docs-dev/privacy.md:506  :: }
-apps/extension/entrypoints/background.ts:3393-3462  67f465f10b1a  lines=70
-  <- docs-dev/privacy.md:506  :: /**
+apps/extension/entrypoints/background.ts:3382-3456  218b2ba194e7  lines=75
+  <- docs-dev/privacy.md:506  :: // 🔴 Answer only **after** the write: an ok has to mean "th…
+apps/extension/entrypoints/background.ts:3400-3469  a5921df50e81  lines=70
+  <- docs-dev/privacy.md:506  :: * guard": only a message that **says** it is a hook report
 apps/extension/entrypoints/dw-bridge.content.ts:248-275  3a035d5fd708  lines=28
   <- docs-dev/privacy.md:598, docs-dev/threat-model.md:500  :: && (event.data as { type?: unknown }).type === CHATGPT_WORK…
 apps/extension/entrypoints/dw-bridge.content.ts:332-336  e074e6d440cd  lines=5
@@ -89,12 +89,12 @@ apps/extension/entrypoints/dw-fetch-main.content.ts:13-15  0a41796be631  lines=3
   <- docs-dev/threat-model.md:235  :: matches: CONTENT_MATCHES,
 apps/extension/lib/account-fingerprint.ts:53  a0defe815627  lines=1
   <- docs-dev/privacy.md:504  :: export const ACCOUNT_SALT_KEY = 'cs_account_salt_v1';
-apps/extension/lib/account-fingerprint.ts:156-191  c3504f1537c2  lines=36
+apps/extension/lib/account-fingerprint.ts:182-234  af63cc21e970  lines=53
   <- docs-dev/privacy.md:504, docs-dev/threat-model.md:373, docs-dev/threat-model.md:402  :: export async function loadOrCreateAccountSalt(
-apps/extension/lib/account-fingerprint.ts:198-222  0438c93fd9eb  lines=25
+apps/extension/lib/account-fingerprint.ts:241-265  0438c93fd9eb  lines=25
   <- docs-dev/threat-model.md:403  :: export async function fingerprintAccountId(
-apps/extension/lib/account-fingerprint.ts:416-435  1294c056c50a  lines=20
-  <- docs-dev/privacy.md:275  :: * Never throws: a capture whose fingerprint cannot be compu…
+apps/extension/lib/account-fingerprint.ts:462-481  6d85675d2fcd  lines=20
+  <- docs-dev/privacy.md:275  :: export async function accountFingerprintFor(
 apps/extension/lib/backfill/account-lease.ts:161-226  aab2291adcda  lines=66
   <- docs-dev/threat-model.md:530  :: export async function accountLeaseForScope(
 apps/extension/lib/backfill/alarm.ts:16-18  96f2d93f9819  lines=3
@@ -465,8 +465,8 @@ apps/extension/lib/outbox.ts:629-640  04263d8db5ad  lines=12
   <- docs-dev/install.md:510  :: /**
 apps/extension/lib/outbox.ts:629-662  f91dda6932df  lines=34
   <- docs-dev/privacy.md:714, docs-dev/threat-model.md:118  :: /**
-apps/extension/lib/outbox.ts:664-691  d99e4ed6b344  lines=28
-  <- docs-dev/privacy.md:503  :: export interface LastExport {
+apps/extension/lib/outbox.ts:631-658  95401f9fe346  lines=28
+  <- docs-dev/privacy.md:503  :: * `\n` — byte-for-byte what `deliver` would have sent, whic…
 apps/extension/lib/page-hook.ts:258-265  ce770312c2a2  lines=8
   <- docs-dev/privacy.md:909  :: const warnUnsupportedTransport = (transport: string, url: s…
 apps/extension/lib/page-hook.ts:448-520  5b3a55011101  lines=73
