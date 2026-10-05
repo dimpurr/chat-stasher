@@ -1895,3 +1895,55 @@ fn run_cli_env(sandbox: &Path, subcommand: &str, extra: &[&str], envs: &[(&str, 
     }
     command.output().unwrap()
 }
+
+/// A stage ID can occupy all 255 bytes; export must reserve its file suffix,
+/// retain the canonical manifest ID, and keep matching prefixes distinct.
+#[test]
+fn export_bounds_long_session_filenames_without_changing_manifest_ids() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let repo = root.join("repo");
+    let key = root.join("key.json");
+    let mk = MasterKey::new();
+    let machine = "m-alpha";
+    let stage = stage_path(root, machine);
+    let prefix = format!("claude-code.{machine}.{}", "s".repeat(234));
+    let ids = [format!("{prefix}a"), format!("{prefix}b")];
+    for id in &ids {
+        assert_eq!(id.len(), 255);
+        write_two_shards(
+            &stage,
+            machine,
+            id,
+            &[user_line("synthetic export fixture", None)],
+        );
+    }
+    store::persist_key_file(&cfg(&repo, &key, root), &mk).unwrap();
+    let store = store_of(&repo, root, machine);
+    store.push(&stage, &mk).unwrap();
+    let out = root.join("out");
+    let report = export::export_sessions(
+        &store,
+        &mk,
+        &selector(SelectorArgs::default()),
+        &export_opts(&out, Turns::All, false),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(report.sessions.len(), 2);
+    assert!(report.failed.is_empty());
+    let manifest = manifest(&out);
+    let sessions = manifest["sessions"].as_array().unwrap();
+    let mut paths = BTreeSet::new();
+    for session in sessions {
+        assert!(ids
+            .iter()
+            .any(|id| Some(id.as_str()) == session["session_id"].as_str()));
+        let relative = session["relative_path"].as_str().unwrap();
+        let path = out.join(relative);
+        assert!(path.file_name().unwrap().len() <= 255);
+        assert!(path.is_file());
+        paths.insert(relative);
+    }
+    assert_eq!(paths.len(), 2);
+}

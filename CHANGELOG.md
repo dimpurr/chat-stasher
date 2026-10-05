@@ -199,6 +199,13 @@ under its own heading below.
 
 #### Fixed
 
+- **`collect` accepts long OpenClaw cold transcript filenames.** Hex encoding
+  could expand a valid source filename beyond the 255-byte stage directory
+  limit, causing `File name too long`. Oversized native and composed IDs now
+  use a readable prefix and a deterministic 128-bit SHA-256 tag of the full
+  value. IDs that already fit retain their exact bytes. Extension and raw inbox
+  session directories apply the same bound; export reserves six bytes for its
+  `.jsonl` suffix and keeps the canonical ID in the manifest.
 - **`export --turns user` now reads the messages Claude Code records mid-turn,
   and stops reading notices as if a person had written them.** The filter kept a
   line only when it said `type: "user"` and was not a tool result. Two things

@@ -103,6 +103,11 @@ pub const MANIFEST_NAME: &str = "manifest.json";
 /// with a real harness directory and cannot be mistaken for one.
 pub const NO_HARNESS_DIR: &str = "<no-harness-prefix>";
 
+/// Suffix appended to a session id to name its exported file. A `const` so the
+/// length reserved for it in the file name's `NAME_MAX` budget cannot drift from
+/// the suffix actually written.
+const JSONL_SUFFIX: &str = ".jsonl";
+
 /// Harnesses where "this line is the user's own message" is determinable from
 /// the archived line alone.
 ///
@@ -954,11 +959,23 @@ pub fn export_sessions(
             }
         };
         let filtered = filter_session(hit.harness.as_deref(), bytes, opts, report.window.as_ref());
+        // `.jsonl` is appended here, so this file name is one path component
+        // carrying a suffix the session id does not — its budget is `NAME_MAX`
+        // minus that suffix (`id::SessionIdentity::id` bounds the id at the full
+        // `NAME_MAX`, because there the id is the whole component). Without the
+        // reserve the last six bytes of an id that the stage layout accepts
+        // would make this one file uncreatable, reported per session as a write
+        // failure. An id this short is returned verbatim, so no export layout
+        // that exists today moves.
+        let session_file = crate::id::bounded_path_component(
+            &hit.session_id,
+            crate::id::MAX_PATH_COMPONENT_BYTES - JSONL_SUFFIX.len(),
+        );
         let relative = format!(
-            "{}/{}/{}.jsonl",
+            "{}/{}/{}{JSONL_SUFFIX}",
             hit.machine,
             hit.harness_dir(),
-            hit.session_id
+            session_file
         );
         if let Some(bad) = first_unsafe_component(hit) {
             out.failed.push(FailedSession {

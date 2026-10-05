@@ -599,11 +599,23 @@ struct FingerprintRecord {
 ///    look somewhere other than where the delivery went, and the failure would be
 ///    silent: a miss reads as "not held", so the answer would be an extra copy
 ///    rather than an error anyone could see.
+///
+/// 🔴 W680. Bounded too, and for the same reason the session id is: this string
+///    is one path component, `NAME_MAX` is 255, and the protocol admits a
+///    `sessionId` of up to 512 characters (`nativehost::has`) while
+///    `sanitize_component` only rewrites the charset. A delivery naming a longer
+///    conversation could not be written at all. Bounding the *composite* rather
+///    than each half keeps the platform's name readable at the head, and a
+///    session id already short enough is returned verbatim, so every directory
+///    written before this bound is the same directory as before.
 pub fn session_dir_id(platform: &str, session_id: &str) -> String {
-    format!(
-        "{}.{}",
-        sanitize_component(platform),
-        sanitize_component(session_id)
+    crate::id::bounded_path_component(
+        &format!(
+            "{}.{}",
+            sanitize_component(platform),
+            sanitize_component(session_id)
+        ),
+        crate::id::MAX_PATH_COMPONENT_BYTES,
     )
 }
 
@@ -1284,7 +1296,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     let default_platform = "deepseek".to_string();
 
     let mut out = ParseOutcome {
-        id: format!("{}.{}", default_platform, fallback_id),
+        id: session_dir_id(&default_platform, &fallback_id),
         platform: default_platform,
         session_id: fallback_id,
         captured_at: None,
@@ -1542,6 +1554,22 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn raw_fallback_filename_keeps_its_identity_bounded() {
+        let name = format!("{}.json", "s".repeat(250));
+        let parsed = parse_bundle(&name, b"synthetic invalid JSON").unwrap();
+        assert_eq!(parsed.kind, "raw");
+        assert_eq!(parsed.session_id, "s".repeat(250));
+        assert!(parsed.id.len() <= crate::id::MAX_PATH_COMPONENT_BYTES);
+        assert_eq!(
+            parse_bundle("short.json", b"synthetic invalid JSON")
+                .unwrap()
+                .id,
+            "deepseek.short"
+        );
+    }
+
     use std::fs;
 
     fn synthetic_bundle(session_id: &str, raw_text: &str) -> String {
