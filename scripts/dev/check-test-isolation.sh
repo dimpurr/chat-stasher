@@ -313,10 +313,17 @@ scan_roots() {
   printf 'marker\t%s\n' "$STATE_HOME"
 }
 
-# Snapshot the roots named in `$2` (one path per line) into `$1`, one stat line
-# per entry, keyed by path so a changed root is a readable diff. An absent root
-# is recorded as `ABSENT <path>` so a run that creates it is a diff.
-snapshot_all() {
+# Snapshot the structure roots named in `$2` (one path per line) into `$1`, one
+# path per entry, so a changed root is a readable diff. An absent root is
+# recorded as `ABSENT <path>` so a run that creates it is a diff. Only names are
+# recorded, not stat data: a create-then-delete leaves the entry set identical
+# and is caught by the run-boundary check below, whereas recording mtime here
+# made the same event a *snapshot* diff whose whole-second granularity is a
+# race — the generic "changed a real inbox" message would pre-empt the specific
+# create-then-delete message whenever the probe straddled a second boundary. An
+# in-place rewrite (same name, newer mtime) is still caught by the boundary
+# check, so dropping stat data loses no detection.
+snapshot_structure() {
   # $1 = output file, $2 = roots file.
   : >"$1"
   while IFS= read -r root; do
@@ -332,12 +339,7 @@ snapshot_all() {
       exit 1
     fi
     while IFS= read -r -d '' entry; do
-      # inode, mtime, size — a rename or an in-place rewrite is a diff even
-      # when the name set is unchanged.
-      stat -c '%i %Y %s' "$entry" 2>/dev/null ||
-        stat -f '%i %m %z' "$entry" 2>/dev/null ||
-        printf 'stat-unavailable'
-      printf ' %s\n' "$entry"
+      printf '%s\n' "$entry"
     done <"$SNAP_DIR/names.raw" >>"$1"
   done <"$2"
   LC_ALL=C sort -o "$1" "$1"
@@ -424,7 +426,7 @@ file_fixture_tokens() {
 # ---- structure snapshot -----------------------------------------------------
 
 collect_structure_roots | LC_ALL=C sort -u >"$SNAP_DIR/structure.roots"
-snapshot_all "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.roots"
+snapshot_structure "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.roots"
 
 # The scan-root names before the run, so a fixture name deleted during it is a
 # diff. Names only: a stat of the whole archive is not needed to notice a
@@ -490,7 +492,7 @@ failed=0
 # ---- structure diff: any change is a leak ----------------------------------
 
 collect_structure_roots | LC_ALL=C sort -u >"$SNAP_DIR/structure.roots.after"
-snapshot_all "$SNAP_DIR/structure.after" "$SNAP_DIR/structure.roots.after"
+snapshot_structure "$SNAP_DIR/structure.after" "$SNAP_DIR/structure.roots.after"
 if ! diff -q "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.after" >/dev/null; then
   failed=1
   echo "$TAG FAIL: this run changed a real inbox or native-messaging manifest" \
@@ -499,8 +501,9 @@ if ! diff -q "$SNAP_DIR/structure.before" "$SNAP_DIR/structure.after" >/dev/null
 fi
 
 # Unchanged entry set, but a structure directory was touched during the run: a
-# create-then-delete. Reported only when the snapshot diff was clean, so one
-# change is never announced twice.
+# create-then-delete, or an in-place rewrite of an entry that kept its name.
+# Reported only when the name-set snapshot diff was clean, so one change is
+# never announced twice.
 if [ "$failed" -eq 0 ]; then
   while IFS= read -r root; do
     [ -n "$root" ] || continue
@@ -508,7 +511,8 @@ if [ "$failed" -eq 0 ]; then
     if [ -n "$(find "$root" -newer "$BOUNDARY" -print -quit 2>/dev/null)" ]; then
       echo "$TAG FAIL: this run modified $root during the run (an entry is newer" \
         "than the run boundary) while leaving the entry set unchanged —" \
-        "a create-then-delete the snapshot diff cannot see" >&2
+        "a create-then-delete (or an in-place rewrite) the snapshot diff" \
+        "cannot see" >&2
       failed=1
     fi
   done <"$SNAP_DIR/structure.roots.after"
