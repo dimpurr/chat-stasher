@@ -82,7 +82,7 @@ A destination name with characters that are not letters, digits, `-`, `_` or `.`
 
 A timer is started by launchd or systemd, not by your shell. It does **not** see variables you exported in your shell profile. That matters for R2 and S3, whose credentials you may have written as `env:NAME` ([destinations.md](destinations.md#keeping-the-secret-out-of-the-config-file-env)): under a timer, the variable is not there, the option is dropped, and the run cannot reach the bucket.
 
-A credential written in one of these forms is resolved without a shell, so it works the same from a terminal and from a timer:
+A credential written in one of these forms is resolved without a shell, so it works from a terminal and from a timer, subject to the file, the line or the keychain item being readable by the scheduled user:
 
 | Written as | The secret is read from |
 |---|---|
@@ -98,7 +98,11 @@ access_key_id = "file:~/.config/chat-stasher/r2-access-key-id"
 secret_access_key = "keychain:r2"
 ```
 
-Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up the first time you run any command, not as a silent failure at 3 a.m.
+Unlike `env:`, these forms **fail closed**: if the file, the line or the keychain item cannot be read, the config is refused with an error naming the option and the reference, never the secret. So a broken reference shows up on the next command, not as a silent failure at 3 a.m.
+
+A `keychain:` lookup uses your macOS login keychain; a LaunchAgent can read it only when that keychain is unlocked and permits the lookup. If you are still logged in but the keychain is locked, `file:` or `env-file:` avoids that keychain dependency.
+
+A LaunchAgent runs in the user's login session and stops when that user logs out, so changing the credential reference cannot make this timer run while you are logged out ([Apple's LaunchAgents documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
 
 Make a secret file readable only by you (`chmod 600`). To add a keychain item:
 
@@ -193,7 +197,7 @@ With `--output`, it writes the file and prints the exact command that loads it. 
 
 Windows has no scheduler this build integrates with: every `chat-stasher schedule` action there refuses with exit 2 and writes nothing. Create the pass yourself instead, as a per-user task in Task Scheduler.
 
-`schtasks.exe` does the whole job. Run this in `cmd.exe` or PowerShell, with the two paths replaced by yours — the binary's **full path** is required, because Task Scheduler does not search `PATH`:
+`schtasks.exe` does the whole job. In `cmd.exe`, run this with the paths replaced by yours — the binary's **full path** is required, because Task Scheduler does not search `PATH`:
 
 ```bat
 schtasks /Create /TN "chat-stasher run-once" /SC HOURLY /TR "\"%USERPROFILE%\bin\chat-stasher.exe\" run-once --stage \"%USERPROFILE%\stash\chat-stasher\stage\" --destination r2"
@@ -202,10 +206,10 @@ schtasks /Create /TN "chat-stasher run-once" /SC HOURLY /TR "\"%USERPROFILE%\bin
 The parts that are easy to get wrong:
 
 - `/TN` is the task's name. `/Query`, `/Run` and `/Delete` address the task by it.
-- `/TR` is the whole command, as one string. The inner quotes are backslash-escaped: `cmd.exe` passes `\"` through untouched and `schtasks` reads it as a real quote, which is what keeps a program path containing spaces from being split in two.
+- `/TR` is the whole command, as one string. The inner quotes are backslash-escaped for the Windows command-line parser; `schtasks` reads them as real quotes, which keeps a program or stage path containing spaces from being split in two. This command uses `cmd.exe` syntax: `%USERPROFILE%` expansion and `\"` quoting are not PowerShell syntax.
 - `run-once` needs its own `--stage`, and `--destination <name>` as soon as your config declares a destination ([destinations.md](destinations.md)). A pass that names none is refused, and the task then looks scheduled while failing every hour. Drop `--destination` only while no destination is declared.
 - The binary has to be a permanent copy, the same rule as [above](#which-binary-the-timer-runs): one inside a build folder stops working after the next `cargo clean`.
-- Without `/RU` and `/RP`, the task runs **only while you are logged on**. This is the reason this page gives no wrapper around it: a task that looks scheduled and silently stops at every log-off is worse than one you know you set up by hand. If the pass must run while you are logged off, add `/RU <account> /RP` and expect Windows to ask for that account's password.
+- `/IT` is the `schtasks` switch that restricts a task to times when its run-as user is logged on; omitting `/IT` does not impose that restriction. `schtasks` prompts for a password by default, including when creating a task for the current local user. To configure this task to run while you are logged off, supply `/RU <account> /RP *`; `*` makes Windows prompt for the account password without putting it in the command. The task still needs access to the stage, config, credential files and destination while it runs ([Microsoft's `schtasks` reference](https://learn.microsoft.com/en-us/windows/win32/taskschd/schtasks) and [create command](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create)).
 
 Check what Windows did with it:
 
