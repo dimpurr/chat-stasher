@@ -83,12 +83,20 @@ export interface ConnectDelivery {
   count: number;
 }
 
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeFiniteNumber(value) && Number.isInteger(value);
+}
+
 export async function loadConnectDelivery(store: BackfillStore | null): Promise<ConnectDelivery | null> {
   if (!store) return null;
   const raw = await store.load(CONNECT_DELIVERY_KEY);
   if (!raw || typeof raw !== 'object') return null;
   const rec = raw as Partial<ConnectDelivery>;
-  if (typeof rec.at !== 'number' || typeof rec.count !== 'number') return null;
+  if (!isNonNegativeFiniteNumber(rec.at) || !isNonNegativeInteger(rec.count)) return null;
   return { at: rec.at, count: rec.count };
 }
 
@@ -632,11 +640,14 @@ export async function loadLastExport(store: BackfillStore | null): Promise<LastE
   const raw = await store.load(LAST_EXPORT_KEY);
   if (!raw || typeof raw !== 'object') return null;
   const rec = raw as Partial<LastExport>;
-  if (typeof rec.at !== 'number' || typeof rec.entries !== 'number') return null;
+  if (!isNonNegativeFiniteNumber(rec.at) || !isNonNegativeInteger(rec.entries)) return null;
+  // A present but malformed byte count is not a trustworthy summary and must
+  // not be converted into a plausible zero.
+  if (rec.bytes !== undefined && !isNonNegativeInteger(rec.bytes)) return null;
   return {
     at: rec.at,
     entries: rec.entries,
-    bytes: typeof rec.bytes === 'number' ? rec.bytes : 0,
+    bytes: rec.bytes ?? 0,
     filename: typeof rec.filename === 'string' ? rec.filename : '',
   };
 }

@@ -139,7 +139,7 @@ the sentence.
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:35-38`,
-   `:365-437`). It does this *before* attempting any delivery, so a service
+   `:373-445`). It does this *before* attempting any delivery, so a service
    worker killed between "the page produced bytes" and "the host answered" cannot
    lose a conversation without a trace
    (`apps/extension/entrypoints/background.ts:378-395`).
@@ -154,7 +154,7 @@ the sentence.
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
    (`apps/extension/lib/native-host.ts:1118-1127`;
-   `apps/extension/lib/outbox.ts:440-455`).
+   `apps/extension/lib/outbox.ts:448-463`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
    (`crates/chat-stasher/src/main.rs:329-366`;
@@ -268,7 +268,7 @@ Three places, all of them yours.
 profile.** Each captured session is written there as one record holding the
 bundle — a JSON document whose `raw.text` field is the raw response body, that
 is, the conversation itself (`apps/extension/entrypoints/background.ts:268-271`;
-`apps/extension/lib/outbox.ts:102-119`, `:365-437`). The bundle also carries an
+`apps/extension/lib/outbox.ts:110-127`, `:373-445`). The bundle also carries an
 **account fingerprint** beside the identity described below: not the account id
 and not an email, but a keyed digest of the platform's account id, computed
 in the extension with a random per-install salt
@@ -343,7 +343,7 @@ extension could find one — it reaches that record from the bundle itself, not
 from this key — and that field is never what these comparisons match on.
 Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
-existing platform scope (`apps/extension/lib/outbox.ts:102-112`,
+existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2839-3054`,
 `crates/chat-stasher/src/inbox.rs:510-520`, `:879-881`).
@@ -367,7 +367,7 @@ your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
 (`crates/chat-stasher/src/inbox.rs:839-849`, `:918-979`;
 `crates/chat-stasher/src/nativehost.rs:3069-3073`;
-`apps/extension/lib/outbox.ts:458-503`). The label is a name you typed, and it
+`apps/extension/lib/outbox.ts:466-511`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
 it nowhere but to your own host.
@@ -458,7 +458,7 @@ button: that writes one
 the name carries the producing install's short id and a per-export nonce, so
 two browser profiles exporting in the same second cannot overwrite each
 other's file), one undelivered bundle per line, into your browser's download
-directory (`apps/extension/lib/outbox.ts:540-621`). That file is an ordinary
+directory (`apps/extension/lib/outbox.ts:548-629`). That file is an ordinary
 download, so your browser keeps a download-history entry for it — just its name
 and timestamp, not its content. We do not delete it; `ingest` retires it to
 `consumed/` when it has consumed every line
@@ -500,7 +500,7 @@ What is kept there:
 | `cs_native_host_status_v1`, `cs_native_host_pause_v1` | The last `hello` answer (stage, machine id, host version, or the named reason it failed) and the record that says the backfill leg is paused | `apps/extension/lib/host-status.ts:24-53`, `:114-138` |
 | `cs_ext_coordination_unavailable_v1` | A Boolean popup note recording whether this profile's most recent backfill tick found coordination unavailable. It is true when the host cannot answer EXT-3 and false after a successful coordination claim; a tick without a request channel preserves the prior result. It stores no platform, account, or conversation data. | `apps/extension/entrypoints/background.ts:915-924` |
 | `extension-coordination.sqlite3` in the native host's local state directory | Machine-local backfill coordination metadata: platform ids, install ids, masterkey-derived HMAC account keys when available, last-seen and lease/cooldown/request timestamps, and a per-day detail-request count. It contains no raw account id, conversation id, title, or message content. Install sightings older than 30 days are pruned when coordination runs. | `crates/chat-stasher/src/nativehost.rs:1236-1311`, `:1417-1423`, `:1507-1522` |
-| `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:70-71`, `:623-647` |
+| `cs_outbox_last_export_v1` | The time, size and file name of the last export you triggered | `apps/extension/lib/outbox.ts:70-71`, `:631-658` |
 | `cs_account_salt_v1` | The random 32-byte secret every account fingerprint is keyed with, plus an opaque per-install id and the time it was created — nothing else, and no account id in any form. It is what makes a fingerprint irreversible: the value in your archive cannot be turned back into an account id without this secret, which never leaves this browser profile and is never synced. 🔴 Two installs, two profiles, or one install whose record you delete produce **incomparable** fingerprints for the same account; a fingerprint is only ever meant to be compared with one carrying the same id, and a mismatch there is not evidence of an account switch. A stored record this build cannot read is reported as `salt-unreadable` and deliberately **left alone** rather than replaced — re-keying would change every later fingerprint and make one unchanged account look like a switch. | `apps/extension/lib/account-fingerprint.ts:53`, `:156-191`; `apps/extension/lib/contract.ts:1326-1330` |
 | `cs_backfill_lasttick_v1` | The trace of the most recent backfill alarm wake: when it was, whether it ran, the named outcome, and how many backfill targets were registered. 🔴 It also carries **how that tick ended** — the run's own stop reason (`stopped`), the halt it left behind (`halted`) and that halt's `detail`, or, for a tick that stopped before making any request, that tick's own named outcome. And whether that tick **swept open tabs** for a live page the registry had lost (`tabSweep`): `null` if it never swept, `{ looked: false }` if it could not list tabs, `{ looked: true, queried, pruned, pinged, registered, deferred, crowded }` if it did — counts only, so "we looked and found nothing" stays distinct from "we never looked", a sweep that hit its ping cap (`deferred > 0`) stays distinct from one that pinged everything it wanted to, and a sweep that refused an answering tab for want of a slot (`crowded > 0`) stays distinct from both. 🔴 The field also has a fourth value that is **not an outcome**: `{ sweeping: true }`, written by the provisional record the tick saves *before* its sweep starts, says this tick has no sweep result yet. It exists so that an interrupted tick is never recorded as one that never looked — that provisional record is the one that stays if the browser reclaims the worker mid-sweep, if the sweep throws, or if the tick's final save fails, and `null` there would have been a false "this tick never swept" about a tick that did. It is replaced in the same tick by one of the three values above whenever the tick finishes, and the popup says the tick had not finished rather than reading it as a skip. 🔴 W76 · It also carries **which target that wake served, and which ones it passed over and why** (`schedule`): the platform id the wake ran (`served`), and, for each target the walk examined and did not run, that platform's id beside the code it was passed over for — `no-http-port` (no open page for it), `halted` (a stop that still applies) or `waiting-retry` (a transient stop still inside its backoff). The walk orders targets by least-recently-served rank; never-seen targets join at the back and registry order breaks ties. Platform ids and reason codes only: no account scope, no origin, no free text. Metadata only: reason codes, counts and timestamps. The one free-text field is the halt's `detail`, and by construction it names storage keys, paths, HTTP statuses and counts — never a conversation id, title, or body. One record, overwritten by the next wake. | `apps/extension/lib/backfill/alarm.ts:1577-1679`, `:1682-1761`; `apps/extension/entrypoints/background.ts:2994-3059`, `:2964-3034` |
 | `cs_hook_v1:<origin>`, `cs_hook_declined_v1` | A top frame's own report about its capture hook: one record per origin, holding each observation with **when it was first made and when it was last made**. The two differ because a page that stays in one state re-sends that state every few seconds to say it still holds; the latest observation is the state that page is in (an older one is a state it has moved out of), and a capture that arrived after the latest one *began* is evidence about it. A child frame's observation is not stored — it is a statement about that frame, not about the origin. 🔴 And the one report that was **received and not recorded**, with the check that refused it, the origin and observation when they are known, how many times in a row the same refusal has repeated, and when. Metadata only: reason codes, a count, an origin string, timestamps; no URL path, no conversation id, no body, no token. Unlike the per-origin records, the declined one is a single record, overwritten by the next decline. | `apps/extension/lib/hook-status.ts:79-134`, `:292-421`; `apps/extension/entrypoints/background.ts:3400-3469`, `:3382-3456` |
@@ -711,7 +711,7 @@ The parties who *do* see something, stated plainly:
 |---|---|---|
 | **The chat platform** (ChatGPT, DeepSeek, Perplexity, Gemini, Claude, Kimi, Grok) | Your conversations — they host them; they always could. Capture adds no traffic of its own, except on **ChatGPT**, where it requests the full conversation you just opened, and on **Gemini**, where it requests the conversation from its first page and follows the paging token to the end — one request for the first page plus one per remaining page, all on the same route the page itself calls (both same origin, your own session). | `apps/extension/lib/page-hook.ts:877`, `:671-719`; `apps/extension/lib/gemini-capture.ts:150-238` |
 | **Your archive destination provider**, if you chose a remote one | Encrypted objects: their **sizes**, **timestamps**, and how many there are. Not the content. This is a real metadata leak: it reveals your archiving rhythm and volume. | `crates/chat-stasher/src/store.rs:318-418`; see `docs-dev/threat-model.md` |
-| **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:588-621` |
+| **Your browser vendor**, possibly | The download-history entry for an export file, *if* you pressed the popup's export button *and* your browser syncs download history to your browser account. **We have not investigated** whether any particular browser does this by default. | `apps/extension/lib/outbox.ts:596-629` |
 | **Anything else running on your computer as you** | The plaintext bundles in the extension's outbox, the staged shards, the config, and the master key files. We do not defend against this. | See [Known weaknesses](#known-weaknesses) |
 | **Us, the authors** | Nothing. | Section 1 |
 
@@ -971,7 +971,7 @@ Retention on **your** machine is under your control:
 
 | Where | How long it stays | How to delete it |
 |---|---|---|
-| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:440-455`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** One outbox per install: it holds only what that profile's copy captured, and no other install can read or drain it. | Uninstall the extension **in that profile**, or clear its site data in your browser; there is no per-record delete button. Either one deletes that install's queue and leaves every other profile's alone. |
+| Bundles in the extension's outbox | Until the host answers a matching `ack`, which deletes the record (`apps/extension/lib/outbox.ts:448-463`). A record the host **refused** outright is kept and never retried. **If the host is never reachable, they stay indefinitely, in plaintext.** One outbox per install: it holds only what that profile's copy captured, and no other install can read or drain it. | Uninstall the extension **in that profile**, or clear its site data in your browser; there is no per-record delete button. Either one deletes that install's queue and leaves every other profile's alone. |
 | An export file you triggered | Until `ingest` consumes it, which moves it to `<inbox>/consumed/` once every line was sealed or found to be a duplicate (`crates/chat-stasher/src/inbox.rs:57-60`). | Delete it from your download directory with your file manager. |
 | Browser download-history entry for that export | Until you clear your browser history | Clear downloads in your browser's own history UI |
 | Extension local storage — the install identity, the report counter, the account-fingerprint salt, backfill progress, the alarm's last-wake trace, the last host status, the pause record, the capture-hook records and the last-export stamp (the full list is the table in [section 3b](#3-where-your-data-is-stored)) | Until you clear it or uninstall the extension | Uninstalling the extension removes it; browsers also expose per-extension site-data clearing |
@@ -1004,7 +1004,7 @@ all, so here are the ones that bear on your privacy. The full list is in
 
 **1. The plaintext window before delivery.** The extension writes each captured
 session as an ordinary, unencrypted record into its outbox database, inside your
-browser profile (`apps/extension/lib/outbox.ts:102-119`, `:365-437`). That record
+browser profile (`apps/extension/lib/outbox.ts:110-127`, `:373-445`). That record
 contains the conversation itself. It sits there, readable by anything running as
 your user, until the host acknowledges it — and a record the host refused stays
 until you uninstall. **We do not encrypt it, we do not restrict its permissions,

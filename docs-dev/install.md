@@ -67,7 +67,7 @@ whose `request_id` and `sha256` equal the ones the extension sent**
 (`apps/extension/lib/native-host.ts:1118-1127`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
-(`apps/extension/lib/outbox.ts:440-455`). There is no "probably delivered".
+(`apps/extension/lib/outbox.ts:448-463`). There is no "probably delivered".
 
 If you would rather not register the host at all, the extension can instead
 export everything it has not delivered as one file, which you feed to the CLI by
@@ -488,7 +488,7 @@ into your download directory — the short install id names the browser profile
 that produced it and the nonce makes the name unique per export, so two
 profiles exporting in the same second cannot write the same file — one line
 per undelivered capture, each line being exactly the payload that would
-have been sent to the host (`apps/extension/lib/outbox.ts:540-621`).
+have been sent to the host (`apps/extension/lib/outbox.ts:548-629`).
 
 Feed that directory to the CLI:
 
@@ -507,7 +507,7 @@ volatile field) seals that fingerprint onto the shard, so the CLI's `has`
 answers for imported content exactly as it does for a live delivery; a line
 from an older export seals with none and its conversation is recognised by
 exact bytes only. Exporting does not remove anything from the
-outbox (`apps/extension/lib/outbox.ts:588-599`).
+outbox (`apps/extension/lib/outbox.ts:596-607`).
 
 ---
 
@@ -1176,7 +1176,7 @@ confirmed in the code, not a temporary disclaimer.
 - **A captured conversation is plaintext until the host acknowledges it.** A
   live capture is written into the extension's own IndexedDB outbox before any
   delivery is attempted and deleted only on a matching `ack`
-  (`apps/extension/lib/outbox.ts:363-432`, `:434-449`); the popup's export file
+  (`apps/extension/lib/outbox.ts:371-440`, `:442-457`); the popup's export file
   contains the same bodies. Other programs running as you can read all of it.
   (The "Security and privacy" section of `README.md` says the same.)
 
