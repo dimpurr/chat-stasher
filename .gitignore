@@ -12,8 +12,8 @@ apps/extension/node_modules/
 apps/extension/.output/
 apps/extension/.wxt/
 
-# D15: python bytecode cache from the citation checker
-scripts/__pycache__/
+# D15: python bytecode cache from the citation checker and its tests
+**/__pycache__/
 
 # release artifacts produced by scripts/release-artifacts.sh
 dist/

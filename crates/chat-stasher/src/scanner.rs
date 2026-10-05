@@ -4292,8 +4292,8 @@ mod tests {
     fn source_detection_via_directory_segment() {
         let codex = Path::new("/Users/u/.codex/sessions/2026-05-01/ab.jsonl");
         let claude = Path::new("/Users/u/.claude/projects/foo-abc/ab.jsonl");
-        assert_eq!(detect_source(&codex), Some(HarnessSource::Codex));
-        assert_eq!(detect_source(&claude), Some(HarnessSource::ClaudeCode));
+        assert_eq!(detect_source(codex), Some(HarnessSource::Codex));
+        assert_eq!(detect_source(claude), Some(HarnessSource::ClaudeCode));
     }
 
     #[test]
