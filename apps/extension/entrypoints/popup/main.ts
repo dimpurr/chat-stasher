@@ -645,6 +645,11 @@ function paintInstallIdentity(install: BackfillRuntimeStatus['install']): void {
   void paintOtherInstallCount(install.install_id);
 }
 
+function setInstallProfileLabelSaveStatus(key: string): void {
+  const status = document.getElementById('install-profile-label-save-status');
+  if (status) status.textContent = t(key);
+}
+
 /**
  * 🔴 EXT-13 · Paint the identity-conflict repair card.
  *
@@ -740,11 +745,30 @@ async function paintOtherInstallCount(installId: string): Promise<void> {
 async function saveInstallProfileLabel(): Promise<void> {
   const input = document.getElementById('install-profile-label') as HTMLInputElement | null;
   if (!input) return;
-  const reply = await browser.runtime.sendMessage({
-    type: POPUP_SAVE_INSTALL_LABEL_MESSAGE,
-    profile_label: input.value,
-  });
-  if (reply?.ok) await refresh();
+  setInstallProfileLabelSaveStatus('popup.install.savePending');
+  let reply: { ok?: boolean } | null;
+  try {
+    reply = await browser.runtime.sendMessage({
+      type: POPUP_SAVE_INSTALL_LABEL_MESSAGE,
+      profile_label: input.value,
+    });
+  } catch {
+    console.warn('[chat-stasher] install label save failed');
+    setInstallProfileLabelSaveStatus('popup.install.saveFailed');
+    return;
+  }
+  if (reply?.ok !== true) {
+    setInstallProfileLabelSaveStatus('popup.install.saveFailed');
+    return;
+  }
+  setInstallProfileLabelSaveStatus('popup.install.saveSucceeded');
+  try {
+    await refresh();
+  } catch {
+    // The host confirmed the save, so a later repaint failure must not undo that
+    // status or suggest that saving failed.
+    console.warn('[chat-stasher] install label repaint failed');
+  }
 }
 
 /**
@@ -1030,9 +1054,7 @@ document.getElementById('open-dashboard')?.addEventListener('click', () => {
 });
 
 document.getElementById('save-install-profile-label')?.addEventListener('click', () => {
-  void saveInstallProfileLabel().catch((err) => {
-    console.warn('[chat-stasher] install label save failed', (err as Error).message);
-  });
+  void saveInstallProfileLabel();
 });
 
 // Load the stored language before the first paint, so the popup does not flash

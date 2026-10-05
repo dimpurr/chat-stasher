@@ -90,6 +90,23 @@ describe('i18n catalog · en.yml and zh_CN.yml stay aligned', () => {
     }
   });
 
+  it('profile-label save feedback is localized, safe, and actionable', () => {
+    const en = CATALOGS.en;
+    const zh = CATALOGS.zh_CN;
+    const entries = [
+      ['popup_install_savePending', 'Saving profile name…'],
+      ['popup_install_saveSucceeded', 'Profile name saved.'],
+      ['popup_install_saveFailed', 'Could not save the profile name. Try again.'],
+    ] as const;
+    for (const [key, english] of entries) {
+      expect(en[key]?.message, `en is missing ${key}`).toBe(english);
+      expect(zh[key]?.message.trim(), `zh_CN is missing ${key}`).toBeTruthy();
+      expect(zh[key]!.message).not.toBe(english);
+      expect(en[key]!.message).not.toContain('{');
+      expect(zh[key]!.message).not.toContain('{');
+    }
+  });
+
   it('every entry has non-empty text in both catalogs', () => {
     for (const locale of TEST_LOCALES) {
       for (const [key, entry] of Object.entries(CATALOGS[locale])) {
