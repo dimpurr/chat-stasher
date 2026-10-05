@@ -98,19 +98,43 @@ export function channelNoCheck(): string {
   return t('channel.noCheck');
 }
 
+/**
+ * 🔴 A fact that was never learned, said so in one word.
+ *
+ * `ChannelFacts` types these as optional because a record read back from
+ * `storage.local` is only *shape*-validated (lib/host-status.ts), and a record
+ * written by an older build — or a hand-edited one — reaches the popup with
+ * fields absent. Interpolating that absence straight into the sentence renders
+ * the JavaScript `undefined` as user-visible text ("stage undefined"), which is
+ * the one thing CLAUDE.md's first invariant forbids: an unknown recorded as if
+ * it were a value. `common.unknownShort` already exists for exactly a fact with
+ * no unit and no longer sentence to carry, so nothing new is invented here.
+ */
+function known(fact: string | undefined): string {
+  return typeof fact === 'string' && fact.length > 0 ? fact : t('common.unknownShort');
+}
+
 export function channelConnected(f: ChannelFacts): string {
   return t('channel.connected', {
-    stage: f.stage,
-    machine: f.machine,
-    hostVersion: f.hostVersion,
+    stage: known(f.stage),
+    machine: known(f.machine),
+    hostVersion: known(f.hostVersion),
     at: stamp(f.at),
   });
 }
 
 export function channelDisconnected(f: ChannelFacts): string {
-  const why = f.kind
-    ? `${f.reason} (${f.kind})`
-    : (f.reason ?? t('channel.reason.unknown'));
+  // 🔴 The reason and the kind are two independent facts, so each falls back on
+  //    its own. Reading them as one — a `kind` present ⇒ the reason is known —
+  //    renders the JavaScript `undefined` into the sentence whenever a record
+  //    carries a kind without a reason, which `parseHostStatus` accepts (both
+  //    fields are optional). `common.unknownShort` is the honest word for a
+  //    reason we were not given; `channel.reason.unknown` stays the whole-reason
+  //    fallback so the sentence never carries a blank in that position.
+  const reason = typeof f.reason === 'string' && f.reason.length > 0
+    ? f.reason
+    : t('channel.reason.unknown');
+  const why = f.kind ? `${reason} (${f.kind})` : reason;
   const stage = f.lastKnownStage ?? null;
   // 🔴 EXT-12 · A stage ever learned ⇔ the CLI is known to exist on this machine
   //   (it installed the host). With none, the fix is the one-line installer, not

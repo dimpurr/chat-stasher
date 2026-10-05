@@ -481,7 +481,7 @@ the *"Manage your downloads"* warning is gone
 Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
-(`apps/extension/lib/ui-strings.ts:101-126`;
+(`apps/extension/lib/ui-strings.ts:113-150`;
 `apps/extension/entrypoints/background.ts:754-770`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
@@ -492,7 +492,7 @@ it prints the stage that `hello` reported with the `chat-stasher
 install-native-host --stage …` command already filled in with that path; never has
 one, and it prints the one-line installer instead, because telling a user to run a
 `chat-stasher …` command assumes the very thing that is missing
-(`apps/extension/lib/ui-strings.ts:54-60`, `:110-133`). Nothing is delivered while
+(`apps/extension/lib/ui-strings.ts:54-60`, `:126-150`). Nothing is delivered while
 this is the case: captures wait in the extension's outbox instead, and the toolbar
 badge shows how many (`apps/extension/lib/badge.ts:46-73`).
 

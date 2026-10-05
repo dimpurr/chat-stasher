@@ -191,4 +191,44 @@ describe('W666 · channelConnected / channelDisconnected', () => {
       'Delivery channel: NOT connected to the chat-stasher host — reason: timeout (checked 2023-11-14 22:13:20 UTC). No stage path has ever been learned on this machine. Fix: curl -fsSL https://chatstasher.com/install.sh | sh',
     );
   });
+
+  // -------------------------------------------------------------------------
+  // 🔴 A fact we were never given must read as "unknown", never as the
+  //    JavaScript `undefined`. `parseHostStatus` only shape-validates the fields
+  //    it knows, so a record written by an older build — or a hand-edited one —
+  //    reaches this builder with them absent, and interpolating the absence
+  //    shipped the literal text "stage undefined" to a user. Pinned on all three
+  //    facts and on the string itself, because the failure is a word appearing
+  //    that no catalog entry contains.
+  // -------------------------------------------------------------------------
+
+  it('a connected record missing its facts reads "unknown", never the string "undefined"', async () => {
+    const ui = await uiStrings();
+    const line = ui.channelConnected({ at: 1700000000000, ok: true });
+    expect(line).toBe(
+      'Delivery channel: connected to the chat-stasher host — stage unknown · machine unknown · host version unknown (checked 2023-11-14 22:13:20 UTC).',
+    );
+    expect(line).not.toContain('undefined');
+  });
+
+  it('one absent connected fact does not blank the two it does have', async () => {
+    const ui = await uiStrings();
+    const line = ui.channelConnected({ at: 1700000000000, ok: true, stage: '/Users/me/stage', hostVersion: '0.3.0' });
+    expect(line).toBe(
+      'Delivery channel: connected to the chat-stasher host — stage /Users/me/stage · machine unknown · host version 0.3.0 (checked 2023-11-14 22:13:20 UTC).',
+    );
+  });
+
+  // 🔴 `reason` and `kind` are independent fields. A kind present does not make
+  //    the reason known, and reading it that way rendered "reason: undefined
+  //    (config)" — the same missing-fact-as-a-value defect, in the sentence that
+  //    tells a user why their host is not answering.
+  it('a kind with no reason reads "unknown reason" beside the kind', async () => {
+    const ui = await uiStrings();
+    const line = ui.channelDisconnected({ at: 1700000000000, ok: false, kind: 'config' });
+    expect(line).toBe(
+      'Delivery channel: NOT connected to the chat-stasher host — reason: unknown reason (config) (checked 2023-11-14 22:13:20 UTC). No stage path has ever been learned on this machine. Fix: curl -fsSL https://chatstasher.com/install.sh | sh',
+    );
+    expect(line).not.toContain('undefined');
+  });
 });
