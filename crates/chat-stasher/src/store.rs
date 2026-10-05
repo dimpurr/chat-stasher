@@ -2191,7 +2191,7 @@ mod tests {
                 "default must stay below the ceiling: raising concurrency buys no \
                  measured speed (D2) but does open masters that must be reaped"
             );
-        }
+        };
         let cfg4 = StoreConfig {
             repo_root: "/tmp/x".into(),
             key_file: PathBuf::from("/tmp/x.key"),
