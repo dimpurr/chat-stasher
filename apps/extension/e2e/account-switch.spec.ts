@@ -26,7 +26,7 @@
 
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { expect } from '@playwright/test';
-import { installFakePlatforms, readStorage, test, writeStorage, type Extension } from './harness';
+import { installFakePlatforms, readStorage, test, waitForStorage, writeStorage, type Extension } from './harness';
 
 const ORIGIN = 'https://grok.com';
 const PLATFORM = 'grok';
@@ -256,11 +256,21 @@ test('a run whose responses come from another account stops, and the scope keeps
       chrome: { alarms: { create(n: string, info: { when: number }): Promise<void> } };
     }).chrome.alarms.create(name, { when: Date.now() + 50 });
   }, TICK_ALARM);
-  await page.waitForTimeout(1500);
+  // 🔴 W618 · The wait is the record the assertions below read, not a guessed interval: the
+  //    run's stop is **one** header write — `stopForAccountChange` sets `state.suspended`
+  //    and then `halt('account-changed')` persists the header (`lib/backfill/engine.ts`) —
+  //    so waiting for the pair is waiting for that write and nothing else. A fast run
+  //    proceeds the moment it lands instead of after 1500 ms, and a run that never writes
+  //    it fails on the assertions below, which name the record that is missing.
+  const headers = await waitForStorage(ext, [HEADER_KEY], (state) => {
+    const header = state[HEADER_KEY] as
+      | { halted?: { reason?: unknown } | null; suspended?: unknown }
+      | undefined;
+    return header?.halted?.reason === 'account-changed' && Boolean(header.suspended);
+  });
 
   // 🔴 The record: the run stopped for the account reason, and it says **which** account
   //    answered — a fingerprint this spec computes independently, not the id.
-  const headers = await readStorage(ext, [HEADER_KEY]);
   const header = headers[HEADER_KEY] as Record<string, unknown>;
   expect(header).toBeTruthy();
   expect((header.halted as { reason?: string } | null)?.reason).toBe('account-changed');
@@ -320,9 +330,16 @@ test('a capture of another account suspends the scope that account no longer ans
   const page = await ext.context.newPage();
   await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => (window as unknown as { __csCapture: Promise<unknown> }).__csCapture);
-  await page.waitForTimeout(1500);
 
-  const state = await readStorage(ext, [HEADER_KEY, TARGETS_KEY]);
+  // 🔴 W618 · The same wait, on the same product's own record. The capture leg registers
+  //    the observing account's target (`rememberScopedTarget`, `kickBackfill`) **before**
+  //    `applyAccountObservationForCapture` suspends the old scope through `patchScopeAccount`'s
+  //    single ledger save, so a reading taken once the suspension exists already carries both
+  //    keys the assertions below read — and the reading itself is the one they are judged on.
+  const state = await waitForStorage(ext, [HEADER_KEY, TARGETS_KEY], (reading) => {
+    const header = reading[HEADER_KEY] as { suspended?: unknown } | undefined;
+    return Boolean(header?.suspended);
+  });
   const header = state[HEADER_KEY] as Record<string, unknown>;
   const suspended = header.suspended as Record<string, unknown>;
   expect(suspended, 'a capture naming another account must suspend the old scope').toBeTruthy();

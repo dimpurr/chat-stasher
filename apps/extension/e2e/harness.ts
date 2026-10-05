@@ -587,6 +587,93 @@ export async function readStorage(
 }
 
 /**
+ * The one poll shape every waiter in this harness uses: read, judge, repeat
+ * until `settled` accepts or the deadline passes, and return the last **real**
+ * reading.
+ *
+ * 🔴 W618 · A worker restart mid-poll makes a reader throw (`readStorage`,
+ *    `readOutbox`, `readDebtRows` and `listDatabases` all throw rather than
+ *    return an empty result, precisely so "I could not ask" is never read as
+ *    "there is none" — see the three-state rule on each of them). That throw is
+ *    "not settled yet", not an answer, so the poll keeps the reading it already
+ *    has and tries again instead of failing the wait outright. This is the
+ *    flake W618 was written for: the restart is transient, and a restart must
+ *    not decide a test.
+ *
+ * 🔴 But the throw is only swallowed **once there is a reading to fall back
+ *    on**. If the deadline passes and *no* read ever succeeded, this re-throws
+ *    the reader's own error instead of returning its empty seed value. That is
+ *    the whole reason the readers throw: an extension that never installed, a
+ *    worker that never came up, or a reader that genuinely broke would
+ *    otherwise return `{}` / `[]` — indistinguishable at the call site from a
+ *    storage that was read and was empty — and the caller's assertions would
+ *    then report a *missing record* for a run that never read anything, after
+ *    burning the whole timeout. With `retries: 0` that misleading failure is
+ *    also final. So "unreadable" and "empty" stay two states here too, and the
+ *    diagnostic that names the real cause survives.
+ */
+async function pollLastReading<T>(
+  read: () => Promise<T>,
+  settled: (reading: T) => boolean,
+  timeoutMs: number,
+  intervalMs: number,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  // A `T` can legitimately be anything, so "have we ever read" is its own flag
+  // rather than a null/undefined check on the value.
+  let reading: { value: T } | null = null;
+  let failure: unknown;
+  for (;;) {
+    try {
+      reading = { value: await read() };
+      failure = undefined;
+    } catch (error) {
+      failure = error;
+    }
+    if (reading && settled(reading.value)) return reading.value;
+    if (Date.now() >= deadline) {
+      if (!reading) throw failure;
+      return reading.value;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, intervalMs); });
+  }
+}
+
+/**
+ * Poll `storage.local` until `settled` accepts the reading, and return that reading.
+ *
+ * 🔴 W618 · The storage twin of `waitForOutbox`, and it exists for the same reason:
+ *    a fixed `page.waitForTimeout` is the suite's known flake source, and this
+ *    config has `retries: 0`, so one impatient sleep fails the run rather than
+ *    being papered over. A spec that sleeps for the product to write a record is
+ *    guessing how long the write takes; polling on the record's own shape is not.
+ *
+ *    The **shape the next assertion reads** is the only thing worth waiting on: a
+ *    shorter wait cannot prove the state exists, and a longer one buys nothing the
+ *    timeout below does not already bound.
+ *
+ * Returning the last reading on timeout is the same rule `waitForOutbox` and
+ * `waitForTickRecord` follow, and for the same reason: the caller's own
+ * assertions are the judge, so a missing record fails with the sentence that
+ * names which field was absent rather than with "a poll ran out of time". That
+ * holds only for a reading that was actually taken — `pollLastReading` throws
+ * rather than inventing an empty one.
+ */
+export async function waitForStorage(
+  extension: Extension,
+  keys: string[] | null,
+  settled: (state: Record<string, unknown>) => boolean,
+  timeoutMs = 20_000,
+): Promise<Record<string, unknown>> {
+  return await pollLastReading(
+    () => readStorage(extension, keys),
+    settled,
+    timeoutMs,
+    50,
+  );
+}
+
+/**
  * Wait until the extension has **armed** one of its own alarms.
  *
  * 🔴 W82 · `fireAlarm` below does not add a second alarm — `alarms.create` on a
@@ -753,30 +840,34 @@ export async function seedOutbox(extension: Extension, rows: OutboxEntry[]): Pro
  * Returning the last reading on timeout (rather than throwing) is deliberate,
  * the same rule the other waiters follow: the caller decides what the snapshot
  * means, and the body's assertions are what fail on a missing or provisional
- * record.
+ * record — for a reading that was taken. A poll in which the reader threw every
+ * time never got one, so `pollLastReading` re-throws rather than returning an
+ * empty snapshot that reads as a storage with no record in it.
  */
 export async function waitForTickRecord(
   ext: Extension,
   options: { since?: number; timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
   const { since = 0, timeoutMs = 20_000 } = options;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const all = await readStorage(ext, null);
-    const record = all['cs_backfill_lasttick_v1'];
-    if (record && typeof record === 'object') {
-      const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
-      if (
-        typeof fields.at === 'number'
-        && fields.at > since
-        && !isSweepNotConcluded(fields.tabSweep)
-      ) {
-        return all;
+  return await pollLastReading(
+    async () => await readStorage(ext, null),
+    (all) => {
+      const record = all['cs_backfill_lasttick_v1'];
+      if (record && typeof record === 'object') {
+        const fields = record as { at?: unknown; tabSweep?: TabSweepTrace | null };
+        if (
+          typeof fields.at === 'number'
+          && fields.at > since
+          && !isSweepNotConcluded(fields.tabSweep)
+        ) {
+          return true;
+        }
       }
-    }
-    if (Date.now() >= deadline) return all;
-    await new Promise((resolve) => { setTimeout(resolve, 100); });
-  }
+      return false;
+    },
+    timeoutMs,
+    100,
+  );
 }
 
 /**
@@ -829,20 +920,23 @@ export async function fireAlarmUntilRuns(
  * caller decides what the number means. A spec that expects one record asserts
  * on it; a spec that expects none reads the outbox only after the page has
  * confirmed the response arrived, and an exception there would look exactly like
- * the failure it is looking for.
+ * the failure it is looking for. That again holds only for a reading that was
+ * taken: `readOutbox` throws rather than returning `[]`, and a poll whose every
+ * read threw has measured nothing at all — so `pollLastReading` re-throws
+ * instead of returning the empty list, which at the call site would be
+ * indistinguishable from an outbox that was read and was empty.
  */
 export async function waitForOutbox(
   extension: Extension,
   settled: (entries: readonly OutboxEntry[]) => boolean,
   timeoutMs = 20_000,
 ): Promise<OutboxEntry[]> {
-  const deadline = Date.now() + timeoutMs;
-  let last = await readOutbox(extension);
-  while (!settled(last) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    last = await readOutbox(extension);
-  }
-  return last;
+  return await pollLastReading(
+    async () => await readOutbox(extension),
+    (entries) => settled(entries),
+    timeoutMs,
+    100,
+  );
 }
 
 // ---------------------------------------------------------------------------
