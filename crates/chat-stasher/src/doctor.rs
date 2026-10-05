@@ -5011,6 +5011,186 @@ mod json_tests {
     }
 }
 
+/// The `doctor --json` contract itself: what a machine consumer parses when
+/// the run checked nothing. `json_tests` above pins the populated shapes; this
+/// pins the envelope, the not-checked tag and the collection types against a
+/// minimal report — the only shape guaranteed to exist on every machine.
+#[cfg(test)]
+mod report_to_json_shape_tests {
+    use super::*;
+
+    /// The smallest report that is still a report: config read fine, no
+    /// optional check filled in, no rows found.
+    fn minimal_report() -> DoctorReport {
+        DoctorReport {
+            config_source: crate::config::ConfigSource::DefaultsMissing,
+            config_error: None,
+            claude: ClaudeCheck {
+                layers: Vec::new(),
+                verdict: ClaudeRetention::UnsetDefault,
+            },
+            gemini: GeminiRetention::default(),
+            footprints: Vec::new(),
+            other_present: Vec::new(),
+            risks: Vec::new(),
+            reclaim: None,
+            cache: None,
+            body_cache: None,
+            fts_indexes: None,
+            probes: Vec::new(),
+            archive_gaps: Vec::new(),
+            scan_failed: false,
+            destinations: Vec::new(),
+            stage_duplicate_shards: None,
+            native_host: None,
+            keys: None,
+        }
+    }
+
+    /// An unchecked section is `{"checked": false}` — never `null`, never `[]`,
+    /// never absent. Those three are three different claims ("we looked and it
+    /// is empty" / "we do not know" / "this field is not part of the schema"),
+    /// and a consumer distinguishing them is the whole point of the tag.
+    #[test]
+    fn report_to_json_marks_every_unchecked_section_as_checked_false() {
+        let v = report_to_json(&minimal_report());
+        for key in [
+            "reclaim",
+            "cache",
+            "body_cache",
+            "fts_indexes",
+            "keys",
+            "native_host",
+            "stage_duplicate_shards",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "{key} must be present in doctor --json"
+            );
+            let value = &v[key];
+            assert_eq!(
+                value,
+                &serde_json::json!({"checked": false}),
+                "{key} for a section that was not checked must be exactly {{\"checked\": false}}"
+            );
+        }
+    }
+
+    /// The envelope every script reads first: schema version, command name,
+    /// scan health, config provenance, config error.
+    #[test]
+    fn report_to_json_pins_the_envelope() {
+        let v = report_to_json(&minimal_report());
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["command"], serde_json::json!("doctor"));
+        assert_eq!(v["scan_failed"], serde_json::json!(false));
+        assert!(
+            v["config_source"].is_string(),
+            "config_source is the label string, not the enum variant name in Rust form"
+        );
+        assert_eq!(
+            v["config_source"],
+            serde_json::json!(crate::config::ConfigSource::DefaultsMissing.label())
+        );
+        assert!(
+            v["config_error"].is_null(),
+            "a healthy report has no config error, and null is the only encoding of that"
+        );
+    }
+
+    /// `not_checked` is an array of strings in both directions: empty when the
+    /// config was usable (everything was checked or legitimately not run), and
+    /// the `CHECKS_NEEDING_CONFIG` names themselves when it was not.
+    #[test]
+    fn report_to_json_serialises_not_checked_as_an_array_of_strings() {
+        let v = report_to_json(&minimal_report());
+        let not_checked = v["not_checked"]
+            .as_array()
+            .expect("not_checked must be an array");
+        assert!(
+            not_checked.is_empty(),
+            "a healthy report checked everything it names: {not_checked:?}"
+        );
+        assert!(not_checked.iter().all(serde_json::Value::is_string));
+
+        let mut unhealthy = minimal_report();
+        unhealthy.config_error = Some("config.toml could not be read".to_string());
+        let v = report_to_json(&unhealthy);
+        let not_checked = v["not_checked"]
+            .as_array()
+            .expect("not_checked must be an array");
+        let expected: Vec<_> = CHECKS_NEEDING_CONFIG
+            .iter()
+            .map(|name| serde_json::json!(name))
+            .collect();
+        assert_eq!(
+            not_checked, &expected,
+            "an unreadable config names the checks it skipped"
+        );
+        assert!(
+            not_checked.iter().all(serde_json::Value::is_string),
+            "not_checked holds check names as plain strings: {not_checked:?}"
+        );
+    }
+
+    /// `claude` and `gemini` are objects with their tri-state shapes pinned:
+    /// the verdict tag, the layer list, and the four-field known policy.
+    #[test]
+    fn report_to_json_claude_and_gemini_are_objects() {
+        let v = report_to_json(&minimal_report());
+
+        let claude = v["claude"]
+            .as_object()
+            .expect("claude must be an object, not null or a string");
+        let mut claude_keys: Vec<_> = claude.keys().map(String::as_str).collect();
+        claude_keys.sort_unstable();
+        assert_eq!(claude_keys, ["dangerous", "layers", "verdict"]);
+        assert_eq!(
+            v["claude"]["verdict"],
+            serde_json::json!({"kind": "unset_default"})
+        );
+        assert_eq!(v["claude"]["dangerous"], serde_json::json!(true));
+        assert_eq!(v["claude"]["layers"], serde_json::json!([]));
+
+        let gemini = v["gemini"]
+            .as_object()
+            .expect("gemini must be an object, not null or a string");
+        let mut gemini_keys: Vec<_> = gemini.keys().map(String::as_str).collect();
+        gemini_keys.sort_unstable();
+        assert_eq!(
+            gemini_keys,
+            ["dangerous", "enabled", "kind", "max_age", "min_retention"]
+        );
+        assert_eq!(v["gemini"]["kind"], serde_json::json!("known"));
+        assert_eq!(v["gemini"]["enabled"], serde_json::json!(true));
+        assert_eq!(v["gemini"]["max_age"], serde_json::json!("30d"));
+        assert_eq!(v["gemini"]["min_retention"], serde_json::json!("1d"));
+        // The documented default policy *is* the 30-day cleanup window.
+        assert_eq!(v["gemini"]["dangerous"], serde_json::json!(true));
+    }
+
+    /// The per-row fields are arrays — a consumer iterates them — and a
+    /// minimal report serialises each as an empty array rather than null.
+    #[test]
+    fn report_to_json_serialises_the_row_fields_as_arrays() {
+        let v = report_to_json(&minimal_report());
+        for key in [
+            "footprints",
+            "other_present",
+            "risks",
+            "archive_gaps",
+            "probes",
+            "destinations",
+        ] {
+            assert!(
+                v[key].is_array(),
+                "{key} must be an array (possibly empty), got {:?}",
+                v[key]
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod w285_coverage_and_clock_tests {
     use super::*;
