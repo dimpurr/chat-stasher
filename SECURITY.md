@@ -65,7 +65,7 @@ actually claims (each is derived from code in `docs-dev/threat-model.md`):
    (`apps/extension/lib/contract.ts:305-350`, `:881-894`).
 3. The CLI writing to, or otherwise mutating, a harness's own session store,
    which is opened read-only (`crates/chat-stasher/src/sqlite_probe.rs:23-29`,
-   `:2014-2021`).
+   `:2042-2049`).
 4. `push` creating a snapshot that silently drops content it cannot account for
    (`crates/chat-stasher/src/main.rs:8047-8054,8071-8075`).
 

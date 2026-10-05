@@ -371,8 +371,8 @@ away the only way to notice the same account twice.
 |---|---|---|
 | **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1192-1197`; `crates/chat-stasher/src/inbox.rs:484-489`, `:552-557`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:484-489`) |
 | **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:490-508`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1326-1330`) |
-| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:512`, `:862`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
-| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1341-1349`) |
+| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:512`, `:874`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
+| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1353-1361`) |
 
 🔴 **The masterkey-derived account key is the mechanism that makes "the same
 account on two machines" answerable, and it is derived rather than observed.**
@@ -388,7 +388,7 @@ the archive can confirm that two conversations belong to one account — which i
 already the party who can read both conversations. The host never returns the
 masterkey or the derived value to the extension, the value is not in the bundle,
 the payload or the export file, and a test asserts the sealed payload never
-contains it (`crates/chat-stasher/src/inbox.rs:1941-1963`). No account id
+contains it (`crates/chat-stasher/src/inbox.rs:1969-1991`). No account id
 visible, no key file resolvable without ambiguity, or a key file that cannot be
 read each mean **no comparable key is derived** — coordination then falls back
 to a platform-wide bucket (`crates/chat-stasher/src/nativehost.rs:1310-1345`,
@@ -608,7 +608,7 @@ The properties that bound this boundary:
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1175-1203`). Two browsers, two
+  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1187-1215`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
@@ -739,7 +739,7 @@ words with different consequences:
   fix lives in the browser profile and not in the host: retrying the same bytes
   could never succeed. The capture stays in the outbox, listed rejected with that
   instruction, and is never merged with the first install's record
-  (`crates/chat-stasher/src/inbox.rs:742-750`, `:822-832`, `:907-962`;
+  (`crates/chat-stasher/src/inbox.rs:754-762`, `:834-844`, `:919-974`;
   `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
   deliberately *not* evidence of a conflict, and neither is the same browser under
   the same label — that case is invisible here, by construction.
@@ -828,10 +828,10 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:2014-2023`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:2042-2051`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2767-2815`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2868-2916`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:393,483-484`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by

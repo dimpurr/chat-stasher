@@ -346,7 +346,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1083-1127`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2850-3065`,
-`crates/chat-stasher/src/inbox.rs:509-519`, `:862-864`).
+`crates/chat-stasher/src/inbox.rs:509-519`, `:874-876`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -359,13 +359,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:446-451`,
-`:508-516`, `:863-866`). 🔴 A copied browser profile brings its copied
+`:508-516`, `:875-878`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:822-832`, `:901-962`;
+(`crates/chat-stasher/src/inbox.rs:834-844`, `:913-974`;
 `crates/chat-stasher/src/nativehost.rs:3080-3084`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
@@ -998,7 +998,7 @@ Retention on **your** machine is under your control:
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:686-772`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1884-2000`; `crates/chat-stasher/src/collect.rs:2066-2106`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:168-1319`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1891-2000`; `crates/chat-stasher/src/collect.rs:2066-2106`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:168-1319`). Selective per-conversation deletion inside an archive is not implemented. |
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
 lives, so uninstalling also deletes the captures *that install* had not been

@@ -29,7 +29,7 @@ continue to be scanned.
 
 Cold files under `sessions/` are considered when the file name's extension is
 `.zst`; a `.jsonl` name component is not required
-(`crates/chat-stasher/src/scanner.rs:2313-2322`). The part of the name before
+(`crates/chat-stasher/src/scanner.rs:2306-2315`). The part of the name before
 the first `.jsonl` supplies the session ID — the whole file name when the name
 contains no `.jsonl` — and a file whose part before `.jsonl` is empty is
 skipped. A file is also skipped when an identifiable SQLite archive row for the
@@ -93,8 +93,8 @@ shard-directory creation as collect. Against the original code, a rotated cold
 filename triggers `File name too long` (macOS error 63). It also checks short-ID
 compatibility and distinct archive generations.
 
-Implementation: `crates/chat-stasher/src/sqlite_probe.rs:342-399`,
+Implementation: `crates/chat-stasher/src/sqlite_probe.rs:347-402`,
 `crates/chat-stasher/src/id.rs:232-287`,
-`crates/chat-stasher/src/inbox.rs:594-623`,
+`crates/chat-stasher/src/inbox.rs:593-622`,
 `crates/chat-stasher/src/export.rs:962-979`, and
 `crates/chat-stasher/src/store.rs:1217-1220`.
