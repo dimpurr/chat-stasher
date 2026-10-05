@@ -30,7 +30,7 @@ Understanding the roles below requires knowing the path the content takes.
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
-   (`apps/extension/lib/outbox.ts:373-445`;
+   (`apps/extension/lib/outbox.ts:400-478`;
    `apps/extension/entrypoints/background.ts:378-395`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
@@ -105,17 +105,17 @@ Concretely, five separate plaintext exposures:
 1. **The outbox window, before delivery.** The extension writes each captured
    session as an ordinary, unencrypted record into its outbox IndexedDB
    database, inside your browser profile
-   (`apps/extension/lib/outbox.ts:110-127`, `:373-445`). The record's `raw.text`
+   (`apps/extension/lib/outbox.ts:110-127`, `:400-478`). The record's `raw.text`
    field is the raw response body — the conversation itself
    (`apps/extension/entrypoints/background.ts:268-271`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
-   and the record is deleted (`apps/extension/lib/outbox.ts:448-463`). **We do
+   and the record is deleted (`apps/extension/lib/outbox.ts:481-496`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
    that window.** How long it is depends on how often the host is reachable; if
    it never is, the plaintext stays indefinitely. A second plaintext copy of a
    capture exists if you press the popup's export button, which writes the same
    bodies into an ordinary download file
-   (`apps/extension/lib/outbox.ts:596-629`). (An **archived** session can also be
+   (`apps/extension/lib/outbox.ts:629-662`). (An **archived** session can also be
    written out decrypted, by `export --out` — that is exposure 5, below.)
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
@@ -133,7 +133,7 @@ Concretely, five separate plaintext exposures:
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
    `chat-stasher-export-<UTC>-<install-short-id>-<nonce>.jsonl`
-   (`apps/extension/lib/outbox.ts:548-586`). The name's install segment is a
+   (`apps/extension/lib/outbox.ts:581-619`). The name's install segment is a
    short id for this browser profile — metadata of the same kind as the one
    the bundle carries — and the nonce says nothing but "this export".
    That is metadata, not content — it says an export happened and when, not
@@ -315,7 +315,7 @@ coordination sentence the extension shows is about *this* machine: when the loca
 coordination channel is unavailable — an older host, or a host that cannot be
 reached — the leg does not run at all, live capture continues, and the popup says
 exactly that, "Update chat-stasher to enable backfill. Live capture remains
-active in this browser." (`apps/extension/entrypoints/background.ts:2054`;
+active in this browser." (`apps/extension/entrypoints/background.ts:2047`;
 `apps/extension/locales/en.yml:488-489`). Refusing to backfill is the safe
 direction, but that sentence is not a statement about your other machines.
 
@@ -325,7 +325,7 @@ it bounds what you may safely assume is archived:
 
 | Platform | Requests the platform sees | What lands in your archive |
 |---|---|---|
-| **ChatGPT** | Main conversations, archived conversations, project discovery, and per-project conversations; these lists advance on separate cursors under the workspace observed from the page's own outgoing request header (`apps/extension/lib/backfill/types.ts:1762-1779`; `apps/extension/lib/backfill/enumerate.ts:314-384`; `apps/extension/lib/backfill/engine.ts:2596-2623`). If that workspace is unknown or ambiguous, the extension records a named refusal and issues no list request (`apps/extension/entrypoints/background.ts:2142-2154`; `apps/extension/lib/backfill/engine.ts:1937-1952`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. |
+| **ChatGPT** | Main conversations, archived conversations, project discovery, and per-project conversations; these lists advance on separate cursors under the workspace observed from the page's own outgoing request header (`apps/extension/lib/backfill/types.ts:1762-1779`; `apps/extension/lib/backfill/enumerate.ts:314-384`; `apps/extension/lib/backfill/engine.ts:2596-2623`). If that workspace is unknown or ambiguous, the extension records a named refusal and issues no list request (`apps/extension/entrypoints/background.ts:2135-2147`; `apps/extension/lib/backfill/engine.ts:1937-1952`). | The conversation text, fetched one conversation at a time. Implemented, **not yet observed completing a backfill in a real browser**. |
 | **DeepSeek**, **Gemini**, **Grok**, **Kimi**, **Claude** | Conversation-list requests **and** requests per conversation — **one per page** on Gemini (a long conversation is several requests), **two** on Grok (a skeleton call, then a content call), plus **one** resolution request on Claude when neither the page's own requests nor its cookie names the organization | The conversation text (`apps/extension/lib/backfill/enumerate.ts:4959-4983`). On all five this is **implemented but not yet observed completing in a real browser**; on Grok and Kimi, whether a long conversation comes back complete is **unverified**, because the extension does not page those endpoints. On DeepSeek it is unverified too and the endpoint is not paged either — but the body is **checked before it is stored**: the response is a tree, the extension walks it from its newest message back to a root, and a walk that leaves the messages the response carries means that conversation is not archived (`apps/extension/lib/backfill/enumerate.ts:2980-3007`). Gemini **is** paged, to the end of the continuation token, and a conversation needing more than 20 pages is refused and listed as a failure rather than archived in part (`apps/extension/lib/backfill/engine.ts:3042-3115`). Grok's routes were read out of public open-source implementations rather than measured in a logged-in session, and where its sources disagree about the list cursor the leg stops instead of choosing (`apps/extension/lib/backfill/enumerate.ts:3338-3399`; `apps/extension/lib/backfill/engine.ts:2266-2384`). Kimi's routes **were** measured in a logged-in session, and both of its requests carry the token that session uses — read from the page origin's own local storage at request time, held in memory only, and sent to those two paths and no others (`apps/extension/lib/platform-auth.ts:313-350`); a Kimi body response that says it holds only part of a conversation is refused and listed as a failure rather than archived as a whole one (`apps/extension/lib/backfill/engine.ts:3250-3284`) |
 | **Perplexity** | Conversation-list requests **and** one `GET /rest/thread/<slug>` per conversation — the same route the live-capture row registers (`apps/extension/lib/contract.ts:436-451`; `apps/extension/lib/backfill/enumerate.ts:3111-3112`) | The conversation text, on the condition the body's own top-level signal says there is no more. A 2026-09-23 logged-in probe observed `has_next_page` (boolean) and `next_cursor` (string or null), so a body that declares more is refused and listed as a failure rather than archived in part, and a body with no `entries` is never a confirmed receipt (`apps/extension/lib/backfill/enumerate.ts:2432-2476`). Implemented, **not yet observed completing a backfill in a real browser**; the observed thread had one entry, so whether a genuinely long thread answers the "more" signal when it truncates was not directly observed. |
 | **Claude** | Conversation-list requests **and** requests per conversation, each addressed by an account-scoped organization; plus **one** organization-list request when the page's own requests and the cookie both answered nothing | The conversation text — the active branch is walked from its newest message back to the branch root; a branch ending at a parent the response does not carry is the branch root only when the body's own shape corroborates it (one shared absent parent, and a root at the foot of the `index` counter — the shared tree-root id every real body omits, measured 2026-09-24), and a missing middle, a dropped prefix, a missing newest message or a cycle in the parent links is refused and listed as a failure (`apps/extension/lib/backfill/enumerate.ts:4278-4356`). Every request path carries the organization, which the page URL does not; it is resolved from evidence in a fixed order and the leg **stops** rather than choosing when an account has several (`apps/extension/lib/backfill/claude-org.ts:219-273`), so the request that is sent is always one the extension itself built for one resolved organization (`apps/extension/lib/backfill/tab-port.ts:479-500`) |
@@ -498,7 +498,7 @@ leave pending work in place. A different salt is incomparable, never an accusati
 The header is still page-visible, untrusted
 provenance, and distinguishes header values rather than verified people
 (`apps/extension/entrypoints/dw-bridge.content.ts:248-275`, `:616-660`;
-`apps/extension/entrypoints/background.ts:3234-3248`;
+`apps/extension/entrypoints/background.ts:3227-3241`;
 `apps/extension/lib/backfill/tab-port.ts:226-245`;
 `apps/extension/lib/backfill/tab-port.ts:816-819`;
 `apps/extension/lib/backfill/tab-port.ts:876-904`;
@@ -534,7 +534,7 @@ lease has a separate request-header source, described above; it does not derive
 account identity from the workspace scope. A capture that names another account
 also suspends every scope of that platform whose recorded fingerprint differs,
 and starts the new account's own scope while the old scope keeps its debts
-(`apps/extension/entrypoints/background.ts:1429-1485`, `:1556-1572`). Missing
+(`apps/extension/entrypoints/background.ts:1422-1478`, `:1549-1565`). Missing
 identity on those four platforms remains incomparable and does not accuse; missing
 or ambiguous ChatGPT request identity instead yields `refused-unknown` and the
 response is not accepted. Fingerprints with different `saltId` values are
@@ -721,7 +721,7 @@ They reach three different places, and the differences matter:
   incomparable across installs by construction. It is metadata only — counts,
   codes, a version string and timestamps — and it carries no conversation text,
   no session id and no scope label
-  (`apps/extension/entrypoints/background.ts:3067-3096`). This is what makes an
+  (`apps/extension/entrypoints/background.ts:3060-3089`). This is what makes an
   install visible *as an install*: a capture puts the same names on a shard, but
   only this record says how much that profile holds and when it last reported,
   which is what another machine reads when it lists your installs.
@@ -781,7 +781,7 @@ with nobody reviewing it. It mints a new install id and then resets the sequence
 in that order, and touches no already-sealed record — captures already archived
 keep the identity they were sealed with
 (`apps/extension/lib/install-identity.ts:71-110`;
-`apps/extension/entrypoints/background.ts:3299-3312`). The card states all four
+`apps/extension/entrypoints/background.ts:3292-3305`). The card states all four
 things a person needs before an irreversible choice: what happened, that nothing
 was lost, that history is not rewritten, and what the button does
 (`apps/extension/locales/en.yml:69-85`).
@@ -885,7 +885,7 @@ a real limitation of the current code.
 1. **Plaintext window before delivery.** Described in full above. Captured
    conversations sit unencrypted in the extension's outbox, inside your browser
    profile, until the host answers a matching `ack`
-   (`apps/extension/lib/outbox.ts:373-445`, `:448-463`). **We do not currently
+   (`apps/extension/lib/outbox.ts:400-478`, `:481-496`). **We do not currently
    defend this.** Mitigation available to you today: keep the popup's channel
    line healthy so deliveries go through, uninstall the extension when you are
    done with it, and put your browser profile on an encrypted volume.
@@ -992,7 +992,7 @@ a real limitation of the current code.
    recorded in the scope's own progress header before the request goes out so a
    write that does not land cannot make it once per wake-up
    (`apps/extension/lib/backfill/claude-page.ts:71-158`;
-   `apps/extension/entrypoints/background.ts:1733-1793`). Kimi's routes, by contrast, were measured in a logged-in session,
+   `apps/extension/entrypoints/background.ts:1726-1786`). Kimi's routes, by contrast, were measured in a logged-in session,
    and its requests carry the page's own login token, read at request time and
    held in memory only (`apps/extension/lib/platform-auth.ts:303-357`); a body
    response that admits it is incomplete is refused and listed as a failure

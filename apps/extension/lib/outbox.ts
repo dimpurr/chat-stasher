@@ -323,6 +323,33 @@ export async function undeliveredEntries(): Promise<OutboxEntry[] | null> {
   return rows.filter((e) => e.state === 'pending' || e.state === 'rejected');
 }
 
+/**
+ * 🔴 Is this value a summary this module could have written?
+ *
+ * It lives beside `summary()` rather than in a caller because it re-derives
+ * `summary()`'s own arithmetic: a summary whose `full`/`nearFull` disagree with
+ * its `bytes` and `capacityBytes` is one this module would not have produced, so
+ * a caller holding one is holding something it cannot reason about. That is a
+ * *shape* question about the type declared above, and answering it anywhere
+ * else means a second copy of the derivation to keep in step.
+ *
+ * `capacityBytes === 0` is refused because `summary()` never returns it (the
+ * default is the protocol's 256 MiB) and the two derived flags are vacuous
+ * against a zero capacity — `0 >= 0` is `full` whatever the queue holds.
+ */
+export function isOutboxSummary(value: unknown): value is OutboxSummary {
+  if (!value || typeof value !== 'object') return false;
+  const summary = value as Record<string, unknown>;
+  const counts = [summary.pending, summary.rejected, summary.bytes, summary.capacityBytes];
+  if (!counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) return false;
+  const { bytes, capacityBytes, full, nearFull } = summary as unknown as OutboxSummary;
+  if (capacityBytes === 0) return false;
+  return typeof full === 'boolean'
+    && full === (bytes >= capacityBytes)
+    && typeof nearFull === 'boolean'
+    && nearFull === (bytes >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION);
+}
+
 /** `null` = the outbox could not be read; never a zeroed summary. */
 export async function summary(options: OutboxOptions = {}): Promise<OutboxSummary | null> {
   const rows = await readAll();
@@ -415,13 +442,19 @@ export async function enqueue(
       reason: 'outbox-full',
       sha256,
       // The counts describe what is actually queued, so the caller can show the
-      // user what is at stake. `full` is the refusal itself, not a guess.
+      // user what is at stake. `full` is derived exactly as `summary()` derives
+      // it, not asserted from the refusal: this newcomer can fail to fit while the
+      // queue is still under capacity (`used + storageBytes > capacityBytes` with
+      // `used < capacityBytes`), and a summary whose `full` disagrees with its own
+      // `bytes` is one `isOutboxSummary` refuses. This module's guard has to
+      // accept every summary this module writes; the refusal itself is reported
+      // in `reason`, which is a different statement from "the queue is full".
       summary: {
         pending: pendingCount,
         rejected: rejectedCount,
         bytes: used,
         capacityBytes,
-        full: true,
+        full: used >= capacityBytes,
         nearFull: used >= capacityBytes * OUTBOX_NEAR_FULL_FRACTION,
       },
     };

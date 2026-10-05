@@ -67,7 +67,7 @@ whose `request_id` and `sha256` equal the ones the extension sent**
 (`apps/extension/lib/native-host.ts:1118-1127`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
-(`apps/extension/lib/outbox.ts:448-463`). There is no "probably delivered".
+(`apps/extension/lib/outbox.ts:481-496`). There is no "probably delivered".
 
 If you would rather not register the host at all, the extension can instead
 export everything it has not delivered as one file, which you feed to the CLI by
@@ -118,7 +118,7 @@ page of that platform open there is no channel at all and the leg fetches
 nothing: the popup says archiving is not running for want of a fetch channel,
 and the alarm's last-tick trace names the same thing as `no-http-port`
 (`apps/extension/lib/backfill/schedule.ts:237`;
-`apps/extension/entrypoints/background.ts:1269-1271`). That page does not have to
+`apps/extension/entrypoints/background.ts:1262-1264`). That page does not have to
 be the conversation being archived — any open page of that platform answers —
 and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
@@ -465,7 +465,7 @@ Click the extension's toolbar icon. The popup asks the host one `hello` question
 and renders the answer — **the stage it writes to, the machine id, and the host
 version** — or the reason it could not, with the command that fixes it
 (`apps/extension/lib/ui-strings.ts:101-126`;
-`apps/extension/entrypoints/background.ts:723-739`).
+`apps/extension/entrypoints/background.ts:716-732`).
 
 If it does **not** say connected, the popup prints the named reason (the host's
 own `nack` kind, e.g. `config` or `stage-unavailable`) and then one of two fixes,
@@ -488,7 +488,7 @@ into your download directory — the short install id names the browser profile
 that produced it and the nonce makes the name unique per export, so two
 profiles exporting in the same second cannot write the same file — one line
 per undelivered capture, each line being exactly the payload that would
-have been sent to the host (`apps/extension/lib/outbox.ts:548-629`).
+have been sent to the host (`apps/extension/lib/outbox.ts:581-662`).
 
 Feed that directory to the CLI:
 
@@ -507,7 +507,7 @@ volatile field) seals that fingerprint onto the shard, so the CLI's `has`
 answers for imported content exactly as it does for a live delivery; a line
 from an older export seals with none and its conversation is recognised by
 exact bytes only. Exporting does not remove anything from the
-outbox (`apps/extension/lib/outbox.ts:596-607`).
+outbox (`apps/extension/lib/outbox.ts:629-640`).
 
 ---
 
@@ -1162,7 +1162,7 @@ confirmed in the code, not a temporary disclaimer.
   the list fetch. If the active organization differs from the stored target, that
   request is refused as `scope-mismatch`; the next tick asks the page again and
   adopts its answer. Separate organization targets keep separate progress records
-  (`apps/extension/entrypoints/background.ts:2379-2480`). Perplexity now lists
+  (`apps/extension/entrypoints/background.ts:2372-2473`). Perplexity now lists
   conversations **and** fetches their content — with the completeness gate
   described in section 1.1, where every platform's body leg (list from
   `apps/extension/lib/backfill/enumerate.ts:4907-4938`) is covered.
@@ -1176,7 +1176,7 @@ confirmed in the code, not a temporary disclaimer.
 - **A captured conversation is plaintext until the host acknowledges it.** A
   live capture is written into the extension's own IndexedDB outbox before any
   delivery is attempted and deleted only on a matching `ack`
-  (`apps/extension/lib/outbox.ts:371-440`, `:442-457`); the popup's export file
+  (`apps/extension/lib/outbox.ts:400-478`, `:481-496`); the popup's export file
   contains the same bodies. Other programs running as you can read all of it.
   (The "Security and privacy" section of `README.md` says the same.)
 

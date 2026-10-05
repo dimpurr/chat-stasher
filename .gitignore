@@ -13,6 +13,8 @@ apps/extension/.output/
 apps/extension/.wxt/
 
 # D15: python bytecode cache from the citation checker and its tests
+# (the checker's own unittest suite, which CONTRIBUTING asks for by name, writes
+# beside the test rather than beside the script)
 **/__pycache__/
 
 # release artifacts produced by scripts/release-artifacts.sh

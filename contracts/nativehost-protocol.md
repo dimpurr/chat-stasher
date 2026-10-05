@@ -514,7 +514,12 @@ version is a new document section, never an edit to an existing one.
   `nack`, a timeout or a send failure keeps the item pending.
 - Retries must not depend on the backfill switch: while the outbox holds a
   pending item, the extension keeps its own low-frequency retry timer, and
-  clears it once the outbox is empty.
+  clears it once the outbox is empty. It clears the timer only on a **measured**
+  empty outbox: a read that fails, or a summary it cannot read, leaves the timer
+  armed. An unreadable queue is not an empty one, and a timer that fires on an
+  empty outbox costs one read where a missing timer on a full one loses retries.
+  A context with no IndexedDB API at all is the one case where absence *is*
+  measurable — the outbox cannot exist there — so it does clear.
 - There is no automatic file download anywhere.
 - **A capture is skipped as already-stored only when the host answered `has` with
   `held: true` for that capture's own fingerprint (§6.6).** Every other outcome —
