@@ -5063,19 +5063,11 @@ mod report_to_json_shape_tests {
             "native_host",
             "stage_duplicate_shards",
         ] {
-            let value = &v[key];
             assert!(
                 v.get(key).is_some(),
                 "{key} must be present in doctor --json"
             );
-            assert!(
-                !value.is_null(),
-                "{key} must not be null — null would read as 'no answer' rather than 'not checked'"
-            );
-            assert!(
-                !value.is_array(),
-                "{key} must not be an empty array — [] would read as 'checked, found nothing'"
-            );
+            let value = &v[key];
             assert_eq!(
                 value,
                 &serde_json::json!({"checked": false}),
@@ -5108,7 +5100,7 @@ mod report_to_json_shape_tests {
 
     /// `not_checked` is an array of strings in both directions: empty when the
     /// config was usable (everything was checked or legitimately not run), and
-    /// populated with the check names when it was not.
+    /// the `CHECKS_NEEDING_CONFIG` names themselves when it was not.
     #[test]
     fn report_to_json_serialises_not_checked_as_an_array_of_strings() {
         let v = report_to_json(&minimal_report());
@@ -5127,8 +5119,12 @@ mod report_to_json_shape_tests {
         let not_checked = v["not_checked"]
             .as_array()
             .expect("not_checked must be an array");
-        assert!(
-            !not_checked.is_empty(),
+        let expected: Vec<_> = CHECKS_NEEDING_CONFIG
+            .iter()
+            .map(|name| serde_json::json!(name))
+            .collect();
+        assert_eq!(
+            not_checked, &expected,
             "an unreadable config names the checks it skipped"
         );
         assert!(
