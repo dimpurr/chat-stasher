@@ -89,12 +89,29 @@ that platform."** The extension has two legs; please read them separately:
   (`apps/extension/lib/contract.ts:471-476`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
-  So, reading the code, passive capture on Perplexity **does name the
-  conversation you are viewing and delivers it**
-  (`apps/extension/lib/contract.ts:1422-1450`) — but this is still a conclusion
-  drawn from reading the code, and the route itself was read out of public
-  source rather than measured: **we have not tested it on a real perplexity.ai
-  page.**
+  🔴 **The name comes from the URL and from nothing else.** Where the row's own
+  patterns match, passive capture on Perplexity **does name the conversation you
+  are viewing and delivers it** — but where they match nothing (a request path
+  with no thread in it, or a named sibling route such as
+  `/rest/thread/list_ask_threads`) the capture is **refused**, not named from an
+  identifier in the response body. A body's identifier is a claim by the body, and
+  on this platform the route already carries the thread's own id in the path, so a
+  body value was never evidence of *which* conversation arrived; reading one would
+  file a conversation under a name the route never claimed
+  (`apps/extension/lib/contract.ts:1423-1502`,
+  `apps/extension/entrypoints/background.ts:277-310`).
+  🔴 Refusing the **name** is not the same as finding no identity, and the two are
+  kept apart on purpose: the account-identity guard still reads what the body
+  claims the capture is, so a body carrying one string under both `session_id` and
+  `user_id` has that per-conversation string refused as an account id rather than
+  promoted onto the axis that deduplicates two machines' archives of one account
+  (`apps/extension/entrypoints/background.ts:312-331`).
+  🔴 All of this is still a conclusion drawn from reading the code: the route and
+  the envelope were read out of public source rather than measured, and nobody has
+  opened a logged-in perplexity.ai page, so **we have not tested this on a real
+  perplexity.ai page** — and whether the content envelope carries a
+  session-shaped key at all is unknown, which is why the refusal above is a
+  precaution against a wrong file name rather than a repair of an observed one.
 - **History backfill** (off by default; see section 6): digs up your **past**
   conversations and saves them. This leg's **capability differs per platform**,
   spelled out in section 1.1 below.

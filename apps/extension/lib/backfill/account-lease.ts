@@ -275,14 +275,17 @@ export function agreesWithLease(
  *
  * 🔴 **Honest note on the refusal branch**, so it is not read as more than it is: this
  *    build cannot produce such a record — the lease is derived from the scope key
- *    itself, two derivations of one input cannot differ, and the two session-id
- *    resolutions on the two paths are the same call (`resolveCaptureSessionId` delegates to
- *    `extractSessionId`, which is what `backfillTargetFor` uses). So in production this
- *    arm fires only on a record this build did not write. It is kept because it is the
- *    same guard `lib/coverage-read.ts`'s `isReadableHeaderAt` already applies for the
- *    same reason ("a record whose two halves disagree is not one to show a user as
- *    their progress"), and because obeying such a record — or silently overwriting it —
- *    would both be worse than saying so.
+ *    itself, two derivations of one input cannot differ, and on the path that carries a
+ *    debt key down (`captured.sessionId`) the two session-id resolutions are the same
+ *    value, because both prefer it over any derivation. 🔴 W519 widened that: the file
+ *    name may now be refused where the claim is not (a Perplexity capture whose URL
+ *    names no thread is named by nothing, while `extractSessionId` still witnesses what
+ *    the body claims it is — see `claimedSessionId`). That gap makes this arm reachable
+ *    on a record whose two halves disagree, which is precisely the case it exists to
+ *    catch, so it is kept. It is also the same guard `lib/coverage-read.ts`'s
+ *    `isReadableHeaderAt` already applies for the same reason ("a record whose two
+ *    halves disagree is not one to show a user as their progress"), and because obeying
+ *    such a record — or silently overwriting it — would both be worse than saying so.
  *
  * 🔴 It is a decision here rather than a halt written inside the engine, so the two
  *    readers of this rule — the run and the coverage page — cannot disagree about what
