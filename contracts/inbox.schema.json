@@ -203,6 +203,8 @@
         "surface": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "tenant": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "container": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "cwd": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 },
+          "description": "Working directories the source itself recorded, spelled as it spelled them. An OS execution location, never a repository or workspace identity; a session that moved records every place it ran, not only the last." },
         "status": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       },
       "additionalProperties": false

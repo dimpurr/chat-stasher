@@ -587,7 +587,7 @@ apps/extension/wxt.config.ts:148  84787b717b3c  lines=1
   <- docs-dev/privacy.md:251  :: data_collection_permissions: { required: ['none'] },
 contracts/inbox.schema.json:180-198  7f9e999f1a3a  lines=19
   <- docs-dev/privacy.md:432  :: "provenance": {
-contracts/inbox.schema.json:210-222  1c6b2383bb93  lines=13
+contracts/inbox.schema.json:212-224  1c6b2383bb93  lines=13
   <- docs-dev/privacy.md:439  :: "provenanceSupplement": {
 crates/chat-stasher/Cargo.toml:1-6  3398bf09821c  lines=6
   <- docs-dev/install.md:265  :: [package]

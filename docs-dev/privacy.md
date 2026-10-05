@@ -436,7 +436,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:210-222`; `crates/chat-stasher/src/activity.rs:2504-2554`). A project name is a label from
+(`contracts/inbox.schema.json:212-224`; `crates/chat-stasher/src/activity.rs:2504-2554`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
