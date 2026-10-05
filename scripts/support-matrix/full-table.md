@@ -84,9 +84,8 @@
 | Local | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
 | Local | Hermes Agent | - | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |
-| Local | Grok Bot (desktop) | - | low | local transcript replicas can be partial and contain sequence gaps; the archive never claims completeness |
+| Agent platform | Grok Bot (desktop) | - | low | local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |
-| Agent platform | Grok Bot | - | - | - |
 | Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |

@@ -117,7 +117,8 @@ const WEB_PLATFORM_HARNESSES: &[&str] = &[
 
 /// The coding-agent harness ids — one per harness in
 /// `data/harness-registry-v1.json`, minus `grok` (that id belongs to the web
-/// platform group above). A registry harness that appears without a home here
+/// platform group above) and minus `grok-bot` (a product agent platform, in
+/// the group below). A registry harness that appears without a home here
 /// fails the map's test, so a new registry entry must be classified the same
 /// release it is added — it may not silently fall into `ungrouped`.
 const CODING_AGENT_HARNESSES: &[&str] = &[
@@ -131,7 +132,6 @@ const CODING_AGENT_HARNESSES: &[&str] = &[
     "hermes-agent",
     "github-copilot-cli",
     "google-antigravity",
-    "grok-bot",
     "kimi-code",
     "opencode",
     "openclaw",
@@ -535,6 +535,48 @@ mod tests {
             group_of("brand-new-platform-from-the-extension"),
             PlatformGroup::Ungrouped
         );
+    }
+
+    /// The three static vocabularies are **disjoint**, which classification
+    /// alone cannot guarantee: `group_of` returns the first group that lists
+    /// an id, so an id listed twice still classifies consistently while the
+    /// *other* group's link — whose href is its whole static list — keeps
+    /// selecting it. The row is then counted in one group and matched by
+    /// another, and that group's advertised count is a number its own link
+    /// contradicts. A link must name the rows it counts and no others.
+    #[test]
+    fn the_static_group_vocabularies_are_disjoint() {
+        let groups = [
+            (PlatformGroup::WebPlatforms, WEB_PLATFORM_HARNESSES),
+            (PlatformGroup::CodingAgents, CODING_AGENT_HARNESSES),
+            (PlatformGroup::AgentPlatforms, AGENT_PLATFORM_HARNESSES),
+        ];
+        for (group, list) in groups {
+            for id in list {
+                assert_eq!(
+                    group_of(id),
+                    group,
+                    "`{id}` is listed in the {} vocabulary but classifies elsewhere",
+                    group.label()
+                );
+            }
+        }
+        for (group, a) in groups {
+            for (other, b) in groups {
+                if other == group {
+                    continue;
+                }
+                for id in a {
+                    assert!(
+                        !b.contains(id),
+                        "`{id}` is in both the {} and {} vocabularies: it counts in one \
+                         group and matches the other's link",
+                        group.label(),
+                        other.label()
+                    );
+                }
+            }
+        }
     }
 
     /// `fixture::groups_data`'s hand-laid rows, as the known answers every
