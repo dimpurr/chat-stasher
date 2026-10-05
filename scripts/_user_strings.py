@@ -68,6 +68,19 @@ PRINT_FAMILY = {"println", "print", "eprintln", "eprint"}
 #: positions that cannot begin one (this is a hot loop over ~250 KB of source)
 _MACRO_START = frozenset("pebawcutis.")
 
+#: patterns matched at a position with .match(text, pos) — never against
+#: text[pos:], which would copy the whole rest of the file per candidate
+#: position and made the scan O(n^2) (764 KB main.rs alone took >2 min).
+#: `_RE_STRUCT_ENUM` carries no leading \b because \b at position 0 of a slice
+#: is vacuous (start-of-string is always a boundary); dropping it there and
+#: matching at the pos keeps the exact semantics of the old sliced match.
+_RE_STRUCT_ENUM = re.compile(r"(struct|enum)\b")
+_RE_CONTEXT_CALL = re.compile(r"\.(with_context|context)\s*\(")
+_RE_MACRO_CALL = re.compile(
+    r"(?:anyhow::)?(println|print|eprintln|eprint|write|writeln|say|"
+    r"bail|anyhow|panic|unreachable|todo|unimplemented)!\s*\("
+)
+
 
 @dataclass(frozen=True)
 class Hit:
@@ -438,20 +451,20 @@ class _Scanner:
 
             # -- struct / enum keyword (opens a clap type block when pending)
             if c.isalpha():
-                m = re.match(r"\b(struct|enum)\b", t[i : i + 16])
+                m = _RE_STRUCT_ENUM.match(t, i)
                 if m:
                     if clap_pending and not in_test:
                         expect_clap_brace = True
                         clap_pending = False
-                    i += m.end()
+                    i = m.end()   # .match(text, pos) reports absolute offsets
                     continue
 
             # -- macro calls / method-context calls
             if c.isalpha() or c == ".":
                 if c == ".":
-                    mm = re.match(r"\.(with_context|context)\s*\(", t[i : i + 32])
+                    mm = _RE_CONTEXT_CALL.match(t, i)
                     if mm:
-                        open_pos = i + mm.end() - 1
+                        open_pos = mm.end() - 1
                         close = self._find_matching_paren(open_pos)
                         if close != -1:
                             s, disp, val = self._first_string_literal(open_pos, close)
@@ -461,13 +474,9 @@ class _Scanner:
                             i = close + 1
                             continue
                 else:
-                    mm = re.match(
-                        r"(?:anyhow::)?(println|print|eprintln|eprint|write|writeln|say|"
-                        r"bail|anyhow|panic|unreachable|todo|unimplemented)!\s*\(",
-                        t[i : i + 80],
-                    )
+                    mm = _RE_MACRO_CALL.match(t, i)
                     if mm:
-                        open_pos = i + mm.end() - 1
+                        open_pos = mm.end() - 1
                         close = self._find_matching_paren(open_pos)
                         if close != -1:
                             s, disp, val = self._first_string_literal(open_pos, close)
