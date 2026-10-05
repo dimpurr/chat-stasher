@@ -796,9 +796,10 @@ mod tests {
                 .min(self.bytes.len());
             let end =
                 (start + usize::try_from(length).expect("a length is small")).min(self.bytes.len());
+            let span = end - start;
             let take = match self.fault {
-                Fault::Short => end - start - 1,
-                _ => end - start,
+                Fault::Short => span.saturating_sub(1),
+                _ => span,
             };
             Ok(Bytes::copy_from_slice(&self.bytes[start..start + take]))
         }
