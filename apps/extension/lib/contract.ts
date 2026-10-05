@@ -1627,9 +1627,12 @@ export function pathSafeSessionId(id: string): string | null {
   return id;
 }
 
-import Ajv2020 from 'ajv/dist/2020';
-import inboxSchema from '../../../contracts/inbox.schema.json';
-const inboxSchemaValidator = new Ajv2020({ strict: false, validateFormats: false }).compile(inboxSchema);
+import Ajv2020 from 'ajv/dist/2020.js';
+import inboxSchema from '../../../contracts/inbox.schema.json' with { type: 'json' };
+// Reader validation is currently used by Node tooling. Compile on demand so
+// importing producer types in the extension does not run AJV code generation
+// under the browser's extension CSP.
+let inboxSchemaValidator: ReturnType<Ajv2020['compile']> | undefined;
 
 /** Incoming @3 is independent of the extension's current @2 emission. */
 export const SCHEMA_V3 = 'chat-stasher/inbox@3';
@@ -1679,6 +1682,7 @@ export type IncomingInboxBundle = InboxBundleV3 | (Omit<Partial<InboxBundle>, 's
 
 /** Structural validation uses the committed JSON Schema, not a second rule table. */
 export function isInboxBundle(value: unknown): value is IncomingInboxBundle {
+  inboxSchemaValidator ??= new Ajv2020({ strict: false, validateFormats: false }).compile(inboxSchema);
   return inboxSchemaValidator(value) as boolean;
 }
 
