@@ -466,6 +466,8 @@ struct Bundle {
 #[derive(Debug, Serialize)]
 struct ShardRecord {
     schema: &'static str,
+    #[serde(flatten)]
+    v3: Option<CaptureMetadataV3>,
     kind: &'static str,
     id: String,
     platform: String,
@@ -478,7 +480,7 @@ struct ShardRecord {
     /// not the same as a parsed envelope whose values are false/empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     parsed: Option<ParsedEnvelope>,
-    raw: RawEnvelope,
+    raw: BundleRaw,
     /// The `inbox@2` identity axis, preserved verbatim when the bundle carried
     /// one. Omitted entirely for `@1` bundles, so `@1` shard lines keep their
     /// existing bytes. It is *stored* but deliberately does NOT take part in
@@ -825,6 +827,13 @@ pub fn seal_payload(
     let file_bytes = bytes.len() as u64;
 
     let parsed = parse_bundle(source_file, bytes).map_err(SealError::Other)?;
+    // RI-3b validates the new contract; RI-3d owns archive wiring and readback.
+    // Never seal encoded bytes into an old web-only record shape.
+    if matches!(parsed.raw, Some(BundleRaw::Slice(_))) {
+        return Err(SealError::Other(anyhow::anyhow!(
+            "harness-file archive wiring is not implemented"
+        )));
+    }
 
     // W306: refuse a fixture identity before the stage is touched at all — the
     // lock file below is itself a write into the stage, so the check has to
@@ -860,6 +869,7 @@ pub fn seal_payload(
     }
 
     let record = ShardRecord {
+        v3: parsed.v3,
         schema: SCHEMA,
         kind: parsed.kind,
         id: parsed.id.clone(),
@@ -1267,13 +1277,14 @@ fn write_shard_atomic(
 // ---------------------------------------------------------------- parsing
 
 struct ParseOutcome {
+    v3: Option<CaptureMetadataV3>,
     id: String,
     platform: String,
     session_id: String,
     captured_at: Option<String>,
     kind: &'static str,
     parsed: Option<ParsedEnvelope>,
-    raw: Option<RawEnvelope>,
+    raw: Option<BundleRaw>,
     identity: Option<IdentityEnvelope>,
     /// W128 step 1 · the `account` envelope as written, or `None` when the bundle
     /// carried no object with a string `kind`.
@@ -1296,6 +1307,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     let default_platform = "deepseek".to_string();
 
     let mut out = ParseOutcome {
+        v3: None,
         id: session_dir_id(&default_platform, &fallback_id),
         platform: default_platform,
         session_id: fallback_id,
@@ -1320,14 +1332,22 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         dimensions: None,
     };
 
+    let incoming: Option<serde_json::Value> = serde_json::from_slice(bytes).ok();
+    if let Some(value) = incoming
+        .as_ref()
+        .filter(|v| v["schema"] == "chat-stasher/inbox@3")
+    {
+        return parse_v3(value, out);
+    }
+
     let bundle: Bundle = match serde_json::from_slice(bytes) {
         Ok(b) => b,
         Err(_) => {
             // Degrade: raw = whole file, re-derivable from the archived record.
-            out.raw = Some(RawEnvelope {
+            out.raw = Some(BundleRaw::Web(RawEnvelope {
                 text: String::from_utf8_lossy(bytes).into_owned(),
                 bytes: bytes.len() as u64,
-            });
+            }));
             return Ok(out);
         }
     };
@@ -1339,10 +1359,10 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
     {
         // Never trust malformed normalized metadata. Preserve the complete
         // source bytes as a raw record so the invalid claim remains auditable.
-        out.raw = Some(RawEnvelope {
+        out.raw = Some(BundleRaw::Web(RawEnvelope {
             text: String::from_utf8_lossy(bytes).into_owned(),
             bytes: bytes.len() as u64,
-        });
+        }));
         out.parsed = Some(ParsedEnvelope {
             has_json: Some(true),
             keys: serde_json::from_slice::<serde_json::Value>(bytes)
@@ -1412,19 +1432,19 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
                 .get("bytes")
                 .and_then(|x| x.as_u64())
                 .ok_or_else(|| anyhow::anyhow!("bundle raw.bytes is missing"))?;
-            Some(RawEnvelope {
+            Some(BundleRaw::Web(RawEnvelope {
                 text: raw_text.to_string(),
                 bytes: raw_bytes,
-            })
+            }))
         }
         None if bundle.messages.is_some() => {
             // Compatibility for the old messages-shaped export: the complete
             // input bytes are known, so preserve them instead of manufacturing
             // `raw.text=""` and `raw.bytes=0`.
-            Some(RawEnvelope {
+            Some(BundleRaw::Web(RawEnvelope {
                 text: String::from_utf8_lossy(bytes).into_owned(),
                 bytes: bytes.len() as u64,
-            })
+            }))
         }
         None => return Err(anyhow::anyhow!("bundle raw envelope is missing")),
     };
@@ -2505,7 +2525,10 @@ mod tests {
         assert_eq!(parsed.kind, "raw");
         assert!(parsed.dimensions.is_none());
         assert_eq!(
-            parsed.raw.as_ref().map(|raw| raw.text.as_bytes()),
+            parsed.raw.as_ref().and_then(|raw| match raw {
+                BundleRaw::Web(raw) => Some(raw.text.as_bytes()),
+                BundleRaw::Slice(_) => None,
+            }),
             Some(bytes.as_slice())
         );
     }
@@ -2708,4 +2731,330 @@ mod tests {
             "the drop box channel must keep sealing without a fingerprint"
         );
     }
+}
+
+#[cfg(test)]
+mod contract_v3_tests {
+    use super::*;
+    #[test]
+    fn shared_contract_fixtures() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/inbox");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../contracts/inbox.schema.json")).unwrap();
+        let validator = jsonschema::options()
+            .should_validate_formats(false)
+            .build(&schema)
+            .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        for case in manifest.as_array().unwrap() {
+            let name = case["file"].as_str().unwrap();
+            let bytes = fs::read(root.join(name)).unwrap();
+            assert_eq!(
+                sha256_hex(&bytes),
+                case["sha256"].as_str().unwrap(),
+                "{name}"
+            );
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                validator.is_valid(&value),
+                case.get("schemaValid")
+                    .unwrap_or(&case["valid"])
+                    .as_bool()
+                    .unwrap(),
+                "schema: {name}"
+            );
+            assert_eq!(
+                check_bundle(&bytes).is_ok(),
+                case["valid"].as_bool().unwrap(),
+                "{name}"
+            );
+        }
+    }
+    #[test]
+    fn legacy_sealed_record_bytes_stay_unchanged() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/inbox");
+        for name in ["legacy-v1.json", "legacy-v2.json"] {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = fs::read(root.join(name)).unwrap();
+            seal_payload(
+                "synthetic.json",
+                &bytes,
+                dir.path(),
+                "synthetic-machine",
+                100,
+                None,
+                None,
+            )
+            .unwrap();
+            let path = store::shard_path_with_cap(
+                dir.path(),
+                "synthetic-machine",
+                "deepseek.synthetic-session",
+                1,
+                100,
+            );
+            let identity = if name == "legacy-v2.json" {
+                r#","identity":{"level":"default","value":""}"#
+            } else {
+                ""
+            };
+            let expected = format!(
+                "{{\"schema\":\"chat-stasher/inbox@1\",\"kind\":\"bundle\",\"id\":\"deepseek.synthetic-session\",\"platform\":\"deepseek\",\"session_id\":\"synthetic-session\",\"source_file\":\"synthetic.json\",\"file_sha256\":\"{}\",\"file_bytes\":{},\"captured_at\":null,\"raw\":{{\"text\":\"{{}}\",\"bytes\":2}}{},\"machine\":\"synthetic-machine\"}}\n",
+                sha256_hex(&bytes), bytes.len(), identity
+            );
+            assert!(
+                fs::read(path).unwrap() == expected.as_bytes(),
+                "legacy sealed bytes changed: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn v3_parser_preserves_encoded_bytes_and_capture_metadata() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/inbox");
+        for name in [
+            "harness-raw.json",
+            "binary-slice.json",
+            "harness-subagent.json",
+            "web-full.json",
+            "cloud-account.json",
+        ] {
+            let bytes = fs::read(root.join(name)).unwrap();
+            let input: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let parsed = parse_bundle(name, &bytes).unwrap();
+            assert_eq!(
+                serde_json::to_value(&parsed.raw).unwrap(),
+                input["raw"],
+                "raw: {name}"
+            );
+            let metadata = serde_json::to_value(&parsed.v3).unwrap();
+            for field in [
+                "fidelity",
+                "producer",
+                "platformRefs",
+                "file",
+                "harness",
+                "nativeSessionId",
+                "dimensions",
+            ] {
+                assert_eq!(
+                    metadata.get(field),
+                    input.get(field),
+                    "metadata {field}: {name}"
+                );
+            }
+            if name == "cloud-account.json" {
+                assert_eq!(parsed.id, "claude-code.synthetic-account.synthetic-native");
+            } else if input["kind"] == "harness-file" {
+                assert_eq!(parsed.id, "claude-code.synthetic-native");
+            }
+        }
+    }
+
+    #[test]
+    fn harness_archive_wiring_is_explicitly_deferred_without_touching_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let bytes = include_bytes!("../../../contracts/fixtures/inbox/harness-raw.json");
+        assert!(check_bundle(bytes).is_ok());
+        let error = seal_payload(
+            "synthetic.json",
+            bytes,
+            &stage,
+            "synthetic-machine",
+            100,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("harness-file archive wiring is not implemented"));
+        assert!(!stage.exists());
+    }
+
+    #[test]
+    fn web_v3_capture_metadata_survives_the_existing_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = include_bytes!("../../../contracts/fixtures/inbox/web-full.json");
+        let outcome = seal_payload(
+            "synthetic.json",
+            bytes,
+            dir.path(),
+            "synthetic-machine",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(outcome, SealOutcome::Stored(_)));
+        let path = store::shard_path_with_cap(
+            dir.path(),
+            "synthetic-machine",
+            "deepseek.synthetic-session",
+            1,
+            100,
+        );
+        let record: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let input: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(record["fidelity"], input["fidelity"]);
+        assert_eq!(record["dimensions"], input["dimensions"]);
+        assert_eq!(record["schema"], SCHEMA);
+    }
+}
+
+/// Metadata is captured, never filled from registry declarations. Unknown stays explicit.
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CaptureMetadataV3 {
+    fidelity: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    producer: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platformRefs: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nativeSessionId: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EncodedSlice {
+    encoding: String,
+    data: String,
+}
+
+/// Keep encoded bytes intact, including non-UTF-8 transcripts.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum BundleRaw {
+    Web(RawEnvelope),
+    Slice(EncodedSlice),
+}
+
+fn parse_v3(value: &serde_json::Value, mut out: ParseOutcome) -> anyhow::Result<ParseOutcome> {
+    static VALIDATOR: std::sync::LazyLock<jsonschema::Validator> = std::sync::LazyLock::new(|| {
+        let schema = serde_json::from_str(include_str!("../../../contracts/inbox.schema.json"))
+            .expect("committed inbox schema is valid JSON");
+        jsonschema::options()
+            .should_validate_formats(false)
+            .build(&schema)
+            .expect("committed inbox schema compiles")
+    });
+    // Do not print validation errors: they may contain raw conversation values.
+    anyhow::ensure!(
+        VALIDATOR.is_valid(value),
+        "inbox@3 contract validation failed"
+    );
+    let metadata: CaptureMetadataV3 = serde_json::from_value(value.clone())?;
+    match value["kind"].as_str() {
+        Some("web-capture") => {
+            // Reuse exactly the existing web parsing and identity semantics after
+            // strict @3 validation; the input bytes themselves are not rewritten.
+            let mut legacy = value.clone();
+            legacy["schema"] = serde_json::Value::String("chat-stasher/inbox@2".into());
+            out = parse_bundle("(validated-web-capture)", &serde_json::to_vec(&legacy)?)?;
+        }
+        Some("harness-file") => {
+            use base64::Engine;
+            let raw: EncodedSlice = serde_json::from_value(value["raw"].clone())?;
+            let decoded = match raw.encoding.as_str() {
+                "utf-8" => raw.data.as_bytes().to_vec(),
+                "base64" => {
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    let bytes = engine
+                        .decode(&raw.data)
+                        .map_err(|_| anyhow::anyhow!("inbox@3 base64 is invalid"))?;
+                    anyhow::ensure!(
+                        engine.encode(&bytes) == raw.data,
+                        "inbox@3 base64 is not canonical"
+                    );
+                    bytes
+                }
+                _ => anyhow::bail!("inbox@3 encoding is invalid"),
+            };
+            let file = &value["file"];
+            // JSON Schema integers include 1.0; use the validated safe numeric domain.
+            let start = file["byteStart"]
+                .as_f64()
+                .context("inbox@3 slice start is invalid")? as u64;
+            let end = file["byteEnd"]
+                .as_f64()
+                .context("inbox@3 slice end is invalid")? as u64;
+            anyhow::ensure!(
+                end.checked_sub(start) == Some(decoded.len() as u64),
+                "inbox@3 slice length mismatch"
+            );
+            let expected_sha = file["sha256"]
+                .as_str()
+                .context("inbox@3 slice digest missing")?;
+            anyhow::ensure!(
+                sha256_hex(&decoded) == expected_sha,
+                "inbox@3 slice digest mismatch"
+            );
+            out.platform = value["harness"]
+                .as_str()
+                .context("inbox@3 harness missing")?
+                .into();
+            out.session_id = value["nativeSessionId"]
+                .as_str()
+                .context("inbox@3 session missing")?
+                .into();
+            out.id = format!("{}.{}", out.platform, out.session_id);
+            if let Some(identity) = value.get("identity") {
+                let level = identity["level"]
+                    .as_str()
+                    .context("inbox@3 identity level missing")?;
+                let account = identity["value"]
+                    .as_str()
+                    .context("inbox@3 identity value missing")?;
+                if level != "default" {
+                    out.id = format!("{}.{}.{}", out.platform, account, out.session_id);
+                }
+                out.identity = Some(IdentityEnvelope {
+                    level: level.into(),
+                    value: account.into(),
+                });
+            }
+            out.captured_at = value
+                .get("capturedAt")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.dimensions = value
+                .get("dimensions")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()?;
+            out.account = value.get("account").cloned();
+            out.provenance = value.get("provenance").cloned();
+            out.provenance_supplement = value.get("provenanceSupplement").cloned();
+            out.install_id = value
+                .get("install_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.browser = value
+                .get("browser")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.profile_label = value
+                .get("profile_label")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.fingerprint = value
+                .get("fingerprint")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            out.kind = "bundle";
+            out.parsed = None;
+            out.raw = Some(BundleRaw::Slice(raw));
+        }
+        _ => anyhow::bail!("inbox@3 kind is invalid"),
+    }
+    out.dimensions = None;
+    out.v3 = Some(metadata);
+    Ok(out)
 }

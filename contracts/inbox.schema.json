@@ -2,19 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dimpurr/chat-stasher/contracts/inbox.schema.json",
   "title": "chat-stasher inbox bundle",
-  "description": "One captured conversation bundle handed from the extension to the CLI. This file is the single source of truth for both sides: changing it requires changing apps/extension/lib/contract.ts and crates/chat-stasher/src/inbox.rs together.",
+  "description": "Inbox bundles from web captures or encoded harness-file slices. Schema, TypeScript validators and Rust parsing change together. Legacy @1/@2 remain accepted.",
   "type": "object",
   "required": [
-    "schema",
-    "platform",
-    "sessionId",
-    "raw"
+    "schema"
   ],
   "properties": {
     "schema": {
       "enum": [
         "chat-stasher/inbox@1",
-        "chat-stasher/inbox@2"
+        "chat-stasher/inbox@2",
+        "chat-stasher/inbox@3"
       ],
       "description": "@1 has no identity field; the CLI reads an @1 bundle as identity {level:'default', value:''}."
     },
@@ -52,22 +50,6 @@
           "items": {
             "type": "string"
           }
-        }
-      }
-    },
-    "raw": {
-      "type": "object",
-      "required": [
-        "text",
-        "bytes"
-      ],
-      "description": "The raw response. Authoritative: a wrong parse can always be redone from here.",
-      "properties": {
-        "text": {
-          "type": "string"
-        },
-        "bytes": {
-          "type": "integer"
         }
       }
     },
@@ -222,5 +204,410 @@
         "observedAt": { "type": "string", "format": "date-time" }
       }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "schema": {
+          "enum": [
+            "chat-stasher/inbox@1",
+            "chat-stasher/inbox@2"
+          ]
+        },
+        "raw": {
+          "type": "object",
+          "required": [
+            "text",
+            "bytes"
+          ],
+          "description": "The raw response. Authoritative: a wrong parse can always be redone from here.",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "required": [
+        "platform",
+        "sessionId",
+        "raw"
+      ]
+    },
+    {
+      "properties": {
+        "schema": {
+          "const": "chat-stasher/inbox@3"
+        },
+        "kind": {
+          "enum": [
+            "web-capture",
+            "harness-file"
+          ]
+        },
+        "fidelity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "const": "raw"
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "const": "full"
+                },
+                "representation": {
+                  "enum": [
+                    "api",
+                    "decoded",
+                    "export"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "representation"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "const": "partial"
+                },
+                "note": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "value",
+                "note"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "const": "unknown"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "value",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "producer": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "send",
+                "extension",
+                "collect",
+                "ingest"
+              ]
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "platform": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+            },
+            "sendKeyId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+            }
+          },
+          "required": [
+            "kind",
+            "version"
+          ],
+          "additionalProperties": false
+        },
+        "platformRefs": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+          }
+        },
+        "harness": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+        },
+        "nativeSessionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+        },
+        "file": {
+          "type": "object",
+          "properties": {
+            "role": {
+              "enum": [
+                "transcript",
+                "subagent",
+                "tool-result",
+                "other"
+              ]
+            },
+            "relPath": {
+              "type": "string",
+              "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+            },
+            "byteStart": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "byteEnd": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "parentNativeSessionId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+            }
+          },
+          "required": [
+            "role",
+            "relPath",
+            "byteStart",
+            "byteEnd",
+            "sha256"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "role": {
+                    "const": "subagent"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "parentNativeSessionId"
+                ]
+              }
+            }
+          ]
+        },
+        "platform": {},
+        "sessionId": {},
+        "url": {},
+        "method": {},
+        "status": {},
+        "capturedAt": {},
+        "parsed": {},
+        "identity": {},
+        "account": {},
+        "install_id": {},
+        "browser": {},
+        "profile_label": {},
+        "fingerprint": {},
+        "provenance": {},
+        "dimensions": {},
+        "provenanceSupplement": {},
+        "raw": {}
+      },
+      "required": [
+        "kind",
+        "fidelity"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "web-capture"
+            },
+            "raw": {
+              "type": "object",
+              "required": [
+                "text",
+                "bytes"
+              ],
+              "description": "The raw response. Authoritative: a wrong parse can always be redone from here.",
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "fidelity": {
+              "not": {
+                "properties": {
+                  "value": {
+                    "const": "raw"
+                  }
+                }
+              }
+            },
+            "platform": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "sessionId": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "platform",
+            "sessionId",
+            "raw"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "harness"
+                ]
+              },
+              {
+                "required": [
+                  "nativeSessionId"
+                ]
+              },
+              {
+                "required": [
+                  "file"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "harness-file"
+            },
+            "raw": {
+              "type": "object",
+              "properties": {
+                "encoding": {
+                  "enum": [
+                    "utf-8",
+                    "base64"
+                  ]
+                },
+                "data": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "additionalProperties": false
+            },
+            "identity": {
+              "properties": {
+                "value": {
+                  "anyOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+                    }
+                  ]
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "level": {
+                        "const": "default"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "const": ""
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "value": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "harness",
+            "nativeSessionId",
+            "file",
+            "raw"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "platform"
+                ]
+              },
+              {
+                "required": [
+                  "sessionId"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false,
+      "$comment": "Fidelity is captured, never a registry declaration. Runtime validation additionally checks canonical encoding, decoded slice length, ordered bounds and SHA-256. Standard JSON Schema validates structure only. Archive wiring for harness-file is a separate delivery."
+    }
+  ]
 }

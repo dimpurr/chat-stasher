@@ -1626,3 +1626,80 @@ export function pathSafeSessionId(id: string): string | null {
   if (id.startsWith('.')) return null;
   return id;
 }
+
+import Ajv2020 from 'ajv/dist/2020';
+import inboxSchema from '../../../contracts/inbox.schema.json';
+const inboxSchemaValidator = new Ajv2020({ strict: false, validateFormats: false }).compile(inboxSchema);
+
+/** Incoming @3 is independent of the extension's current @2 emission. */
+export const SCHEMA_V3 = 'chat-stasher/inbox@3';
+export type CapturedFidelity =
+  | { value: 'raw' }
+  | { value: 'full'; representation: 'api' | 'decoded' | 'export' }
+  | { value: 'partial'; note: string }
+  | { value: 'unknown'; reason: string };
+export interface InboxProducer {
+  kind: 'send' | 'extension' | 'collect' | 'ingest';
+  version: string;
+  platform?: string;
+  sendKeyId?: string;
+}
+export interface HarnessFileSource {
+  role: 'transcript' | 'subagent' | 'tool-result' | 'other';
+  relPath: string;
+  byteStart: number;
+  byteEnd: number;
+  sha256: string;
+  parentNativeSessionId?: string;
+}
+export interface EncodedSlice { encoding: 'utf-8' | 'base64'; data: string }
+interface InboxV3Metadata extends Omit<Partial<InboxBundle>, 'schema' | 'platform' | 'sessionId' | 'raw'> {
+  schema: typeof SCHEMA_V3;
+  fidelity: CapturedFidelity;
+  producer?: InboxProducer;
+  platformRefs?: Record<string, string>;
+  dimensions?: SessionProvenanceDimensions;
+  identity?: InboxIdentity;
+  capturedAt?: string;
+}
+export type InboxWebCaptureV3 = InboxV3Metadata & {
+  kind: 'web-capture'; platform: string; sessionId: string; raw: { text: string; bytes: number };
+  fidelity: Exclude<CapturedFidelity, { value: 'raw' }>;
+};
+export type InboxHarnessFileV3 = InboxV3Metadata & {
+  kind: 'harness-file'; harness: string; nativeSessionId: string;
+  file: HarnessFileSource; raw: EncodedSlice;
+};
+export type InboxBundleV3 = InboxWebCaptureV3 | InboxHarnessFileV3;
+/** Reader shape; legacy producers still use the stricter InboxBundle above. */
+export type IncomingInboxBundle = InboxBundleV3 | (Omit<Partial<InboxBundle>, 'schema' | 'platform'> & {
+  schema: typeof SCHEMA | typeof SCHEMA_V1; platform: string;
+  sessionId: string; raw: { text: string; bytes: number };
+});
+
+/** Structural validation uses the committed JSON Schema, not a second rule table. */
+export function isInboxBundle(value: unknown): value is IncomingInboxBundle {
+  return inboxSchemaValidator(value) as boolean;
+}
+
+/** Verify the additional byte invariants that standard JSON Schema cannot express. */
+export async function validateInboxBundle(value: unknown): Promise<boolean> {
+  if (!isInboxBundle(value)) return false;
+  if (value.schema !== SCHEMA_V3 || value.kind !== 'harness-file') return true;
+  try {
+    const { raw, file } = value;
+    let bytes: Uint8Array<ArrayBuffer>;
+    if (raw.encoding === 'utf-8') {
+      bytes = new TextEncoder().encode(raw.data);
+      // Unpaired surrogates cannot be represented as byte-identical UTF-8.
+      if (new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes) !== raw.data) return false;
+    } else {
+      const binary = atob(raw.data);
+      if (btoa(binary) !== raw.data) return false;
+      bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+    }
+    if (file.byteEnd < file.byteStart || file.byteEnd - file.byteStart !== bytes.length) return false;
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return [...hash].map(b => b.toString(16).padStart(2, '0')).join('') === file.sha256;
+  } catch { return false; }
+}

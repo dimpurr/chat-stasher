@@ -1,0 +1,282 @@
+[
+  {
+    "file": "legacy-v1.json",
+    "valid": true,
+    "sha256": "c92523170b86a8070bf6c7c0389dcf8a83b212f524d6152c3351829c8bb0a98e"
+  },
+  {
+    "file": "legacy-v2.json",
+    "valid": true,
+    "sha256": "ce07d333d3bf8974fd116361ef0569607b9d92b4065f1646344942b835fde7ce"
+  },
+  {
+    "file": "web-full.json",
+    "valid": true,
+    "sha256": "b7aa7eb4bfa686e7102a74a2be2f0a7b44acd92b6d6eecdad5350b5bdf752e55"
+  },
+  {
+    "file": "harness-raw.json",
+    "valid": true,
+    "sha256": "8b6f4fd45342c0524f699e15fde6ec0d846ca99550f6e31854f3f38c5557aa5c"
+  },
+  {
+    "file": "harness-base64.json",
+    "valid": true,
+    "sha256": "30085f592002bd8f1ac37b9d07702efe04d1e89b29b5059a522c384cf282671d"
+  },
+  {
+    "file": "harness-partial.json",
+    "valid": true,
+    "sha256": "9f724508254ee681c3d06be9e53b350cb360666c481a0e2a9d0774a6a08dc9aa"
+  },
+  {
+    "file": "harness-unknown.json",
+    "valid": true,
+    "sha256": "4038d682d91f44942157674f59a5be245111f1fed8a4eaf9f679e543a5a05978"
+  },
+  {
+    "file": "harness-full.json",
+    "valid": true,
+    "sha256": "6b6b7f5f3fd4bcbf30f8063e107150689e8117ead8fed0910fae6c9ffaf69a4d"
+  },
+  {
+    "file": "harness-subagent.json",
+    "valid": true,
+    "sha256": "6b229584935c98c83e60a5f9d894e0eb32923307144520ece39ca126dd0a46fd"
+  },
+  {
+    "file": "missing-kind.json",
+    "valid": false,
+    "sha256": "2bdcbc5c67c7de000d4aeab9747cee07f4f328363904e2f5dc619c286d7992b9"
+  },
+  {
+    "file": "missing-fidelity.json",
+    "valid": false,
+    "sha256": "86aa43248317c8ce092e0418cd1c381a235e5e42880aac302158fc75ed3ac321"
+  },
+  {
+    "file": "missing-file.json",
+    "valid": false,
+    "sha256": "6f305d207821176dcbcd0a12624ce1220ed5747410b43b0d635078c58ba17792"
+  },
+  {
+    "file": "missing-harness.json",
+    "valid": false,
+    "sha256": "aeb00a402e9fe3e3451e8ee0cea63a6f947d40a29453f817d7979e88fffc764d"
+  },
+  {
+    "file": "missing-nativeSessionId.json",
+    "valid": false,
+    "sha256": "fbba77102493af70b26008675f0b51f551eec1449bbb7fcecfe4decb90d69287"
+  },
+  {
+    "file": "invalid-fidelity-partial.json",
+    "valid": false,
+    "sha256": "98fdca919b6b1651f5ea629b50a8c2a61d86bb8e23408f291d711ae6b41f412e"
+  },
+  {
+    "file": "invalid-fidelity-unknown.json",
+    "valid": false,
+    "sha256": "805918a9ae2571f2b32e7362f91142327a656ebd8f7b70c106d3c250cf3118ad"
+  },
+  {
+    "file": "invalid-fidelity-full.json",
+    "valid": false,
+    "sha256": "60bbf861eced932d6b57da999d23cd6ab0dbe83cc14537c4d060064b6f8828a2"
+  },
+  {
+    "file": "invalid-fidelity-declared.json",
+    "valid": false,
+    "sha256": "eab73be554d03b9e04d8e6b510e9bc6e539a6ad63eeebe97a6d12c3fb24cc920"
+  },
+  {
+    "file": "unsafe-path-0.json",
+    "valid": false,
+    "sha256": "fa6a19b683c0a53ffd7e3189827a677b62b48050a113b0a5882001c549014d2e"
+  },
+  {
+    "file": "unsafe-path-1.json",
+    "valid": false,
+    "sha256": "c1b79bf0069e2c93c7696983d91ff48b93e353179a8993cb03120b6c4b1926ae"
+  },
+  {
+    "file": "unsafe-path-2.json",
+    "valid": false,
+    "sha256": "c5d6299c22edc18fc94cdcecd3f13d912781d5bd30aac64e32c02091d99a0b68"
+  },
+  {
+    "file": "unsafe-path-3.json",
+    "valid": false,
+    "sha256": "7a75366d6c8966b577d5fcb4d75af5fa47aa85cc94460fbd27b14e0038675f64"
+  },
+  {
+    "file": "unsafe-path-4.json",
+    "valid": false,
+    "sha256": "db79ab1267326fccaea080778c9ca1672602d36e2162a84e7c2aef89f53fa5d9"
+  },
+  {
+    "file": "unsafe-path-5.json",
+    "valid": false,
+    "sha256": "eb7c3c1c3b86e87d436d44f263c784c5d7de7b51058cd1d387b22042b59a45ea"
+  },
+  {
+    "file": "unsafe-path-6.json",
+    "valid": false,
+    "sha256": "4a5bc7c18a4897450ca3d0b7b5fcad3966db296d157da5b0891c7350cd1016cb"
+  },
+  {
+    "file": "unsafe-path-7.json",
+    "valid": false,
+    "sha256": "cc82e1d51b1008379e7041e32ff2f2b80fed5a788a57466dbfbd39af7b3d18c5"
+  },
+  {
+    "file": "unsafe-path-8.json",
+    "valid": false,
+    "sha256": "a6d8020f2253c9576d73123b11b1b9a245cfda6bd07f27d0c995556449ae099b"
+  },
+  {
+    "file": "invalid-dimensions-0.json",
+    "valid": false,
+    "sha256": "4af82d5fe49b7159c86835410fe835282906787f38ec9000ef2896859497f518"
+  },
+  {
+    "file": "invalid-dimensions-1.json",
+    "valid": false,
+    "sha256": "d2a2757db3ad240cca0d7984c72e18d8049c48560ae015358863d789de82398e"
+  },
+  {
+    "file": "invalid-dimensions-2.json",
+    "valid": false,
+    "sha256": "e861e8eb054583235a61e70f841c907760d21ce7683cd207290e3f14659e4ad1"
+  },
+  {
+    "file": "invalid-dimensions-3.json",
+    "valid": false,
+    "sha256": "e078560d50236c72b9e3ebf4947963973be913463e7412b4c6c379af0fa0c101"
+  },
+  {
+    "file": "missing-parent.json",
+    "valid": false,
+    "sha256": "5ba5f2f2816bd4166781c88a9439af4b16172c5b259b943a3e0f9eebb3605339"
+  },
+  {
+    "file": "unsafe-id.json",
+    "valid": false,
+    "sha256": "168807fcbf1710a1ee1d239f51c2f69862c6085d1e43af7a341b44895df78b9c"
+  },
+  {
+    "file": "producer-secret.json",
+    "valid": false,
+    "sha256": "41e80082fac37ecf863724c4b71b5bc62721e7656e9e45b0a5aafbfbf9f0bc16"
+  },
+  {
+    "file": "mixed-variant.json",
+    "valid": false,
+    "sha256": "ba639111619cc4b19a8827db9f64c3ce0d1a1499cd02b24e9ff2ad0255aad45a"
+  },
+  {
+    "file": "bad-digest.json",
+    "valid": false,
+    "schemaValid": true,
+    "sha256": "7889a7c68839cadeafde6388bc1c7bb28c3c4bb3b17a7a1594cc0ca66b52306b"
+  },
+  {
+    "file": "bad-length.json",
+    "valid": false,
+    "schemaValid": true,
+    "sha256": "35fa997c8dd2e9e7dd16e5d13a0da3c422eddee2ecc5c82de9ae9b489d8b6ec1"
+  },
+  {
+    "file": "reversed-range.json",
+    "valid": false,
+    "schemaValid": true,
+    "sha256": "a9639b9322cfd56da3c36b20990cae9b3190986a93a34bc29d8f104756dd3bc3"
+  },
+  {
+    "file": "bad-base64.json",
+    "valid": false,
+    "schemaValid": true,
+    "sha256": "1fd3764d94229d764814f42376273798c5fcc21de1a27919fa0d7d55191c3242"
+  },
+  {
+    "file": "unpadded-base64.json",
+    "valid": false,
+    "schemaValid": true,
+    "sha256": "c2205b560a49fd391d43302274abce80580d197bc4d1dab4bfd9c8d4c971082f"
+  },
+  {
+    "file": "binary-slice.json",
+    "valid": true,
+    "sha256": "fec9cf5e204f4100d997c21730538bc921097051866f1681efe9c8b35f531afe"
+  },
+  {
+    "file": "unknown-field.json",
+    "valid": false,
+    "sha256": "aa5c612d922ca3a21de0e91c4a4d438483dc91c43cc74f142d82f894523e857d"
+  },
+  {
+    "file": "unsafe-reference.json",
+    "valid": false,
+    "sha256": "8dc5bf95a917b1b61be685ed44d40907c023ca4ec95dad2f1abd6b2ceddb6c6a"
+  },
+  {
+    "file": "scalar-producer.json",
+    "valid": false,
+    "sha256": "8fd2e65fcaa632f0aa9fa54b6e6711a9d309d0f9ea537d9943eebfeb69f6912b"
+  },
+  {
+    "file": "null-note.json",
+    "valid": false,
+    "sha256": "287e21c7033bfe03ec2d3a7141fa41ca563d5576f43e8933c030500f4db9a30d"
+  },
+  {
+    "file": "blank-note.json",
+    "valid": false,
+    "sha256": "a925dcd4da6fc2618fc6b6738e32dd1bc10f3ef394043b5a1fa58328c7ebbca1"
+  },
+  {
+    "file": "bad-encoding.json",
+    "valid": false,
+    "sha256": "fe7f1949189e7688ba336764f26a3b705a90ce6964a9abc4e49556e005262318"
+  },
+  {
+    "file": "nondefault-empty-identity.json",
+    "valid": false,
+    "sha256": "a7fc5f17e2405ec3fed76e0a758c1728aa1c8b13a1c8b1417537aea8fb509155"
+  },
+  {
+    "file": "cloud-account.json",
+    "valid": true,
+    "sha256": "c38d317173963f897687cb3420ec70221c7ff1b995cc3cdea6f0a6ab26a9d264"
+  },
+  {
+    "file": "default-identity.json",
+    "valid": true,
+    "sha256": "05fdae3cc2daab0d07776b0e3959f09b6a0e6a837e1d50224957807ac68c51b6"
+  },
+  {
+    "file": "utf8-bom.json",
+    "valid": true,
+    "sha256": "a8c30d596ec3f79ae78b8b9980bff2d05fe47c3e7ad3a5462e4e8410fa95fd1b"
+  },
+  {
+    "file": "unicode-slice.json",
+    "valid": true,
+    "sha256": "f79964408ea5b606ea1bfd5f3b7625bf04194f71dcb3bc7df4d42448632c98a3"
+  },
+  {
+    "file": "empty-slice.json",
+    "valid": true,
+    "sha256": "51b92064dcb339af32e20e95513d321746a2927261e7413e2623ee85e32a2ef6"
+  },
+  {
+    "file": "integral-float-range.json",
+    "valid": true,
+    "sha256": "9c4886ec08c839d4ac7996cda0effa5cbbf9ff9ac6a500ed2c9125099fbce856"
+  },
+  {
+    "file": "hidden-source-directory.json",
+    "valid": true,
+    "sha256": "dc012b1a402b9a538a51cef608c86737786d5fc450205ec02448bf4e4bce3bdf"
+  }
+]
