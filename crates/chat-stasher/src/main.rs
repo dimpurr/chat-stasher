@@ -11334,9 +11334,8 @@ mod decision_surface_tests {
                 trust,
                 SetupDestinationInit::Ran { exit_code: Some(0) },
             ));
-            assert_eq!(
+            assert!(
                 value["trust"]["kind"].is_string(),
-                true,
                 "the trust state is a tagged object: {value}"
             );
             assert_eq!(
