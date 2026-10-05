@@ -2760,7 +2760,16 @@ fn rebuild_activity_index(
         }
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let mut row = activity::build_row(&session_id, machine, &harness, &refs);
-        row.dimensions = chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied());
+        // Merged, not assigned: `build_row` has already read what the harness's
+        // own records say about this session (claude-code's `cwd` and owning
+        // organization/account), and the typed `dimensions` a capture envelope
+        // carries are *another* origin's observation of the same session rather
+        // than a replacement for it. Assigning here would discard the first
+        // reading every time the second was empty.
+        chat_stasher::provenance::merge(
+            &mut row.dimensions,
+            &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
+        );
         if let Some(observations) = provenance_by_session.get(&session_id) {
             let sequence_bodies: Vec<(Option<u64>, Vec<u8>)> = shards
                 .iter()
@@ -3464,7 +3473,15 @@ fn rebuild_activity_index_from_archive(
             let owned: Vec<String> = text.lines().map(|line| line.to_string()).collect();
             let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
             let mut row = activity::build_row(session_id, machine, &harness, &refs);
-            row.dimensions = chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied());
+            // Merged for the same reason as the stage rebuild above: the
+            // dimensions `build_row` read off the harness's own records and the
+            // ones an archived capture envelope carries are two observations of
+            // one session, and replacing the first with the second would lose
+            // every dimension an envelope says nothing about.
+            chat_stasher::provenance::merge(
+                &mut row.dimensions,
+                &chat_stasher::provenance::dimensions_from_jsonl(refs.iter().copied()),
+            );
             if let Some(observations) = provenance_by_session.get(session_id) {
                 chat_stasher::provenance::merge_verified_shard_sequence_observations(
                     &mut row.dimensions,
