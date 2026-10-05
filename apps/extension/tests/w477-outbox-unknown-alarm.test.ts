@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 import {
   OUTBOX_ALARM_NAME,
@@ -11,6 +11,15 @@ const NAME_A = 'chatgpt-aaaaaaaa-1111-2222-3333-444444444444.json';
 const NAME_B = 'chatgpt-bbbbbbbb-1111-2222-3333-444444444444.json';
 const PAYLOAD_A = '{"sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}';
 const PAYLOAD_B = '{"sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}';
+
+/**
+ * The two warnings an unknown outbox read answers with. Pinned here so
+ * the cases below can assert the warning is still there — exactly once,
+ * in these words, naming its cause when the read threw — rather than
+ * only keeping it out of the CI log.
+ */
+const UNREADABLE_SUMMARY_WARN = '[chat-stasher] outbox summary is unreadable or malformed; keeping retry alarm scheduled';
+const READ_FAILED_WARN = '[chat-stasher] outbox summary read failed; keeping retry alarm scheduled';
 
 function fakeAlarms() {
   const live = new Map<string, { periodInMinutes?: number }>();
@@ -45,29 +54,57 @@ function emptySummary() {
 }
 
 describe('W477 · unknown outbox reads keep the retry alarm scheduled', () => {
+  /**
+   * 🔴 Every case here is a synthetic failure the module answers with
+   *    exactly one `console.warn` — the "keeping retry alarm scheduled"
+   *    half of the unknown rule *is* that warning, so the spy keeps
+   *    the surface asserted (one warn, the expected wording, and for a
+   *    thrown read its cause) while the identical lines stay out of the
+   *    CI log. A test that only tidied the log would be hiding the
+   *    signal. The count is taken off the expected message itself, not
+   *    off every warn, so an unrelated warning the module may grow
+   *    later can neither turn this case red nor let a dropped one pass.
+   *    Read inside the try because `mockRestore` clears the calls.
+   */
   it.each([
-    ['summary reader returns null', async () => null],
-    ['read throws', async () => { throw new Error('synthetic read failure'); }],
-    ['malformed summary', async () => ({ pending: '0' })],
-    ['missing pending count', async () => ({})],
-    ['malformed sibling field', async () => ({ pending: 0, rejected: '0', bytes: 0, capacityBytes: 1, full: false, nearFull: false })],
-    ['inconsistent sibling fields', async () => ({ pending: 0, rejected: 0, bytes: 1, capacityBytes: 1, full: false, nearFull: false })],
-  ])('%s is unknown, never a verified empty outbox', async (_case, read) => {
+    ['summary reader returns null', async () => null, UNREADABLE_SUMMARY_WARN, undefined],
+    ['read throws', async () => { throw new Error('synthetic read failure'); }, READ_FAILED_WARN, 'synthetic read failure'],
+    ['malformed summary', async () => ({ pending: '0' }), UNREADABLE_SUMMARY_WARN, undefined],
+    ['missing pending count', async () => ({}), UNREADABLE_SUMMARY_WARN, undefined],
+    ['malformed sibling field', async () => ({ pending: 0, rejected: '0', bytes: 0, capacityBytes: 1, full: false, nearFull: false }), UNREADABLE_SUMMARY_WARN, undefined],
+    ['inconsistent sibling fields', async () => ({ pending: 0, rejected: 0, bytes: 1, capacityBytes: 1, full: false, nearFull: false }), UNREADABLE_SUMMARY_WARN, undefined],
+  ])('%s is unknown, never a verified empty outbox', async (_case, read, expectedWarn, expectedDetail) => {
     const alarms = fakeAlarms();
 
-    expect(await syncOutboxAlarmFromRead(alarms.api, true, read)).toBe('created');
-    expect(alarms.live.get(OUTBOX_ALARM_NAME)).toEqual({ periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
-    expect(alarms.calls).toEqual([`create:${OUTBOX_ALARM_NAME}`]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await syncOutboxAlarmFromRead(alarms.api, true, read)).toBe('created');
+      expect(alarms.live.get(OUTBOX_ALARM_NAME)).toEqual({ periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
+      expect(alarms.calls).toEqual([`create:${OUTBOX_ALARM_NAME}`]);
+      const unknownWarns = warn.mock.calls.filter((call) => call[0] === expectedWarn);
+      expect(unknownWarns).toHaveLength(1);
+      if (expectedDetail !== undefined) expect(unknownWarns[0]?.[1]).toBe(expectedDetail);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps an existing alarm when the read is unknown', async () => {
     const alarms = fakeAlarms();
     alarms.live.set(OUTBOX_ALARM_NAME, { periodInMinutes: OUTBOX_ALARM_PERIOD_MINUTES });
 
-    expect(await syncOutboxAlarmFromRead(alarms.api, true, async () => { throw new Error('synthetic failure'); }))
-      .toBe('kept');
-    expect(alarms.calls).toEqual([]);
-    expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await syncOutboxAlarmFromRead(alarms.api, true, async () => { throw new Error('synthetic failure'); }))
+        .toBe('kept');
+      expect(alarms.calls).toEqual([]);
+      expect(alarms.live.has(OUTBOX_ALARM_NAME)).toBe(true);
+      const unknownWarns = warn.mock.calls.filter((call) => call[0] === READ_FAILED_WARN);
+      expect(unknownWarns).toHaveLength(1);
+      expect(unknownWarns[0]?.[1]).toBe('synthetic failure');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('clears the alarm for a verified empty outbox', async () => {
@@ -117,6 +154,14 @@ describe('W477 · isOutboxSummary · what the outbox itself could have written',
     ['a full queue', {
       ...emptySummary(), pending: 1, bytes: OUTBOX_CAPACITY_BYTES, full: true, nearFull: true,
     }],
+    // 🔴 The capacity floor is a value the writers can reach (`capacityOf()` passes
+    //    an override of 0 through), and at it both flags are vacuously true. It is
+    //    listed here, not among the refusals below, because refusing it would be the
+    //    guard rejecting a summary this module writes.
+    ['a zero-capacity queue', { pending: 0, rejected: 0, bytes: 0, capacityBytes: 0, full: true, nearFull: true }],
+    ['a zero-capacity queue holding something', {
+      pending: 2, rejected: 0, bytes: 128, capacityBytes: 0, full: true, nearFull: true,
+    }],
   ])('%s is a measurement', (_case, value) => {
     expect(isOutboxSummary(value)).toBe(true);
   });
@@ -127,7 +172,6 @@ describe('W477 · isOutboxSummary · what the outbox itself could have written',
     ['a string', 'pending'],
     ['a number', 0],
     ['an array', []],
-    ['a zero-capacity summary', { ...emptySummary(), capacityBytes: 0 }],
     ['a negative count', { ...emptySummary(), rejected: -1 }],
     ['a fractional count', { ...emptySummary(), pending: 0.5 }],
     ['a non-finite count', { ...emptySummary(), bytes: Number.NaN }],
@@ -184,6 +228,43 @@ describe('W477 · the outbox’s own refusal summary is a summary its guard acce
     const refused = await ob.enqueue(NAME_B, PAYLOAD_B, { capacityBytes: used });
     expect(refused.reason).toBe('outbox-full');
     expect(refused.summary).toMatchObject({ full: true });
+    expect(ob.isOutboxSummary(refused.summary)).toBe(true);
+  });
+
+  /**
+   * 🔴 The capacity floor, reached through the writers rather than around them.
+   *    `OutboxOptions.capacityBytes` is documented as existing so the capacity rule
+   *    can be exercised, and `capacityOf()` passes an override of `0` straight
+   *    through — so `summary()` really does write `capacityBytes: 0`, with both
+   *    derived flags vacuously true. A guard that refused those would be refusing
+   *    this module's own output, which is the one thing its contract forbids.
+   */
+  it('🔴 accepts the zero-capacity summary summary() itself writes', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    // `bytes` is whatever earlier cases left queued — both flags are true at zero
+    // capacity either way, which is the whole point of the floor.
+    const measured = await ob.summary({ capacityBytes: 0 });
+    expect(measured).toMatchObject({ capacityBytes: 0, full: true, nearFull: true });
+    expect(ob.isOutboxSummary(measured)).toBe(true);
+  });
+
+  it('accepts the refusal summary it writes at zero capacity', async () => {
+    (globalThis as any).indexedDB = new IDBFactory();
+    const ob = await import('../lib/outbox');
+
+    // Nothing can ever fit at zero capacity, so a payload not already queued is
+    // refused outright — the refusal-with-no-predecessor case a hand-picked
+    // fixture cannot produce.
+    const refused = await ob.enqueue(
+      'chatgpt-cccccccc-9999-8888-7777-666666666666.json',
+      '{"sessionId":"cccccccc-9999-8888-7777-666666666666"}',
+      { capacityBytes: 0 },
+    );
+    expect(refused.accepted).toBe(false);
+    expect(refused.reason).toBe('outbox-full');
+    expect(refused.summary).toMatchObject({ capacityBytes: 0, full: true, nearFull: true });
     expect(ob.isOutboxSummary(refused.summary)).toBe(true);
   });
 });

@@ -333,9 +333,14 @@ export async function undeliveredEntries(): Promise<OutboxEntry[] | null> {
  * *shape* question about the type declared above, and answering it anywhere
  * else means a second copy of the derivation to keep in step.
  *
- * `capacityBytes === 0` is refused because `summary()` never returns it (the
- * default is the protocol's 256 MiB) and the two derived flags are vacuous
- * against a zero capacity — `0 >= 0` is `full` whatever the queue holds.
+ * 🔴 Nothing is refused here that the writers above can produce, and zero
+ *    capacity is a value they can reach: `capacityOf()` passes an override of `0`
+ *    straight through, so `summary({ capacityBytes: 0 })` really does write it,
+ *    with both derived flags vacuously `true`. A guard that refused that would
+ *    reject its own module's output while claiming to accept it. The flags are
+ *    honest at the floor: at zero capacity nothing can be accepted, so "full" is
+ *    the truth whatever the queue holds — and it is `reason`, not `full`, that
+ *    reports one newcomer failing to fit.
  */
 export function isOutboxSummary(value: unknown): value is OutboxSummary {
   if (!value || typeof value !== 'object') return false;
@@ -343,7 +348,6 @@ export function isOutboxSummary(value: unknown): value is OutboxSummary {
   const counts = [summary.pending, summary.rejected, summary.bytes, summary.capacityBytes];
   if (!counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) return false;
   const { bytes, capacityBytes, full, nearFull } = summary as unknown as OutboxSummary;
-  if (capacityBytes === 0) return false;
   return typeof full === 'boolean'
     && full === (bytes >= capacityBytes)
     && typeof nearFull === 'boolean'

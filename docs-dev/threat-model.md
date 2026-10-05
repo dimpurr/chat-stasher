@@ -30,7 +30,7 @@ Understanding the roles below requires knowing the path the content takes.
 2. The extension writes that text, as a JSON bundle, into its **own IndexedDB
    outbox** inside your browser profile — before attempting any delivery, so a
    service worker killed mid-flight cannot lose it without a trace
-   (`apps/extension/lib/outbox.ts:400-478`;
+   (`apps/extension/lib/outbox.ts:404-482`;
    `apps/extension/entrypoints/background.ts:416-433`).
 3. The extension delivers the bundle to a **Native Messaging host** — the
    `chat-stasher` binary you registered with
@@ -105,17 +105,17 @@ Concretely, five separate plaintext exposures:
 1. **The outbox window, before delivery.** The extension writes each captured
    session as an ordinary, unencrypted record into its outbox IndexedDB
    database, inside your browser profile
-   (`apps/extension/lib/outbox.ts:110-127`, `:400-478`). The record's `raw.text`
+   (`apps/extension/lib/outbox.ts:110-127`, `:404-482`). The record's `raw.text`
    field is the raw response body — the conversation itself
    (`apps/extension/entrypoints/background.ts:269-272`). It sits there,
    readable by anything running as you, until the host answers a matching `ack`
-   and the record is deleted (`apps/extension/lib/outbox.ts:481-496`). **We do
+   and the record is deleted (`apps/extension/lib/outbox.ts:485-500`). **We do
    not encrypt it, we do not restrict its permissions, and we do not shorten
    that window.** How long it is depends on how often the host is reachable; if
    it never is, the plaintext stays indefinitely. A second plaintext copy of a
    capture exists if you press the popup's export button, which writes the same
    bodies into an ordinary download file
-   (`apps/extension/lib/outbox.ts:629-662`). (An **archived** session can also be
+   (`apps/extension/lib/outbox.ts:633-666`). (An **archived** session can also be
    written out decrypted, by `export --out` — that is exposure 5, below.)
 
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
@@ -133,7 +133,7 @@ Concretely, five separate plaintext exposures:
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
    `chat-stasher-export-<UTC>-<install-short-id>-<nonce>.jsonl`
-   (`apps/extension/lib/outbox.ts:581-619`). The name's install segment is a
+   (`apps/extension/lib/outbox.ts:585-623`). The name's install segment is a
    short id for this browser profile — metadata of the same kind as the one
    the bundle carries — and the nonce says nothing but "this export".
    That is metadata, not content — it says an export happened and when, not
@@ -885,7 +885,7 @@ a real limitation of the current code.
 1. **Plaintext window before delivery.** Described in full above. Captured
    conversations sit unencrypted in the extension's outbox, inside your browser
    profile, until the host answers a matching `ack`
-   (`apps/extension/lib/outbox.ts:400-478`, `:481-496`). **We do not currently
+   (`apps/extension/lib/outbox.ts:404-482`, `:485-500`). **We do not currently
    defend this.** Mitigation available to you today: keep the popup's channel
    line healthy so deliveries go through, uninstall the extension when you are
    done with it, and put your browser profile on an encrypted volume.
