@@ -1934,7 +1934,6 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
         "cooldown reaches every install: {blocked}; {wait}ms left after {elapsed}ms \
          of test wall clock is short of the 300000ms header"
     );
-    );
 }
 
 #[test]
