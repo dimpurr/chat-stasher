@@ -53,6 +53,24 @@ const IDS = [
 /** One conversation-body URL, used as the string the timeout message must NOT leak. */
 const DETAIL_URL = `${ORIGIN}/backend-api/conversation/${IDS[0]}`;
 
+/**
+ * How long the wait for the round's first **body** request may take.
+ *
+ * The typical round gets there in about a dozen event-loop turns — well
+ * under a millisecond — so this budget is not for the normal case; it is
+ * for a runner that is executing the rest of the suite in parallel. The
+ * chain from a `chat-captured` dispatch to the first body request awaits
+ * real threadpool work (the account observation's HMAC,
+ * `lib/account-fingerprint.ts`, computed with `crypto.subtle`), and that
+ * await's completion is a function of CPU, not of how many event-loop
+ * turns have been spent: a fixed turn budget corresponded to a few
+ * milliseconds of wall time and ran out on a contended CI runner while
+ * the very next case, same wait, passed milliseconds later. The budget
+ * stays far below vitest's own per-test timeout, so a round that never
+ * arrives fails the assertion that follows the wait, not the clock.
+ */
+const BODY_REQUEST_REACH_BUDGET_MS = 3_000;
+
 /** A `send` that never settles: exactly what a dead content-script context looks like. */
 const neverAnswers: TabSend = () => new Promise(() => { /* never settles */ });
 
@@ -330,6 +348,37 @@ async function backfillState(): Promise<BackfillState> {
   return await loadState(st, 'chatgpt', scope);
 }
 
+/**
+ * Wait until the running round has reached its first **body** request.
+ *
+ * 🔴 The wait is bounded by **real time**, not by a count of event-loop
+ *    turns, and that distinction is the whole reason this helper exists.
+ *    The chain from a `chat-captured` dispatch to the first body request
+ *    awaits real threadpool work — the account observation's HMAC
+ *    (`lib/account-fingerprint.ts`, `crypto.subtle`) — and that await's
+ *    completion is not a function of how many `setImmediate` turns the
+ *    loop below has already spent: it is CPU, contended on a runner that
+ *    is executing the rest of the suite in parallel. A fixed turn budget
+ *    (40 turns, a few milliseconds of wall time) ran out on a contended
+ *    CI runner before the round reached the request — this exact case
+ *    failed there with `expected [] to have a length of 1` while the very
+ *    next case, waiting the same way, passed milliseconds later.
+ *
+ * `Date` is not among the faked timers in these cases, so the deadline is
+ *    real time; every iteration still yields the event loop, which is what
+ *    lets the chain's fake-indexeddb tasks and microtasks run at all.
+ *    A round that genuinely never reaches a body request — the defect this
+ *    file exists to catch — still fails the caller's assertion below:
+ *    nothing is retried and no expectation is loosened.
+ */
+async function waitForFirstBodyRequest(): Promise<void> {
+  const deadline = Date.now() + BODY_REQUEST_REACH_BUDGET_MS;
+  while (detailAttempts.length === 0 && Date.now() < deadline) {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 afterEach(() => vi.useRealTimers());
 
 beforeEach(async () => {
@@ -359,10 +408,7 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
     // ---- round 1: the page answers the list and then goes silent ----
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     const firstSettled = mod.backfillTickSettled();
-    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
-      await Promise.resolve();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    await waitForFirstBodyRequest();
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
@@ -433,10 +479,7 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
     const firstSettled = mod.backfillTickSettled();
-    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
-      await Promise.resolve();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    await waitForFirstBodyRequest();
     expect(detailAttempts).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(50);
     await firstSettled;
