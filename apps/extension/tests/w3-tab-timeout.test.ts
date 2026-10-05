@@ -29,7 +29,7 @@
  * function in this file and the port is injected through background's own test seam.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { withI18n } from './i18n-harness';
 import { IDBFactory } from 'fake-indexeddb';
 import { createSyntheticHost, type SyntheticHost } from './synthetic-native-host';
@@ -63,48 +63,85 @@ const neverAnswers: TabSend = () => new Promise(() => { /* never settles */ });
 describe('W7 (a) · a page that never answers is a lost round, not an empty answer', () => {
   it('rejects in bounded time, and the message carries no URL and no conversation id', async () => {
     // 50 ms rather than the production 90 s: the timeout is injectable precisely so
-    // this can be a fast test. The production value is asserted separately in (b2).
-    const port = tabHttpPort(11, neverAnswers, 50);
-
-    const started = Date.now();
-    let caught: Error | null = null;
+    // this can be a fast test. Fake timers make the budget exact under scheduler load;
+    // the production value is asserted separately in (b2).
+    vi.useFakeTimers();
     try {
-      await port(DETAIL_URL);
-    } catch (err) {
-      caught = err as Error;
+      const port = tabHttpPort(11, neverAnswers, 50);
+      const outcome = port(DETAIL_URL).then(
+        () => ({ kind: 'resolved' as const }),
+        (err) => ({ kind: 'rejected' as const, error: err as Error }),
+      );
+
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(49);
+      expect(await Promise.race([outcome, Promise.resolve({ kind: 'pending' as const })])).toEqual({ kind: 'pending' });
+
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await outcome;
+      expect(result.kind).toBe('rejected');
+      if (result.kind !== 'rejected') throw new Error('expected the page request to time out');
+      const caught = result.error;
+      expect(caught.message).toContain('tab 11');
+      expect(caught.message).toContain('did not answer the backfill fetch');
+      expect(caught.message).toContain('within 0.05 s');
+      // 🔴 Only technical facts: the tab id and the budget. The URL, the origin and the
+      //    conversation id must not be carried into the halt detail or the log.
+      expect(caught.message).not.toContain(DETAIL_URL);
+      expect(caught.message).not.toContain(ORIGIN);
+      expect(caught.message).not.toContain(IDS[0]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
-    const elapsed = Date.now() - started;
+  });
 
-    console.log('[W7-a] rejected after', elapsed, 'ms with:', caught?.message);
-    expect(caught).not.toBeNull();
-    expect(caught!.message).toContain('tab 11');
-    expect(caught!.message).toContain('did not answer the backfill fetch');
-    // 🔴 Only technical facts: the tab id and the budget. The URL, the origin and the
-    //    conversation id must not be carried into the halt detail or the log.
-    expect(caught!.message).not.toContain(DETAIL_URL);
-    expect(caught!.message).not.toContain(ORIGIN);
-    expect(caught!.message).not.toContain(IDS[0]);
+  it('a reply arriving after the timeout cannot turn the settled request into success', async () => {
+    vi.useFakeTimers();
+    try {
+      let answer!: (value: unknown) => void;
+      const lateReply = new Promise<unknown>((resolve) => { answer = resolve; });
+      const port = tabHttpPort(13, () => lateReply, 50);
+      const outcome = port(DETAIL_URL).then(
+        (value) => ({ kind: 'resolved' as const, value }),
+        (err) => ({ kind: 'rejected' as const, error: err as Error }),
+      );
 
-    // "In bounded time": it really was the timer that settled it, not something else.
-    expect(elapsed).toBeGreaterThanOrEqual(40);
-    expect(elapsed).toBeLessThan(5_000);
+      await vi.advanceTimersByTimeAsync(50);
+      const timedOut = await outcome;
+      expect(timedOut.kind).toBe('rejected');
+      if (timedOut.kind !== 'rejected') throw new Error('expected the page request to time out');
+      expect(timedOut.error.message).toContain('did not answer the backfill fetch');
+
+      answer({ ok: true, status: 200, text: 'too late' });
+      await Promise.resolve();
+      expect(await outcome).toBe(timedOut);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the POST route is bounded by the same timeout (no second, unbounded path)', async () => {
-    const port = tabHttpPort(12, neverAnswers, 50);
-    let caught: Error | null = null;
+    vi.useFakeTimers();
     try {
-      await port(`${ORIGIN}/backend-api/conversation/${IDS[1]}`, {
+      const port = tabHttpPort(12, neverAnswers, 50);
+      const outcome = port(`${ORIGIN}/backend-api/conversation/${IDS[1]}`, {
         method: 'POST',
         body: '{"offset":0}',
         contentType: 'application/json',
-      } as never);
-    } catch (err) {
-      caught = err as Error;
+      } as never).then(
+        () => ({ kind: 'resolved' as const }),
+        (err) => ({ kind: 'rejected' as const, error: err as Error }),
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      const result = await outcome;
+      expect(result.kind).toBe('rejected');
+      if (result.kind !== 'rejected') throw new Error('expected the POST request to time out');
+      expect(result.error.message).toContain('tab 12');
+    } finally {
+      vi.useRealTimers();
     }
-    console.log('[W7-a] the POST route rejected with:', caught?.message);
-    expect(caught).not.toBeNull();
-    expect(caught!.message).toContain('tab 12');
   });
 });
 
@@ -293,7 +330,10 @@ async function backfillState(): Promise<BackfillState> {
   return await loadState(st, 'chatgpt', scope);
 }
 
+afterEach(() => vi.useRealTimers());
+
 beforeEach(async () => {
+  vi.useRealTimers();
   for (const k of Object.keys(store)) delete store[k];
   runtimeListeners.length = 0;
   detailAttempts.length = 0;
@@ -310,6 +350,7 @@ beforeEach(async () => {
 
 describe('W7 (c) · 🔴 a round that times out releases the single-flight lock', () => {
   it('the second round is not refused as already-running, and the debt is still owed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     await enableBackfill();
     const mod = await bootBackground();
     // 🔴 The existing test seam: the production port is replaced, nothing else is.
@@ -317,7 +358,14 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
 
     // ---- round 1: the page answers the list and then goes silent ----
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
-    await mod.backfillTickSettled();
+    const firstSettled = mod.backfillTickSettled();
+    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
+      await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(detailAttempts).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(50);
+    await firstSettled;
 
     const first = mod.lastBackfillTick()!;
     console.log('[W7-c] round 1:', {
@@ -378,12 +426,20 @@ describe('W7 (c) · 🔴 a round that times out releases the single-flight lock'
   });
 
   it('🔴 a later round really runs again after the halt is cleared (the lock is not merely idle)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     await enableBackfill();
     const mod = await bootBackground();
     mod.configureBackfillTransport(halfDeadPort());
 
     await dispatch({ type: 'chat-captured', payload: liveCapture() }, 42);
-    await mod.backfillTickSettled();
+    const firstSettled = mod.backfillTickSettled();
+    for (let i = 0; i < 40 && detailAttempts.length === 0; i += 1) {
+      await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(detailAttempts).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(50);
+    await firstSettled;
     expect(mod.lastBackfillTick()!.report.halted).toMatchObject({ reason: 'transport-error' });
 
     // A human looked at the trace and cleared it; this time the page answers.

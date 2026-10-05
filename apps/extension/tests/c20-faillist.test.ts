@@ -308,21 +308,43 @@ describe('C20-3 · the failure list hitting its cap ⇒ drop the oldest and reco
     const st = memoryStore();
     let now = 1_700_000_000_000;
 
-    const report = await runBackfill({
-      platform: 'chatgpt',
-      origin: 'https://chatgpt.com',
-      scope: 'cap-fixture',
-      store: st,
-      http: server.port,
-      clock: { now: () => (now += 1_000), sleep: async () => {} },
-      pace: {
-        enumerate: { minIntervalMs: 0, maxPerDay: null },
-        detail: { minIntervalMs: 0, maxPerDay: null },
-      },
-      maxDetails: n,
-      // Every single one reports outright that nothing was stored.
-      sink: async () => ({ saved: false, reason: 'synthetic failure' }),
-    });
+    // 🔴 The engine surfaces every failed write-down with one console.warn
+    //    (engine.ts:3445 — "knowing about it" is C20's whole point), so
+    //    exercising the cap provokes `n` of them. The spy keeps that
+    //    surface asserted while the `n` identical headers stay out of the
+    //    CI log — a test that only tidies the log would be hiding a signal.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let report: Awaited<ReturnType<typeof runBackfill>>;
+    try {
+      report = await runBackfill({
+        platform: 'chatgpt',
+        origin: 'https://chatgpt.com',
+        scope: 'cap-fixture',
+        store: st,
+        http: server.port,
+        clock: { now: () => (now += 1_000), sleep: async () => {} },
+        pace: {
+          enumerate: { minIntervalMs: 0, maxPerDay: null },
+          detail: { minIntervalMs: 0, maxPerDay: null },
+        },
+        maxDetails: n,
+        // Every single one reports outright that nothing was stored.
+        sink: async () => ({ saved: false, reason: 'synthetic failure' }),
+      });
+      // One warn per synthetic failure, and each one names the reason —
+      // counted off the sink's own prefix rather than off every warn, so an
+      // unrelated warning the engine may grow later cannot make this case go
+      // red or, worse, let a dropped warn pass. The prefix is the *verdict's*
+      // (`sinkVerdict` turns `saved:false` into `not-saved` and carries the
+      // sink's own reason as the detail), not the sink's raw string. Read here
+      // because `mockRestore` below clears the spy's recorded calls.
+      const sinkWarns = warn.mock.calls.filter((c) => String(c[0]).startsWith(
+        '[chat-stasher] backfill sink did not save: not-saved — synthetic failure',
+      ));
+      expect(sinkWarns).toHaveLength(n);
+    } finally {
+      warn.mockRestore();
+    }
 
     // 🔴 W18 · Through the production load path: the ids are in the debt store now.
     const state = await loadState(st, 'chatgpt', 'cap-fixture');
