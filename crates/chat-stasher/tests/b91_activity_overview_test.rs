@@ -326,6 +326,15 @@ fn gemini_document(session_id: &str, project_hash: &str) -> String {
     )
 }
 
+/// One synthetic Grok CLI export envelope: the `session_docs` row
+/// `sqlite_probe.rs` seals, carrying whatever session fields the caller spells
+/// in.
+fn grok_cli_envelope(session: &str) -> String {
+    format!(
+        r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{{{session}}}}}"#
+    )
+}
+
 /// TICKET-4D-07 · the `projectHash` a gemini-cli session document states about
 /// itself reaches the written index as the session's `container` — a
 /// repository/workspace identity, never a working directory.
@@ -494,6 +503,106 @@ fn activity_index_leaves_an_opencode_dimension_the_export_stated_nothing_about_a
         row["dimensions"].get("status").is_none(),
         "a null time_archived is an unobserved status, never an `active` one: {}",
         row["dimensions"]
+    );
+}
+
+/// TICKET-4D-04 · the working directory a Grok CLI `session_docs` row states
+/// reaches the written index. The row names no tenancy and no project, and the
+/// written line must not carry those dimensions either.
+#[test]
+fn activity_index_records_the_cwd_a_grok_cli_row_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "grok.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[grok_cli_envelope(
+            r#""session_id":"s1","cwd":"/w/one","updated_at":1789384914"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert!(
+        row["dimensions"].get("container").is_none(),
+        "a path is not a repository identity, so nothing becomes a container: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("tenant").is_none(),
+        "the row names no tenancy, and none is invented: {}",
+        row["dimensions"]
+    );
+}
+
+/// A Grok CLI row whose `cwd` is empty states no working directory, and the
+/// written index must not state one either: the dimension is absent, never an
+/// empty string.
+#[test]
+fn activity_index_leaves_an_unrecorded_grok_cwd_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "grok.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[grok_cli_envelope(
+            r#""session_id":"s1","cwd":"","updated_at":1789384914"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "an empty cwd is nothing observed, so no dimension object is written: {}",
+        row
     );
 }
 
