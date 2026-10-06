@@ -1271,7 +1271,7 @@ not need you to confirm anything.
   for you (`crates/chat-stasher/src/runstate.rs:1-11`). This is also why "never
   ran" is judged **unhealthy** rather than "fine": an absent record is the
   **absence of evidence**, not **evidence of health**
-  (`crates/chat-stasher/src/runstate.rs:289-295`).
+  (`crates/chat-stasher/src/runstate.rs:308-316`).
 - Run `doctor` occasionally, to check whether any tool has started deleting
   your history.
 

@@ -555,6 +555,16 @@ under its own heading below.
   machines it was never checked on. The manual Task Scheduler setup was
   always the documented Windows configuration, so no capability is
   withdrawn — the pretence that an installed timer could be checked is.
+- **`run-state.json` dates a pass at the moment it ended, not the moment it
+  started.** The field promises "the moment the pass ended", but `run-once`
+  stamped it when the pass began and never restamped it, so a pass that took
+  three seconds claimed to have finished three seconds before it started, and
+  every reader of that timestamp was off by the whole pass: `status` called
+  the last run staler than it was, the host's `last_push` reported the push
+  as having happened before it did, and `waiting_to_upload` counted the
+  shards that pass itself had just archived as still waiting. The record is
+  stamped again at the only point where the duration and the end are both
+  known — after the pass returns, immediately before the file is written.
 
 #### Security
 

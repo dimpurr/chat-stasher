@@ -182,7 +182,14 @@ pub struct RunState {
 }
 
 impl RunState {
-    /// Build a record for a pass that ended now.
+    /// Build a record for a pass, stamped with the current second.
+    ///
+    /// `run_once_pass` builds this at the *start* of the pass, as the
+    /// pessimistic record it then corrects step by step, so the stamp taken
+    /// here is the moment the pass began. Whoever writes the file has to call
+    /// [`RunState::mark_finished`] first: a record that skips it claims a pass
+    /// which took N seconds finished N seconds before it started, and every
+    /// reader of `finished_at_unix` is then wrong by the whole pass.
     pub fn new(
         outcome: RunOutcome,
         failed_step: Option<&str>,
@@ -203,6 +210,18 @@ impl RunState {
             machine_digest: machine_digest(machine),
             phases: PassMetrics::default(),
         }
+    }
+
+    /// Restamp `finished_at_unix` with the current second, immediately before
+    /// the record is written.
+    ///
+    /// The field documents itself as the moment the pass *ended*, and only
+    /// the caller holding the finished pass knows that moment — a record built
+    /// at the start of the work cannot. So the stamp is moved here, at the one
+    /// point where both the duration and the end are known: after
+    /// `cmd_run_once` has measured `duration_ms`, before `save`.
+    pub fn mark_finished(&mut self) {
+        self.finished_at_unix = now_unix();
     }
 }
 
@@ -562,5 +581,22 @@ mod tests {
         assert_eq!(json["phases"]["scan_ms"], 42);
         assert_eq!(json["phases"]["records_scanned"], 7);
         assert!(json["phases"]["collect_harness_ms"].as_object().is_some());
+    }
+
+    /// The record is built at the start of a pass and written at its end, so
+    /// the field that promises "the moment the pass ended" can only become
+    /// true when the caller restamps it. 1000 stands in for a stamp taken
+    /// long before the write.
+    #[test]
+    fn mark_finished_replaces_the_stamp_taken_when_the_pass_started() {
+        let mut state = RunState::new(RunOutcome::Noop, None, "some-laptop", 42);
+        state.finished_at_unix = 1_000;
+        state.mark_finished();
+        assert!(
+            state.finished_at_unix > 1_000,
+            "mark_finished must re-read the clock, got {}",
+            state.finished_at_unix
+        );
+        assert!(state.finished_at_unix <= now_unix(), "never in the future");
     }
 }

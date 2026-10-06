@@ -6999,6 +6999,9 @@ fn cmd_run_once(
         keep_ssh_masters,
     );
     state.duration_ms = started.elapsed().as_millis() as u64;
+    // The record was built when the pass began; `finished_at_unix` promises
+    // the moment it ended, and this is the last point where that is known.
+    state.mark_finished();
     let state_dir = chat_stasher::collect::default_state_dir();
     // W880: the write is timed, then the record is rewritten once more
     // so the file on disk carries the write's own timing — the same
