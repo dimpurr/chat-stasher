@@ -39,11 +39,9 @@ function bodyWithPaths(paths: readonly string[], leaf: unknown = 'x'): Record<st
   return body;
 }
 
-/** Point the bound body path at the same id the capture's query will carry. */
-function bindQueryNamedSession(platform: ChatPlatform, body: Record<string, unknown>): void {
-  const binding = QUERY_ID_BINDINGS[platform.id];
-  if (!binding) return;
-  const parts = binding.path.split('.');
+/** Write `value` at a dotted object path, creating the objects the path names. */
+function setAtPath(body: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
   let current = body;
   for (const part of parts.slice(0, -1)) {
     const child = current[part];
@@ -52,7 +50,14 @@ function bindQueryNamedSession(platform: ChatPlatform, body: Record<string, unkn
     }
     current = current[part] as Record<string, unknown>;
   }
-  current[parts.at(-1)!] = BOUND_SESSION_ID;
+  current[parts.at(-1)!] = value;
+}
+
+/** Point the bound body path at the same id the capture's query will carry. */
+function bindQueryNamedSession(platform: ChatPlatform, body: Record<string, unknown>): void {
+  const binding = QUERY_ID_BINDINGS[platform.id];
+  if (!binding) return;
+  setAtPath(body, binding.path, BOUND_SESSION_ID);
 }
 
 function minimumResponse(platform: ChatPlatform): string {
@@ -128,6 +133,35 @@ describe('W470 · declared platform contract matrix', () => {
       const missingField = missingRequiredResponse(platform);
       expect(matchesResponseShape(platform, missingField)).toBe(false);
       expect(isCapturedFetchShape({ ...candidate, text: missingField })).toBe(false);
+    },
+  );
+
+  // 🔴 The refusal the two cases above cannot witness: their bodies differ from a
+  //    capture only in origin, method, or row data, so deleting the id binding from
+  //    the gate would leave both green. This case differs from an accepted capture
+  //    in the bound value alone, and the row still passes — so the only thing that
+  //    can refuse it is the binding.
+  it.each(
+    PLATFORMS
+      .filter((candidate) => QUERY_ID_BINDINGS[candidate.id] !== undefined)
+      .flatMap((platform) => platform.origins.map((origin) => ({ platform, origin }))),
+  )(
+    '$platform.id refuses a row-conforming body that names another session ($origin)',
+    ({ platform, origin }) => {
+      const binding = QUERY_ID_BINDINGS[platform.id]!;
+      const path = platform.pathHints[0]!;
+      const method = platform.methods[0]!;
+      const body = JSON.parse(minimumResponse(platform)) as Record<string, unknown>;
+      setAtPath(body, binding.path, `${BOUND_SESSION_ID.slice(0, -1)}b`);
+      const text = JSON.stringify(body);
+      const candidate = capture(platform, origin, path, method, text);
+
+      expect(matchesResponseShape(platform, text)).toBe(true);
+      expect(isCapturedFetchShape(candidate)).toBe(false);
+
+      // The other half of the same gate: a request that names no session at all
+      // has nothing for the body to agree with, so it is not a capture either.
+      expect(isCapturedFetchShape({ ...candidate, url: `${origin}${path}` })).toBe(false);
     },
   );
 
