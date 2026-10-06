@@ -84,7 +84,10 @@ pub fn dimensions_from_jsonl<'a>(lines: impl IntoIterator<Item = &'a str>) -> Se
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if value.get("schema").and_then(serde_json::Value::as_str) != Some(crate::inbox::SCHEMA) {
+        if !matches!(
+            value.get("schema").and_then(serde_json::Value::as_str),
+            Some(crate::inbox::SCHEMA | crate::inbox::SEALED_SCHEMA_V3)
+        ) {
             continue;
         }
         let Some(raw) = value.get("dimensions") else {

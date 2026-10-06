@@ -800,6 +800,27 @@ enum Command {
     /// Deprecated alias for `ui`; prints a one-line notice on stderr and behaves
     /// identically. Kept for one release.
     View(UiArgs),
+    /// Backfill the audit sidecar from historical sealed bodies without rewriting them.
+    AuditBackfill {
+        /// Stage receiving the derived sidecar; source bodies remain untouched.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Partition owned by this writer.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Retained archive-wide random secret (exactly 32 bytes), outside stage.
+        #[arg(long)]
+        join_key_file: PathBuf,
+        /// Scan only the stage, explicitly excluding historical destination bodies.
+        #[arg(long)]
+        stage_only: bool,
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        key_file: Option<String>,
+    },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -1777,6 +1798,23 @@ fn run() -> ExitCode {
             &options,
             json,
             keep_ssh_masters,
+        ),
+        Command::AuditBackfill {
+            stage,
+            machine,
+            join_key_file,
+            stage_only,
+            destination,
+            repo,
+            key_file,
+        } => cmd_audit_backfill(
+            &stage,
+            machine.as_deref(),
+            &join_key_file,
+            stage_only,
+            destination,
+            repo,
+            key_file,
         ),
         Command::Ingest {
             inbox,
@@ -6472,6 +6510,78 @@ fn cmd_dest_init(
     }
     println!("[dest-init] result: COMPLETED exit_code=0 union=local+existing-destinations");
     ExitCode::SUCCESS
+}
+
+fn cmd_audit_backfill(
+    stage: &Path,
+    machine: Option<&str>,
+    join_key_file: &Path,
+    stage_only: bool,
+    destination: Option<String>,
+    repo: Option<String>,
+    key_file: Option<String>,
+) -> ExitCode {
+    let config = match config_or_refuse("audit-backfill") {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("audit-backfill", &config, machine) {
+        Ok(m) => m,
+        Err(code) => return code,
+    };
+    let result = (|| -> anyhow::Result<chat_stasher::audit_store::BackfillReport> {
+        fs::create_dir_all(stage)?;
+        let key_path = fs::canonicalize(join_key_file)
+            .map_err(|_| anyhow::anyhow!("audit join key is unreadable"))?;
+        anyhow::ensure!(
+            !key_path.starts_with(fs::canonicalize(stage)?),
+            "audit join key must be outside the stage"
+        );
+        let key = chat_stasher::audit_store::read_policy(&key_path)?;
+        if stage_only {
+            anyhow::ensure!(
+                destination.is_none() && repo.is_none() && key_file.is_none(),
+                "stage-only cannot name a destination"
+            );
+            return chat_stasher::audit_store::backfill_stage(stage, &machine, &key);
+        }
+        anyhow::ensure!(
+            destination.is_some() || repo.is_some() || config.destinations.is_empty(),
+            "name a destination for audit migration"
+        );
+        let cfg = resolve_store_config_checked(
+            &config,
+            destination.as_deref(),
+            repo,
+            key_file,
+            None,
+            &[],
+        )
+        .map_err(|_| anyhow::anyhow!("audit destination configuration is invalid"))?;
+        // Migration is read-only: it must never generate an absent masterkey.
+        let mk = store::load_key_file(&cfg)?;
+        let store = BackupStore::new(cfg, machine.clone());
+        let mut report =
+            chat_stasher::audit_store::backfill_archive(&store, &mk, stage, &machine, &key)?;
+        fs::create_dir_all(stage.join("sessions").join(&machine))?;
+        let staged = chat_stasher::audit_store::backfill_stage(stage, &machine, &key)?;
+        report.shards_scanned += staged.shards_scanned;
+        report.bodies_scanned += staged.bodies_scanned;
+        report.rows_recognized += staged.rows_recognized;
+        report.incomplete_extractions += staged.incomplete_extractions;
+        Ok(report)
+    })();
+    match result {
+        Ok(report) => {
+            println!("audit migration: scan complete; shards={} bodies={} recognized={} incomplete_extractions={}; sidecar staged",
+                report.shards_scanned, report.bodies_scanned, report.rows_recognized, report.incomplete_extractions);
+            ExitCode::SUCCESS
+        }
+        Err(_) => {
+            eprintln!("audit migration: incomplete; retained committed progress; coverage unknown");
+            ExitCode::from(3)
+        }
+    }
 }
 
 fn cmd_collect(
