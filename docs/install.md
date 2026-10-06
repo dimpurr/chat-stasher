@@ -52,10 +52,10 @@ Name the version, because the script otherwise installs the newest **stable** re
 curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
 ```
 
-If `chatstasher.com` is unreachable, the same script is on GitHub:
+If `chatstasher.com` is unreachable, fetch the script from GitHub and run it the same way:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dimpurr/chat-stasher/main/scripts/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
+curl -fsSL https://github.com/dimpurr/chat-stasher/raw/main/scripts/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
 ```
 
 If you would rather build it, you need a Rust toolchain:
