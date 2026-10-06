@@ -3257,7 +3257,6 @@ mod tests {
         )
     }
 
-
     #[test]
     fn gemini_cli_records_its_project_hash_as_the_container() {
         let line = gemini_doc(r#","projectHash":"hash-fixture""#);
