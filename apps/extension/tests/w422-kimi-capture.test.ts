@@ -1,3 +1,10 @@
+/**
+ * W422 · Synthetic fixture probe for Kimi's live capture boundary.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to kimi.com, and nothing leaves the machine.
+ */
+
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {

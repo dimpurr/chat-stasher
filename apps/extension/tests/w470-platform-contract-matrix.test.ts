@@ -90,11 +90,12 @@ function minimumResponse(platform: ChatPlatform): string {
 function missingRequiredResponse(platform: ChatPlatform): string {
   const shape = platform.responseShape;
   if (shape.encoding === 'text') return 'x';
-  // 🔴 W422 · BOTH required lists are read, in declaration order, so dropping the first
-  //    entry leaves a body the row refuses whichever of the two keys it actually uses.
-  //    `requiredPaths` alone gives an array-only row — kimi and perplexity both — nothing
-  //    to drop, so its missing-path case would be an empty body refused for the wrong
-  //    reason. Each surviving array path keeps the `[]` that satisfies it above.
+  // 🔴 W422 · BOTH required lists are read, in declaration order, so the case drops a
+  //    required path whichever list the row declares: the first scalar when there is
+  //    one, otherwise the first array path. That is what a row declaring both lists
+  //    needs — DeepSeek declares both today, where `requiredPaths` alone built `{}` and
+  //    never exercised the array requirement. A one-array-path row (kimi, perplexity)
+  //    builds `{}` either way; every surviving array path keeps the `[]` above.
   const requiredPaths = shape.requiredPaths ?? [];
   const requiredArrayPaths = shape.requiredArrayPaths ?? [];
   const keptArrayPaths = requiredPaths.length > 0 ? requiredArrayPaths : requiredArrayPaths.slice(1);
