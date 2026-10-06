@@ -33,11 +33,21 @@
 //! on every platform and pins the relation the field doc promises from the side
 //! Windows can express, and this arm is documented rather than faked — the
 //! same shape `b70_inboxfsync_test.rs` uses for its `chmod` rig.
+//!
+//! A red here can also mean the artifact, not the source. The pass this test
+//! stalls is the `chat-stasher` cargo uplifted for this package, and one build
+//! directory serving several checkouts can hand back a binary built from
+//! another one — a binary stamped before this fix fails the assertion below
+//! exactly as unfixed source does. So a red is a statement about *that binary*
+//! first: check that the artifact is this checkout's build before treating the
+//! source as the thing to change.
 
 use std::fs;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Stdio};
 use std::process::{Command, Output};
 #[cfg(unix)]
 use std::time::Duration;
@@ -51,6 +61,13 @@ mod test_support;
 /// cannot be confused with a slow spawn on either side of the assertion.
 #[cfg(unix)]
 const STALL_SECS: u64 = 3;
+
+/// How long the rig waits for the pass to arrive at the key-file read. A pass
+/// on a loaded machine can take a while to get there, so this is generous —
+/// but it is the point at which the fixture, not the source, is what failed,
+/// and the message it produces says that.
+#[cfg(unix)]
+const RENDEZVOUS_WAIT: Duration = Duration::from_secs(60);
 
 const MACHINE: &str = "mbp-test";
 const SESSION: &str = "claude-code.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
@@ -180,11 +197,20 @@ fn make_fifo(path: &Path) {
 /// reader fails with `ENXIO`, so the first one that succeeds means the pass
 /// is now inside its blocking read. Only then does the clock start, and only
 /// then does the three seconds of stall apply.
+///
+/// The child is watched while we wait, because a pass that has already exited
+/// cannot be blocked in that read. It either failed before the step this rig
+/// parks in, or the binary that ran is not the one this test means to run —
+/// and either way the premise is gone. Saying so now, with the exit status and
+/// whatever the pass wrote, is the whole point: spending the deadline first
+/// and then reporting "the pass never opened the key file" describes a pass
+/// that is still running, and leaves a fixture that never engaged looking like
+/// a source defect.
 #[cfg(unix)]
-fn block_reader(fifo: &Path) -> SystemTime {
+fn block_reader(fifo: &Path, child: &mut Child) -> SystemTime {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + RENDEZVOUS_WAIT;
     loop {
         match fs::OpenOptions::new()
             .write(true)
@@ -201,9 +227,29 @@ fn block_reader(fifo: &Path) -> SystemTime {
                 return blocked_at;
             }
             Err(e) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    // The read this rig exists to block is the one thing a
+                    // finished pass cannot be in. Read what it said while the
+                    // pipe still holds it: the write end is closed, so this
+                    // cannot wait on a process that is already gone.
+                    let mut said = Vec::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        drop(err.read_to_end(&mut said));
+                    }
+                    panic!(
+                        "the pass exited ({status}) without ever reaching the key-file read this \
+                         rig blocks, so the record below would date a pass that never got there \
+                         and the assertion would not be about timestamps at all ({e})\n\
+                         pass stderr:\n{}",
+                        String::from_utf8_lossy(&said)
+                    );
+                }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the pass never opened the key file: {e}"
+                    "the pass was still running {}s after the rig began waiting and had not \
+                     opened the key file, so the premise this test needs was never established \
+                     ({e})",
+                    RENDEZVOUS_WAIT.as_secs()
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -212,16 +258,23 @@ fn block_reader(fifo: &Path) -> SystemTime {
 }
 
 /// Keep serving the FIFO after the first release, in case the pass reads the
-/// key file a second time. Detached on purpose: it only exists so a second
-/// read cannot hang the pass past its own assertions, and the test process
-/// ends it.
+/// key file a second time.
+///
+/// Detached on purpose, and bounded by the fixture rather than by a stopwatch:
+/// it serves for as long as the FIFO exists, which is as long as the sandbox
+/// this test owns does. A fixed window was the wrong shape — a pass on a
+/// loaded machine can outlive one, and a read after it would then block on a
+/// FIFO with no writer left to release it, so the test would hang where it
+/// should have failed. It asserts nothing and reads nothing: it exists only so
+/// a second read cannot hang the pass, and the test process ends it.
 #[cfg(unix)]
 fn keep_serving(fifo: PathBuf) {
     use std::os::unix::fs::OpenOptionsExt;
 
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
+        // `metadata` stats without opening, so this test of whether the
+        // fixture still exists cannot itself block on the FIFO.
+        while fs::metadata(&fifo).is_ok() {
             if let Ok(mut writer) = fs::OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NONBLOCK)
@@ -252,8 +305,6 @@ fn finished_at_unix_is_the_second_the_pass_ended() {
     make_fifo(&key);
 
     let fifo = key.clone();
-    let blocker = std::thread::spawn(move || block_reader(&fifo));
-
     let spawn_second = now_secs();
     let child = command(
         sandbox,
@@ -270,10 +321,19 @@ fn finished_at_unix_is_the_second_the_pass_ended() {
             "--keep-ssh-masters",
         ],
     )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()
     .unwrap();
 
-    let blocked = blocker.join().expect("key-file blocker thread");
+    // The child travels with the blocker: only the thread holding it can
+    // notice that a pass which had to reach the key file never did.
+    let blocker = std::thread::spawn(move || {
+        let mut child = child;
+        let blocked = block_reader(&fifo, &mut child);
+        (blocked, child)
+    });
+    let (blocked, child) = blocker.join().expect("key-file blocker thread");
     // Polling starts before the child is waited for, so a second read of the
     // key file finds a writer instead of hanging the pass.
     keep_serving(key);
