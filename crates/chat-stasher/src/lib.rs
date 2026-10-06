@@ -22,6 +22,7 @@ pub mod inbox;
 pub mod json_out;
 pub mod keydecl;
 pub mod manifest;
+pub mod message_audit;
 pub mod metahash;
 pub mod models;
 pub mod nativehost;
