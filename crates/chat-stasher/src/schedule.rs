@@ -1404,6 +1404,23 @@ fn launchd_next_run(
             path.display()
         ));
     };
+    if slot.weekday.is_some() != slot.hour.is_some() {
+        return NextRun::Unknown(format!(
+            "the installed plist {} declares a StartCalendarInterval naming {} but not {}, a \
+             shape this tool cannot read a fire time from",
+            path.display(),
+            if slot.weekday.is_some() {
+                "a Weekday"
+            } else {
+                "an Hour"
+            },
+            if slot.weekday.is_some() {
+                "an Hour"
+            } else {
+                "a Weekday"
+            }
+        ));
+    }
     match next_calendar_occurrence(slot, now) {
         Some(when) => NextRun::Known(when.format("%a %Y-%m-%d %H:%M:%S %z").to_string()),
         None => NextRun::Unknown(
@@ -3309,6 +3326,43 @@ mod tests {
                 "launchd interval jobs expose no next fire time; the job runs every 30 minutes \
                  after load"
             )
+        );
+    }
+
+    #[test]
+    fn a_partial_calendar_shape_is_reported_as_unreadable_not_as_a_dst_gap() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        let label = launchd_label_for_destination(Unit::RunOnce, None);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>StartCalendarInterval</key>\n\
+             \t<dict>\n\
+             \t\t<key>Hour</key>\n\
+             \t\t<integer>3</integer>\n\
+             \t\t<key>Minute</key>\n\
+             \t\t<integer>17</integer>\n\
+             \t</dict>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+        fs::write(agents.join(format!("{label}.plist")), plist).expect("write plist");
+
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
+        assert_eq!(next.value(), None);
+        let note = next.note().expect("an empty answer carries its reason");
+        assert!(
+            !note.contains("daylight-saving"),
+            "a partial shape is not a DST gap: note={note}"
+        );
+        assert!(
+            note.contains("naming an Hour but not a Weekday"),
+            "the missing half is named: note={note}"
         );
     }
 
