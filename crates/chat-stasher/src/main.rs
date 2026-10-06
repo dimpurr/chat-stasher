@@ -65,6 +65,33 @@ fn say_to(out: &mut dyn std::io::Write, args: std::fmt::Arguments<'_>) {
     }
 }
 
+fn cmd_inbox_init(name: &str, locator: &str) -> ExitCode {
+    use chat_stasher::inbox_config;
+    if let Err(error) = inbox_config::validate(name, locator) {
+        eprintln!("{error}");
+        return ExitCode::from(2);
+    }
+    match inbox_config::initialize(&inbox_config::default_root(), name, locator) {
+        Ok((config, created)) => {
+            // Only the public recipient is printed, never the locator or identity.
+            println!(
+                "inbox configured: created={created}; recipient={}",
+                config.recipient()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            // Context strings are bounded and never contain backend paths or secrets.
+            eprintln!("inbox initialization failed: {error}");
+            if error.downcast_ref::<std::io::Error>().is_some() {
+                ExitCode::from(3)
+            } else {
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
 /// [`say_to`] on this process's own stdout.
 fn say(args: std::fmt::Arguments<'_>) {
     say_to(&mut std::io::stdout(), args);
@@ -168,6 +195,15 @@ enum ScheduleAction {
 enum Command {
     /// Write a commented default config if none exists (non-destructive).
     Init,
+    /// Declare a remote inbox and persist its age identity locally. No backend
+    /// is contacted. Repeating the same declaration preserves the recipient.
+    InboxInit {
+        /// Local name for this inbox.
+        name: String,
+        /// Credential-free backend locator; credentials are configured separately.
+        #[arg(long)]
+        locator: String,
+    },
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -1615,6 +1651,7 @@ fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init => cmd_init(),
+        Command::InboxInit { name, locator } => cmd_inbox_init(&name, &locator),
         Command::Setup {
             stage,
             destination,
