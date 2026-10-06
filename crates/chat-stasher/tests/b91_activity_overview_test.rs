@@ -335,6 +335,22 @@ fn grok_cli_envelope(session: &str) -> String {
     )
 }
 
+/// One synthetic Grok browser-extension bundle, the web payload that shares the
+/// `grok` harness name with the CLI.
+fn grok_web_bundle(create_time: &str) -> String {
+    let body = serde_json::json!({
+        "responses": [ { "createTime": create_time } ],
+    })
+    .to_string();
+    serde_json::json!({
+        "schema": "chat-stasher/inbox@2",
+        "platform": "grok",
+        "sessionId": "s1",
+        "raw": { "text": body, "bytes": body.len() },
+    })
+    .to_string()
+}
+
 /// TICKET-4D-07 · the `projectHash` a gemini-cli session document states about
 /// itself reaches the written index as the session's `container` — a
 /// repository/workspace identity, never a working directory.
@@ -603,6 +619,53 @@ fn activity_index_leaves_an_unrecorded_grok_cwd_absent() {
         row.get("dimensions").is_none(),
         "an empty cwd is nothing observed, so no dimension object is written: {}",
         row
+    );
+}
+
+/// The browser-extension bundle shares the `grok` name but is a web payload,
+/// not a `session_docs` row: it states no working directory, and the written
+/// index must not state one for it either.
+#[test]
+fn activity_index_reads_no_grok_dimension_from_a_web_bundle() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "grok.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[grok_web_bundle("2025-01-15T12:34:56.789Z")],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["last_unix"].as_i64(),
+        Some(1_736_944_496),
+        "the web bundle is indexed as the session it always was"
+    );
+    assert!(
+        row.get("dimensions").is_none(),
+        "a web bundle states no working directory, and none is invented: {row}"
     );
 }
 
