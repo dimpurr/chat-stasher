@@ -118,6 +118,13 @@ impl SessionProvenance {
     pub fn insert_cwd(&mut self, value: impl Into<String>) {
         insert(&mut self.cwd, value.into());
     }
+
+    /// Add one observed container without replacing another's. An empty value
+    /// is not a container: it is nothing observed, and recording it would make
+    /// every session that recorded none comparable with every other one.
+    pub fn insert_container(&mut self, value: impl Into<String>) {
+        insert(&mut self.container, value.into());
+    }
 }
 
 /// Add one value to one dimension, keeping that vector a sorted set: a value the
