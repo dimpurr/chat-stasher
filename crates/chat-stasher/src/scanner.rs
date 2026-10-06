@@ -2919,7 +2919,11 @@ fn descend_scope(
     // declares a two-level rule (DeepSeek Harness) names its segment by a
     // lossy cwd slug, which is a path derivative and never a container
     // identity (`cwd ≠ repo identity`), so only Kimi Code reads the parent
-    // segment as a workspace.
+    // segment as a workspace. The depth is counted from the walked root,
+    // so the segment is a workspace identity only when that root is the
+    // harness's own sessions directory — the same anchoring the
+    // per-session index (`kimi_work_dirs`) is held to for the cwd it
+    // reads.
     let container =
         (source == HarnessSource::KimiCode && components.len() == 2).then(|| components[0].clone());
     SessionScope::In {
@@ -2960,6 +2964,13 @@ fn collect_records(
     // recorded for a session, which makes it the session's observed
     // cwd. An absent, unreadable or malformed index observes
     // nothing, and so does a session the index holds no line for.
+    // Both Kimi dimensions are anchored to that root being the
+    // harness's own sessions directory: the index is looked up at the
+    // root's parent, and the workspace segment is the one exactly two
+    // levels below the root. A scan root that is not that directory —
+    // a `harness_roots` override pointing at `<home>` itself or at a
+    // session directory — leaves the container and the indexed cwd
+    // unobserved, never mislabeled.
     let session_index = if source == HarnessSource::KimiCode {
         kimi_work_dirs(root)
     } else {
@@ -3031,6 +3042,13 @@ fn collect_records(
 /// line is a JSON object; a line that is not JSON, or that carries
 /// no `sessionId` or no non-empty `workDir`, contributes nothing —
 /// absence is not an empty working directory.
+///
+/// "Beside the sessions root" is the anchoring contract: a walk root
+/// that is not the harness's `sessions` directory itself — a
+/// `harness_roots` override pointed at `<home>` or at a session
+/// directory — looks the index up under the wrong parent and observes
+/// no working directory, the same outcome as a session the index
+/// holds no line for.
 fn kimi_work_dirs(root: &Path) -> BTreeMap<String, String> {
     let Some(index) = root.parent().map(|home| home.join("session_index.jsonl")) else {
         return BTreeMap::new();
@@ -3143,6 +3161,7 @@ enum RecordBuild {
     Record(SessionRecord),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record(
     path: &Path,
     expected: HarnessSource,
