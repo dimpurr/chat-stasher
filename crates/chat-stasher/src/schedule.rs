@@ -1400,7 +1400,7 @@ fn launchd_next_run(
     let Some(slot) = plist_calendar_slot(&text) else {
         return NextRun::Unknown(format!(
             "the installed plist {} declares neither StartInterval nor a StartCalendarInterval \
-             naming Weekday, Hour and Minute, so no next fire time can be derived from it",
+             naming a Minute, so no next fire time can be derived from it",
             path.display()
         ));
     };
