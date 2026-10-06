@@ -43,19 +43,19 @@ Homebrew installs the same checksummed release binary, and `brew upgrade` update
 
 ### Linux
 
-Prebuilt Linux binaries are published from **0.5.0**: `chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64`. They are built against musl and statically linked, so one binary covers every distribution and no libc version has to match. The install script installs them the way it installs a Mac build.
+Prebuilt Linux binaries are published from **0.5.0-rc.2**: `chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64`. They are built against musl and statically linked, so one binary covers every distribution and no libc version has to match. The install script installs them the way it installs a Mac build.
 
-<!-- RELEASE GATE: the version named in the command below must be released. Until it is, the same command works with a 0.5.0 release candidate named explicitly. -->
+<!-- RELEASE GATE: the version named in the command below must be released. Until the 0.5.0 stable tag is pushed, the same command works with the 0.5.0-rc.2 release candidate named explicitly. -->
 Name the version, because the script otherwise installs the newest **stable** release, and a release from before the Linux binaries existed has none for this platform. It refuses rather than installing something that would not run:
 
 ```sh
-curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
+curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=0.5.0-rc.2 sh
 ```
 
 If `chatstasher.com` is unreachable, fetch the script from GitHub and run it the same way:
 
 ```sh
-curl -fsSL https://github.com/dimpurr/chat-stasher/raw/main/scripts/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
+curl -fsSL https://github.com/dimpurr/chat-stasher/raw/main/scripts/install.sh | CHAT_STASHER_VERSION=0.5.0-rc.2 sh
 ```
 
 If you would rather build it, you need a Rust toolchain:
@@ -73,7 +73,7 @@ The support table in the [README](../README.md#support-at-a-glance) shows where 
 
 ### Windows
 
-A prebuilt `chat-stasher-windows-x86_64.exe` is published from **0.5.0**. The install script does not install it: it is a POSIX `sh` script, so on Windows it prints that asset's URL and stops rather than pretending. Download the file, put it anywhere on your `PATH`, and run `chat-stasher doctor`.
+A prebuilt `chat-stasher-windows-x86_64.exe` is published from **0.5.0-rc.2**, the same pre-release that carries the Linux binaries. The install script does not install it: it is a POSIX `sh` script, so on Windows it prints that asset's URL and stops rather than pretending. Download the file, put it anywhere on your `PATH`, and run `chat-stasher doctor`.
 
 Two things are known about Windows, and neither is a promise:
 
@@ -82,8 +82,8 @@ Two things are known about Windows, and neither is a promise:
 
 ### npm and cargo
 
-<!-- RELEASE GATE: 0.5.0 must be published to both registries before this section is accurate. Until then the npm package resolves only for the 0.5.0 prerelease, and `cargo install chat-stasher` finds no crate. -->
-From **0.5.0**, a release is also published to two package registries, for platforms the install script does not cover and for people who install everything that way:
+<!-- RELEASE GATE: the 0.5.0 stable tag must be published to both registries before this section is accurate. Until then the npm package resolves only for the 0.5.0-rc.2 prerelease, and `cargo install chat-stasher` finds no crate — crates.io has no `chat-stasher` crate at all (404), so that command does not work yet. -->
+From **0.5.0-rc.2**, the npm package is published for platforms the install script does not cover and for people who install everything that way. `cargo install chat-stasher` is not yet available: the crate has never been published.
 
 ```sh
 npm install -g chat-stasher

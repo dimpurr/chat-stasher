@@ -51,7 +51,7 @@ curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=<version> s
 
 Windows is not installed by this script, because it is a POSIX `sh` script: it prints the URL of the `.exe` release asset to download instead.
 
-Alternative installs, published from 0.5.0: `npm install -g chat-stasher` (a launcher, so it needs Node 18 or newer and nothing to compile) and `cargo install chat-stasher`. To build from source, `cargo build --release`, then **copy the binary out of `target/`**: timers and the browser host record the binary's path, and a path inside `target/` stops working after `cargo clean`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
+Alternative installs, published from 0.5.0-rc.2: `npm install -g chat-stasher` (a launcher, so it needs Node 18 or newer and nothing to compile). `cargo install chat-stasher` is not yet available — the crate has never been published to crates.io. To build from source, `cargo build --release`, then **copy the binary out of `target/`**: timers and the browser host record the binary's path, and a path inside `target/` stops working after `cargo clean`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
 
 ## Step 1: check the machine
 

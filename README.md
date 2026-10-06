@@ -31,7 +31,7 @@ chat-stasher init && chat-stasher run-once --stage ~/stash/chat-stasher/stage
 
 The first command installs the CLI into `~/.local/bin` (checksum-verified, no `sudo`); the `export` is the line the installer prints when that folder is not already on your `PATH`, and running it twice is harmless. `doctor` changes nothing; `run-once` makes your first local, encrypted archive.
 
-The install script places a prebuilt macOS binary today. Linux and Windows builds arrive with **0.5.0**; until then those platforms build from source. All of it is in [Install](#install), and backups to a remote and scheduling are in [Your first archive](#your-first-archive).
+The install script places a prebuilt macOS binary today. Linux and Windows builds arrive with **0.5.0-rc.2** (a pre-release, so name it explicitly with `CHAT_STASHER_VERSION=0.5.0-rc.2`); until the 0.5.0 stable tag ships, those platforms build from source. All of it is in [Install](#install), and backups to a remote and scheduling are in [Your first archive](#your-first-archive).
 
 ## Why this exists
 
@@ -82,7 +82,7 @@ Once the Homebrew tap formula has been merged and verified with a clean Mac inst
 brew install dimpurr/tap/chat-stasher
 ```
 
-**Linux and Windows:** there is no prebuilt binary in a stable release yet. Both arrive with 0.5.0, a statically linked Linux binary for x86-64 and arm64 and an `.exe` for Windows. Until then, build from source with `cargo build --release`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
+**Linux and Windows:** the prebuilt binaries exist in the `0.5.0-rc.2` pre-release — a statically linked Linux binary for x86-64 and arm64 and an `.exe` for Windows. That tag is a prerelease, so the install script does not install it by default; name it explicitly with `CHAT_STASHER_VERSION=0.5.0-rc.2`. Until the 0.5.0 stable tag ships, build from source with `cargo build --release`. [docs/install.md](docs/install.md) covers each system, updating and uninstalling.
 
 ### The browser extension
 
@@ -302,7 +302,7 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 
 - **No `restore` command.** Sessions come out with `read` and `export`, but nothing writes them back into a tool.
 - **The extension is not in a store**, and backfill is not yet verified end to end on any platform.
-- **No prebuilt Linux or Windows binary in a stable release yet**; they arrive with 0.5.0.
+- **No prebuilt Linux or Windows binary in a stable release yet**; they exist in the `0.5.0-rc.2` pre-release, which the install script does not install by default — name it with `CHAT_STASHER_VERSION=0.5.0-rc.2`.
 - **Text search uses a local plaintext index by default.** `chat-stasher search --text` reads the index built in the operating-system cache by `chat-stasher index build`; it searches indexed titles and conversation text, and can also match a session ID. Search does not compare indexed text with archive contents: after archive changes, the index reflects its last build until rebuilt. New selected sessions are reported as missing; if a changed session cannot be re-read during a build, its previous text may still match but the session is no longer counted as covered. With `--scan`, the CLI reads the selected conversations from the archive and searches their text directly, including queries shorter than the index's three-character minimum. Index-mode results report coverage for the selected sessions, while scan-mode results report sessions it could not read. See the [CLI guide](docs/cli.md#search) for details.
 
 ## Roadmap

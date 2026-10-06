@@ -87,7 +87,7 @@ brew untap dimpurr/chat-stasher
 | --- | --- |
 | macOS arm64 (Apple Silicon) | ✅ prebuilt, v0.2.0 |
 | macOS x86_64 (Intel) | ✅ prebuilt, v0.2.0 |
-| Linux | ❌ not shipped by this tap — and, as of 2026-09-25, not carried by any Release either: the release workflow builds `chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64` (static musl builds) on a version tag, but no version tag has been pushed since those jobs were added, so no Release holds one. The newest Release, v0.4.0, carries two macOS binaries, the extension zip and `SHA256SUMS` only (`gh release view v0.4.0`, 2026-09-25). `scripts/install.sh` has an install path for Linux and reads that manifest first, so on Linux it refuses today rather than fetching a file the release does not have. A Homebrew formula for them, with its own bottles, would be separate work for this tap |
+| Linux | ❌ not shipped by this tap. Prebuilt Linux binaries exist in the `0.5.0-rc.2` pre-release (`chat-stasher-linux-x86_64` and `chat-stasher-linux-arm64`, static musl builds) but no stable Release carries one yet, so `scripts/install.sh` refuses on Linux rather than fetching a file the release does not have. The newest stable Release, v0.4.0, carries two macOS binaries, the extension zip and `SHA256SUMS` only (`gh release view v0.4.0`, 2026-09-25). A Homebrew formula for them, with its own bottles, would be separate work for this tap |
 
 For a platform without a prebuilt binary, build from source:
 

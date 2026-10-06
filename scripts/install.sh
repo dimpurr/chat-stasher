@@ -39,7 +39,7 @@ set -eu
 #    "this is the version you got without asking for one" rather than leaving
 #    the reader to work out why the documented command failed.
 # ---------------------------------------------------------------------------
-DEFAULT_VERSION="0.5.0"
+DEFAULT_VERSION="0.4.0"
 VERSION="${CHAT_STASHER_VERSION:-$DEFAULT_VERSION}"
 
 # Where the binary + SHA256SUMS live. The default is the tagged GitHub release
