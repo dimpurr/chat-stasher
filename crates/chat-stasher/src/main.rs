@@ -6715,7 +6715,7 @@ fn cmd_run_once(
             state.phases.run_state_write_ms = write_started.elapsed().as_millis() as u64;
             state.phases.state_saves += 1;
             if let Err(e) = chat_stasher::runstate::save(&state_dir, &state) {
-                eprintln!("[run-once] warning: run-state not recorded: {e:#}");
+                eprintln!("[run-once] warning: run-state saved without write timing: {e:#}");
             }
         }
         Err(e) => {
