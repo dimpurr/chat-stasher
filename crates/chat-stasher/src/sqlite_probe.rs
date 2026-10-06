@@ -1708,10 +1708,13 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
 /// NULL when the thread belongs to no folder. The array is the shape the 4D
 /// projection in `activity.rs` reads: NULL stays NULL and an empty list
 /// becomes an empty array, so "no folder observed" has exactly one spelling
-/// per state instead of a string that might be empty, absent, or blank.
+/// per state instead of a string that might be empty, absent, or blank. A
+/// value of any other type is not a path list either, so it stays NULL too —
+/// a hex or numeric spelling would reach the projection as a folder identity
+/// the column never held.
 fn folder_paths_to_json(value: ValueRef<'_>) -> Value {
     let ValueRef::Text(bytes) = value else {
-        return sqlite_value_to_json(value, false);
+        return Value::Null;
     };
     let paths: Vec<Value> = String::from_utf8_lossy(bytes)
         .lines()
@@ -3497,6 +3500,61 @@ mod zed_tests {
             val["session"]["folder_paths"],
             Value::Null,
             "a thread with no folder records no folder: NULL stays NULL"
+        );
+    }
+
+    /// TICKET-4D-09: a `folder_paths` value that is not text is not
+    /// a path list, so the export keeps it unobserved. A hex or
+    /// numeric spelling would travel to the 4D projection, which
+    /// reads every string as the newline-separated folder list and
+    /// would record it as a folder identity the column never held.
+    #[test]
+    fn zed_export_keeps_a_non_text_folder_paths_unobserved() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        let raw_json = br#"{"title":"synthetic-title","messages":[]}"#;
+        let compressed = zstd::encode_all(&raw_json[..], 3).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "synthetic-zed-blob",
+                "synthetic-summary",
+                "2026-10-03T10:00:00.000000+00:00",
+                "zstd",
+                compressed,
+                Option::<String>::None,
+                vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8],
+                Option::<String>::None,
+                "2026-10-03T09:00:00.000000+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let snapshot = read_zed_session(&db, &spec, "synthetic-zed-blob").unwrap();
+        let val: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            val["session"]["folder_paths"],
+            Value::Null,
+            "a value that is not a path list records no folder"
         );
     }
 

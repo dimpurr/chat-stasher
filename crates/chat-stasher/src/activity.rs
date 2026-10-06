@@ -2457,12 +2457,15 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
 /// table's `folder_paths` column, which `read_zed_session` exports onto the
 /// session envelope (`session.folder_paths`).
 ///
-/// The folders are the thread's project/workspace identities, so every one is
-/// recorded as a `container`; the first entry — the primary folder the thread
-/// was created against, lexicographically first as Zed stores them — is also
-/// the session's `cwd`, the working directory the session ran in. Both
-/// dimensions come from the one recorded fact, and neither is ever inferred:
-/// a NULL or empty `folder_paths` leaves both unobserved.
+/// The folders are the thread's project/workspace identities, so every
+/// one is recorded as a `container` — and never as a `cwd`: a workspace
+/// identity is not an OS execution location (the `cwd ≠ repo identity`
+/// rule, the one `projectHash` is held to as well), and Zed stores the
+/// list sorted, so its first entry is a sort artifact, not a recorded
+/// "primary" folder. The `threads` table states no working directory at
+/// all, so a Zed session's `cwd` stays unobserved — the honest answer
+/// for a dimension nothing was read from. A NULL or empty `folder_paths`
+/// leaves the container dimension unobserved too.
 ///
 /// Two column shapes are read, both honestly the same fact: the array
 /// [`crate::sqlite_probe::read_zed_session`] exports today, and the raw
@@ -2487,10 +2490,6 @@ fn fold_zed_dimensions(
             .collect(),
         _ => return,
     };
-    let Some(primary) = paths.first() else {
-        return;
-    };
-    dimensions.insert_cwd(primary.clone());
     for path in paths {
         dimensions.insert_container(path);
     }
@@ -3153,8 +3152,8 @@ mod tests {
     // --------------------------------------------------- TICKET-4D-09 · zed
     //
     // The workspace folders Zed's `threads.folder_paths` column records for a
-    // thread: every folder is a project/workspace identity (`container`), and
-    // the first entry is the session's working directory (`cwd`).
+    // thread: every folder is a project/workspace identity (`container`).
+    // The table states no working directory, so `cwd` stays unobserved.
 
     /// One archived Zed session envelope, spelled the way
     /// `read_sqlite_session`'s Zed route writes it.
@@ -3227,14 +3226,15 @@ mod tests {
     }
 
     #[test]
-    fn zed_records_its_workspace_folders_as_container_and_the_first_as_cwd() {
+    fn zed_records_its_workspace_folders_as_containers_never_a_cwd() {
         let line = zed_envelope(r#"["/w/one","/w/two"]"#);
         let row = build_row("s", "mbp", "zed", &[line.as_str()]);
         assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
-        assert_eq!(
-            row.dimensions.cwd,
-            ["/w/one"],
-            "the primary folder is the session's working directory"
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a workspace identity is not an OS execution location, so it \
+             never becomes a cwd: {:?}",
+            row.dimensions.cwd
         );
     }
 
@@ -3286,7 +3286,12 @@ mod tests {
         let line = zed_envelope("\"/w/one\\n/w/two\"");
         let row = build_row("s", "mbp", "zed", &[line.as_str()]);
         assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
-        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "the legacy text shape carries folders, not a working \
+             directory: {:?}",
+            row.dimensions.cwd
+        );
     }
 
     #[test]
@@ -3991,7 +3996,10 @@ mod tests {
         let line = zed_envelope(r#"["/w/one"]"#);
         let json = to_jsonl(&build_row("s", "mbp", "zed", &[line.as_str()]));
         assert!(json.contains(r#""container":["/w/one"]"#), "line: {json}");
-        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""cwd":[]"#) || !json.contains("\"cwd\""),
+            "a workspace identity is never a working directory: {json}"
+        );
     }
 
     // ------------------------------------------------- W219 · account keys
