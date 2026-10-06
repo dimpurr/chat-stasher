@@ -152,3 +152,17 @@ pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-linux-x86_64"
 # URL names, so the override names it exactly as it is published.
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-url = "{ repo }/releases/download/v{ version }/chat-stasher-windows-x86_64.exe"
+
+# RI-5 optional inbox transport and producer encryption; no archive key on send.
+[dependencies.age]
+version = "0.11.1"
+default-features = false
+[dependencies.ed25519-dalek]
+version = "2.2.0"
+[dependencies.opendal]
+version = "=0.57.0"
+default-features = false
+features = ["blocking", "services-memory"]
+[dev-dependencies.tokio]
+version = "1"
+features = ["rt-multi-thread"]

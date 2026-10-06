@@ -2088,6 +2088,12 @@ println      crates/chat-stasher/src/remote_err.rs:525  "[trust-host]   {fingerp
 println      crates/chat-stasher/src/remote_err.rs:528  "[trust-host] compare the fingerprints above with the ones your provider publishes before this file is used for a real connection."
 println      crates/chat-stasher/src/remote_err.rs:536  "[trust-host] records written:"
 println      crates/chat-stasher/src/remote_err.rs:538  "[trust-host]   {line}"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:31  "inbox upload unavailable"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:47  "inbox listing unavailable: waiting count unknown"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:77  "inbox fetch unavailable"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:86  "inbox fetch unavailable"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:88  "inbox fetch unavailable"
+anyhow       crates/chat-stasher/src/remote_inbox.rs:97  "inbox retirement unavailable"
 with_context crates/chat-stasher/src/runstate.rs:242  "create state dir {}"
 context      crates/chat-stasher/src/runstate.rs:245  "serialise run state"
 eprintln     crates/chat-stasher/src/scanner.rs:2788  "warning: cannot expand path `{p}`: {e}"
@@ -2150,6 +2156,10 @@ help_doc     crates/chat-stasher/src/selector.rs:366  DEPRECATED, use `--since`/
 help_doc     crates/chat-stasher/src/selector.rs:367  session's conversation time, unix seconds.
 help_doc     crates/chat-stasher/src/selector.rs:370  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive upper bound on the
 help_doc     crates/chat-stasher/src/selector.rs:371  session's conversation time, unix seconds.
+anyhow       crates/chat-stasher/src/send.rs:36  "invalid send bundle"
+anyhow       crates/chat-stasher/src/send.rs:78  "send input unreadable"
+anyhow       crates/chat-stasher/src/send.rs:82  "send input unreadable"
+anyhow       crates/chat-stasher/src/send.rs:87  "send input file name invalid"
 bail         crates/chat-stasher/src/shard_writer.rs:102  "seal target already exists: {}"
 with_context crates/chat-stasher/src/shard_writer.rs:105  "seal rename {} -> {}"
 with_context crates/chat-stasher/src/shard_writer.rs:118  "create {}"
