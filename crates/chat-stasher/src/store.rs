@@ -1699,7 +1699,7 @@ fn write_sealed_shard_raw_with_policy(
     allow_exact_repeat: bool,
 ) -> anyhow::Result<String> {
     assert_stage_writer_audited(writer)?;
-    crate::shard_writer::write_shard(
+    let written = crate::shard_writer::write_shard(
         stage_root,
         machine,
         session_id,
@@ -1709,8 +1709,16 @@ fn write_sealed_shard_raw_with_policy(
             writer,
             allow_exact_repeat,
         },
-    )
-    .map(crate::shard_writer::ShardWrite::filename)
+    )?;
+    let filename = written.filename();
+    if writer == StageWriter::Collect {
+        if let Some(key) = crate::audit_store::configured_policy(stage_root)? {
+            crate::audit_store::record_collected_shard(
+                stage_root, machine, session_id, &filename, &key,
+            )?;
+        }
+    }
+    Ok(filename)
 }
 
 /// Find an already sealed shard with the same SHA-256 in one session.

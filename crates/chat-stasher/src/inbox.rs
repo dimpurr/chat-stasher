@@ -70,8 +70,10 @@ pub const STAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// a deadline — the blocking `lock` has none — so the wait is a poll loop, and
 /// this is how coarse that poll is.
 const STAGE_LOCK_POLL: Duration = Duration::from_millis(25);
-/// Staging shard line schema (same as the bundle schema).
+/// Legacy sealed-record marker, independent of the incoming bundle version.
 pub const SCHEMA: &str = "chat-stasher/inbox@1";
+/// New capture shape; old bundles retain their legacy sealed bytes.
+pub const SEALED_SCHEMA_V3: &str = "chat-stasher/inbox@3";
 /// Version of the local consumed-file audit state.
 const AUDIT_STATE_VERSION: u32 = 1;
 const AUDIT_STATE_FILE: &str = "consumed-audit-v1.json";
@@ -827,14 +829,6 @@ pub fn seal_payload(
     let file_bytes = bytes.len() as u64;
 
     let parsed = parse_bundle(source_file, bytes).map_err(SealError::Other)?;
-    // RI-3b validates the new contract; RI-3d owns archive wiring and readback.
-    // Never seal encoded bytes into an old web-only record shape.
-    if matches!(parsed.raw, Some(BundleRaw::Slice(_))) {
-        return Err(SealError::Other(anyhow::anyhow!(
-            "harness-file archive wiring is not implemented"
-        )));
-    }
-
     // W306: refuse a fixture identity before the stage is touched at all — the
     // lock file below is itself a write into the stage, so the check has to
     // precede it, not just the shard. A fixture identity aimed at a temp stage
@@ -855,11 +849,27 @@ pub fn seal_payload(
             return Err(SealError::IdentityCollision);
         }
     }
+    let audit_key = crate::audit_store::configured_policy(stage).map_err(SealError::Other)?;
     let session_dir = store::session_shard_dir(stage, machine, &parsed.id);
 
     // Content-addressed idempotency: identical raw bytes already archived?
     let known = existing_file_shas(&session_dir).map_err(SealError::Other)?;
     if let Some(matched_shard) = known.get(&file_sha256) {
+        if let Some(key) = &audit_key {
+            let path = store::sealed_shard_entries(&session_dir)
+                .map_err(SealError::Other)?
+                .into_iter()
+                .find(|(_, path)| {
+                    path.file_name()
+                        .is_some_and(|name| name == matched_shard.as_str())
+                })
+                .map(|(_, path)| path)
+                .ok_or_else(|| SealError::Other(anyhow::anyhow!("audit retry body is missing")))?;
+            let raw = fs::read(path)
+                .map_err(|_| SealError::Other(anyhow::anyhow!("audit retry body is unreadable")))?;
+            crate::audit_store::record_shard(stage, machine, &parsed.id, &raw, key, true)
+                .map_err(SealError::Other)?;
+        }
         return Ok(SealOutcome::Duplicate(Duplicate {
             source_file: source_file.to_string(),
             id: parsed.id.clone(),
@@ -869,9 +879,21 @@ pub fn seal_payload(
     }
 
     let record = ShardRecord {
+        schema: if parsed.v3.is_some() {
+            SEALED_SCHEMA_V3
+        } else {
+            SCHEMA
+        },
+        kind: if parsed.v3.is_some() {
+            if matches!(parsed.raw, Some(BundleRaw::Slice(_))) {
+                "harness-file"
+            } else {
+                "web-capture"
+            }
+        } else {
+            parsed.kind
+        },
         v3: parsed.v3,
-        schema: SCHEMA,
-        kind: parsed.kind,
         id: parsed.id.clone(),
         platform: parsed.platform,
         session_id: parsed.session_id,
@@ -899,8 +921,19 @@ pub fn seal_payload(
         .context("serialise shard record")
         .map_err(SealError::Other)?;
 
-    let shard = write_shard_atomic(stage, machine, &parsed.id, &[line], bucket_cap)
-        .map_err(SealError::Other)?;
+    let shard = write_shard_atomic(
+        stage,
+        machine,
+        &parsed.id,
+        std::slice::from_ref(&line),
+        bucket_cap,
+    )
+    .map_err(SealError::Other)?;
+
+    if let Some(key) = &audit_key {
+        crate::audit_store::record_shard(stage, machine, &parsed.id, line.as_bytes(), key, true)
+            .map_err(SealError::Other)?;
+    }
 
     Ok(SealOutcome::Stored(Consumed {
         source_file: source_file.to_string(),
@@ -987,7 +1020,7 @@ fn install_identity_conflicts(
     Ok(false)
 }
 
-/// Is `bytes` a bundle that would be archived as a `kind: "bundle"` record —
+/// Is `bytes` a validated bundle rather than a degraded raw-only record —
 /// i.e. would it *survive* `parse_bundle` without degrading to the raw-only
 /// fallback?
 ///
@@ -2853,28 +2886,6 @@ mod contract_v3_tests {
     }
 
     #[test]
-    fn harness_archive_wiring_is_explicitly_deferred_without_touching_stage() {
-        let dir = tempfile::tempdir().unwrap();
-        let stage = dir.path().join("stage");
-        let bytes = include_bytes!("../../../contracts/fixtures/inbox/harness-raw.json");
-        assert!(check_bundle(bytes).is_ok());
-        let error = seal_payload(
-            "synthetic.json",
-            bytes,
-            &stage,
-            "synthetic-machine",
-            100,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("harness-file archive wiring is not implemented"));
-        assert!(!stage.exists());
-    }
-
-    #[test]
     fn web_v3_capture_metadata_survives_the_existing_writer() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = include_bytes!("../../../contracts/fixtures/inbox/web-full.json");
@@ -2900,7 +2911,7 @@ mod contract_v3_tests {
         let input: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(record["fidelity"], input["fidelity"]);
         assert_eq!(record["dimensions"], input["dimensions"]);
-        assert_eq!(record["schema"], SCHEMA);
+        assert_eq!(record["schema"], SEALED_SCHEMA_V3);
     }
 }
 
