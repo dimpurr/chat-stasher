@@ -1688,6 +1688,7 @@ fn run() -> ExitCode {
             connections,
             &options,
             keep_ssh_masters,
+            None,
         ),
         Command::Status {
             sessions,
@@ -2404,6 +2405,9 @@ struct ActivityIndexOutcome {
     out_path: PathBuf,
     /// Wall-clock time the rebuild took.
     elapsed: std::time::Duration,
+    /// W880: shard-body bytes the rebuild read and hashed. Sessions
+    /// with no body in the stage read nothing.
+    shard_bytes_read_hashed: u64,
 }
 
 /// Why an activity-index rebuild failed, in the two failure families the
@@ -2602,6 +2606,9 @@ fn rebuild_activity_index(
         .map_err(|e| ActivityIndexError::Write(format!("cannot create activity index: {e}")))?;
     let mut rows_written = 0usize;
     let mut sessions_without_harness = 0usize;
+    // W880: shard-body bytes read and hashed across every
+    // indexed session.
+    let mut shard_bytes_read_hashed = 0u64;
     for session_dir in session_dirs {
         let session_id = session_dir
             .file_name()
@@ -2741,6 +2748,9 @@ fn rebuild_activity_index(
                 }
             };
             hasher.update(&bytes);
+            // W880: shard-body bytes read and hashed for the row's
+            // measured body.
+            shard_bytes_read_hashed += bytes.len() as u64;
             shard_bodies.push(bytes);
         }
         let duplicate_indices: BTreeSet<_> = if index_shard_policy.collapses() {
@@ -2814,6 +2824,7 @@ fn rebuild_activity_index(
         sessions_without_harness,
         out_path,
         elapsed: started.elapsed(),
+        shard_bytes_read_hashed,
     })
 }
 
@@ -6664,9 +6675,9 @@ fn print_collect_report(
 /// timer-visibility feature needs: whatever happened — success, no-op or
 /// failure — one `run-state.json` is written before we return.
 ///
-/// Deliberately silent: a write failure is reported on stderr only, and
-/// nothing about this record is printed on the happy path, so scheduled runs
-/// look exactly as they did before.
+/// The record itself stays off stdout except for the one W880 phase
+/// summary line, which is printed on every outcome; a write failure is
+/// reported on stderr only.
 fn cmd_run_once(
     stage: &Path,
     machine: Option<String>,
@@ -6694,9 +6705,26 @@ fn cmd_run_once(
     );
     state.duration_ms = started.elapsed().as_millis() as u64;
     let state_dir = chat_stasher::collect::default_state_dir();
-    if let Err(e) = chat_stasher::runstate::save(&state_dir, &state) {
-        eprintln!("[run-once] warning: run-state not recorded: {e:#}");
+    // W880: the write is timed, then the record is rewritten once more
+    // so the file on disk carries the write's own timing — the same
+    // bytes plus one integer, so the second write costs what the
+    // first did. One logical run-state save per pass.
+    let write_started = std::time::Instant::now();
+    match chat_stasher::runstate::save(&state_dir, &state) {
+        Ok(()) => {
+            state.phases.run_state_write_ms = write_started.elapsed().as_millis() as u64;
+            state.phases.state_saves += 1;
+            if let Err(e) = chat_stasher::runstate::save(&state_dir, &state) {
+                eprintln!("[run-once] warning: run-state saved without write timing: {e:#}");
+            }
+        }
+        Err(e) => {
+            eprintln!("[run-once] warning: run-state not recorded: {e:#}");
+        }
     }
+    // W880: one summary line per pass, on every outcome — the
+    // scheduled command's only stdout is what a timer leaves behind.
+    println!("{}", state.phases.summary_line());
     code
 }
 
@@ -6894,6 +6922,17 @@ fn run_once_pass(
     state.shards_written = report.shards_written;
     state.collect_errors = report.errors.len();
     state.archive_gaps = report.archive_gaps.len();
+    // W880: the collect-phase record the report already measured.
+    state.phases.scan_ms = report.scan_ms;
+    state.phases.collect_ms = report.collect_ms;
+    state.phases.collect_harness_ms = report.collect_harness_ms.clone();
+    state.phases.records_scanned = report.scanned_records as u64;
+    state.phases.files_statted = report.files_statted;
+    state.phases.source_bytes_read = report.source_bytes_read;
+    state.phases.shard_bytes_read_hashed = report.shard_bytes_read_hashed;
+    state.phases.sqlite_sessions_queried = report.sqlite_sessions_queried;
+    state.phases.sqlite_sessions_exported = report.sqlite_sessions_exported;
+    state.phases.state_saves = report.state_saves;
     print_collect_report(&report, stage, &state_dir, &machine_name);
     if !report.errors.is_empty() || !report.archive_gaps.is_empty() {
         eprintln!(
@@ -6905,6 +6944,8 @@ fn run_once_pass(
         return (ExitCode::FAILURE, state);
     }
 
+    // W880: stage audit — counting the sealed shards in the stage.
+    let audit_started = std::time::Instant::now();
     let stage_shards = match store::sealed_shard_count(stage) {
         Ok(count) => count,
         Err(e) => {
@@ -6913,11 +6954,15 @@ fn run_once_pass(
             return (ExitCode::FAILURE, state);
         }
     };
+    state.phases.stage_audit_ms = audit_started.elapsed().as_millis() as u64;
     state.stage_shards = stage_shards;
     // This guard used to refuse any shard-less stage: while readers looked only at the
     // newest snapshot per machine, an empty snapshot made the machine look as if it
     // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
     // only when the stage holds neither sealed shards nor machine metadata/status reports.
+    // W880: metadata hash — hashing the machine's metadata to
+    // decide whether this pass pushes.
+    let meta_started = std::time::Instant::now();
     let (has_content, changed) = match chat_stasher::metahash::evaluate_run_once_change(
         stage,
         &machine_name,
@@ -6932,6 +6977,7 @@ fn run_once_pass(
             return (ExitCode::FAILURE, state);
         }
     };
+    state.phases.metadata_hash_ms = meta_started.elapsed().as_millis() as u64;
     let only_if_changed = config.push_only_if_changed.unwrap_or(true);
     let should_push = has_content && (!only_if_changed || changed);
     if !should_push {
@@ -7013,6 +7059,8 @@ fn run_once_pass(
     // period), which is nothing next to the correctness it buys.
     match rebuild_activity_index(stage, &machine_name, false) {
         Ok(outcome) => {
+            state.phases.activity_index_ms = outcome.elapsed.as_millis() as u64;
+            state.phases.shard_bytes_read_hashed += outcome.shard_bytes_read_hashed;
             println!(
                 "[run-once] activity-index: sessions={} unknown_harness={} index={} elapsed={}ms",
                 outcome.sessions_indexed,
@@ -7043,6 +7091,7 @@ fn run_once_pass(
         connections,
         options,
         keep_ssh_masters,
+        Some(&mut state.phases),
     );
     if push_code != ExitCode::SUCCESS {
         eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
@@ -8026,6 +8075,11 @@ fn cmd_push(
     connections: Option<usize>,
     options: &[String],
     keep_ssh_masters: bool,
+    // W880: when a `run-once` pass drives the push, the pass's
+    // per-phase record is handed in so the push preflight and the
+    // backup land in it. A standalone `push` has no such record
+    // and passes `None`.
+    mut metrics: Option<&mut chat_stasher::runstate::PassMetrics>,
 ) -> ExitCode {
     let config = match config_or_refuse("push") {
         Ok(config) => config,
@@ -8044,6 +8098,8 @@ fn cmd_push(
         connections,
         options,
     );
+    // W880: push preflight — the empty-stage safety scan.
+    let preflight_started = std::time::Instant::now();
     let stage_check =
         match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine) {
             Ok(check) => check,
@@ -8052,6 +8108,9 @@ fn cmd_push(
                 return ExitCode::FAILURE;
             }
         };
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.push_preflight_ms = preflight_started.elapsed().as_millis() as u64;
+    }
     println!(
         "[push] stage check   : shards={} scanner_records={} sqlite_sessions={} sqlite_unknown={} scanner_unknown={} committed_reads={}",
         stage_check.stage_shards,
@@ -8226,6 +8285,8 @@ fn cmd_push(
             return ExitCode::FAILURE;
         }
     };
+    // W880: backup — the rustic traversal and snapshot write.
+    let backup_started = std::time::Instant::now();
     let summary = match store.push(stage, &mk) {
         Ok(s) => s,
         Err(e) => {
@@ -8234,6 +8295,9 @@ fn cmd_push(
             return ExitCode::FAILURE;
         }
     };
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.backup_ms = backup_started.elapsed().as_millis() as u64;
+    }
     let was_init = summary.repo_was_init;
     println!(
         "[push] {} {}",
