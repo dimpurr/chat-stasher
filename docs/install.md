@@ -16,7 +16,7 @@ Prebuilt binaries are published for Apple Silicon and Intel Macs.
 **Install script (recommended):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dimpurr/chat-stasher/main/scripts/install.sh | sh
+curl -fsSL https://chatstasher.com/install.sh | sh
 ```
 
 What the script does:
@@ -47,6 +47,12 @@ Prebuilt Linux binaries are published from **0.5.0**: `chat-stasher-linux-x86_64
 
 <!-- RELEASE GATE: the version named in the command below must be released. Until it is, the same command works with a 0.5.0 release candidate named explicitly. -->
 Name the version, because the script otherwise installs the newest **stable** release, and a release from before the Linux binaries existed has none for this platform. It refuses rather than installing something that would not run:
+
+```sh
+curl -fsSL https://chatstasher.com/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
+```
+
+If `chatstasher.com` is unreachable, the same script is on GitHub:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dimpurr/chat-stasher/main/scripts/install.sh | CHAT_STASHER_VERSION=0.5.0 sh
