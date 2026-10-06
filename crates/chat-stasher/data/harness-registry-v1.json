@@ -476,6 +476,15 @@
       "display_name": "Grok Bot (desktop)",
       "dev_priority": "low",
       "product_group": "agent-platforms",
+      "dimensions": {
+        "supported": [
+          "tenant",
+          "container"
+        ],
+        "surfaces": [
+          "app"
+        ]
+      },
       "known_issue": "local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness",
       "paths": {
         "macos": {
@@ -485,7 +494,7 @@
           "source": "measured locally (W321): blobs are named by the unpadded lowercase base32 of their state keys; replica keys end in transcript.replicas.<agent-uuid>; a roster blob carries agent names"
         }
       },
-      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness. This local persistence is read through the macOS Grok Bot adapter, not an inbox bundle; the partial replicas do not establish complete history.",
+      "notes": "Read-only app persistence adapter. Blobs on disk are named by the base32 of their state keys, so the reader decodes each `.blob` name and matches the .transcript.replicas.<agent-uuid> suffix rather than any literal filename. The persistence directory is located below the app support root. Replica rows are retained raw; identical re-observations dedupe, and a sequence observed with changed content is kept as an additional variant rather than overwriting the earlier row; missing sequence values from 1 through the highest observed remain metadata and the archive never claims completeness. This local persistence is read through the macOS Grok Bot adapter, not an inbox bundle; the partial replicas do not establish complete history. The registry declares tenant and container as supported dimensions (TICKET-4D-08). The block names capabilities this harness's state keys carry, not a claim about any one session: tenant is the account_ref in the decoded state key sand.client.slice.account.<account_ref>.transcript.replicas.<agent-uuid>, and container is the agent-uuid suffix the reader already resolves as the session identity (with the agent name from the roster blob). The reader discards account.<account_ref> today, so no session records a tenant until that extraction lands; state keys lacking account.<ref> leave tenant unobserved. The desktop app is the harness's only surface.",
       "seal_policy": "not-applicable",
       "seal_source": "read-only replica blobs are never renamed or modified",
       "reference": {
