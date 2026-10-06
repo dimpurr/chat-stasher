@@ -58,6 +58,22 @@ let hookStatusReports = 0;
  */
 const DRAIN_TIMEOUT_MS = 4_000;
 
+/**
+ * 🔴 W876 · **Machine-load headroom for the whole file.**
+ *
+ *    Each wait below is bounded by `DRAIN_TIMEOUT_MS`, but one case can take
+ *    several of them in a row — the capture case drains the startup round, then
+ *    the delivery, then the round trip — and it is their sum, not any single
+ *    bound, that a loaded runner pays. Vitest's 5 s default then measures the
+ *    machine instead of the chain and kills the case with its own generic
+ *    message before a drain can name what it was waiting for. This only stops a
+ *    busy runner from deciding the verdict: the waits, the assertions and what
+ *    each case exercises are unchanged, and a chain that cannot reach quiescence
+ *    still fails — named, at `DRAIN_TIMEOUT_MS`, well inside this budget. Same
+ *    arrangement as tests/w86b-least-recently-served.test.ts (W88/W223).
+ */
+const LOAD_TIMEOUT_MS = 30_000;
+
 let host: SyntheticHost;
 
 /** Each test simulates a fresh extension: clear all registered listeners/records. */
@@ -200,10 +216,19 @@ const fakeBrowser: any = {
       if (msg?.type === HOOK_STATUS_MESSAGE) hookStatusReports += 1;
       return new Promise((resolve, reject) => {
         let settled = false;
+        /**
+         * 🔴 W876 · The last-resort bound below is owed only while the message is
+         *    unanswered, so its handle is kept here and dropped the moment any
+         *    listener settles the message. A passing test therefore leaves no
+         *    fixed timer behind, and the bound can never fire against work that
+         *    already finished.
+         */
+        let fallback: ReturnType<typeof setTimeout> | undefined;
         const doSettle = (fn: () => void) => {
           if (settled) return;
           settled = true;
           messagesInFlight -= 1;
+          if (fallback !== undefined) { clearTimeout(fallback); fallback = undefined; }
           fn();
         };
         const doResolve = (v: any) => doSettle(() => resolve(v));
@@ -248,13 +273,22 @@ const fakeBrowser: any = {
          * `true` and then never called `sendResponse`, which a real browser
          * reports as a closed channel. It **rejects** rather than resolving
          * `undefined`, so it can never be mistaken for an answer and let a case
-         * pass on the chain having gone quiet. It never fires in a passing test —
-         * every message this file sends is answered by `sendResponse` — and the
-         * bound keeps a defective listener from hanging the worker forever.
+         * pass on the chain having gone quiet.
+         *
+         * 🔴 W876 · **It cannot fire in a passing test, by construction.** It is
+         *    armed only while the message is still unanswered (`if (!settled)`),
+         *    it is cleared the instant a listener answers (`doSettle`), and it is
+         *    one beat longer than `DRAIN_TIMEOUT_MS` — so a chain that cannot
+         *    reach quiescence fails first, named, inside the drain, and this bound
+         *    is left to catch only the listener that never answers at all, keeping
+         *    a defective one from hanging the worker forever.
          */
-        setTimeout(() => doReject(new Error(
-          `no listener answered the runtime message within ${DRAIN_TIMEOUT_MS}ms: ${String(msg?.type)}`,
-        )), DRAIN_TIMEOUT_MS).unref?.();
+        if (!settled) {
+          fallback = setTimeout(() => doReject(new Error(
+            `no listener answered the runtime message within ${DRAIN_TIMEOUT_MS + 1_000}ms: ${String(msg?.type)}`,
+          )), DRAIN_TIMEOUT_MS + 1_000);
+          fallback.unref?.();
+        }
       });
     },
   },
@@ -312,7 +346,7 @@ function makeFakeWindow() {
   };
 }
 
-describe('W2 · synthetic chain: page → bridge → background → outbox → host', () => {
+describe('W2 · synthetic chain: page → bridge → background → outbox → host', { timeout: LOAD_TIMEOUT_MS }, () => {
   it('one real capture ends with a matching ack, and the payload is byte-for-byte a conforming inbox bundle', async () => {
     await loadBackground();
 
