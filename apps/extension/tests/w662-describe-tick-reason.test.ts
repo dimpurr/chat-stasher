@@ -151,9 +151,17 @@ describe('W843 · describeTickReason', () => {
     });
 
     it('the empty code is still a sentence in the language the popup is rendering in', async () => {
+      // The empty rendering is where a silent English fallback is hardest to
+      // see: the equality alone holds either way, and `"outcome code: "` is not
+      // blank, so "still says something" holds either way too. The difference
+      // assertion is the one that says the sentence came from this locale —
+      // same two-assertion shape as the case above, and the reason the empty
+      // code is asserted under zh_CN at all rather than only for being non-empty.
+      const inEnglish = describeTickReason('');
       await applyUiLocale('zh_CN');
       const said = describeTickReason('');
       expect(said).toBe(t('tick.reason.unknown', { reason: '' }));
+      expect(said).not.toBe(inEnglish);
       expect(said).not.toBe('');
     });
   });
