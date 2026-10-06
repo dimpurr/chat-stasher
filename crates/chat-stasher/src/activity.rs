@@ -2336,23 +2336,54 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Only
-/// `claude-code` has a reader today; every other harness answers with the empty
-/// set, which is the honest answer for a dimension nothing was read from — and
-/// never a value inferred from the harness name.
+/// opposed to what the collection path or the registry already recorded. Two
+/// harnesses have a reader today — `claude-code` (its working directory and
+/// owning tenancy) and `gemini-cli` (its `projectHash`); every other harness
+/// answers with the empty set, which is the honest answer for a dimension
+/// nothing was read from — and never a value inferred from the harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
 /// this module: an unreadable line is not evidence about a dimension.
 fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::SessionProvenance {
     let mut dimensions = crate::provenance::SessionProvenance::default();
-    if harness != "claude-code" {
-        return dimensions;
-    }
-    for line in lines {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        fold_claude_code_dimensions(&mut dimensions, &record);
+    match harness {
+        "claude-code" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_claude_code_dimensions(&mut dimensions, &record);
+            }
+        }
+        "gemini-cli" => {
+            // gemini-cli writes a whole session as one **pretty-printed JSON
+            // document**, so — exactly as for the session span in
+            // `analyze_session` — its lines do not parse individually. Each
+            // line is tried first (a JSONL-shaped body parses per line), and
+            // when no line yielded a project hash the body is re-read as the
+            // stream of documents it is, the same framing `normalize` applies.
+            let mut saw_hash = false;
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                if fold_gemini_cli_dimensions(&mut dimensions, &record) {
+                    saw_hash = true;
+                }
+            }
+            if !saw_hash {
+                let body = lines.join("\n");
+                let documents = serde_json::Deserializer::from_str(&body)
+                    .into_iter::<serde_json::Value>()
+                    .collect::<Result<Vec<_>, _>>();
+                if let Ok(documents) = documents {
+                    for document in &documents {
+                        fold_gemini_cli_dimensions(&mut dimensions, document);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     dimensions
 }
@@ -2392,6 +2423,28 @@ fn fold_claude_code_dimensions(
     if let Some(tenant) = tenant {
         dimensions.insert_tenant(tenant);
     }
+}
+
+/// gemini-cli states one provenance fact on the **top level** of a session
+/// document: `projectHash`, the hash of the project (working directory tree)
+/// the session ran in. It is a repository/workspace identity, not a path — the
+/// digest is not a directory and never becomes a `cwd` (the `cwd ≠ repo
+/// identity` rule) — so it is recorded as the session's `container`.
+///
+/// The value must be a non-empty string, and neither field presence nor value
+/// is inferred: a document without one, a value of another type, and a line
+/// that does not parse at all each leave the dimension exactly as empty as it
+/// was. Returns whether a hash was folded, so the caller can tell a body whose
+/// lines were read from one whose lines never parsed at all.
+fn fold_gemini_cli_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) -> bool {
+    if let Some(hash) = non_empty_str(record.get("projectHash")) {
+        dimensions.insert_container(hash);
+        return true;
+    }
+    false
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -2766,6 +2819,135 @@ mod tests {
         let bare = cc_user(RFC_T1);
         let json = to_jsonl(&build_row("s", "mbp", "aider", &[bare.as_str()]));
         assert!(!json.contains("\"dimensions\""), "line: {json}");
+    }
+
+    // ------------------------------------------------ TICKET-4D-07 · gemini-cli
+    //
+    // The one fact a gemini-cli session document states about itself: the
+    // `projectHash` of the project the session ran in.
+
+    /// One gemini-cli document carrying whatever the caller spells in.
+    fn gemini_doc(fields: &str) -> String {
+        format!(
+            r#"{{"sessionId":"s1","startTime":"{RFC_T1}","lastUpdated":"{RFC_T2}","messages":[{{"id":"m1","timestamp":"{RFC_T1}","type":"user","content":[{{"text":"hi"}}]}}],"kind":"main"{fields}}}"#
+        )
+    }
+
+    #[test]
+    fn gemini_cli_records_its_project_hash_as_the_container() {
+        let line = gemini_doc(r#","projectHash":"hash-fixture""#);
+        let row = build_row("s", "mbp", "gemini-cli", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["hash-fixture"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a digest is not a path, so it never becomes a cwd: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    /// The 2026-02 shape: one **pretty-printed** document whose physical lines
+    /// do not parse individually, so the container is read from the whole
+    /// document, exactly as the session span is.
+    #[test]
+    fn gemini_cli_pretty_printed_document_yields_its_container() {
+        let doc = format!(
+            "{{\n  \"sessionId\": \"s1\",\n  \"projectHash\": \"hash-fixture\",\n  \
+             \"startTime\": \"{RFC_T1}\",\n  \"lastUpdated\": \"{RFC_T2}\",\n  \
+             \"messages\": [\n    {{\n      \"id\": \"m1\",\n      \"timestamp\": \"{RFC_T1}\",\n      \
+             \"type\": \"user\"\n    }}\n  ]\n}}\n"
+        );
+        let lines: Vec<&str> = doc.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .all(|l| serde_json::from_str::<serde_json::Value>(l).is_err()),
+            "premise: no individual line parses"
+        );
+        let row = build_row("s", "mbp", "gemini-cli", &lines);
+        assert_eq!(row.dimensions.container, ["hash-fixture"]);
+        assert!(row.dimensions.cwd.is_empty());
+    }
+
+    /// Several documents run together (a session plus export mirrors): each
+    /// document's own hash is read, and the dimension stays a set.
+    #[test]
+    fn every_gemini_cli_document_in_one_body_is_read() {
+        let body = format!(
+            "{}\n{}\n",
+            gemini_doc(r#","projectHash":"hash-one""#),
+            gemini_doc(r#","projectHash":"hash-two""#),
+        );
+        let lines: Vec<&str> = body.lines().collect();
+        let row = build_row("s", "mbp", "gemini-cli", &lines);
+        assert_eq!(row.dimensions.container, ["hash-one", "hash-two"]);
+    }
+
+    #[test]
+    fn a_gemini_cli_document_without_a_project_hash_leaves_container_unobserved() {
+        let line = gemini_doc("");
+        let row = build_row("s", "mbp", "gemini-cli", &[line.as_str()]);
+        assert!(row.dimensions.container.is_empty());
+        assert!(
+            row.dimensions.is_empty(),
+            "nothing else was observed either, so the row carries no dimensions: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_project_hash_records_no_container() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "gemini-cli",
+            &[
+                r#"not json at all"#,
+                gemini_doc(r#","projectHash":"""#).as_str(),
+                gemini_doc(r#","projectHash":null"#).as_str(),
+                gemini_doc(r#","projectHash":7"#).as_str(),
+                gemini_doc(r#","projectHash":["h"]"#).as_str(),
+                gemini_doc(r#","projectHash":{{"id":"h"}}"#).as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty or mistyped value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    /// Dimensions are read per harness: a claude-code record carrying a
+    /// `projectHash` key of its own is not a gemini-cli document, and reading
+    /// it here would report a container for a harness nobody asked about.
+    #[test]
+    fn another_harness_reads_no_gemini_cli_dimensions() {
+        let line = cc_with(r#","cwd":"/w/one","projectHash":"hash-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "the gemini-cli reader is the only one that reads projectHash: {:?}",
+            row.dimensions.container
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+    }
+
+    #[test]
+    fn the_gemini_cli_container_travels_in_the_index_line() {
+        let line = gemini_doc(r#","projectHash":"hash-fixture""#);
+        let row = build_row("s", "mbp", "gemini-cli", &[line.as_str()]);
+        let json = to_jsonl(&row);
+        assert!(
+            json.contains(r#""container":["hash-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(
+            json.contains(r#""cwd":[]"#) || !json.contains("\"cwd\""),
+            "a project hash is never a working directory: {json}"
+        );
     }
 
     // ------------------------------------------------- W219 · account keys

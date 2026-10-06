@@ -319,6 +319,64 @@ fn activity_index_leaves_an_unrecorded_dimension_absent() {
     );
 }
 
+/// One synthetic gemini-cli session document stating its `projectHash`.
+fn gemini_document(session_id: &str, project_hash: &str) -> String {
+    format!(
+        r#"{{"sessionId":"{session_id}","projectHash":"{project_hash}","startTime":"2026-04-05T14:06:44.334Z","lastUpdated":"2026-04-05T14:09:50.892Z","messages":[{{"id":"m1","timestamp":"2026-04-05T14:06:44.334Z","type":"user","content":[{{"text":"hi"}}]}}],"kind":"main"}}"#
+    )
+}
+
+/// TICKET-4D-07 · the `projectHash` a gemini-cli session document states about
+/// itself reaches the written index as the session's `container` — a
+/// repository/workspace identity, never a working directory.
+#[test]
+fn activity_index_records_the_project_hash_a_gemini_cli_document_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "gemini-cli.mbp-test.session-2026-04-05T14-06-b9f717c6";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[gemini_document(
+            "session-2026-04-05T14-06-b9f717c6",
+            "79906c0e722ab1cb44a014d1b9ff4ff177a50fa7bbaf296a14f6fdaad1d294aa",
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["79906c0e722ab1cb44a014d1b9ff4ff177a50fa7bbaf296a14f6fdaad1d294aa"]),
+        "the document's own project hash is the session's container: {row}"
+    );
+    assert!(
+        row["dimensions"].get("cwd").is_none(),
+        "a digest is not a path, so it never becomes a cwd: {}",
+        row["dimensions"]
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]
