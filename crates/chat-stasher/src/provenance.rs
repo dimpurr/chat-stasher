@@ -116,17 +116,26 @@ impl SessionProvenance {
         insert(&mut self.tenant, value.into());
     }
 
+    /// Add one observed project, workspace or repository identity without
+    /// replacing another's. The value is an identity a source recorded, not a
+    /// path: a filesystem location belongs in [`SessionProvenance::cwd`], and
+    /// an empty value is nothing observed, exactly as for a tenancy.
+    pub fn insert_container(&mut self, value: impl Into<String>) {
+        insert(&mut self.container, value.into());
+    }
+
     /// Add one observed working directory, keeping every other place the same
     /// session ran. See [`SessionProvenance::cwd`] for why several is ordinary.
     pub fn insert_cwd(&mut self, value: impl Into<String>) {
         insert(&mut self.cwd, value.into());
     }
 
-    /// Add one observed container without replacing another's. An empty value
-    /// is not a container: it is nothing observed, and recording it would make
-    /// every session that recorded none comparable with every other one.
-    pub fn insert_container(&mut self, value: impl Into<String>) {
-        insert(&mut self.container, value.into());
+    /// Add one observed lifecycle state without replacing another's. The value
+    /// must be a state a source explicitly recorded — an absence is never
+    /// turned into `active` by a caller, because "never archived" is not a fact
+    /// the source states.
+    pub fn insert_status(&mut self, value: impl Into<String>) {
+        insert(&mut self.status, value.into());
     }
 }
 
@@ -520,7 +529,9 @@ mod tests {
 
         let mut refused = SessionProvenance::default();
         refused.insert_tenant("");
+        refused.insert_container("");
         refused.insert_cwd("");
+        refused.insert_status("");
         assert!(
             refused.is_empty(),
             "a caller must not be able to slip an empty value past the guard that \
