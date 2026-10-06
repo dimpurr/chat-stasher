@@ -446,7 +446,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2558-2607`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2627-2676`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -500,7 +500,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2346-2410`,
+(`crates/chat-stasher/src/activity.rs:2346-2481`,
 `crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -514,6 +514,20 @@ nothing about where it ran" and "it ran nowhere" are different facts and the row
 only has room for the first of them. No path is ever inferred: the archive's own
 location, and any directory that appears in the path a transcript was found
 under, are not a working directory the session ran in.
+
+An opencode export states three more facts of its own, read the same way and
+landing on the same row. Its session row — which travels whole inside the sealed
+shard the archive has always held — names the directory the session ran in (the
+same path rule, and the same "each place it ran, not only the last"), the
+**project** it belonged to, and the moment it was archived. A project id is the
+one fact here that *is* a project identity: an opaque key the harness itself
+recorded, not a path and not derived from one, kept as a container precisely so
+a directory is never asked to do that work. The archive fact is a recorded
+moment, not a computed state: a session the source marked archived is indexed
+`archived`, and a session with no marker is indexed as nothing — never `active`,
+which no source states. The sealed export itself did not gain a byte; what is
+new is that these three fields now also sit on the index line beside it, as
+plaintext session metadata like the paths and ids above.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,

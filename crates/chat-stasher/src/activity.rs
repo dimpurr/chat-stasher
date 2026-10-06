@@ -2336,10 +2336,11 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Two
+/// opposed to what the collection path or the registry already recorded. Three
 /// harnesses have a reader today — `claude-code` (its working directory and
-/// owning tenancy) and `gemini-cli` (its `projectHash`); every other harness
-/// answers with the empty set, which is the honest answer for a dimension
+/// owning tenancy), `gemini-cli` (its `projectHash`), and `opencode` (its
+/// directory, project, and archive fact); every other harness answers
+/// with the empty set, which is the honest answer for a dimension
 /// nothing was read from — and never a value inferred from the harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
@@ -2353,6 +2354,17 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     continue;
                 };
                 fold_claude_code_dimensions(&mut dimensions, &record);
+            }
+        }
+        "opencode" => {
+            // The same JSONL-shaped body as Claude Code's, one sealed export
+            // envelope per line, so the same per-line loop — only the fold the
+            // lines go through differs.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_opencode_dimensions(&mut dimensions, &record);
             }
         }
         "gemini-cli" => {
@@ -2445,6 +2457,63 @@ fn fold_gemini_cli_dimensions(
         return true;
     }
     false
+}
+
+/// opencode exports a session as one envelope that carries, beside the
+/// conversation, the row its own `session` table recorded about it
+/// (`sqlite_probe.rs` seals that row under the
+/// `chat-stasher.opencode.session.v1` schema). Three of its fields are
+/// dimension facts, and they are three different kinds of fact:
+///
+/// `directory` — else `path`, where the directory is null or empty — is where
+/// the session ran. It is a path, so it lands in `cwd` under the same rule as
+/// Claude Code's: a place the harness executed in, never a repository
+/// identity. A session resumed and re-exported states each directory it ran in,
+/// and every one is kept.
+///
+/// `project_id` is the inverse case, and the one that makes the pair a pair:
+/// an opaque **foreign key** the harness itself recorded, not a path and not
+/// derivable from one. It names the project the session belonged to, which is
+/// what `container` exists for — and keeping it there rather than leaning on
+/// the directory is the whole point of the `cwd ≠ repo identity` rule.
+///
+/// `time_archived` is a recorded fact, not a state to compute: the row holds
+/// the millisecond moment the session was archived, or nothing. An integer
+/// stamps `archived`; a null stays empty, because "not archived *yet*" and
+/// "never archived" are both things the row does not say, and inferring
+/// `active` would publish a lifecycle the source never recorded. Only the
+/// integer shape the exporter writes is trusted — a value of another type is a
+/// row this reader cannot read, not a fact it may take on faith.
+///
+/// Only an envelope identified by its schema is read at all: a line with a
+/// `session` object that the exporter did not seal is a record nothing
+/// vouches for, however much it looks like one.
+fn fold_opencode_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        != Some("chat-stasher.opencode.session.v1")
+    {
+        return;
+    }
+    let Some(session) = record.get("session") else {
+        return;
+    };
+    let cwd =
+        non_empty_str(session.get("directory")).or_else(|| non_empty_str(session.get("path")));
+    if let Some(cwd) = cwd {
+        dimensions.insert_cwd(cwd);
+    }
+    if let Some(project) = non_empty_str(session.get("project_id")) {
+        dimensions.insert_container(project);
+    }
+    if session
+        .get("time_archived")
+        .is_some_and(serde_json::Value::is_i64)
+    {
+        dimensions.insert_status("archived");
+    }
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -2833,6 +2902,18 @@ mod tests {
         )
     }
 
+    // ------------------------------------------------- TICKET-4D-01 · opencode
+    //
+    // The three facts an opencode export envelope states about its session:
+    // where it ran, the project it belonged to, and whether it was archived.
+
+    /// One opencode export envelope carrying whatever `session` fields the
+    /// caller spells in, so each case states exactly which fields it is about.
+    fn oc_with(fields: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{{fields}}},"messages":[],"orphan_parts":[]}}"#
+        )
+    }
     #[test]
     fn gemini_cli_records_its_project_hash_as_the_container() {
         let line = gemini_doc(r#","projectHash":"hash-fixture""#);
@@ -2948,6 +3029,164 @@ mod tests {
             json.contains(r#""cwd":[]"#) || !json.contains("\"cwd\""),
             "a project hash is never a working directory: {json}"
         );
+    }
+
+    #[test]
+    fn an_opencode_export_states_its_directory_project_and_archive_fact() {
+        let line = oc_with(
+            r#""id":"s1","directory":"/w/one","project_id":"project-fixture","time_archived":1770000000000"#,
+        );
+        let row = build_row("s", "mbp", "opencode", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["project-fixture"],
+            "a foreign key the harness recorded is a container, which is what the \
+             directory on its own can never be"
+        );
+        assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn an_unarchived_opencode_session_stays_status_unobserved() {
+        // The one lifecycle fact the row can state is the moment it was
+        // archived; a null says neither "never" nor "not yet", so no state is
+        // inferred from the absence.
+        let line = oc_with(r#""id":"s1","directory":"/w/one","time_archived":null"#);
+        let row = build_row("s", "mbp", "opencode", &[line.as_str()]);
+        assert!(
+            row.dimensions.status.is_empty(),
+            "a null time_archived is an unobserved status, never `{}`: {:?}",
+            "active",
+            row.dimensions.status
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+    }
+
+    #[test]
+    fn an_opencode_session_without_a_project_records_no_container() {
+        let line = oc_with(r#""id":"s1","directory":"/w/one""#);
+        let row = build_row("s", "mbp", "opencode", &[line.as_str()]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "no project key was recorded, and none is invented from the directory"
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        // The empty-string spelling of the same absence is the same absence.
+        let row = build_row(
+            "s",
+            "mbp",
+            "opencode",
+            &[oc_with(r#""id":"s1","directory":"/w/one","project_id"""#).as_str()],
+        );
+        assert!(row.dimensions.container.is_empty());
+    }
+
+    #[test]
+    fn a_null_directory_falls_back_to_the_path_the_row_also_carries() {
+        let line =
+            oc_with(r#""id":"s1","directory":null,"path":"/w/one","project_id":"project-fixture""#);
+        let row = build_row("s", "mbp", "opencode", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a null directory is not a directory, and the path beside it still is"
+        );
+        assert_eq!(row.dimensions.container, ["project-fixture"]);
+    }
+
+    #[test]
+    fn every_directory_an_opencode_session_ran_in_is_kept_as_one_sorted_set() {
+        // A resume re-exports the whole session, so one that moved carries both
+        // directories — and the archive holds both exports.
+        let first = oc_with(r#""id":"s1","directory":"/w/one""#);
+        let second = oc_with(r#""id":"s1","directory":"/w/one/apps""#);
+        let third = oc_with(r#""id":"s1","directory":"/w/one""#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "opencode",
+            &[first.as_str(), second.as_str(), third.as_str()],
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one", "/w/one/apps"]);
+    }
+
+    #[test]
+    fn a_session_archived_after_a_resume_is_archived() {
+        // The earlier export predates the archive, so only the later one
+        // states the fact — and one observation is enough to record it.
+        let before = oc_with(r#""id":"s1","directory":"/w/one","time_archived":null"#);
+        let after = oc_with(
+            r#""id":"s1","directory":"/w/one","project_id":"project-fixture","time_archived":1770000000000"#,
+        );
+        let row = build_row("s", "mbp", "opencode", &[before.as_str(), after.as_str()]);
+        assert_eq!(row.dimensions.status, ["archived"]);
+        assert_eq!(row.dimensions.container, ["project-fixture"]);
+    }
+
+    #[test]
+    fn an_opencode_record_without_a_usable_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "opencode",
+            &[
+                "not json at all",
+                oc_with(r#""id":"s1","directory":"","path":"","project_id":"""#).as_str(),
+                oc_with(r#""id":"s1","directory":7,"project_id":{"id":"x"}"#).as_str(),
+                // A timestamp spelled as a string is not the integer shape
+                // the exporter writes, so it is unread rather than trusted.
+                oc_with(r#""id":"s1","time_archived":"1770000000000""#).as_str(),
+                oc_with(r#""id":"s1","directory":{"path":"/w/one"}"#).as_str(),
+                // A `session` object the exporter did not seal under the export
+                // schema is a record nothing vouches for, whatever it says.
+                r#"{"session":{"directory":"/w/one","project_id":"project-fixture","time_archived":1770000000000}}"#,
+                // And neither is an envelope whose schema names something else.
+                r#"{"schema":"chat-stasher.opencode.session.v2","session":{"directory":"/w/one"}}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty, mistyped, or unsealed value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_opencode_dimensions() {
+        // A Claude Code harness handed an opencode envelope: the same bytes
+        // exist, and dimensions are still read per harness, not per shape.
+        let line = oc_with(r#""id":"s1","directory":"/w/one","project_id":"project-fixture""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are answered per harness, not read from whatever an \
+             archived line happens to carry: {:?}",
+            row.dimensions
+        );
+        // And the envelope under its own harness is where the facts live.
+        let row = build_row("s", "mbp", "opencode", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(row.dimensions.container, ["project-fixture"]);
+    }
+
+    #[test]
+    fn the_opencode_dimensions_travel_in_the_index_line() {
+        let line = oc_with(
+            r#""id":"s1","directory":"/w/one","project_id":"project-fixture","time_archived":1770000000000"#,
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "opencode", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""container":["project-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""status":["archived"]"#), "line: {json}");
+        assert!(!json.contains("\"tenant\""), "line: {json}");
     }
 
     // ------------------------------------------------- W219 · account keys

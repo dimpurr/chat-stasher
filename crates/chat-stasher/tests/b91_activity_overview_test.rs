@@ -377,6 +377,126 @@ fn activity_index_records_the_project_hash_a_gemini_cli_document_states() {
     );
 }
 
+/// One synthetic opencode export envelope for a session whose own row states
+/// whatever session fields the caller spells in. The export shape is the one
+/// `sqlite_probe.rs` seals: one line per session, the whole `session` row
+/// beside its messages.
+fn oc_envelope(session: &str) -> String {
+    format!(
+        r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{{session}}},"messages":[],"orphan_parts":[]}}"#
+    )
+}
+
+/// TICKET-4D-01 · the facts an opencode export states about its session reach
+/// the written index: the directory it ran in, the project it belonged to, and
+/// the archive fact its row recorded.
+#[test]
+fn activity_index_records_the_dimensions_an_opencode_export_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "opencode.mbp-test.sess-1-opencode-4d";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","directory":"/w/one","project_id":"project-fixture","time_archived":1770000000000"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["project-fixture"]),
+        "the project key the harness recorded is recorded as a container"
+    );
+    assert_eq!(
+        row["dimensions"]["status"],
+        serde_json::json!(["archived"]),
+        "a recorded archive moment is an archived session"
+    );
+}
+
+/// An opencode row that recorded no project and no archive moment states those
+/// two dimensions not at all, and the written index must not state them
+/// either: the fields are absent from the line, never empty and never inferred.
+#[test]
+fn activity_index_leaves_an_opencode_dimension_the_export_stated_nothing_about_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "opencode.mbp-test.sess-1-opencode-4d";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","directory":"/w/one","project_id":null,"time_archived":null"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the one dimension the export did state is the one recorded"
+    );
+    assert!(
+        row["dimensions"].get("container").is_none(),
+        "no project key was stated, and none is invented from the directory: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("status").is_none(),
+        "a null time_archived is an unobserved status, never an `active` one: {}",
+        row["dimensions"]
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]
