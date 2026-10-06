@@ -250,8 +250,16 @@ def pct(part: int, whole: int) -> str:
 
 
 def machine_label(machine: str, display: str | None) -> str:
-    """`display (machine)` when the two differ, else the one name twice not."""
+    """`display (machine)` when the two differ, else the one name twice not.
+
+    The archive's own `machine_display` already ends in `(machine)` — it is
+    `Name (id)` for every machine the overview names — so the id is appended
+    only when the display does not carry it. A display that names its machine
+    once is never made to name it twice.
+    """
     if display and display != machine:
+        if display.endswith(f"({machine})"):
+            return display
         return f"{display} ({machine})"
     return machine
 
@@ -2018,6 +2026,7 @@ def _session(
     kind: str = "known",
     unix: int = UNIX_FRESH,
     session_index: int = 0,
+    machine_display: str | None = None,
 ) -> dict[str, Any]:
     if kind == "known":
         boundary = {"kind": "known", "unix": unix}
@@ -2031,7 +2040,7 @@ def _session(
     return {
         "session_id": f"{harness}.{machine}.0000000{session_index:02d}-0000-4000-8000-000000000001",
         "machine": machine,
-        "machine_display": machine.replace("machine-", "Machine ").title(),
+        "machine_display": machine_display if machine_display is not None else machine.replace("machine-", "Machine ").title(),
         "harness": harness,
         "line_count": 3,
         "time_source": time_source,
@@ -2403,6 +2412,38 @@ def selftest() -> int:
         result = run_cli(base_args(repo_root, None, boundary_path) + ["--no-state", "--unknown-share", "0.4999"])
         text = result.stdout
         expect(f"time-unknown-share: Machine A (machine-a) / {quiet_tool} — 5 of 10 conversations time-unknown (50.0%)" in text, "a share above a lowered threshold is flagged")
+
+        # ---------------- case: the archive's display already names the machine
+        # The real overview's `machine_display` is `Name (id)`, so an anomaly
+        # line must not append the id a second time.
+        display_sessions: list[dict[str, Any]] = []
+        for index in range(5):
+            display_sessions.append(
+                _session(
+                    quiet_tool, "machine-a", "known", UNIX_FRESH,
+                    session_index=900 + index, machine_display="Machine A (machine-a)",
+                )
+            )
+        for index in range(5):
+            display_sessions.append(
+                _session(
+                    quiet_tool, "machine-a", "unknown",
+                    session_index=950 + index, machine_display="Machine A (machine-a)",
+                )
+            )
+        display_path = _write_json(
+            os.path.join(tmp, "overview-display.json"), _overview_doc(display_sessions), mtime=UNIX_NOW
+        )
+        result = run_cli(base_args(repo_root, None, display_path) + ["--no-state", "--unknown-share", "0.4999"])
+        text = result.stdout
+        expect(
+            f"time-unknown-share: Machine A (machine-a) / {quiet_tool} — 5 of 10 conversations time-unknown (50.0%)" in text,
+            "an archive display that already names the machine is not doubled",
+        )
+        expect(
+            "Machine A (machine-a) (machine-a)" not in text,
+            "the anomaly never names a machine twice",
+        )
 
         # ---------------- case: pending rising through the state -----------
         rise_now = "2026-09-29T19:00:00Z"
