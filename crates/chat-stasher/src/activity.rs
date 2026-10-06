@@ -2666,9 +2666,16 @@ fn cursor_workspace_uri(composer: &serde_json::Value) -> Option<String> {
 /// a URI parser this crate does not depend on. Emitting the escaped text would
 /// record a path that does not exist, so nothing is recorded instead — the raw
 /// shard still holds the composer's own spelling for anyone who wants it.
+///
+/// A **URI with an authority** is the third refusal: `file://server/share` is
+/// how a UNC workspace is spelled, and everything after the scheme is a share on
+/// another machine — the leading separators are gone, so what is left would
+/// become a relative path no OS here resolves. Only the empty-authority form VS
+/// Code serializes for a local file, `file:///…`, names a directory this archive
+/// can compare, and its path is the one that begins at the third slash.
 fn cursor_file_path(uri: &str) -> Option<String> {
     let path = uri.strip_prefix("file://")?;
-    if path.is_empty() || path.contains('%') {
+    if !path.starts_with('/') || path.contains('%') {
         return None;
     }
     Some(path.to_string())
@@ -3488,6 +3495,25 @@ mod tests {
             row.dimensions.cwd.is_empty(),
             "a path this reader cannot reproduce byte for byte is not a path it \
              observed: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn a_workspace_uri_with_an_authority_names_no_local_directory() {
+        // A UNC workspace is spelled `file://server/share`: the authority is
+        // another machine, and the text after the scheme has no third slash
+        // where a local file's path begins. It would become a relative path no
+        // OS here resolves, so the boundary is recorded and the directory is not.
+        let line = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","external":"file://server/share/one"}}"#,
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file://server/share/one"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a share on another machine is not a directory this machine ran in: {:?}",
             row.dimensions.cwd
         );
     }
