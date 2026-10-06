@@ -29,7 +29,7 @@ read-only (`crates/chat-stasher/src/main.rs:885`).
 DeepSeek (`chat.deepseek.com`), Perplexity (`www.perplexity.ai`), ChatGPT
 (`chatgpt.com` / `chat.openai.com`), Gemini (`gemini.google.com`), Claude
 (`claude.ai`), Kimi (`www.kimi.com`), Grok (`grok.com`)
-(`apps/extension/lib/contract.ts:398-404,478-484,489-503,540-552,614-618,748-753,833-843`).
+(`apps/extension/lib/contract.ts:414-420,499-505,510-524,561-573,635-639,769-774,854-864`).
 
 🔴 **Recognizing a platform is not the same as capturing on it, and for two of
 the seven it measurably was not.** On 2026-09-19, in a real browser with the
@@ -80,13 +80,13 @@ that platform."** The extension has two legs; please read them separately:
 - **Passive capture** (on by default): the conversation you are currently
   viewing is saved as a side effect when the page fetches its own data. Each
   platform registers in that table which route, method, and response shape
-  count (`apps/extension/lib/contract.ts:356-852`).
+  count (`apps/extension/lib/contract.ts:356-873`).
   🔴 **Perplexity used to be the exception here; read where it stands now:**
   its row registers the **conversation-content** route — path hint
   `/rest/thread/`, method `GET`, response shape requiring `entries`
-  (`apps/extension/lib/contract.ts:419-484`) — and it recognizes the session id
+  (`apps/extension/lib/contract.ts:440-505`) — and it recognizes the session id
   from the page URL, the `/search/<slug>` the thread is open at
-  (`apps/extension/lib/contract.ts:471-476`). The **conversation-list** route is
+  (`apps/extension/lib/contract.ts:492-497`). The **conversation-list** route is
   deliberately outside the row: a list is a summary of conversations, not one of
   them, so it is skipped silently rather than captured.
   🔴 **The name comes from the URL and from nothing else.** Where the row's own
@@ -98,7 +98,7 @@ that platform."** The extension has two legs; please read them separately:
   on this platform the route already carries the thread's own id in the path, so a
   body value was never evidence of *which* conversation arrived; reading one would
   file a conversation under a name the route never claimed
-  (`apps/extension/lib/contract.ts:1423-1502`,
+  (`apps/extension/lib/contract.ts:1460-1539`,
   `apps/extension/entrypoints/background.ts:277-310`).
   🔴 Refusing the **name** is not the same as finding no identity, and the two are
   kept apart on purpose: the account-identity guard still reads what the body
@@ -201,7 +201,7 @@ The popup shows these three tiers in the same terms as the table above
 
 (**Passive capture is not affected by this table:** the passive-capture criteria
 for the seven platforms above are each registered in the table at
-`apps/extension/lib/contract.ts:356-852`, a separate matter from backfill.)
+`apps/extension/lib/contract.ts:356-873`, a separate matter from backfill.)
 
 ---
 
@@ -1287,7 +1287,7 @@ Collected in one place, so you know which spots to double-check yourself:
 | Whether the DeepSeek / Perplexity / Grok conversation-list endpoints still look like this today | **Unverified** (from cross-checking multiple open-source implementations, not official documentation, and not tested with a logged-in session; `apps/extension/lib/backfill/enumerate.ts:3054-3106`, `:3226-3247`, `:3338-3399`. If the shape changes, it stops on the spot and leaves a trace, rather than producing fake progress. That trace carries the shape of the response that did not match — the key names, types and array lengths at the level that disagreed — and carries no conversation text, no id and no title from it (`apps/extension/lib/backfill/enumerate.ts:1488-1556`), so a shape change can be diagnosed from the trace itself instead of from a second logged-in session.) |
 | Which Grok list cursor the real backend honours — an opaque `pageToken` or an integer `page` | **Unverified** (the sources disagree; `apps/extension/lib/backfill/enumerate.ts:3338-3399`. The extension does not choose: it hands back exactly what it was given, and a page that repeats what was already listed stops the leg and says the response shape changed, rather than being read as "no more conversations"; `apps/extension/lib/backfill/engine.ts:2266-2384`.) |
 | Whether a **long** Grok conversation comes back complete from the backfill content endpoint | **Unverified** (its two-step route — a skeleton call then a content call — was cross-checked across implementations, but none of them pages the content call and this extension adds no paging, so a long conversation may be stored as only its first part; `apps/extension/lib/backfill/enumerate.ts:3338-3399`.) |
-| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Not settled by any source — and checked rather than assumed** (the endpoint itself is well evidenced: it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:2964-2978`. None of the reviewed implementations pages it and this extension adds no paging. Instead of assuming a single response holds the whole conversation, the extension walks the response's own tree — `chat_session.current_message_id` back along `parent_id` to a root — and archives the body only if that walk closes; a body that came back short is not archived at all, it is recorded as a failure with its own reason code and the leg carries on; `apps/extension/lib/backfill/enumerate.ts:2980-3007`.) |
+| Whether a **long** DeepSeek conversation comes back complete from the backfill body endpoint | **Not settled by any source — and checked rather than assumed** (the endpoint itself is well evidenced: it is the route DeepSeek's own page calls in a real logged-in browser session, and several independent open-source exporters request the same route; `apps/extension/lib/backfill/enumerate.ts:2964-2980`. None of the reviewed implementations pages it and this extension adds no paging. Instead of assuming a single response holds the whole conversation, the extension walks the response's own tree — `chat_session.current_message_id` back along `parent_id` to a root — and archives the body only if that walk closes; a body that came back short is not archived at all, it is recorded as a failure with its own reason code and the leg carries on; `apps/extension/lib/backfill/enumerate.ts:2980-3007`.) |
 | Whether a **long** Kimi conversation comes back complete from the backfill body endpoint | **Unverified, and handled rather than guessed** (a logged-in session measured the route and five **short** conversations, none of which carried a page-token field; nothing here pages that endpoint. If a response ever does say it holds more of the conversation, that conversation is not archived at all — it is recorded as a failure with its own reason code and the leg moves on, because a truncated conversation stored as a complete one would be silent loss; `apps/extension/lib/backfill/enumerate.ts:3423-3485`; `apps/extension/lib/backfill/engine.ts:3250-3284`.) |
 | Whether the Kimi gateway requires the two extra request headers the page sends, or whether they are merely what the page happens to send | **Unverified** (the page's requests were observed carrying `x-msh-platform` and `x-language` alongside the bearer token, so the backfill requests send them too — that they are *required* has not been tested; `apps/extension/lib/platform-auth.ts:313-350`.) |
 | Whether a Kimi backfill run has ever completed end to end in a real browser | **Unverified** (implemented and wired to the host, like the other three; no complete run observed. See section 1.1.) |
