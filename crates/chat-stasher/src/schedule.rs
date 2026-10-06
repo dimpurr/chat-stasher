@@ -126,15 +126,15 @@ pub struct ReclaimStageArgs {
 }
 
 /// Resolve the executable that a persistent scheduler may safely embed.
-/// Cargo's `target/` paths are disposable build products, not installation
-/// paths. An explicit non-build path is accepted without requiring it to exist
-/// yet, so a package manager can render before its copy is complete.
+/// Cargo's `target/` paths and `CARGO_TARGET_DIR` are disposable build products.
+/// An explicit installed path need not exist yet, so a package manager can
+/// render before its copy is complete.
 pub fn resolve_binary(explicit: Option<&Path>, current_exe: &Path, home: &Path) -> Result<PathBuf> {
     if let Some(path) = explicit {
         let path = absolute_path(path);
         if is_build_artifact(&path) {
             bail!(
-                "binary path must be an installed path outside target/: {}",
+                "binary path must be an installed path outside Cargo build directories: {}",
                 path.display()
             );
         }
@@ -173,6 +173,16 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn is_build_artifact(path: &Path) -> bool {
+    let cargo_target = std::env::var_os("CARGO_TARGET_DIR");
+    is_build_artifact_in_target(path, cargo_target.as_deref().map(Path::new))
+}
+
+fn is_build_artifact_in_target(path: &Path, cargo_target: Option<&Path>) -> bool {
+    if let Some(target) = cargo_target.filter(|target| !target.as_os_str().is_empty()) {
+        if path.starts_with(absolute_path(target)) {
+            return true;
+        }
+    }
     let parts: Vec<&str> = path
         .iter()
         .filter_map(|component| component.to_str())
@@ -2265,6 +2275,27 @@ mod tests {
         assert!(!run.contains("chat-stasher-reclaim-stage.timer"));
         assert!(reclaim.contains("chat-stasher-reclaim-stage.timer"));
         assert!(!reclaim.contains("chat-stasher-run-once.timer"));
+    }
+
+    #[test]
+    fn configured_cargo_target_is_disposable_regardless_of_its_directory_name() {
+        let temp = tempfile::tempdir().expect("create test directory");
+        let target = temp.path().join("shared-builds");
+        for profile in ["debug", "release", "aarch64-apple-darwin/debug"] {
+            let binary = target.join(profile).join("chat-stasher");
+            assert!(is_build_artifact_in_target(&binary, Some(&target)));
+            assert!(!is_build_artifact_in_target(&binary, None));
+        }
+        let installed = temp.path().join("bin/chat-stasher");
+        assert!(!is_build_artifact_in_target(&installed, Some(&target)));
+        let sibling = temp
+            .path()
+            .join("shared-builds-installed/debug/chat-stasher");
+        assert!(!is_build_artifact_in_target(&sibling, Some(&target)));
+        assert!(!is_build_artifact_in_target(
+            &installed,
+            Some(Path::new(""))
+        ));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "schema": "chat-stasher/inbox@1",
+  "platform": "deepseek",
+  "sessionId": "synthetic-session",
+  "raw": {
+    "text": "{}",
+    "bytes": 2
+  }
+}

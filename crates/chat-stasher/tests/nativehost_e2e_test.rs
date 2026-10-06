@@ -1880,19 +1880,37 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
         "expired lease can be claimed"
     );
 
+    // Native messaging starts a process per request. Bound the host's clock by
+    // the call boundaries instead of assuming startup takes less than a second.
+    let rate_started = chrono::Utc::now().timestamp_millis();
     let limited = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
         "request_id":"rate-a","mode":"rate_limit","platform":"chatgpt","install_id":"install-b",
         "status":429,"retry_after_ms":300_000})));
+    let rate_finished = chrono::Utc::now().timestamp_millis();
+    assert_eq!(exit_code(&limited), 0, "stderr: {}", stderr_of(&limited));
     let limited = one_frame(&limited.stdout);
     assert_matches_schema(&limited);
+    assert_eq!(limited["wait_ms"], 300_000);
+    let deadline = limited["cooldown_until"]
+        .as_i64()
+        .expect("cooldown deadline");
+    assert!(
+        (rate_started + 300_000..=rate_finished + 300_000).contains(&deadline),
+        "Retry-After sets a full 300s cooldown: {limited}"
+    );
+    let token_started = chrono::Utc::now().timestamp_millis();
     let blocked = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
         "request_id":"token-a","mode":"token","platform":"chatgpt","install_id":"install-b","segment":"detail"})));
+    let token_finished = chrono::Utc::now().timestamp_millis();
+    assert_eq!(exit_code(&blocked), 0, "stderr: {}", stderr_of(&blocked));
     let blocked = one_frame(&blocked.stdout);
     assert_matches_schema(&blocked);
     assert_eq!(blocked["granted"], false);
+    assert_eq!(blocked["cooldown_until"], limited["cooldown_until"]);
+    let wait = blocked["wait_ms"].as_i64().expect("remaining cooldown");
     assert!(
-        blocked["wait_ms"].as_i64().unwrap_or_default() >= 299_000,
-        "cooldown reaches every install: {blocked}"
+        ((deadline - token_finished).max(0)..=(deadline - token_started).max(0)).contains(&wait),
+        "cooldown reaches every install with the remaining wait: {blocked}"
     );
 }
 

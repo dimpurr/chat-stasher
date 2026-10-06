@@ -1,0 +1,35 @@
+{
+  "schema": "chat-stasher/inbox@3",
+  "kind": "harness-file",
+  "harness": "claude-code",
+  "nativeSessionId": "synthetic-native",
+  "capturedAt": "2026-10-04T00:00:00Z",
+  "file": {
+    "role": "transcript",
+    "relPath": "projects/synthetic/session.jsonl",
+    "byteStart": 7,
+    "byteEnd": 13,
+    "sha256": "ec2f00596f643c3181e6f3c6bfb64bb07cf8994f019df013681c886bee0d8b6a"
+  },
+  "raw": {
+    "encoding": "utf-8",
+    "data": "\ufeff{}\n"
+  },
+  "fidelity": {
+    "value": "raw"
+  },
+  "producer": {
+    "kind": "send",
+    "version": "0.1.0",
+    "platform": "synthetic-cloud",
+    "sendKeyId": "synthetic-key"
+  },
+  "platformRefs": {
+    "session": "synthetic-ref"
+  },
+  "dimensions": {
+    "surface": [
+      "cloud"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "chat-stasher/inbox@3",
+  "platform": "deepseek",
+  "sessionId": "synthetic-session",
+  "raw": {
+    "text": "{}",
+    "bytes": 2
+  },
+  "identity": {
+    "level": "default",
+    "value": ""
+  },
+  "kind": "harness-file",
+  "fidelity": {
+    "value": "full",
+    "representation": "api"
+  },
+  "dimensions": {
+    "surface": [
+      "web",
+      "cloud"
+    ],
+    "tenant": []
+  }
+}

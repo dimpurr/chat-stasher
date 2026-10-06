@@ -17,6 +17,10 @@
 # pinning them would be a claim about their bytes that nothing checks.
 crates/chat-stasher/tests/fixtures/ui-bodies/*.response.txt text eol=lf
 
+# Shared inbox contract fixtures are hashed by both Rust and extension tests.
+# Keep their recorded bytes intact when Windows checks out with core.autocrlf.
+contracts/fixtures/inbox/*.json text eol=lf
+
 # Derived files — never a textual 3-way merge: the correct value is always a
 # regeneration from the merged source tree. `citations.lock` is keyed by
 # `file:line-range` and `output-inventory.txt` by `file:line`, so two branches

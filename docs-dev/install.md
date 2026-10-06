@@ -547,7 +547,7 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1187-1215`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1197-1225`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
@@ -919,9 +919,10 @@ loads a launchd agent on macOS or writes and enables a systemd user timer on
 Linux; `schedule uninstall` stops and removes the matching job. Both operations
 are idempotent. Installation targets every configured destination by default;
 repeating `--destination` selects a subset. The embedded binary must be an
-installed path outside `target/` (`crates/chat-stasher/src/schedule.rs:128-163`).
+installed path outside `target/` and the configured `CARGO_TARGET_DIR`
+(`crates/chat-stasher/src/schedule.rs:128-163`).
 The generated template wraps a `run-once` command
-(`crates/chat-stasher/src/schedule.rs:197-301`).
+(`crates/chat-stasher/src/schedule.rs:207-311`).
 
 The scheduler steps run only after the unit files are written (that is the
 only order a manager can accept), so a manager that refuses — WSL with
@@ -929,12 +930,12 @@ only order a manager can accept), so a manager that refuses — WSL with
 disk, and `status` then reported an installed timer that was armed nowhere —
 must be the install's problem, not the user's. A failed install rolls itself
 back: it stops the timers it had got enabled, removes the files it created and
-restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:508-929`),
+restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:518-939`),
 and `status` asks the manager rather than trusting the disk — `installed` needs
 every timer file *and* the manager confirming the job is loaded, `systemctl
 --user is-active` per timer on systemd and `launchctl print` per agent on macOS,
 and units the manager did not confirm are reported `unconfirmed`
-(`crates/chat-stasher/src/schedule.rs:982-1152`). Both formats were measured
+(`crates/chat-stasher/src/schedule.rs:992-1162`). Both formats were measured
 wrong in the same way: W282 on systemd and Windows, W287 on launchd, where a
 failed `bootstrap` left the plist behind and `status` called it installed. On
 Windows every `schedule` action refuses with exit 2 before writing anything,
@@ -1207,7 +1208,7 @@ confirmed in the code, not a temporary disclaimer.
 - **`schedule` render-only mode does not install the timer**; use the explicit
   `schedule install` action to load a launchd agent on macOS or enable the
   systemd user timer on Linux. `schedule uninstall` stops and removes the
-  matching job (`crates/chat-stasher/src/schedule.rs:508-929`).
+  matching job (`crates/chat-stasher/src/schedule.rs:518-939`).
 
 ---
 
