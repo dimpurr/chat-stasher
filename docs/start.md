@@ -18,7 +18,7 @@ Everything below was run on macOS. The commands are the same on Linux, with the 
 ## 1. Install the CLI
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dimpurr/chat-stasher/main/scripts/install.sh | sh
+curl -fsSL https://chatstasher.com/install.sh | sh
 ```
 
 The script installs one file, `~/.local/bin/chat-stasher`. If it says that folder is not on your `PATH`, add the line it prints to your shell profile and open a new terminal. Then check:
