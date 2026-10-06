@@ -1784,9 +1784,14 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # currently occupies.
 #
 # One quota per machine, shared by every destination: there is no per-destination
-# allowance to divide up. Least-recently-used entries are evicted when the quota
-# is reached; a session larger than a tenth of the quota is read through without
-# being stored, so one oversized conversation cannot sweep the cache.
+# allowance to divide up. The quota counts entry files and temporary
+# files being written, not filesystem overhead, and after a store
+# least-recently-used entries are evicted as needed to bring those
+# counted bytes within quota: a temporary file is left alone until it
+# is stale, and a cache nothing can be evicted from (a read-only
+# mount) stays over quota, which `doctor` reports. A session larger
+# than a tenth of the quota is read through without being stored, so
+# one oversized conversation cannot sweep the cache.
 #
 # Bulk work — `verify`, `export`, `dest-init`, `push`, `read --all-machines` —
 # never enters the cache, in either direction. `verify` in particular reads to
@@ -1800,8 +1805,10 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # max_bytes = "10GiB"
 #
 # Where the entries live. Default: this platform's cache directory
-# (~/Library/Caches/chat-stasher/body on macOS), chosen so that no sync or
-# backup tool treats it as data worth carrying.
+# (~/Library/Caches/chat-stasher/body on macOS; $XDG_CACHE_HOME/chat-stasher/body
+# or ~/.cache/chat-stasher/body on Linux; %LOCALAPPDATA%\chat-stasher\body on
+# Windows), chosen so that no sync or backup tool treats it as data worth
+# carrying.
 # dir = "~/Library/Caches/chat-stasher/body"
 
 # ---------------------------------------------------------------- harness_roots
