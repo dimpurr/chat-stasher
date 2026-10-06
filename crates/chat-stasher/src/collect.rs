@@ -1205,7 +1205,7 @@ pub fn collect_scan_report(
     // W880: deep counters the read functions can only reach through
     // this handle; folded into the report once the pass ends.
     let mut counters = CollectCounters::default();
-    for record in records {
+    for mut record in records {
         // W880: the whole iteration is this record's collect work, so
         // the per-harness timer covers the cursor resolution and the
         // provenance bookkeeping too, not only the read.
@@ -1340,6 +1340,15 @@ pub fn collect_scan_report(
                     report.state_saves += 1;
                 }
                 report.outcomes.push(outcome);
+                // TICKET-4D-10: stamp what this read observed firsthand into
+                // the record's provenance so the observation below carries it.
+                // Merged, never assigned — a root's surface observation is
+                // another origin's fact, not a replacement for this one, and
+                // the merge is a set union, so a dimension both origins record
+                // once is still recorded once.
+                if !processed.dimensions.is_empty() {
+                    crate::provenance::merge(&mut record.provenance, &processed.dimensions);
+                }
                 if !record.provenance.is_empty() {
                     let body = stage_shard_fact(stage, machine, &record.id)?;
                     crate::provenance::append_scan_observation(
@@ -1383,6 +1392,11 @@ struct ReadData {
 struct Processed {
     outcome: CollectOutcome,
     state: OffsetEntry,
+    /// The 4D dimensions this read observed firsthand (TICKET-4D-10). Only the
+    /// OpenClaw layout reads any today; every other source answers with the
+    /// empty set, which is the honest answer for a dimension nothing was read
+    /// from — and never a value inferred from the harness name.
+    dimensions: crate::provenance::SessionProvenance,
 }
 
 fn collect_one(
@@ -1563,6 +1577,7 @@ fn process_grok_bot(
                 reset: false,
                 compressed: false,
             },
+            dimensions: Default::default(),
         });
     }
     let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
@@ -1632,6 +1647,7 @@ fn process_grok_bot(
             reset: old.is_some_and(|entry| entry.grok_bot_row_digests.is_none()),
             compressed: false,
         },
+        dimensions: Default::default(),
     })
 }
 
@@ -1667,7 +1683,16 @@ fn process_sqlite(
             && entry.opencode.is_some()
             && entry.store_fingerprint.as_deref() == Some(store_fingerprint.as_str())
         {
-            return Ok(unchanged_sqlite(record, entry, &store_fingerprint));
+            // The store is byte-identical to the pass that already collected
+            // this session, so the dimensions that pass observed (TICKET-4D-10)
+            // are already written against these exact shards; an unchanged
+            // session has nothing new to record.
+            return Ok(unchanged_sqlite(
+                record,
+                entry,
+                &store_fingerprint,
+                Default::default(),
+            ));
         }
     }
     // W880: the shortcut did not fire, so this session's own rows
@@ -1706,6 +1731,7 @@ fn process_sqlite(
                 snapshot.cursor,
                 snapshot.json_line,
                 &store_fingerprint,
+                Default::default(),
             )
         }
         SqliteSessionLayout::CursorLegacy => {
@@ -1723,6 +1749,7 @@ fn process_sqlite(
                 snapshot.cursor,
                 snapshot.json_line,
                 &store_fingerprint,
+                Default::default(),
             )
         }
         SqliteSessionLayout::CursorGlobal => {
@@ -1735,6 +1762,7 @@ fn process_sqlite(
                     record,
                     old.expect("checked above"),
                     &store_fingerprint,
+                    Default::default(),
                 ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
@@ -1749,6 +1777,7 @@ fn process_sqlite(
                 snapshot.cursor,
                 snapshot.json_line,
                 &store_fingerprint,
+                Default::default(),
             )
         }
         SqliteSessionLayout::Grok => {
@@ -1761,6 +1790,7 @@ fn process_sqlite(
                     record,
                     old.expect("checked above"),
                     &store_fingerprint,
+                    Default::default(),
                 ));
             }
             let snapshot = read_sqlite_session(&record.absolute_path, &spec, &session_id)
@@ -1775,6 +1805,7 @@ fn process_sqlite(
                 snapshot.cursor,
                 snapshot.json_line,
                 &store_fingerprint,
+                Default::default(),
             )
         }
         SqliteSessionLayout::Zed => {
@@ -1787,6 +1818,7 @@ fn process_sqlite(
                     record,
                     old.expect("checked above"),
                     &store_fingerprint,
+                    Default::default(),
                 ));
             }
             let snapshot = read_zed_session(&record.absolute_path, &spec, &session_id)
@@ -1801,6 +1833,7 @@ fn process_sqlite(
                 snapshot.cursor,
                 snapshot.json_line,
                 &store_fingerprint,
+                Default::default(),
             )
         }
         SqliteSessionLayout::GrokBot => {
@@ -1846,6 +1879,11 @@ fn process_openclaw(
     let session_id = decode_openclaw_id_component(session_id)?;
     let snapshot = read_openclaw_session(&record.absolute_path, &session_id, generation)
         .map_err(|error| anyhow!("failed to read OpenClaw session snapshot: {error}"))?;
+    // TICKET-4D-10: the read observed the store's own `schema_meta.agent_id`
+    // (the container every session in this store ran inside) and, for a cold
+    // snapshot read from `session_transcript_archives`, the archived status.
+    // They travel in `Processed` so the collect pass can stamp them into the
+    // record's provenance observation.
     process_sqlite_snapshot(
         record,
         old,
@@ -1856,6 +1894,7 @@ fn process_openclaw(
         snapshot.cursor,
         snapshot.json_line,
         store_fingerprint,
+        snapshot.dimensions,
     )
 }
 
@@ -1884,6 +1923,7 @@ fn process_sqlite_snapshot(
     cursor: OpenCodeCursor,
     json_line: Vec<u8>,
     store_fingerprint: &str,
+    dimensions: crate::provenance::SessionProvenance,
 ) -> anyhow::Result<Processed> {
     // This session's own fields, and nothing else. The whole-store fingerprint
     // was removed from `OpenCodeCursor` precisely so that this comparison
@@ -1893,6 +1933,7 @@ fn process_sqlite_snapshot(
             record,
             old.expect("checked above"),
             store_fingerprint,
+            dimensions,
         ));
     }
     let source_bytes = json_line.len() as u64;
@@ -1910,6 +1951,7 @@ fn process_sqlite_snapshot(
             store_fingerprint,
             source_bytes,
             &digest,
+            dimensions,
         ));
     }
     if let Some(entry) = old {
@@ -1920,6 +1962,7 @@ fn process_sqlite_snapshot(
                 store_fingerprint,
                 source_bytes,
                 &digest,
+                dimensions,
             ));
         }
     }
@@ -1965,6 +2008,7 @@ fn process_sqlite_snapshot(
             reset: old.is_some() || force_reset,
             compressed: false,
         },
+        dimensions,
     })
 }
 
@@ -2006,6 +2050,7 @@ fn unchanged_content_sqlite(
     store_fingerprint: &str,
     source_bytes: u64,
     digest: &str,
+    dimensions: crate::provenance::SessionProvenance,
 ) -> Processed {
     Processed {
         state: OffsetEntry {
@@ -2028,6 +2073,7 @@ fn unchanged_content_sqlite(
             reset: false,
             compressed: false,
         },
+        dimensions,
     }
 }
 
@@ -2044,6 +2090,7 @@ fn unchanged_sqlite(
     record: &SessionRecord,
     old: &OffsetEntry,
     store_fingerprint: &str,
+    dimensions: crate::provenance::SessionProvenance,
 ) -> Processed {
     let mut state = old.clone();
     state.store_fingerprint = Some(store_fingerprint.to_string());
@@ -2060,6 +2107,7 @@ fn unchanged_sqlite(
             reset: false,
             compressed: false,
         },
+        dimensions,
     }
 }
 
@@ -2140,6 +2188,7 @@ fn process_jsonl(
             reset: data.reset,
             compressed: false,
         },
+        dimensions: Default::default(),
     })
 }
 
@@ -2166,6 +2215,7 @@ fn process_opencode(
             record,
             old.expect("checked above"),
             store_fingerprint,
+            Default::default(),
         ));
     }
 
@@ -2183,6 +2233,7 @@ fn process_opencode(
             store_fingerprint,
             source_bytes,
             &digest,
+            Default::default(),
         ));
     }
     if let Some(entry) = old {
@@ -2193,6 +2244,7 @@ fn process_opencode(
                 store_fingerprint,
                 source_bytes,
                 &digest,
+                Default::default(),
             ));
         }
     }
@@ -2238,6 +2290,7 @@ fn process_opencode(
             reset: old.is_some() || force_reset,
             compressed: false,
         },
+        dimensions: Default::default(),
     })
 }
 
@@ -2264,6 +2317,7 @@ fn process_whole_file(
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, false),
+            dimensions: Default::default(),
         });
     }
     let lines = if bytes.is_empty() {
@@ -2305,6 +2359,7 @@ fn process_whole_file(
             reset,
             compressed: false,
         },
+        dimensions: Default::default(),
     })
 }
 
@@ -2335,6 +2390,7 @@ fn process_compressed(
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, true),
+            dimensions: Default::default(),
         });
     }
     let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
@@ -2383,6 +2439,7 @@ fn process_compressed(
             reset: old.is_some(),
             compressed: true,
         },
+        dimensions: Default::default(),
     })
 }
 

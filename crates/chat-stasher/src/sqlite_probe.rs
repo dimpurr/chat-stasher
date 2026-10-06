@@ -335,13 +335,48 @@ pub struct OpenClawSessionEnumeration {
     pub unreadable_rows: u64,
 }
 
+/// The sealed schema of a cold OpenClaw archive snapshot, read from
+/// `session_transcript_archives`. Its presence on a line is the harness's own
+/// record that the session is archived, which is the only place that fact is
+/// ever written.
+pub const OPENCLAW_ARCHIVE_SCHEMA: &str = "chat-stasher.openclaw.archive.v1";
+
+/// The sealed schema of a live OpenClaw window snapshot, read from
+/// `session_windows`. A live window records no lifecycle status, so a line
+/// carrying this schema leaves the status dimension unobserved.
+pub const OPENCLAW_SESSION_SCHEMA: &str = "chat-stasher.openclaw.session.v1";
+
 /// One immutable OpenClaw window/archive export. The archive blob is preserved
 /// as hexadecimal bytes when it is not already JSON; it is never decompressed
 /// or interpreted during collection.
+///
+/// `dimensions` carries the 4D projection of what this read observed firsthand
+/// (TICKET-4D-10): the `schema_meta.agent_id` of the store as the `container`
+/// the session ran inside, and `status = ["archived"]` for a cold snapshot read
+/// from `session_transcript_archives`. A live window records no status, so its
+/// snapshot leaves that dimension empty — never "active", which nothing
+/// observed.
 #[derive(Debug, Clone)]
 pub struct OpenClawSessionSnapshot {
     pub cursor: OpenCodeCursor,
     pub json_line: Vec<u8>,
+    pub dimensions: crate::provenance::SessionProvenance,
+}
+
+/// The 4D dimensions one OpenClaw read observed. `agent_id` comes from the
+/// store's own `schema_meta` row and is the container every session in this
+/// store ran inside; `archived` is true exactly when the snapshot was read from
+/// `session_transcript_archives` rather than `session_windows`.
+fn openclaw_snapshot_dimensions(
+    agent_id: &str,
+    archived: bool,
+) -> crate::provenance::SessionProvenance {
+    let mut dimensions = crate::provenance::SessionProvenance::default();
+    dimensions.insert_container(agent_id);
+    if archived {
+        dimensions.insert_status("archived");
+    }
+    dimensions
 }
 
 /// Filesystem-safe, collision-resistant native ID for an OpenClaw agent/session
@@ -1163,7 +1198,7 @@ pub fn read_openclaw_session(
             .collect::<String>();
         archive.insert("blob_hex".to_string(), Value::String(blob_hex));
         let json_line = serde_json::to_vec(&serde_json::json!({
-            "schema": "chat-stasher.openclaw.archive.v1",
+            "schema": OPENCLAW_ARCHIVE_SCHEMA,
             "agent_id": agent_id,
             "archive": Value::Object(archive),
         }))
@@ -1182,6 +1217,7 @@ pub fn read_openclaw_session(
                 part_count: 0,
                 part_high_water: None,
             },
+            dimensions: openclaw_snapshot_dimensions(&agent_id, true),
             json_line,
         });
     }
@@ -1226,7 +1262,7 @@ pub fn read_openclaw_session(
     };
     let event_count = events.len() as u64;
     let json_line = serde_json::to_vec(&serde_json::json!({
-        "schema": "chat-stasher.openclaw.session.v1",
+        "schema": OPENCLAW_SESSION_SCHEMA,
         "agent_id": agent_id,
         "window": window,
         "events": events,
@@ -1247,7 +1283,11 @@ pub fn read_openclaw_session(
         part_count: 0,
         part_high_water: None,
     };
-    Ok(OpenClawSessionSnapshot { cursor, json_line })
+    Ok(OpenClawSessionSnapshot {
+        dimensions: openclaw_snapshot_dimensions(&agent_id, false),
+        cursor,
+        json_line,
+    })
 }
 
 fn ensure_openclaw_schema(conn: &Connection) -> Result<(), String> {
@@ -3116,6 +3156,53 @@ mod openclaw_tests {
             "a mismatched archive digest is unreadable, not a valid preserved archive"
         );
         drop(conn);
+    }
+
+    /// TICKET-4D-10. The 4D projection a read observes firsthand: the store's
+    /// own `schema_meta.agent_id` becomes the `container` the session ran
+    /// inside, and only a cold snapshot read from `session_transcript_archives`
+    /// records `status = ["archived"]`. A live window records no status, so its
+    /// snapshot leaves that dimension unobserved — "active" is never assumed
+    /// from the mere fact that the window still exists.
+    #[test]
+    fn openclaw_snapshot_dimensions_project_agent_id_and_archive_status() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("openclaw-agent.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta(agent_id TEXT);
+             INSERT INTO schema_meta VALUES ('synthetic-agent');
+             CREATE TABLE session_windows(session_id TEXT, session_key TEXT, ended_at TEXT, started_at TEXT);
+             INSERT INTO session_windows VALUES ('window-1', 'logical-1', NULL, '2026-01-02T03:04:05Z');
+             CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, created_at TEXT);
+             CREATE TABLE session_transcript_archives(session_id TEXT, generation INTEGER, session_key TEXT, reason TEXT, encoding TEXT, archive_blob BLOB, archive_sha256 TEXT, archive_name TEXT, created_at TEXT, published_at TEXT);
+             INSERT INTO session_transcript_archives VALUES ('deleted-1', 2, 'logical-2', 'deleted', 'zstd', X'73796e7468657469632d636f6c642d61726368697665', 'cf3d6b9c3808b8ab261b086242d3e53e0d5b7d31eb2518319b679f4c3e4821c6', 'synthetic.jsonl.zst', '2026-01-03T00:00:00Z', '2026-01-03T00:00:01Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let live = read_openclaw_session(&db, "window-1", None).unwrap();
+        assert_eq!(
+            live.dimensions.container,
+            ["synthetic-agent"],
+            "the store's own agent_id is the container the session ran inside"
+        );
+        assert!(
+            live.dimensions.status.is_empty(),
+            "a live window records no lifecycle status, and none is assumed: {:?}",
+            live.dimensions.status
+        );
+        assert!(live.dimensions.is_valid());
+
+        let cold = read_openclaw_session(&db, "deleted-1", Some(2)).unwrap();
+        assert_eq!(cold.dimensions.container, ["synthetic-agent"]);
+        assert_eq!(
+            cold.dimensions.status,
+            ["archived"],
+            "a snapshot read from session_transcript_archives is archived, \
+             which is the only place that fact is recorded"
+        );
+        assert!(cold.dimensions.is_valid());
     }
 
     /// W325/GLM review. Legacy Doctor imports can leave `session_windows` rows

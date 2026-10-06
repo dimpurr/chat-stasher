@@ -2336,14 +2336,15 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Five
+/// opposed to what the collection path or the registry already recorded. Six
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
-/// directory, project and archive fact), `grok` (its CLI `session_docs`
+/// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
+/// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
 /// row's `cwd`) and `codex` (its `session_meta` record's working directory
-/// and repository); every other harness answers with the empty set, which is the
-/// honest answer for a dimension nothing was read from — and never a value
-/// inferred from the harness name.
+/// and repository); every other harness answers with the empty set, which is
+/// the honest answer for a dimension nothing was read from — and never a
+/// value inferred from the harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
 /// this module: an unreadable line is not evidence about a dimension.
@@ -2428,6 +2429,14 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     };
                     fold_codex_turn_context_cwd(&mut dimensions, &record);
                 }
+            }
+        }
+        "openclaw" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_openclaw_dimensions(&mut dimensions, &record);
             }
         }
         _ => {}
@@ -2645,6 +2654,39 @@ fn fold_codex_turn_context_cwd(
     };
     if let Some(cwd) = non_empty_str(payload.get("cwd")) {
         dimensions.insert_cwd(cwd);
+    }
+}
+
+/// OpenClaw writes two provenance facts on the **top level** of every sealed
+/// export line, beside the session itself (TICKET-4D-10).
+///
+/// `agent_id` is the store's own `schema_meta` row: the agent every session in
+/// this store ran inside, which is a container rather than a path — the
+/// distinction `cwd ≠ repo identity` draws. It is stamped onto the line by the
+/// reader, so the index observes it here exactly as the collect pass observed
+/// it firsthand.
+///
+/// A line whose schema is the archive schema is the harness's own record that
+/// the session was read from `session_transcript_archives` — a cold snapshot of
+/// a session that no longer has a live window. That is the only place the
+/// archived status is ever written, so it is the only line that records it; a
+/// live window line leaves the status unobserved rather than assuming
+/// "active" from the mere fact that the window exists.
+///
+/// Neither field is required and neither is inferred: a line without them, a
+/// value that is not a non-empty string, and a line that does not parse at all
+/// each leave the dimension exactly as empty as it was.
+fn fold_openclaw_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if let Some(agent_id) = non_empty_str(record.get("agent_id")) {
+        dimensions.insert_container(agent_id);
+    }
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        == Some(crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA)
+    {
+        dimensions.insert_status("archived");
     }
 }
 
@@ -3278,7 +3320,6 @@ mod tests {
             ],
         );
         assert!(
-            row.dimensions.is_empty(),
             "an empty, mistyped, or unsealed value is nothing observed, never a value: {:?}",
             row.dimensions
         );
@@ -3646,6 +3687,159 @@ mod tests {
             "line: {json}"
         );
         assert!(!json.contains("\"tenant\""), "line: {json}");
+        assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    // --------------------------------------------- TICKET-4D-10 · openclaw
+    //
+    // The two facts an OpenClaw export line states about itself: the agent the
+    // session ran inside, and — only on a cold archive line — that the session
+    // is archived.
+
+    /// One sealed OpenClaw export line, spelled exactly the way
+    /// `sqlite_probe::read_openclaw_session` seals it.
+    fn oc_line(schema: &str, agent_id: &str) -> String {
+        format!(r#"{{"schema":"{schema}","agent_id":"{agent_id}","window":{{"session_id":"s1"}}}}"#)
+    }
+
+    #[test]
+    fn openclaw_records_its_agent_as_the_container_it_ran_inside() {
+        let line = oc_line(
+            crate::sqlite_probe::OPENCLAW_SESSION_SCHEMA,
+            "synthetic-agent",
+        );
+        let row = build_row("s", "mbp", "openclaw", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["synthetic-agent"]);
+        assert!(
+            row.dimensions.status.is_empty(),
+            "a live window records no lifecycle status, and none is assumed: {:?}",
+            row.dimensions.status
+        );
+    }
+
+    #[test]
+    fn openclaw_records_archived_status_on_a_cold_archive_line() {
+        let line = oc_line(
+            crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA,
+            "synthetic-agent",
+        );
+        let row = build_row("s", "mbp", "openclaw", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["synthetic-agent"]);
+        assert_eq!(
+            row.dimensions.status,
+            ["archived"],
+            "a line sealed from session_transcript_archives is the harness's own \
+             record that the session is archived"
+        );
+    }
+
+    #[test]
+    fn an_openclaw_line_without_an_agent_id_records_no_container() {
+        let line = r#"{"schema":"chat-stasher.openclaw.session.v1","window":{}}"#;
+        let row = build_row("s", "mbp", "openclaw", &[line]);
+        assert!(
+            row.dimensions.is_empty(),
+            "an agent id that was not observed is not invented: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn an_empty_or_mistyped_openclaw_agent_id_records_no_container() {
+        // A live-window line carries no status of its own, so the only fact
+        // these lines could record is the container — and an empty or mistyped
+        // agent id records no container either.
+        let row = build_row(
+            "s",
+            "mbp",
+            "openclaw",
+            &[
+                r#"not json at all"#,
+                r#"{"schema":"chat-stasher.openclaw.session.v1","agent_id":""}"#,
+                r#"{"schema":"chat-stasher.openclaw.session.v1","agent_id":7}"#,
+                r#"{"schema":"chat-stasher.openclaw.session.v1","agent_id":["a"]}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty or mistyped value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+
+        // On an archive line the status is the schema's own fact, independent
+        // of the agent id: a mistyped agent id records no container, while
+        // the line still states the session is archived.
+        let row = build_row(
+            "s",
+            "mbp",
+            "openclaw",
+            &[r#"{"schema":"chat-stasher.openclaw.archive.v1","agent_id":""}"#],
+        );
+        assert!(
+            row.dimensions.container.is_empty(),
+            "the container stays unobserved: {:?}",
+            row.dimensions.container
+        );
+        assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn one_agent_observed_twice_is_one_container() {
+        let first = oc_line(
+            crate::sqlite_probe::OPENCLAW_SESSION_SCHEMA,
+            "synthetic-agent",
+        );
+        let second = oc_line(
+            crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA,
+            "synthetic-agent",
+        );
+        let row = build_row("s", "mbp", "openclaw", &[first.as_str(), second.as_str()]);
+        assert_eq!(row.dimensions.container, ["synthetic-agent"]);
+        assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn another_harness_reads_no_openclaw_dimensions() {
+        // The same line read under a harness nobody asked about is not
+        // evidence: dimensions are read per harness, exactly as claude-code's
+        // are.
+        let line = oc_line(
+            crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA,
+            "synthetic-agent",
+        );
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are read per harness, not from whatever key a line has: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn the_openclaw_dimensions_travel_in_the_index_line() {
+        let line = oc_line(
+            crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA,
+            "synthetic-agent",
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "openclaw", &[line.as_str()]));
+        assert!(
+            json.contains(r#""container":["synthetic-agent"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""status":["archived"]"#), "line: {json}");
+
+        // A live window line carries the container and omits the status.
+        let live = oc_line(
+            crate::sqlite_probe::OPENCLAW_SESSION_SCHEMA,
+            "synthetic-agent",
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "openclaw", &[live.as_str()]));
+        assert!(
+            json.contains(r#""container":["synthetic-agent"]"#),
+            "line: {json}"
+        );
         assert!(!json.contains("\"status\""), "line: {json}");
     }
 
