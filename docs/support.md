@@ -208,10 +208,10 @@ around it.
 | System | Prebuilt binary | Install script | Hourly timer |
 |---|---|---|---|
 | macOS, Apple Silicon and Intel | Yes | Yes | launchd (`schedule install`) |
-| Linux, x86-64 and arm64 | From 0.5.0-rc.2: statically linked, any distribution | Yes, from 0.5.0-rc.2 | systemd user timer (`schedule install --format systemd`) |
-| Windows, x86-64 | From 0.5.0-rc.2: `chat-stasher-windows-x86_64.exe` | No: download the file | None built in (`schedule` refuses with exit 2). Use Task Scheduler. |
+| Linux, x86-64 and arm64 | From 0.5.0: statically linked, any distribution | Yes, from 0.5.0 | systemd user timer (`schedule install --format systemd`) |
+| Windows, x86-64 | From 0.5.0: `chat-stasher-windows-x86_64.exe` | No: download the file | None built in (`schedule` refuses with exit 2). Use Task Scheduler. |
 
-From 0.5.0-rc.2, `npm install -g chat-stasher` works. `cargo install chat-stasher` is not yet available: the crate has never been published to crates.io. Before that, Linux and Windows build from source. See [install.md](install.md).
+From 0.5.0, `npm install -g chat-stasher` and `cargo install chat-stasher` also work. Before that, Linux and Windows build from source. See [install.md](install.md).
 
 Most Linux and Windows tool paths come from each tool's source code or documentation, and have not yet been archived end to end on those systems.
 
