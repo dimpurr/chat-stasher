@@ -5,10 +5,10 @@
  * (`entrypoints/background.ts`, `coordinatedHttp`): it answers which
  * coordination bucket a URL belongs to, and it **fails closed** — a request it
  * cannot place is not sent. `tests/w212-coordination.test.ts` covers the routes
- * every plan declares, the final "request is not declared" throw, and the gemini
- * query refusal at one URL (`rpcids=unplanned`); unpinned were the platform
- * refusal and the query refusal's neighbouring outcomes. Those are the sentences
- * a future edit is most likely to break without anything else going red:
+ * every plan declares, the final "request is not declared" throw, and already
+ * pins the gemini query refusal at one URL (`rpcids=unplanned`, :38-39); unpinned were
+ * the platform refusal and the query refusal's neighbouring outcomes. Those are
+ * the sentences a future edit is most likely to break without anything else going red:
  *
  *  · **no plan for the platform** (`backfillPlanFor`'s miss). Without it, a
  *    platform id that is not in the table would be classified against nothing;
@@ -30,9 +30,9 @@
  * by classifying a URL on `CLAUDE_PLAN`, the only plan in the table with a
  * `scopeInPath`. The edge that matters is that a `{…}` placeholder matches
  * exactly one **non-empty** segment and every literal segment is compared
- * character for character — a doubled slash keeps the segment count and so
- * isolates the non-empty rule from the count rule, which is the only way to tell
- * the two apart from outside.
+ * character for character — a doubled slash mid-path (or a trailing slash at
+ * the end) keeps the segment count and so isolates the non-empty rule from the
+ * count rule, which is the only way to tell the two apart from outside.
  *
  * Every pathname below is synthetic. No fixture is read from disk, no request
  * leaves the process, and `new URL` is the only thing that parses a string here.
@@ -137,7 +137,7 @@ describe('W613 · coordination request classification', () => {
       .toBe('detail');
 
     // An EMPTY segment is not a match. A doubled slash (an empty `{org}`
-    // mid-path) and a trailing slash (an empty `{id}` at the end) each
+    // mid-path) and a single trailing slash (an empty `{id}` at the end) each
     // leave the segment count alone, so these two are refused by the
     // non-empty rule itself and not by the count rule — one on the list
     // template's `{org}`, one on the detail template's `{id}`, each with
