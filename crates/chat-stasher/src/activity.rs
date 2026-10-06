@@ -3320,6 +3320,7 @@ mod tests {
             ],
         );
         assert!(
+            row.dimensions.is_empty(),
             "an empty, mistyped, or unsealed value is nothing observed, never a value: {:?}",
             row.dimensions
         );
