@@ -54,6 +54,20 @@ fn cc_line_with_provenance(ts: &str, cwd: &str, organization: &str) -> String {
     )
 }
 
+/// One synthetic Cursor composer line from the global `cursorDiskKV` store,
+/// naming the workspace it ran in and the repository it was tracking.
+fn cursor_composer_line() -> String {
+    concat!(
+        r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:fixture-composer","value":{"#,
+        r#""composerId":"fixture-composer","createdAt":1753000000000,"status":"completed","#,
+        r#""workspaceIdentifier":{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{"#,
+        r#""$mid":1,"fsPath":"/w/one","external":"file:///w/one","path":"/w/one","scheme":"file"}},"#,
+        r#""trackedGitRepos":["/w/one/vendor"],"#,
+        r#""fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}],"conversationMap":{"b1":{"text":"hi","type":1}}}}}"#,
+    )
+    .to_string()
+}
+
 /// Write one sealed shard for a session named `session` under `machine`.
 fn write_shard(stage: &Path, machine: &str, session: &str, lines: &[String]) {
     let dir = stage
@@ -666,6 +680,63 @@ fn activity_index_reads_no_grok_dimension_from_a_web_bundle() {
     assert!(
         row.get("dimensions").is_none(),
         "a web bundle states no working directory, and none is invented: {row}"
+    );
+}
+
+/// TICKET-4D-05 · the boundaries a Cursor composer states about itself reach the
+/// written index: the workspace it names and the repository it was tracking.
+///
+/// The composer's own `status: "completed"` is in this fixture on purpose. It is
+/// the state of the *generation run* when the row was written, so the index must
+/// carry no lifecycle `status` for it — the difference between "this run
+/// finished" and "this conversation was archived" is the whole reason the two are
+/// not read from the same field.
+#[test]
+fn activity_index_records_the_workspace_and_repositories_a_composer_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "cursor.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09767";
+    write_shard(&stage, machine, session, &[cursor_composer_line()]);
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/one/vendor", "file:///w/one"]),
+        "the workspace and the tracked repository are both boundaries, in one \
+         stable order: {}",
+        row["dimensions"]
+    );
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "a `file://` workspace names the directory the session ran in: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("status").is_none(),
+        "a generation run's outcome is not a lifecycle state, so none is \
+         recorded: {}",
+        row["dimensions"]
     );
 }
 
