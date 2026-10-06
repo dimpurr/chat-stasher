@@ -5,7 +5,7 @@
 //! side-effect free; the launchd install helpers are explicit and testable.
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Datelike, Days, Local, LocalResult, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, LocalResult, NaiveDate, TimeZone, Timelike};
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -1424,12 +1424,30 @@ fn plist_integer(text: &str, key: &str) -> Option<u64> {
 fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
     let after_key = text.split_once("<key>StartCalendarInterval</key>")?.1;
     let dict = after_key.split_once("</dict>")?.0;
-    let weekday = u32::try_from(plist_integer(dict, "Weekday")?).ok()?;
-    let hour = u32::try_from(plist_integer(dict, "Hour")?).ok()?;
     let minute = u32::try_from(plist_integer(dict, "Minute")?).ok()?;
-    if weekday > 7 || hour > 23 || minute > 59 {
+    if minute > 59 {
         return None;
     }
+    let weekday = match plist_integer(dict, "Weekday") {
+        Some(w) => {
+            let val = u32::try_from(w).ok()?;
+            if val > 7 {
+                return None;
+            }
+            Some(val)
+        }
+        None => None,
+    };
+    let hour = match plist_integer(dict, "Hour") {
+        Some(h) => {
+            let val = u32::try_from(h).ok()?;
+            if val > 23 {
+                return None;
+            }
+            Some(val)
+        }
+        None => None,
+    };
     Some(CalendarSlot {
         weekday,
         hour,
@@ -1438,8 +1456,8 @@ fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
 }
 
 struct CalendarSlot {
-    weekday: u32,
-    hour: u32,
+    weekday: Option<u32>,
+    hour: Option<u32>,
     minute: u32,
 }
 
@@ -1452,21 +1470,49 @@ struct CalendarSlot {
 /// nothing rather than moved, because moving it would state a fire time
 /// launchd was never asked for.
 fn next_calendar_occurrence(slot: CalendarSlot, now: DateTime<Local>) -> Option<DateTime<Local>> {
-    // launchd accepts 0 and 7 for Sunday; chrono counts from Sunday at 0.
-    let target = slot.weekday % 7;
-    let today = now.date_naive();
-    let day = today.checked_add_days(Days::new(u64::from(
-        (target + 7 - today.weekday().num_days_from_sunday()) % 7,
-    )))?;
-    match local_at(day, &slot)? {
-        this_week if this_week > now => Some(this_week),
-        _ => local_at(day.checked_add_days(Days::new(7))?, &slot),
+    if let (Some(weekday), Some(hour)) = (slot.weekday, slot.hour) {
+        // launchd accepts 0 and 7 for Sunday; chrono counts from Sunday at 0.
+        let target = weekday % 7;
+        let today = now.date_naive();
+        let day = today.checked_add_days(Days::new(u64::from(
+            (target + 7 - today.weekday().num_days_from_sunday()) % 7,
+        )))?;
+        match local_at(day, hour, slot.minute)? {
+            this_week if this_week > now => Some(this_week),
+            _ => local_at(day.checked_add_days(Days::new(7))?, hour, slot.minute),
+        }
+    } else if slot.weekday.is_none() && slot.hour.is_none() {
+        next_hourly_occurrence(slot.minute, now)
+    } else {
+        None
     }
 }
 
-/// `date` at the slot's wall-clock time in the local zone.
-fn local_at(date: NaiveDate, slot: &CalendarSlot) -> Option<DateTime<Local>> {
-    let naive = date.and_hms_opt(slot.hour, slot.minute, 0)?;
+fn next_hourly_occurrence(minute: u32, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let today = now.date_naive();
+    let current_hour = now.hour();
+    for hours_ahead in 0..48u32 {
+        let naive_base = today.and_hms_opt(current_hour, minute, 0)?;
+        let candidate_naive =
+            naive_base.checked_add_signed(chrono::Duration::hours(i64::from(hours_ahead)))?;
+        match Local.from_local_datetime(&candidate_naive) {
+            LocalResult::Single(dt) if dt > now => return Some(dt),
+            LocalResult::Ambiguous(first, second) => {
+                if first > now {
+                    return Some(first);
+                } else if second > now {
+                    return Some(second);
+                }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// `date` at `hour`:`minute` in the local zone.
+fn local_at(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Local>> {
+    let naive = date.and_hms_opt(hour, minute, 0)?;
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(when) => Some(when),
         // A repeated wall-clock time (the autumn fall-back) happens twice; the
@@ -1626,6 +1672,47 @@ fn reclaim_stage_argv(binary: &Path, stage: &Path, args: &ReclaimStageArgs) -> V
     argv
 }
 
+/// Deterministically pick a minute of the hour (0..=59) derived from a machine identifier.
+///
+/// Spreading machines across different minutes of the hour prevents several machines
+/// from hitting the same destination (e.g. S3, R2, or SSH) at the exact same minute.
+pub fn hourly_minute_for_machine(seed: &str) -> u32 {
+    let digest = Sha256::digest(seed.as_bytes());
+    let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    u32::from_be_bytes(bytes) % 60
+}
+
+/// Resolve the machine seed used for deterministic hourly minute selection.
+fn resolve_machine_seed(args: &RunOnceArgs, home: &Path) -> String {
+    if let Some(machine) = &args.machine {
+        if !machine.is_empty() {
+            return machine.clone();
+        }
+    }
+    // Check machine-identity in default_data_root
+    let id_path = crate::config::default_data_root().join("machine-identity");
+    if let crate::identity::IdentityFileState::Loaded(id) =
+        crate::identity::load_identity_state(&id_path)
+    {
+        return id.as_hex();
+    }
+    // Fall back to home data root if different (e.g. in sandboxes or custom HOME)
+    let home_id_path = home.join(".local/share/chat-stasher/machine-identity");
+    if let crate::identity::IdentityFileState::Loaded(id) =
+        crate::identity::load_identity_state(&home_id_path)
+    {
+        return id.as_hex();
+    }
+    // Check hostname / platform machine id
+    if let Some(m) = crate::id::machine_id() {
+        if !m.is_empty() {
+            return m;
+        }
+    }
+    // Deterministic fallback
+    "chat-stasher".to_string()
+}
+
 fn render_launchd(
     binary: &Path,
     stage: &Path,
@@ -1685,6 +1772,17 @@ fn render_launchd_job(
         .map(|arg| format!("        <string>{}</string>", xml_escape(arg)))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let schedule_key = if interval == 3600 {
+        let seed = resolve_machine_seed(args, home);
+        let minute = hourly_minute_for_machine(&seed);
+        format!(
+            "  <!-- Hourly at a deterministic minute per machine (:{minute:02}) so passes do not drift by their own duration and multiple machines do not hit a destination at the same minute. -->\n  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Minute</key>\n    <integer>{minute}</integer>\n  </dict>"
+        )
+    } else {
+        format!("  <key>StartInterval</key>\n  <integer>{interval}</integer>")
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1697,8 +1795,7 @@ fn render_launchd_job(
   <array>
 {arguments}
   </array>
-  <key>StartInterval</key>
-  <integer>{interval}</integer>
+{schedule_key}
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
@@ -1711,6 +1808,7 @@ fn render_launchd_job(
         stdout = xml_escape(&stdout_log.to_string_lossy()),
         stderr = xml_escape(&stderr_log.to_string_lossy()),
         label = xml_escape(label),
+        schedule_key = schedule_key,
     )
 }
 
@@ -2275,6 +2373,105 @@ mod tests {
             .expect("jitter sleep");
         let exec = plist.find("exec &apos;").expect("exec");
         assert!(sleep < exec, "jitter must be applied before exec");
+    }
+
+    /// Hourly launchd unit renders StartCalendarInterval with a deterministic minute,
+    /// RunAtLoad=false, and jitter preamble, instead of StartInterval.
+    #[test]
+    fn launchd_hourly_plist_renders_start_calendar_interval() {
+        let args = RunOnceArgs {
+            machine: Some("machine-alpha".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(!plist.contains("<key>StartInterval</key>"));
+        assert!(!plist.contains("<key>Hour</key>"));
+        assert!(!plist.contains("<key>Weekday</key>"));
+        let minute = hourly_minute_for_machine("machine-alpha");
+        assert!(plist.contains(&format!(
+            "<key>Minute</key>\n    <integer>{minute}</integer>"
+        )));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// Non-hourly intervals (backup_interval_secs != 3600) fall back to StartInterval.
+    #[test]
+    fn launchd_non_hourly_plist_falls_back_to_start_interval() {
+        let args = RunOnceArgs::default();
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            1800,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(!plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(plist.contains("<key>StartInterval</key>\n  <integer>1800</integer>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// The hourly minute is derived deterministically from the machine ID and distributes across 0..=59.
+    #[test]
+    fn deterministic_hourly_minute_derived_from_machine_id() {
+        let min_a = hourly_minute_for_machine("host-a");
+        let min_b = hourly_minute_for_machine("host-b");
+        assert!(min_a < 60);
+        assert!(min_b < 60);
+        assert_eq!(min_a, hourly_minute_for_machine("host-a"));
+        assert_ne!(min_a, min_b);
+    }
+
+    /// The hourly StartCalendarInterval plist yields the exact next occurrence in local time.
+    #[test]
+    fn launchd_hourly_calendar_plist_yields_the_exact_next_local_occurrence() {
+        use chrono::Timelike;
+
+        let home = tempfile::tempdir().unwrap();
+        let args = RunOnceArgs {
+            machine: Some("machine-alpha".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        write_plists(home.path(), &files);
+
+        let now = local_noon();
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), now);
+        let value = next
+            .value()
+            .expect("the hourly plist names a calendar slot");
+        assert_eq!(next.note(), None, "a known time carries no excuse");
+
+        let when = DateTime::parse_from_str(value, "%a %Y-%m-%d %H:%M:%S %z")
+            .expect("the reported value is a local timestamp");
+        let expected_minute = hourly_minute_for_machine("machine-alpha");
+        assert_eq!(when.minute(), expected_minute);
+        assert!(when > now, "the next occurrence is never in the past");
     }
 
     /// The weekly unit must embed the `reclaim-stage` subcommand, the stage path
@@ -3091,7 +3288,7 @@ mod tests {
             Format::Launchd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
-            3600,
+            1800,
             &RunOnceArgs::default(),
             &ReclaimStageArgs::default(),
             home.path(),
@@ -3103,7 +3300,7 @@ mod tests {
         assert_eq!(
             next.note(),
             Some(
-                "launchd interval jobs expose no next fire time; the job runs every 60 minutes \
+                "launchd interval jobs expose no next fire time; the job runs every 30 minutes \
                  after load"
             )
         );

@@ -255,6 +255,16 @@ under its own heading below.
 
 #### Changed
 
+- **Fixed clock-time hourly schedule on macOS.** When `backup_interval_secs` is
+  the default 3600 (hourly), `schedule` on macOS renders launchd's
+  `StartCalendarInterval` (one run per hour at a fixed minute) instead of
+  `StartInterval`, so passes no longer drift by their own execution duration
+  over time. The firing minute is chosen deterministically per machine (derived
+  by hashing the machine ID) to prevent collisions across multiple machines
+  pushing to a common remote destination. `RunAtLoad=false`, the 5-minute jitter
+  preamble, and single-instance execution are preserved; non-hourly intervals
+  retain `StartInterval`. Existing macOS installs need `chat-stasher schedule
+  install` to update their installed plist.
 - **Conversation counts count conversations.** A conversation archived on a
   laptop and a desktop under one id was counted twice, by `overview`'s
   headline, by the dashboard's stat tile and by the host's summary count, and
