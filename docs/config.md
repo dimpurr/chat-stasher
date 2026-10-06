@@ -147,7 +147,7 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 | Key | Default | Meaning |
 |---|---|---|
 | `max_bytes` | `"2GiB"` | The quota. Plain bytes or a unit: `"50GB"` is 50 × 10⁹, `"50GiB"` is 50 × 2³⁰. `0` turns the cache off. |
-| `dir` | the platform cache folder (`~/Library/Caches/chat-stasher/body` on macOS; `$XDG_CACHE_HOME/chat-stasher/body` or `~/.cache/chat-stasher/body` on Linux) | Where entries live. The platform default follows the operating system's cache directory; set this key to choose another location. |
+| `dir` | the platform cache folder (`~/Library/Caches/chat-stasher/body` on macOS; `$XDG_CACHE_HOME/chat-stasher/body` or `~/.cache/chat-stasher/body` on Linux; `%LOCALAPPDATA%\chat-stasher\body` on Windows) | Where entries live. The platform default follows the operating system's cache directory; set this key to choose another location. |
 
 - The quota counts entry files and temporary files being written, not filesystem overhead. After a store, least recently used entries are evicted as needed to bring those counted bytes within quota — once they can be evicted safely: a temporary file still being written counts, but is left alone until it is stale, and a cache nothing can be evicted from (a read-only mount, a permission the cache cannot override) stays over quota, which `doctor` reports against the quota.
 - A session larger than a tenth of the quota is read without being stored.
