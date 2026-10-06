@@ -219,7 +219,7 @@ apps/extension/lib/backfill/enumerate.ts:2916-2930  ffe4f02c7973  lines=15
   <- docs-dev/install.md:168  :: */
 apps/extension/lib/backfill/enumerate.ts:2964-2965  e0ad04fbfb87  lines=2
   <- docs-dev/install.md:126  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
-apps/extension/lib/backfill/enumerate.ts:2964-2978  30e272d8bf3f  lines=15
+apps/extension/lib/backfill/enumerate.ts:2964-2980  aea0d3e5786c  lines=17
   <- docs-dev/install.md:1290  :: *  · `detailPath` / `detailUrl`: GET /api/v0/chat/history_m…
 apps/extension/lib/backfill/enumerate.ts:2980-3007  bf7a44d7622d  lines=28
   <- docs-dev/install.md:164, docs-dev/install.md:1290, docs-dev/privacy.md:922, docs-dev/threat-model.md:329, docs-dev/threat-model.md:970  :: *  · 🔴 W42 · **Whether this endpoint pages or truncates a l…
@@ -331,77 +331,77 @@ apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:561  :: export const PAGE_HOOK_VERSION = 'v1';
 apps/extension/lib/contract.ts:305-350  0d21a1234c75  lines=46
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:356-852  9dc1973404c2  lines=497
+apps/extension/lib/contract.ts:356-873  29443fa42442  lines=518
   <- docs-dev/install.md:83, docs-dev/install.md:204, docs-dev/privacy.md:111, docs-dev/privacy.md:893  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
 apps/extension/lib/contract.ts:359  65cef6a544ee  lines=1
   <- docs-dev/privacy.md:844  :: origins: ['https://chat.deepseek.com'],
-apps/extension/lib/contract.ts:398-404  90fc5f0d7b4a  lines=7
+apps/extension/lib/contract.ts:414-420  90fc5f0d7b4a  lines=7
   <- docs-dev/install.md:32  :: // The external API route/shape differences may represent d…
-apps/extension/lib/contract.ts:419-484  85d95a112633  lines=66
+apps/extension/lib/contract.ts:440-505  85d95a112633  lines=66
   <- docs-dev/install.md:87  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:419  779465350317  lines=1
+apps/extension/lib/contract.ts:440  779465350317  lines=1
   <- docs-dev/privacy.md:845  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:436-451  6ff6670d0810  lines=16
+apps/extension/lib/contract.ts:457-472  6ff6670d0810  lines=16
   <- docs-dev/threat-model.md:330  :: pathHints: ['/rest/thread/'],
-apps/extension/lib/contract.ts:471-476  1631eb0ed4f9  lines=6
+apps/extension/lib/contract.ts:492-497  1631eb0ed4f9  lines=6
   <- docs-dev/install.md:89  :: sessionIdPatterns: [
-apps/extension/lib/contract.ts:478-484  748b3e6fe537  lines=7
+apps/extension/lib/contract.ts:499-505  748b3e6fe537  lines=7
   <- docs-dev/install.md:32  :: // 'from-source': nobody on either change opened a logged-i…
-apps/extension/lib/contract.ts:489-503  3c2febd21c22  lines=15
+apps/extension/lib/contract.ts:510-524  3c2febd21c22  lines=15
   <- docs-dev/install.md:32  :: id: 'chatgpt',
-apps/extension/lib/contract.ts:490  4eda2e856655  lines=1
+apps/extension/lib/contract.ts:511  4eda2e856655  lines=1
   <- docs-dev/privacy.md:846  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
-apps/extension/lib/contract.ts:514  586fc9c878ac  lines=1
+apps/extension/lib/contract.ts:535  586fc9c878ac  lines=1
   <- docs-dev/privacy.md:847  :: origins: ['https://gemini.google.com'],
-apps/extension/lib/contract.ts:540-552  ffbeb3d9ba7d  lines=13
+apps/extension/lib/contract.ts:561-573  ffbeb3d9ba7d  lines=13
   <- docs-dev/install.md:32  :: //    `WIZ_global_data` — an XSRF token in the body's `at` …
-apps/extension/lib/contract.ts:563  1f7678ac6786  lines=1
+apps/extension/lib/contract.ts:584  1f7678ac6786  lines=1
   <- docs-dev/privacy.md:848  :: origins: ['https://claude.ai'],
-apps/extension/lib/contract.ts:614-618  d3006384d2f5  lines=5
+apps/extension/lib/contract.ts:635-639  d3006384d2f5  lines=5
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:637  047cc8b8ab4e  lines=1
+apps/extension/lib/contract.ts:658  047cc8b8ab4e  lines=1
   <- docs-dev/privacy.md:849  :: origins: ['https://www.kimi.com'],
-apps/extension/lib/contract.ts:748-753  81d80c1cc585  lines=6
+apps/extension/lib/contract.ts:769-774  81d80c1cc585  lines=6
   <- docs-dev/install.md:32  :: // '/api/chat/...' route family, which is why that origin i…
-apps/extension/lib/contract.ts:762  23c99a148fbc  lines=1
+apps/extension/lib/contract.ts:783  23c99a148fbc  lines=1
   <- docs-dev/privacy.md:850  :: origins: ['https://grok.com'],
-apps/extension/lib/contract.ts:833-843  757ff261970a  lines=11
+apps/extension/lib/contract.ts:854-864  757ff261970a  lines=11
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:859-894  ebba5d56a375  lines=36
+apps/extension/lib/contract.ts:880-915  ebba5d56a375  lines=36
   <- docs-dev/privacy.md:853, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
-apps/extension/lib/contract.ts:881-894  ee0db2699c92  lines=14
+apps/extension/lib/contract.ts:902-915  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
-apps/extension/lib/contract.ts:915  93f15da49cac  lines=1
+apps/extension/lib/contract.ts:935  93f15da49cac  lines=1
   <- docs-dev/privacy.md:890  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1073-1094  6ada7641acdc  lines=22
+apps/extension/lib/contract.ts:1093-1114  6ada7641acdc  lines=22
   <- docs-dev/privacy.md:888  :: }
-apps/extension/lib/contract.ts:1085-1129  58b342e276c0  lines=45
+apps/extension/lib/contract.ts:1105-1165  ef664a94fbba  lines=61
   <- docs-dev/privacy.md:111, docs-dev/privacy.md:888  :: } catch {
-apps/extension/lib/contract.ts:1094-1156  b31495583f62  lines=63
+apps/extension/lib/contract.ts:1114-1193  29287c06f936  lines=80
   <- docs-dev/threat-model.md:570  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1116-1117  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1153-1154  d72720cd403e  lines=2
   <- docs-dev/privacy.md:454  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1168-1178  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1205-1215  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:569  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1192-1197  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1229-1234  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:372  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1265-1276  1e11e46c5e13  lines=12
+apps/extension/lib/contract.ts:1302-1313  1e11e46c5e13  lines=12
   <- docs-dev/threat-model.md:443  :: /**
-apps/extension/lib/contract.ts:1268-1276  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1305-1313  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:428  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1297-1306  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1334-1343  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:290, docs-dev/threat-model.md:416  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1326-1330  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1363-1367  91a5d6065664  lines=5
   <- docs-dev/privacy.md:548, docs-dev/threat-model.md:373, docs-dev/threat-model.md:413  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1334-1343  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1371-1380  b3b4db645114  lines=10
   <- docs-dev/privacy.md:286  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1357-1360  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1394-1397  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:700  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1423-1502  74df7cf45831  lines=80
+apps/extension/lib/contract.ts:1460-1539  74df7cf45831  lines=80
   <- docs-dev/install.md:101  :: /**
-apps/extension/lib/contract.ts:1519-1522  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1556-1559  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:355  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1572-1588  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1609-1625  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:586, docs-dev/threat-model.md:355  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:756, docs-dev/privacy.md:817, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
@@ -683,24 +683,24 @@ crates/chat-stasher/src/inbox.rs:66-68  3935abac04cb  lines=3
   <- docs-dev/install.md:550, docs-dev/threat-model.md:611  :: pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
 crates/chat-stasher/src/inbox.rs:448-453  bcce48fa0bc4  lines=6
   <- docs-dev/privacy.md:371  :: /// account fingerprint is computed from state outside the …
-crates/chat-stasher/src/inbox.rs:488-493  ff3901193121  lines=6
-  <- docs-dev/threat-model.md:372, docs-dev/threat-model.md:372  :: /// existing bytes. It is *stored* but deliberately does NO…
-crates/chat-stasher/src/inbox.rs:494-512  b083a5c4da2a  lines=19
-  <- docs-dev/threat-model.md:373  :: /// 🔴 W128 step 1 · The account fingerprint envelope, prese…
+crates/chat-stasher/src/inbox.rs:486-491  be25a57d61cc  lines=6
+  <- docs-dev/threat-model.md:372, docs-dev/threat-model.md:372  :: /// The `inbox@2` identity axis, preserved verbatim when th…
+crates/chat-stasher/src/inbox.rs:492-510  abff8979b232  lines=19
+  <- docs-dev/threat-model.md:373  :: #[serde(skip_serializing_if = "Option::is_none")]
 crates/chat-stasher/src/inbox.rs:512-520  602333abb239  lines=9
   <- docs-dev/privacy.md:372  :: account: Option<serde_json::Value>,
 crates/chat-stasher/src/inbox.rs:513-523  6639dea3f5dd  lines=11
   <- docs-dev/privacy.md:359  :: /// W218 · comparable account key derived by the native hos…
-crates/chat-stasher/src/inbox.rs:516  04f9dff3458f  lines=1
-  <- docs-dev/threat-model.md:374  :: account_key: Option<String>,
+crates/chat-stasher/src/inbox.rs:514  42bff107daca  lines=1
+  <- docs-dev/threat-model.md:374  :: /// by extension bundle bytes.
 crates/chat-stasher/src/inbox.rs:518-523  d4cd0be9ef23  lines=6
   <- docs-dev/threat-model.md:708  :: install_id: Option<String>,
 crates/chat-stasher/src/inbox.rs:523  5bd2902af347  lines=1
   <- docs-dev/threat-model.md:702  :: machine: String,
 crates/chat-stasher/src/inbox.rs:531-553  46292023761e  lines=23
   <- docs-dev/privacy.md:438  :: /// W50c · The **content fingerprint** the delivery was mad…
-crates/chat-stasher/src/inbox.rs:556-561  028e2a170cf7  lines=6
-  <- docs-dev/threat-model.md:372  :: /// The `identity` envelope — the account axis an `inbox@2`…
+crates/chat-stasher/src/inbox.rs:554-559  b425498bd497  lines=6
+  <- docs-dev/threat-model.md:372  :: }
 crates/chat-stasher/src/inbox.rs:597-626  b5ed552e3748  lines=30
   <- docs-dev/openclaw-scanner.md:98  :: /// The stage session-directory name for a conversation: `<…
 crates/chat-stasher/src/inbox.rs:758-766  74c932413240  lines=9
@@ -709,18 +709,18 @@ crates/chat-stasher/src/inbox.rs:837-847  67213d742753  lines=11
   <- docs-dev/privacy.md:378, docs-dev/threat-model.md:742  :: crate::test_identity_guard::refuse_fixture_write(&[parsed.i…
 crates/chat-stasher/src/inbox.rs:906-908  8b8c56e29c9d  lines=3
   <- docs-dev/privacy.md:359  :: .raw
-crates/chat-stasher/src/inbox.rs:906  95e2dfb5d7f7  lines=1
-  <- docs-dev/threat-model.md:374  :: .raw
 crates/chat-stasher/src/inbox.rs:907-910  c2c7f2e010c0  lines=4
   <- docs-dev/privacy.md:372  :: .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw…
+crates/chat-stasher/src/inbox.rs:910  663d372c8179  lines=1
+  <- docs-dev/threat-model.md:374  :: account_key: account_key.map(str::to_string),
 crates/chat-stasher/src/inbox.rs:956-1017  9d576c6b4498  lines=62
   <- docs-dev/privacy.md:378  :: }))
 crates/chat-stasher/src/inbox.rs:962-1017  e5eb86fb13fc  lines=56
   <- docs-dev/threat-model.md:742  :: /// bundle, so it can neither establish nor violate an iden…
 crates/chat-stasher/src/inbox.rs:1230-1258  2612dd531f44  lines=29
   <- docs-dev/install.md:550, docs-dev/threat-model.md:611  :: .write(true)
-crates/chat-stasher/src/inbox.rs:1406-1414  0ed05e5b2662  lines=9
-  <- docs-dev/threat-model.md:375  :: .map(|object| object.keys().cloned().collect())
+crates/chat-stasher/src/inbox.rs:1386-1394  07a89684eece  lines=9
+  <- docs-dev/threat-model.md:375  :: };
 crates/chat-stasher/src/inbox.rs:2022-2044  77fcf2eb736c  lines=23
   <- docs-dev/threat-model.md:391  :: inbox.join("deepseek-sess-unk.json"),
 crates/chat-stasher/src/main.rs:113  51c934204980  lines=1
