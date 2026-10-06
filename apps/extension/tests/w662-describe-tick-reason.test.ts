@@ -134,5 +134,27 @@ describe('W843 · describeTickReason', () => {
       expect(said).toBe(t('tick.reason.unknown', { reason: '' }));
       expect(said).not.toBe('');
     });
+
+    it('an unknown code keeps its verbatim reason in the language the popup is rendering in', async () => {
+      // The unknown entry is the only tick sentence with a placeholder, so
+      // this is the one mapping whose zh_CN rendering depends on the
+      // substitution surviving the locale switch. Same two-assertion shape
+      // as the ten named codes above: the equality says "the new locale's
+      // entry for this key with the reason in it", and the difference says
+      // "and it really changed" — a zh_CN entry that silently fell back to
+      // English would satisfy the equality alone.
+      const inEnglish = describeTickReason('some-new-reason');
+      await applyUiLocale('zh_CN');
+      const inChinese = describeTickReason('some-new-reason');
+      expect(inChinese).toBe(t('tick.reason.unknown', { reason: 'some-new-reason' }));
+      expect(inChinese).not.toBe(inEnglish);
+    });
+
+    it('the empty code is still a sentence in the language the popup is rendering in', async () => {
+      await applyUiLocale('zh_CN');
+      const said = describeTickReason('');
+      expect(said).toBe(t('tick.reason.unknown', { reason: '' }));
+      expect(said).not.toBe('');
+    });
   });
 });
