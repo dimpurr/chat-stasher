@@ -1,3 +1,15 @@
+/**
+ * Dual-path · One wrapper per page: when the MAIN-world install and the fallback
+ * both attempt to hook `fetch`, the second returns early, so one response
+ * produces one capture message rather than two.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com, there is no logged-in state and no real
+ *    conversation body or account, and nothing leaves the machine. This file
+ *    injects no http port: it replaces the page's `fetch` in-process, and the
+ *    `chat_session_id` its conversation URL carries is invented here.
+ */
+
 import { describe, expect, it, vi } from 'vitest';
 import {
   CAPTURE_MESSAGE,
