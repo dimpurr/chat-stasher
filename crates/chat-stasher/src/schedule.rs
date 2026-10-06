@@ -59,6 +59,13 @@ pub const RECLAIM_STAGE_RANDOMIZED_DELAY_SECS: u64 = 15 * 60;
 /// before `exec`; systemd gets the same bound through `RandomizedDelaySec`.
 pub const SCHEDULER_RANDOMIZED_DELAY_SECS: u64 = 5 * 60;
 
+/// The cadence, in seconds, at which the launchd `run-once` timer is
+/// rendered as a `StartCalendarInterval` (one fire per hour at a fixed
+/// minute) rather than a `StartInterval`. Exactly one hour is the only
+/// interval whose calendar form is a single `Minute` key; every other
+/// interval keeps `StartInterval`.
+const HOURLY_INTERVAL_SECS: u64 = 3600;
+
 /// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
 /// truncated to empty in place at the start of the next run (see
 /// [`render_launchd`]). macOS launchd has no rotation key of its own, so the
@@ -1683,23 +1690,22 @@ pub fn hourly_minute_for_machine(seed: &str) -> u32 {
 }
 
 /// Resolve the machine seed used for deterministic hourly minute selection.
-fn resolve_machine_seed(args: &RunOnceArgs, home: &Path) -> String {
+///
+/// The identity file is read from [`crate::config::default_data_root`] —
+/// the one spelling of the data root — because that is where every writer
+/// puts it. A second spelling here would read a path the identity is never
+/// written to, and when `$XDG_DATA_HOME` is unset it is the same path
+/// again. `home` is deliberately not a parameter: the render `home` is
+/// `config::home_dir()`, which `default_data_root` already derives from.
+fn resolve_machine_seed(args: &RunOnceArgs) -> String {
     if let Some(machine) = &args.machine {
         if !machine.is_empty() {
             return machine.clone();
         }
     }
-    // Check machine-identity in default_data_root
     let id_path = crate::config::default_data_root().join("machine-identity");
     if let crate::identity::IdentityFileState::Loaded(id) =
         crate::identity::load_identity_state(&id_path)
-    {
-        return id.as_hex();
-    }
-    // Fall back to home data root if different (e.g. in sandboxes or custom HOME)
-    let home_id_path = home.join(".local/share/chat-stasher/machine-identity");
-    if let crate::identity::IdentityFileState::Loaded(id) =
-        crate::identity::load_identity_state(&home_id_path)
     {
         return id.as_hex();
     }
@@ -1773,8 +1779,8 @@ fn render_launchd_job(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let schedule_key = if interval == 3600 {
-        let seed = resolve_machine_seed(args, home);
+    let schedule_key = if interval == HOURLY_INTERVAL_SECS {
+        let seed = resolve_machine_seed(args);
         let minute = hourly_minute_for_machine(&seed);
         format!(
             "  <!-- Hourly at a deterministic minute per machine (:{minute:02}) so passes do not drift by their own duration and multiple machines do not hit a destination at the same minute. -->\n  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Minute</key>\n    <integer>{minute}</integer>\n  </dict>"
