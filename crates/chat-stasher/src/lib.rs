@@ -20,6 +20,7 @@ pub mod grok_bot;
 pub mod id;
 pub mod identity;
 pub mod inbox;
+pub mod inbox_config;
 pub mod json_out;
 pub mod keydecl;
 pub mod manifest;

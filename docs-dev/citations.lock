@@ -723,105 +723,105 @@ crates/chat-stasher/src/inbox.rs:1406-1414  0ed05e5b2662  lines=9
   <- docs-dev/threat-model.md:375  :: .map(|object| object.keys().cloned().collect())
 crates/chat-stasher/src/inbox.rs:2022-2044  77fcf2eb736c  lines=23
   <- docs-dev/threat-model.md:391  :: inbox.join("deepseek-sess-unk.json"),
-crates/chat-stasher/src/main.rs:86  51c934204980  lines=1
+crates/chat-stasher/src/main.rs:113  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…
-crates/chat-stasher/src/main.rs:168-1340  4bcb5e68552c  lines=1173
+crates/chat-stasher/src/main.rs:195-1376  594e6fe2da1d  lines=1182
   <- docs-dev/install.md:1089, docs-dev/privacy.md:1025, docs-dev/threat-model.md:915  :: enum Command {
-crates/chat-stasher/src/main.rs:169-170  6f7da3119197  lines=2
+crates/chat-stasher/src/main.rs:196-197  6f7da3119197  lines=2
   <- docs-dev/install.md:276  :: /// Write a commented default config if none exists (non-de…
-crates/chat-stasher/src/main.rs:220-257  957f12533bab  lines=38
+crates/chat-stasher/src/main.rs:256-293  957f12533bab  lines=38
   <- docs-dev/install.md:948, docs-dev/install.md:1248  :: /// Collect one pass, push only when configured and changed…
-crates/chat-stasher/src/main.rs:329-366  8a0a2a9dbeae  lines=38
+crates/chat-stasher/src/main.rs:365-402  8a0a2a9dbeae  lines=38
   <- docs-dev/privacy.md:160, docs-dev/threat-model.md:49  :: /// Move a batch of sealed session shards into the rustic r…
-crates/chat-stasher/src/main.rs:329-333  70026e4d2709  lines=5
+crates/chat-stasher/src/main.rs:365-369  70026e4d2709  lines=5
   <- docs-dev/threat-model.md:131  :: /// Move a batch of sealed session shards into the rustic r…
-crates/chat-stasher/src/main.rs:334-366  e25c0a07d334  lines=33
+crates/chat-stasher/src/main.rs:370-402  e25c0a07d334  lines=33
   <- docs-dev/install.md:578  :: Push {
-crates/chat-stasher/src/main.rs:390-392  9592a2937e4b  lines=3
+crates/chat-stasher/src/main.rs:426-428  9592a2937e4b  lines=3
   <- docs-dev/install.md:1003  :: /// `--sessions` adds the per-session metadata table on top…
-crates/chat-stasher/src/main.rs:393  5fd8a1cb5337  lines=1
+crates/chat-stasher/src/main.rs:429  5fd8a1cb5337  lines=1
   <- docs-dev/threat-model.md:836  :: Status {
-crates/chat-stasher/src/main.rs:425-482  1f97013e0eb9  lines=58
+crates/chat-stasher/src/main.rs:461-518  1f97013e0eb9  lines=58
   <- docs-dev/install.md:1094  :: /// Read one session from the repository (sequence-concaten…
-crates/chat-stasher/src/main.rs:425-428  577c8c720b83  lines=4
+crates/chat-stasher/src/main.rs:461-464  577c8c720b83  lines=4
   <- docs-dev/threat-model.md:919  :: /// Read one session from the repository (sequence-concaten…
-crates/chat-stasher/src/main.rs:429-482  190ed7971dfe  lines=54
+crates/chat-stasher/src/main.rs:465-518  190ed7971dfe  lines=54
   <- docs-dev/install.md:578  :: Read {
-crates/chat-stasher/src/main.rs:483-494  b3639ab631d6  lines=12
+crates/chat-stasher/src/main.rs:519-530  b3639ab631d6  lines=12
   <- docs-dev/install.md:1026  :: /// Diagnostic: does any harness on this machine silently d…
-crates/chat-stasher/src/main.rs:483-484  73cf6412a398  lines=2
+crates/chat-stasher/src/main.rs:519-520  73cf6412a398  lines=2
   <- docs-dev/threat-model.md:836  :: /// Diagnostic: does any harness on this machine silently d…
-crates/chat-stasher/src/main.rs:495-532  78935e89db1f  lines=38
+crates/chat-stasher/src/main.rs:531-568  78935e89db1f  lines=38
   <- docs-dev/install.md:578  :: /// Prove the archive is intact. Three independently runnab…
-crates/chat-stasher/src/main.rs:495-533  4d73dbd30b3b  lines=39
+crates/chat-stasher/src/main.rs:531-569  4d73dbd30b3b  lines=39
   <- docs-dev/threat-model.md:1076  :: /// Prove the archive is intact. Three independently runnab…
-crates/chat-stasher/src/main.rs:644-648  47efaa2006bc  lines=5
+crates/chat-stasher/src/main.rs:680-684  47efaa2006bc  lines=5
   <- docs-dev/threat-model.md:950  :: /// Exit codes distinguish the three answers, because two o…
-crates/chat-stasher/src/main.rs:686-772  bab81c38b904  lines=87
+crates/chat-stasher/src/main.rs:722-808  bab81c38b904  lines=87
   <- docs-dev/install.md:1078, docs-dev/install.md:1092, docs-dev/privacy.md:480, docs-dev/privacy.md:1023, docs-dev/threat-model.md:146, docs-dev/threat-model.md:922  :: /// Write every session the shared selector selects to file…
-crates/chat-stasher/src/main.rs:831-881  4273707c50b1  lines=51
+crates/chat-stasher/src/main.rs:867-917  4273707c50b1  lines=51
   <- docs-dev/threat-model.md:46  :: Ingest {
-crates/chat-stasher/src/main.rs:849  cf775be2a229  lines=1
+crates/chat-stasher/src/main.rs:885  cf775be2a229  lines=1
   <- docs-dev/install.md:26  :: /// Harness sources are opened read-only. File-backed JSONL…
-crates/chat-stasher/src/main.rs:883-915  42a71db27ac9  lines=33
+crates/chat-stasher/src/main.rs:919-951  42a71db27ac9  lines=33
   <- docs-dev/threat-model.md:841  :: /// Seal one file already inside our stage into the next se…
-crates/chat-stasher/src/main.rs:1028-1050  f05337c1507c  lines=23
+crates/chat-stasher/src/main.rs:1064-1086  f05337c1507c  lines=23
   <- docs-dev/install.md:433  :: /// Register this executable as the browsers' Native Messag…
-crates/chat-stasher/src/main.rs:1051-1093  00c9d6ccdc4b  lines=43
+crates/chat-stasher/src/main.rs:1087-1129  00c9d6ccdc4b  lines=43
   <- docs-dev/install.md:62  :: InstallNativeHost {
-crates/chat-stasher/src/main.rs:2088-2094  96d65b359ff4  lines=7
+crates/chat-stasher/src/main.rs:2125-2131  96d65b359ff4  lines=7
   <- docs-dev/install.md:466  :: Some(_) if uninstall => {
-crates/chat-stasher/src/main.rs:2144-2154  d5c09fef1666  lines=11
+crates/chat-stasher/src/main.rs:2181-2191  d5c09fef1666  lines=11
   <- docs-dev/install.md:458  :: // Explicitly named browsers are written even when their da…
-crates/chat-stasher/src/main.rs:2202-2217  eeafc7f7b2ec  lines=16
+crates/chat-stasher/src/main.rs:2239-2254  eeafc7f7b2ec  lines=16
   <- docs-dev/install.md:452, docs-dev/privacy.md:966, docs-dev/threat-model.md:680  :: if let Some(path) = &stage_to_record {
-crates/chat-stasher/src/main.rs:2253-2291  9ceb7d1eb0cd  lines=39
+crates/chat-stasher/src/main.rs:2290-2328  9ceb7d1eb0cd  lines=39
   <- docs-dev/install.md:466, docs-dev/privacy.md:1038  :: if uninstall {
-crates/chat-stasher/src/main.rs:2360-2366  bd833f481e0e  lines=7
+crates/chat-stasher/src/main.rs:2397-2403  bd833f481e0e  lines=7
   <- docs-dev/install.md:466, docs-dev/privacy.md:1038  :: if uninstall {
-crates/chat-stasher/src/main.rs:2754-2762  0916b7a55f09  lines=9
+crates/chat-stasher/src/main.rs:2791-2799  0916b7a55f09  lines=9
   <- docs-dev/privacy.md:493  :: row.session_provenance = session_provenance
-crates/chat-stasher/src/main.rs:2838-2846  78f525aeff76  lines=9
+crates/chat-stasher/src/main.rs:2875-2883  78f525aeff76  lines=9
   <- docs-dev/privacy.md:493  :: row.session_provenance = session_provenance.get(&session_id…
-crates/chat-stasher/src/main.rs:6068-6083  f605a8d10265  lines=16
+crates/chat-stasher/src/main.rs:6105-6120  f605a8d10265  lines=16
   <- docs-dev/install.md:642  :: // ADR-023 — resolve the destination's trust *before* the e…
-crates/chat-stasher/src/main.rs:6073-6098  d8187ad0e097  lines=26
+crates/chat-stasher/src/main.rs:6110-6135  d8187ad0e097  lines=26
   <- docs-dev/install.md:646  :: if trust_host {
-crates/chat-stasher/src/main.rs:6073-6081  4cd0a7e12bfc  lines=9
+crates/chat-stasher/src/main.rs:6110-6118  4cd0a7e12bfc  lines=9
   <- docs-dev/install.md:681  :: if trust_host {
-crates/chat-stasher/src/main.rs:6082-6094  50271f90bcf4  lines=13
+crates/chat-stasher/src/main.rs:6119-6131  50271f90bcf4  lines=13
   <- docs-dev/install.md:678  :: let known_hosts = chat_stasher::remote_err::default_known_h…
-crates/chat-stasher/src/main.rs:6180-6188  14fed5517e0c  lines=9
+crates/chat-stasher/src/main.rs:6217-6225  14fed5517e0c  lines=9
   <- docs-dev/threat-model.md:872  :: Err(e) => {
-crates/chat-stasher/src/main.rs:7238-7293  8d5f91543470  lines=56
+crates/chat-stasher/src/main.rs:7275-7330  8d5f91543470  lines=56
   <- docs-dev/install.md:945  :: /// The refusal message `schedule` prints on an OS this bui…
-crates/chat-stasher/src/main.rs:7998-8003  60c48a3b18d4  lines=6
+crates/chat-stasher/src/main.rs:8035-8040  60c48a3b18d4  lines=6
   <- docs-dev/install.md:591, docs-dev/privacy.md:1084  :: let key_file = match key_file.or_else(|| entry.key_file.clo…
-crates/chat-stasher/src/main.rs:8106-8107  8311772683ed  lines=2
+crates/chat-stasher/src/main.rs:8143-8144  8311772683ed  lines=2
   <- docs-dev/privacy.md:742  :: let mk = MasterKey::new();
-crates/chat-stasher/src/main.rs:8213-8220  6708be64c9ca  lines=8
+crates/chat-stasher/src/main.rs:8250-8257  6708be64c9ca  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:861  :: let stage_check =
-crates/chat-stasher/src/main.rs:8240-8244  c1c01a085bde  lines=5
+crates/chat-stasher/src/main.rs:8277-8281  c1c01a085bde  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:859  :: // This guard used to refuse any shard-less stage: while re…
-crates/chat-stasher/src/main.rs:8736-8896  ec138f872ade  lines=161
+crates/chat-stasher/src/main.rs:8773-8933  ec138f872ade  lines=161
   <- docs-dev/threat-model.md:919  :: fn cmd_read(
-crates/chat-stasher/src/main.rs:12743-12751  78f23654916e  lines=9
+crates/chat-stasher/src/main.rs:12780-12788  78f23654916e  lines=9
   <- docs-dev/install.md:288  :: fn config_or_refuse(command: &str) -> Result<Config, ExitCo…
-crates/chat-stasher/src/main.rs:12761-12784  3f797bdc8c26  lines=24
+crates/chat-stasher/src/main.rs:12798-12821  3f797bdc8c26  lines=24
   <- docs-dev/install.md:288  :: fn refuse_config(command: &str, error_document: bool) -> Re…
-crates/chat-stasher/src/main.rs:13921-13935  af69d09d53a2  lines=15
+crates/chat-stasher/src/main.rs:13958-13972  af69d09d53a2  lines=15
   <- docs-dev/install.md:610  :: fn setup_refused_awaiting_declaration_why(destination_step_…
-crates/chat-stasher/src/main.rs:14358-14365  e5a9c1eb5374  lines=8
+crates/chat-stasher/src/main.rs:14395-14402  e5a9c1eb5374  lines=8
   <- docs-dev/install.md:609  :: fn setup_create_repo_and_key(config: &Config) -> Result<std…
-crates/chat-stasher/src/main.rs:16889-16923  2b9ef8eaa940  lines=35
+crates/chat-stasher/src/main.rs:16926-16960  2b9ef8eaa940  lines=35
   <- docs-dev/install.md:1017  :: if let Ok(report) = &scan {
-crates/chat-stasher/src/main.rs:16942-16970  563498443d71  lines=29
+crates/chat-stasher/src/main.rs:16979-17007  563498443d71  lines=29
   <- docs-dev/install.md:978  :: fn run_state_info(config: &Config) -> RunStateInfo {
-crates/chat-stasher/src/main.rs:17211-17216  00bb766bbeb7  lines=6
+crates/chat-stasher/src/main.rs:17248-17253  00bb766bbeb7  lines=6
   <- docs-dev/install.md:1007  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:17230-17232  28b586b3526e  lines=3
+crates/chat-stasher/src/main.rs:17267-17269  28b586b3526e  lines=3
   <- docs-dev/install.md:973  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:17232-17365  9b25725da3b1  lines=134
+crates/chat-stasher/src/main.rs:17269-17402  9b25725da3b1  lines=134
   <- docs-dev/install.md:994  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:424, docs-dev/threat-model.md:715  :: //! ADR-022: content-addressed hash tracking for stage meta…
