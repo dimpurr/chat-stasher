@@ -79,6 +79,27 @@ describe('W113 · which records the page will show', () => {
     expect(isReadableHeaderAt(stateKey('chatgpt', 'default'), header())).toBe(true);
   });
 
+  it('accepts valid zero, nullable, optional, and colon-bearing boundary values', () => {
+    const scope = 'ws:1234:abcd';
+    expect(isReadableHeaderAt(stateKey('chatgpt', scope), header({
+      scope,
+      totalKnown: null,
+      enumCursor: { offset: 0, complete: false, cursor: null, token: null },
+      pendingCount: 0,
+      archivedCount: 0,
+      detailToday: { day: '', count: 0 },
+      lastFetchAt: { enumerate: null, detail: null },
+      failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', reason: 'synthetic-failure', at: 1 }],
+      parkedEmpty: ['synthetic-id'],
+      halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop' },
+      relisted: { at: 1, recorded: 2, held: 1 },
+    }))).toBe(true);
+    expect(isReadableHeaderAt(stateKey('chatgpt', scope), header({
+      scope,
+      halted: { reason: 'rate-limited', at: 1, detail: 'synthetic-stop', retryAt: 2, attempts: 1 },
+    }))).toBe(true);
+  });
+
   it('🔴 refuses a header whose own identity disagrees with its address', () => {
     // A set whose identity and address disagree is not one to show a user as their progress.
     expect(isReadableHeaderAt(stateKey('chatgpt', 'default'), header({ scope: 'other' }))).toBe(false);
@@ -88,6 +109,54 @@ describe('W113 · which records the page will show', () => {
   it('🔴 refuses a value that is not a header at all, rather than reading it as an empty one', () => {
     for (const value of [null, undefined, 0, 'x', [], {}, { v: 2 }, { platform: 'chatgpt', scope: 'default', pending: ['a'] }]) {
       expect(isReadableHeaderAt(stateKey('chatgpt', 'default'), value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it('🔴 refuses malformed nested header values instead of rendering missing counts or times as zero', () => {
+    const malformed: Array<[string, Partial<BackfillHeader>]> = [
+      ['string total counter', { totalKnown: '0' as unknown as number }],
+      ['non-finite total counter', { totalKnown: Number.POSITIVE_INFINITY }],
+      ['string pending counter', { pendingCount: '0' as unknown as number }],
+      ['NaN pending counter', { pendingCount: Number.NaN }],
+      ['infinite archived counter', { archivedCount: Number.POSITIVE_INFINITY }],
+      ['negative archived counter', { archivedCount: -1 }],
+      ['string counter inside daily object', { detailToday: { day: '2026-09-24', count: '0' as unknown as number } }],
+      ['NaN daily counter', { detailToday: { day: '2026-09-24', count: Number.NaN } }],
+      ['malformed daily counter object', { detailToday: null as unknown as BackfillHeader['detailToday'] }],
+      ['wrong daily cap type', { detailToday: { day: '2026-09-24', count: 0, cap: '10' as unknown as number } }],
+      ['NaN daily cap', { detailToday: { day: '2026-09-24', count: 0, cap: Number.NaN } }],
+      ['malformed enum cursor object', { enumCursor: { offset: '0' as unknown as number, complete: false } }],
+      ['non-finite enum cursor offset', { enumCursor: { offset: Number.POSITIVE_INFINITY, complete: false } }],
+      ['non-finite enum cursor value', { enumCursor: { offset: 0, complete: false, cursor: Number.NaN } }],
+      ['wrong enum cursor type', { enumCursor: { offset: 0, complete: false, cursor: 'invalid' as unknown as number } }],
+      ['missing enum cursor completion flag', { enumCursor: { offset: 0 } as unknown as BackfillHeader['enumCursor'] }],
+      ['malformed last-fetch object', { lastFetchAt: { enumerate: Number.NaN, detail: null } }],
+      ['non-finite detail timestamp', { lastFetchAt: { enumerate: null, detail: Number.NEGATIVE_INFINITY } }],
+      ['failure list is not an array', { failures: null as unknown as BackfillHeader['failures'] }],
+      ['failure list contains a null entry', { failures: [null] as unknown as BackfillHeader['failures'] }],
+      ['failure entry has no reason', { failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', at: 1 }] as unknown as BackfillHeader['failures'] }],
+      ['failure entry has a null timestamp', { failures: [{ shortId: 'abcdefgh', platform: 'chatgpt', reason: 'synthetic-failure', at: null }] as unknown as BackfillHeader['failures'] }],
+      ['parked empty list is not an array', { parkedEmpty: 0 as unknown as string[] }],
+      ['parked empty list contains a non-string id', { parkedEmpty: ['abc', 1] as unknown as string[] }],
+      ['halted stop is missing', { halted: undefined as unknown as BackfillHeader['halted'] }],
+      ['halted stop is false', { halted: false as unknown as BackfillHeader['halted'] }],
+      ['halted stop lacks a reason', { halted: { at: 1, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
+      ['halted stop has a null timestamp', { halted: { reason: 'rate-limited', at: null, detail: 'synthetic' } as unknown as BackfillHeader['halted'] }],
+      ['halted retry time is NaN', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', retryAt: Number.NaN } }],
+      ['halted retry time is negative', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', retryAt: -1 } }],
+      ['halted attempt count is NaN', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: Number.NaN } }],
+      ['halted attempt count is zero', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 0 } }],
+      ['halted attempt count is fractional', { halted: { reason: 'rate-limited', at: 1, detail: 'synthetic', attempts: 1.5 } }],
+      ['re-listing notice is not an object', { relisted: 7 as unknown as BackfillHeader['relisted'] }],
+      ['re-listing time is NaN', { relisted: { at: Number.NaN, recorded: 2, held: 1 } }],
+      ['re-listing time is negative', { relisted: { at: -1, recorded: 2, held: 1 } }],
+      ['re-listing recorded count is a string', { relisted: { at: 1, recorded: '2' as unknown as number, held: 1 } }],
+      ['re-listing held count is negative', { relisted: { at: 1, recorded: 2, held: -1 } }],
+      ['re-listing held count is fractional', { relisted: { at: 1, recorded: 2, held: 1.5 } }],
+    ];
+
+    for (const [label, change] of malformed) {
+      expect(isReadableHeaderAt(stateKey('chatgpt', 'default'), header(change)), label).toBe(false);
     }
   });
 });
@@ -104,6 +173,22 @@ describe('W113 · the target registry', () => {
       ],
     });
     expect(rows.map((r) => `${r.platform}/${r.scope}`)).toEqual(['chatgpt/default']);
+  });
+
+  it('🔴 drops target rows with malformed fields or non-finite timestamps', () => {
+    const rows = targetsOf({
+      [BACKFILL_TARGETS_KEY]: [
+        { platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'default', at: 0 },
+        { platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'string-time', at: '1' },
+        { platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'nan-time', at: Number.NaN },
+        { platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 'infinite-time', at: Number.POSITIVE_INFINITY },
+        { platform: 'chatgpt', origin: 4, scope: 'wrong-origin-type', at: 1 },
+        { platform: 'chatgpt', origin: 'https://chatgpt.com', scope: 4, at: 1 },
+        { platform: 4, origin: 'https://chatgpt.com', scope: 'wrong-platform-type', at: 1 },
+      ],
+    });
+    expect(rows.map((r) => `${r.platform}/${r.scope}`)).toEqual(['chatgpt/default']);
+    expect(rows[0]?.at).toBe(0);
   });
 
   it('an absent or unreadable registry is an empty list, not a crash', () => {

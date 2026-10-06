@@ -75,9 +75,79 @@ export function isReadableHeaderAt(key: string, value: unknown): value is Backfi
   // The identity on the record and the address it was found at must agree — the same rule the popup
   // applies. A record whose two halves disagree is not one to show a user as their progress.
   if (value.platform !== split.platform || value.scope !== split.scope) return false;
+  if (!hasReadableCoverageShape(value)) return false;
   // 🔴 W91b · A stable build must not show an experimental platform's leftover state. It is not this
   //    build's progress; it belongs to the build that serves that platform.
   return isPlatformActiveInChannel(value.platform, currentReleaseChannel());
+}
+
+/** Fields the coverage model reads arithmetically must be complete and finite before it sees a header. */
+function hasReadableCoverageShape(header: BackfillHeader): boolean {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  const nonNegativeInteger = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const finiteTimestamp = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const timestamp = (value: unknown): value is number | null =>
+    value === null || finiteTimestamp(value);
+
+  const cursor = header.enumCursor as unknown;
+  if (!record(cursor)
+    || !nonNegativeInteger(cursor.offset)
+    || typeof cursor.complete !== 'boolean'
+    || (cursor.cursor !== undefined && cursor.cursor !== null && !Number.isFinite(cursor.cursor))
+    || (cursor.token !== undefined && cursor.token !== null && typeof cursor.token !== 'string')
+    || (cursor.truncated !== undefined && !['cursor-missing', 'has-more-missing', 'empty-page-inferred', 'short-page-inferred'].includes(String(cursor.truncated)))
+    || (cursor.pageFingerprints !== undefined && (!Array.isArray(cursor.pageFingerprints)
+      || !cursor.pageFingerprints.every((item) => typeof item === 'string')))) return false;
+
+  if ((header.totalKnown !== null && !nonNegativeInteger(header.totalKnown))
+    || !['response-total', 'unknown', 'contradicted'].includes(header.totalSource)
+    || !nonNegativeInteger(header.pendingCount)
+    || !nonNegativeInteger(header.archivedCount)) return false;
+
+  const daily = header.detailToday as unknown;
+  if (!record(daily)
+    || typeof daily.day !== 'string'
+    || !nonNegativeInteger(daily.count)
+    || (daily.cap !== undefined && !nonNegativeInteger(daily.cap))) return false;
+
+  const lastFetch = header.lastFetchAt as unknown;
+  if (lastFetch !== undefined && (!record(lastFetch)
+    || !timestamp(lastFetch.enumerate)
+    || !timestamp(lastFetch.detail))) return false;
+
+  const failures = header.failures as unknown;
+  if (failures !== undefined && (!Array.isArray(failures) || !failures.every((entry: unknown) =>
+    record(entry)
+    && typeof entry.shortId === 'string'
+    && typeof entry.platform === 'string'
+    && typeof entry.reason === 'string'
+    && finiteTimestamp(entry.at)))) return false;
+
+  const parkedEmpty = header.parkedEmpty as unknown;
+  if (parkedEmpty !== undefined && (!Array.isArray(parkedEmpty)
+    || !parkedEmpty.every((id: unknown) => typeof id === 'string'))) return false;
+
+  const halted = header.halted as unknown;
+  if (halted !== null && (!record(halted)
+    || typeof halted.reason !== 'string'
+    || halted.reason.length === 0
+    || !finiteTimestamp(halted.at)
+    || typeof halted.detail !== 'string'
+    || (halted.retryAt !== undefined && !finiteTimestamp(halted.retryAt))
+    || (halted.attempts !== undefined && (!nonNegativeInteger(halted.attempts) || halted.attempts < 1)))) return false;
+
+  const relisted = header.relisted as unknown;
+  if (relisted !== undefined && (!record(relisted)
+    || !finiteTimestamp(relisted.at)
+    || !nonNegativeInteger(relisted.recorded)
+    || !nonNegativeInteger(relisted.held))) return false;
+
+  if ((header.emptyStreak !== undefined && !nonNegativeInteger(header.emptyStreak))
+    || (header.failuresDropped !== undefined && !nonNegativeInteger(header.failuresDropped))) return false;
+  return true;
 }
 
 /** The target registry's rows, or an empty list when there is none. Rows that are not targets are dropped. */
@@ -87,7 +157,10 @@ export function targetsOf(snapshot: Record<string, unknown> | null): BackfillTar
   return raw.filter((row): row is BackfillTarget => {
     if (!row || typeof row !== 'object') return false;
     const t = row as Partial<BackfillTarget>;
-    return typeof t.platform === 'string' && typeof t.scope === 'string';
+    return typeof t.platform === 'string' && t.platform.length > 0
+      && typeof t.origin === 'string'
+      && typeof t.scope === 'string' && t.scope.length > 0
+      && typeof t.at === 'number' && Number.isFinite(t.at) && t.at >= 0;
   });
 }
 
