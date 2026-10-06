@@ -3504,10 +3504,8 @@ mod tests {
         // The per-workspace `ItemTable` store writes the composer itself as
         // `session`; the global store wraps it in `value`. Telling them apart by
         // that shape rather than by a label is what makes one reader serve both.
-        let line = format!(
-            r#"{{"schema":"chat-stasher.cursor.legacy.session.v1","session":{{"composerId":"ffffffff-6666","createdAt":1753000000000,"conversation":[],"workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/w/two","external":"file:///w/two","path":"/w/two","scheme":"file"}}}},"trackedGitRepos":["/w/two/vendor"]}}}}"#
-        );
-        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        let line = r#"{"schema":"chat-stasher.cursor.legacy.session.v1","session":{"composerId":"ffffffff-6666","createdAt":1753000000000,"conversation":[],"workspaceIdentifier":{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{"$mid":1,"fsPath":"/w/two","external":"file:///w/two","path":"/w/two","scheme":"file"}},"trackedGitRepos":["/w/two/vendor"]}}"#;
+        let row = build_row("s", "mbp", "cursor", &[line]);
         assert_eq!(row.dimensions.container, ["/w/two/vendor", "file:///w/two"]);
         assert_eq!(row.dimensions.cwd, ["/w/two"]);
     }
