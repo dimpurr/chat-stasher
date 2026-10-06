@@ -1,3 +1,14 @@
+/**
+ * Q2 · A candidate response whose shape is rejected warns, and the warning carries
+ * the reason alone — never the response data.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com, there is no logged-in state and no real
+ *    conversation body or account, and nothing leaves the machine. This file
+ *    injects no http port: it replaces the page's `fetch` in-process, and the
+ *    session id in the URL is invented here.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
 

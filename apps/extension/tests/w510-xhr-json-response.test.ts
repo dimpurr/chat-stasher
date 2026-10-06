@@ -1,3 +1,14 @@
+/**
+ * W510 · An XHR answering with `responseType: 'json'` is captured as serialized
+ * text, and a `null` JSON response produces no capture rather than an empty one.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com, there is no logged-in state and no real
+ *    conversation body or account, and nothing leaves the machine. This file
+ *    injects no http port: it replaces the page's `fetch` and `XMLHttpRequest`
+ *    in-process.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CAPTURE_MESSAGE } from '../lib/contract';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';

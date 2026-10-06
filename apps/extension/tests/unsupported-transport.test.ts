@@ -1,3 +1,15 @@
+/**
+ * An unreadable transport says so instead of going silent, and a readable
+ * `history_messages` XHR is captured on the same path as `fetch`.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com and no socket or event stream is opened
+ *    to any origin, there is no logged-in state and no real conversation body or
+ *    account, and nothing leaves the machine. This file injects no http port: it
+ *    replaces the page's `fetch`, `XMLHttpRequest`, `EventSource` and `WebSocket`
+ *    in-process.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   UNSUPPORTED_TRANSPORT_WARNING,

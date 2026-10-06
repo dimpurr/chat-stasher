@@ -1,3 +1,15 @@
+/**
+ * C15 · Streamed capture is opt-in per platform row: a row that never declares
+ * `webSocketCapture` or `eventSourceCapture` observes nothing.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com and no socket is opened to any origin,
+ *    there is no logged-in state and no real conversation body or account, and
+ *    nothing leaves the machine. This file injects no http port: it replaces the
+ *    page's `fetch`, `WebSocket` and `EventSource` in-process, and the
+ *    `access_token` and `token` values its test URLs carry are invented here.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   installPageFetchHook,
