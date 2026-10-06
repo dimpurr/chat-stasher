@@ -15,6 +15,23 @@ under its own heading below.
 
 #### Added
 
+- **Per-phase timers and counters for one `run-once` pass.** Every
+  `run-once` pass now measures the wall time of each phase — registry
+  scan, collect (per harness, keyed by harness id), stage audit,
+  metadata hash, activity index, push preflight, backup, and the
+  run-state write itself — and counts what the pass touched: records
+  scanned, files stat'ed, source bytes read, shard bytes read and
+  hashed, SQLite sessions queried and exported, and state saves. The
+  numbers print as one `[run-once] phases ms: …` summary line, last in
+  the pass's output, and are the new additive `phases` field of the
+  `run-state.json` record the timer-visibility feature writes, so a
+  slow scheduled pass can be attributed to the phase that was slow
+  after the fact; `status --json` exposes the same field in
+  `run_state`. The record holds durations and counts only — no session
+  id, no path, no harness display name, no conversation content — and
+  a phase the pass never reached reads `0`, which is a measurement of
+  "did not run", never a fallback. No pass behaviour changes: the
+  timings and counts are recorded, nothing about what the pass does.
 - **Repair the duplicated-session read path.** Users who ran `setup` step 4,
   `dest-init`, or added a new destination on `v0.2.0` through `v0.5.0-rc.2`
   may see duplicated turns in those older builds. In `read`, `export`, FTS

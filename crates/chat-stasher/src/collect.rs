@@ -562,6 +562,7 @@ fn stage_prefix_entry(
     record: &SessionRecord,
     stage: &Path,
     machine: &str,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Option<OffsetEntry>> {
     // A SQLite session's cursor is logical, not a file offset, so the stage
     // cannot be turned into one without re-exporting the session. Those paths
@@ -614,6 +615,8 @@ fn stage_prefix_entry(
         let source_len = fs::metadata(&record.absolute_path)
             .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
             .len();
+        // W880: one source file stat'ed.
+        counters.files_statted += 1;
         // No covered prefix can be longer than the stage body, so cap this
         // probe there instead of reading an arbitrarily larger source.
         let source = read_range(
@@ -960,6 +963,35 @@ pub struct CollectReport {
     pub outcomes: Vec<CollectOutcome>,
     pub errors: Vec<CollectError>,
     pub reconciliations: Vec<ReconcileNotice>,
+    /// W880: registry scan wall time, in milliseconds. Measured by
+    /// [`collect`]; zero when a test supplies its own scan report.
+    pub scan_ms: u64,
+    /// W880: incremental staging wall time, in milliseconds.
+    pub collect_ms: u64,
+    /// W880: staging wall time per harness, keyed by harness id.
+    pub collect_harness_ms: std::collections::BTreeMap<String, u64>,
+    /// W880: files whose metadata this pass took. A file read whole
+    /// without a stat is counted in `source_bytes_read`, not here.
+    pub files_statted: u64,
+    /// W880: committed-prefix bytes re-read and re-hashed during
+    /// collection (the JSONL integrity check).
+    pub shard_bytes_read_hashed: u64,
+    /// W880: SQLite sessions whose per-session rows were queried.
+    pub sqlite_sessions_queried: u64,
+    /// W880: SQLite sessions exported (re-sealed) into the stage.
+    pub sqlite_sessions_exported: u64,
+    /// W880: collector state saves this pass.
+    pub state_saves: u64,
+}
+
+/// W880: counters only the per-record read paths can measure. They
+/// happen inside the read functions, below the report's reach, so
+/// they are threaded through the record loop and folded into the
+/// report once the pass ends. Counts only — never a path or id.
+#[derive(Debug, Default)]
+struct CollectCounters {
+    files_statted: u64,
+    sqlite_sessions_queried: u64,
 }
 
 /// Default private state directory. It is owned by chat-stasher, never a
@@ -1060,8 +1092,15 @@ pub fn collect(
     bucket_cap: usize,
     destination: &DestinationView<'_>,
 ) -> anyhow::Result<CollectReport> {
+    let scan_started = std::time::Instant::now();
     let scan = scanner::scan_with_machine(config, machine).context("scan harness sessions")?;
-    collect_scan_report(&scan, stage, machine, state_dir, bucket_cap, destination)
+    let scan_ms = scan_started.elapsed().as_millis() as u64;
+    let collect_started = std::time::Instant::now();
+    let mut report =
+        collect_scan_report(&scan, stage, machine, state_dir, bucket_cap, destination)?;
+    report.scan_ms = scan_ms;
+    report.collect_ms = collect_started.elapsed().as_millis() as u64;
+    Ok(report)
 }
 
 /// Collection entry point split out for tests: the scanner report is supplied
@@ -1163,7 +1202,14 @@ pub fn collect_scan_report(
     } else {
         destination.facts(&wanted)
     };
+    // W880: deep counters the read functions can only reach through
+    // this handle; folded into the report once the pass ends.
+    let mut counters = CollectCounters::default();
     for record in records {
+        // W880: the whole iteration is this record's collect work, so
+        // the per-harness timer covers the cursor resolution and the
+        // provenance bookkeeping too, not only the read.
+        let record_started = std::time::Instant::now();
         let key = state_key(&record);
         let stored = debts.get(&key).cloned();
         // A stored cursor is a claim, not a fact. It is only reused once it has
@@ -1199,7 +1245,7 @@ pub fn collect_scan_report(
             // stage prefix cannot establish whether it is a replay or a new
             // repeated turn; conservatively capture measured provenance rows.
             None if !record.provenance.is_empty() => None,
-            None => stage_prefix_entry(&record, stage, machine)?,
+            None => stage_prefix_entry(&record, stage, machine, &mut counters)?,
         };
         // The cursor is still handed down so the outcome can report this as a
         // reread rather than a first read; `force_reset` is what actually stops
@@ -1212,6 +1258,7 @@ pub fn collect_scan_report(
             state_dir,
             machine,
             bucket_cap,
+            &mut counters,
         ) {
             Ok(processed) => {
                 crate::activity::record_session_provenance(
@@ -1253,6 +1300,15 @@ pub fn collect_scan_report(
                 report.source_bytes_read += outcome.bytes_read;
                 report.delta_bytes_read += outcome.bytes_read;
                 report.prefix_bytes_validated += outcome.prefix_bytes_validated;
+                // W880: the committed prefix was read and SHA-256
+                // hashed to prove it still matches the stage — shard
+                // body bytes read and hashed.
+                report.shard_bytes_read_hashed += outcome.prefix_bytes_validated;
+                // W880: a SQLite session is exported when this pass
+                // re-sealed its rows into the stage.
+                if record.sqlite_layout.is_some() && outcome.shard.is_some() {
+                    report.sqlite_sessions_exported += 1;
+                }
                 if outcome.shard.is_some() {
                     report.shards_written += 1;
                 }
@@ -1280,6 +1336,8 @@ pub fn collect_scan_report(
                 if stored.as_ref() != Some(&entry) {
                     debts.insert(key, entry);
                     save_state(&state_path, &state, &destination_id, &debts)?;
+                    // W880: one durable collector state save.
+                    report.state_saves += 1;
                 }
                 report.outcomes.push(outcome);
                 if !record.provenance.is_empty() {
@@ -1299,7 +1357,15 @@ pub fn collect_scan_report(
                 source_path_sha256: path_digest(&record.absolute_path),
             }),
         }
+        // W880: fold this record's wall time into its harness's
+        // bucket, keyed by the registry's public harness id.
+        *report
+            .collect_harness_ms
+            .entry(record.source.short().to_string())
+            .or_default() += record_started.elapsed().as_millis() as u64;
     }
+    report.files_statted = counters.files_statted;
+    report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
     Ok(report)
 }
 
@@ -1327,6 +1393,7 @@ fn collect_one(
     state_dir: &Path,
     machine: &str,
     bucket_cap: usize,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
     if let Some(layout) = record.sqlite_layout {
         if layout == SqliteSessionLayout::GrokBot {
@@ -1338,9 +1405,19 @@ fn collect_one(
                 state_dir,
                 machine,
                 bucket_cap,
+                counters,
             )
         } else {
-            process_sqlite(record, layout, old, force_reset, stage, machine, bucket_cap)
+            process_sqlite(
+                record,
+                layout,
+                old,
+                force_reset,
+                stage,
+                machine,
+                bucket_cap,
+                counters,
+            )
         }
     } else if record.compressed || is_zstd_path(&record.absolute_path) {
         Ok(process_compressed(
@@ -1359,6 +1436,7 @@ fn collect_one(
             stage,
             machine,
             bucket_cap,
+            counters,
         )?)
     } else {
         Ok(process_whole_file(
@@ -1402,6 +1480,7 @@ fn process_grok_bot(
     state_dir: &Path,
     machine: &str,
     bucket_cap: usize,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
     let agent_id = record
         .id
@@ -1469,6 +1548,8 @@ fn process_grok_bot(
                 )
             })?
             .len();
+        // W880: one source file stat'ed.
+        counters.files_statted += 1;
         return Ok(Processed {
             state: old.cloned().expect("checked above"),
             outcome: CollectOutcome {
@@ -1527,6 +1608,8 @@ fn process_grok_bot(
             )
         })?
         .len();
+    // W880: one source file stat'ed.
+    counters.files_statted += 1;
     let digest = sha256_hex(&serde_json::to_vec(&state.records)?);
     Ok(Processed {
         state: OffsetEntry {
@@ -1560,6 +1643,7 @@ fn process_sqlite(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
     // The whole-store fingerprint is a shortcut over the *store*, so it is
     // checked once here, before any per-session query. Equal fingerprint means
@@ -1576,6 +1660,8 @@ fn process_sqlite(
     // were already staged.
     let store_fingerprint = sqlite_store_fingerprint(&record.absolute_path)
         .map_err(|error| anyhow!("failed to fingerprint SQLite store: {error}"))?;
+    // W880: the fingerprint stats the store file and its two sidecars.
+    counters.files_statted += 3;
     if let Some(entry) = old {
         if !force_reset
             && entry.opencode.is_some()
@@ -1584,6 +1670,9 @@ fn process_sqlite(
             return Ok(unchanged_sqlite(record, entry, &store_fingerprint));
         }
     }
+    // W880: the shortcut did not fire, so this session's own rows
+    // are about to be queried.
+    counters.sqlite_sessions_queried += 1;
     match layout {
         SqliteSessionLayout::OpenCode => process_opencode(
             record,
@@ -1991,8 +2080,9 @@ fn process_jsonl(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<Processed> {
-    let data = read_jsonl_delta(&record.absolute_path, old, force_reset)?;
+    let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
     let (lines, committed_delta) = complete_lines(&data.bytes);
     let new_offset = data.base_offset + committed_delta as u64;
     let new_state = if lines.is_empty() && !data.reset {
@@ -2314,9 +2404,12 @@ fn read_jsonl_delta(
     path: &Path,
     old: Option<&OffsetEntry>,
     force_reset: bool,
+    counters: &mut CollectCounters,
 ) -> anyhow::Result<ReadData> {
     for _ in 0..READ_RETRIES {
         let before = fs::metadata(path)?.len();
+        // W880: one source file stat'ed.
+        counters.files_statted += 1;
         let reusable = old.filter(|entry| {
             !force_reset
                 && !entry.compressed
@@ -2329,6 +2422,8 @@ fn read_jsonl_delta(
             if sha256_hex(&prefix) == expected {
                 let delta = read_range(path, entry.offset, before - entry.offset)?;
                 let after = fs::metadata(path)?.len();
+                // W880: one source file stat'ed.
+                counters.files_statted += 1;
                 if after != before {
                     continue;
                 }
@@ -2354,6 +2449,8 @@ fn read_jsonl_delta(
         // complete current snapshot and commit only complete lines from it.
         let full = read_range(path, 0, before)?;
         let after = fs::metadata(path)?.len();
+        // W880: one source file stat'ed.
+        counters.files_statted += 1;
         if after != before {
             continue;
         }

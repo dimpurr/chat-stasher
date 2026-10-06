@@ -7,8 +7,8 @@
 //!
 //! So every `run-once` pass, success *and* failure, writes one small file:
 //! `<state_dir>/run-state.json`. `chat-stasher status` reads it back and says
-//! one sentence in plain language. Writing is silent: `run-once` prints
-//! nothing extra for this feature.
+//! one sentence in plain language. The write itself is silent; the only
+//! stdout this feature adds is the one W880 phase summary line.
 //!
 //! Privacy: this file holds counts, byte-free timestamps and a machine
 //! *digest* only. No session content, no session id, no hostname.
@@ -55,6 +55,104 @@ impl RunOutcome {
     }
 }
 
+/// Per-phase wall time and privacy-safe counters for one `run-once`
+/// pass, recorded so a slow pass can be attributed to the phase that
+/// was slow — the scheduled command runs with nobody watching stdout,
+/// and the only durable record of where its seconds went is this file.
+///
+/// Durations are milliseconds, integers like [`RunState::duration_ms`].
+/// Counters are counts and byte totals only: no session id, no source
+/// or stage path, no harness display name, no conversation content —
+/// the same boundary [`RunState`] already holds. The per-harness
+/// collect timings are keyed by harness *id* (the registry's public
+/// short label, the same value `status` prints), never by a path.
+///
+/// Additive: a `run-state.json` written before this struct existed
+/// deserializes with every field at its [`Default`] (the field is
+/// `#[serde(default)]` on [`RunState`]), and an older reader ignores
+/// the unknown field, so no version bump is needed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassMetrics {
+    // Wall time per phase, in milliseconds. A phase the pass never
+    // reached (push preflight and backup on a no-op pass) stays 0:
+    // zero is a measurement of "did not run", never a fallback.
+    /// Registry scan (`scanner::scan_with_machine`).
+    pub scan_ms: u64,
+    /// Incremental staging of every scanned record
+    /// (`collect::collect_scan_report`).
+    pub collect_ms: u64,
+    /// Collect wall time per harness, keyed by harness id.
+    pub collect_harness_ms: std::collections::BTreeMap<String, u64>,
+    /// Stage audit: counting the sealed shards in the stage.
+    pub stage_audit_ms: u64,
+    /// Metadata hash: hashing the machine's metadata to decide a push.
+    pub metadata_hash_ms: u64,
+    /// Activity index rebuild before a push.
+    pub activity_index_ms: u64,
+    /// Push preflight: the empty-stage safety scan before a backup.
+    pub push_preflight_ms: u64,
+    /// Backup: the rustic traversal and snapshot write.
+    pub backup_ms: u64,
+    /// Writing this run-state file itself.
+    pub run_state_write_ms: u64,
+    // Counters for the same pass.
+    /// Session records the scanner handed to the collector.
+    pub records_scanned: u64,
+    /// Files whose metadata the pass took (stat calls on source and
+    /// store files; a file read whole without a stat is counted in
+    /// `source_bytes_read`, not here).
+    pub files_statted: u64,
+    /// Source bytes read during collection (committed prefixes, deltas
+    /// and whole-file reads alike).
+    pub source_bytes_read: u64,
+    /// Shard-body bytes read and hashed: the committed JSONL prefixes
+    /// re-hashed during collection plus the shard bodies the activity
+    /// index read and hashed.
+    pub shard_bytes_read_hashed: u64,
+    /// SQLite sessions whose per-session rows were queried.
+    pub sqlite_sessions_queried: u64,
+    /// SQLite sessions exported (re-sealed) into the stage.
+    pub sqlite_sessions_exported: u64,
+    /// Collector state saves plus this run-state write.
+    pub state_saves: u64,
+}
+
+impl PassMetrics {
+    /// One line of `key=value` pairs, for the run-once summary line.
+    /// Counts and durations only — no names, paths or content.
+    pub fn summary_line(&self) -> String {
+        let harness_ms = self
+            .collect_harness_ms
+            .iter()
+            .map(|(harness, ms)| format!("{harness}={ms}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "[run-once] phases ms: scan={} collect={} collect_harness=[{}] \
+             stage_audit={} metadata_hash={} activity_index={} push_preflight={} \
+             backup={} run_state_write={}; counts: records_scanned={} \
+             files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
+             sqlite_sessions_queried={} sqlite_sessions_exported={} state_saves={}",
+            self.scan_ms,
+            self.collect_ms,
+            harness_ms,
+            self.stage_audit_ms,
+            self.metadata_hash_ms,
+            self.activity_index_ms,
+            self.push_preflight_ms,
+            self.backup_ms,
+            self.run_state_write_ms,
+            self.records_scanned,
+            self.files_statted,
+            self.source_bytes_read,
+            self.shard_bytes_read_hashed,
+            self.sqlite_sessions_queried,
+            self.sqlite_sessions_exported,
+            self.state_saves,
+        )
+    }
+}
+
 /// One `run-once` pass, as durable metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
@@ -77,6 +175,10 @@ pub struct RunState {
     /// sha256 prefix of the machine partition name — enough to notice that
     /// two machines share a state dir, without recording the hostname.
     pub machine_digest: String,
+    /// Per-phase timers and counters. Additive: absent in files written
+    /// before it existed, so it defaults rather than failing the read.
+    #[serde(default)]
+    pub phases: PassMetrics,
 }
 
 impl RunState {
@@ -99,6 +201,7 @@ impl RunState {
             collect_errors: 0,
             archive_gaps: 0,
             machine_digest: machine_digest(machine),
+            phases: PassMetrics::default(),
         }
     }
 }
@@ -287,6 +390,11 @@ pub fn run_state_json(
                 "snapshot_created": state.snapshot_created,
                 "collect_errors": state.collect_errors,
                 "archive_gaps": state.archive_gaps,
+                "phases": serde_json::to_value(&state.phases)
+                    // reason: PassMetrics is plain integers and string keys,
+                    // so its serialization cannot fail; the fallback keeps
+                    // the rest of the record readable if that ever changes.
+                    .unwrap_or(serde_json::Value::Null),
             })
         }
     }
@@ -331,5 +439,128 @@ mod tests {
         assert_eq!(stale_after_secs(3600), 4 * 3600);
         // A 5-minute cadence still gets the 1-hour floor.
         assert_eq!(stale_after_secs(300), STALE_FLOOR_SECS);
+    }
+
+    /// W880: a `run-state.json` written before the per-phase timers
+    /// existed has no `phases` field. It is still a valid record —
+    /// the phases default, they are not "unreadable".
+    #[test]
+    fn run_state_without_phases_still_loads_with_default_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            run_state_path(&state_dir),
+            r#"{ "version": 1, "finished_at_unix": 100, "duration_ms": 5,
+                 "outcome": "noop", "failed_step": null, "shards_written": 0,
+                 "stage_shards": 0, "snapshot_created": false,
+                 "collect_errors": 0, "archive_gaps": 0,
+                 "machine_digest": "aaaaaaaaaaaa" }"#,
+        )
+        .unwrap();
+        match load(&state_dir) {
+            RunStateRead::Present(state) => {
+                assert_eq!(state.phases, PassMetrics::default());
+                assert_eq!(state.phases.scan_ms, 0);
+            }
+            other => panic!("pre-W880 record must load, got {other:?}"),
+        }
+    }
+
+    /// W880: the per-phase record survives the atomic write/read
+    /// round trip, and the harness keys stay harness ids.
+    #[test]
+    fn run_state_with_phases_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let mut state = RunState::new(RunOutcome::Completed, None, "machine", 7);
+        state.phases.scan_ms = 11;
+        state.phases.collect_ms = 22;
+        state
+            .phases
+            .collect_harness_ms
+            .insert("chatgpt".to_string(), 3);
+        state
+            .phases
+            .collect_harness_ms
+            .insert("claude".to_string(), 4);
+        state.phases.stage_audit_ms = 5;
+        state.phases.metadata_hash_ms = 6;
+        state.phases.activity_index_ms = 7;
+        state.phases.push_preflight_ms = 8;
+        state.phases.backup_ms = 9;
+        state.phases.run_state_write_ms = 1;
+        state.phases.records_scanned = 12;
+        state.phases.files_statted = 13;
+        state.phases.source_bytes_read = 14;
+        state.phases.shard_bytes_read_hashed = 15;
+        state.phases.sqlite_sessions_queried = 16;
+        state.phases.sqlite_sessions_exported = 17;
+        state.phases.state_saves = 18;
+        save(&state_dir, &state).unwrap();
+        match load(&state_dir) {
+            RunStateRead::Present(read) => {
+                assert_eq!(read.phases, state.phases);
+            }
+            other => panic!("expected a present state, got {other:?}"),
+        }
+    }
+
+    /// W880: the summary line carries every phase and counter, and
+    /// nothing that could name a session, a path or a title.
+    #[test]
+    fn summary_line_carries_every_phase_and_counter() {
+        let mut metrics = PassMetrics::default();
+        metrics.scan_ms = 1;
+        metrics.collect_ms = 2;
+        metrics.collect_harness_ms.insert("chatgpt".to_string(), 3);
+        metrics.stage_audit_ms = 4;
+        metrics.metadata_hash_ms = 5;
+        metrics.activity_index_ms = 6;
+        metrics.push_preflight_ms = 7;
+        metrics.backup_ms = 8;
+        metrics.run_state_write_ms = 9;
+        metrics.records_scanned = 10;
+        metrics.files_statted = 11;
+        metrics.source_bytes_read = 12;
+        metrics.shard_bytes_read_hashed = 13;
+        metrics.sqlite_sessions_queried = 14;
+        metrics.sqlite_sessions_exported = 15;
+        metrics.state_saves = 16;
+        let line = metrics.summary_line();
+        for key in [
+            "scan=1",
+            "collect=2",
+            "chatgpt=3",
+            "stage_audit=4",
+            "metadata_hash=5",
+            "activity_index=6",
+            "push_preflight=7",
+            "backup=8",
+            "run_state_write=9",
+            "records_scanned=10",
+            "files_statted=11",
+            "source_bytes_read=12",
+            "shard_bytes_read_hashed=13",
+            "sqlite_sessions_queried=14",
+            "sqlite_sessions_exported=15",
+            "state_saves=16",
+        ] {
+            assert!(line.contains(key), "summary line must carry {key}: {line}");
+        }
+    }
+
+    /// W880: `status --json` exposes the per-phase record under
+    /// `phases`, alongside the fields it already exposed.
+    #[test]
+    fn status_json_exposes_the_phases() {
+        let mut state = RunState::new(RunOutcome::Noop, None, "machine", 5);
+        state.phases.scan_ms = 42;
+        state.phases.records_scanned = 7;
+        let json = run_state_json(&RunStateRead::Present(state), 1_000, 4 * 3600);
+        assert_eq!(json["kind"], "known");
+        assert_eq!(json["phases"]["scan_ms"], 42);
+        assert_eq!(json["phases"]["records_scanned"], 7);
+        assert!(json["phases"]["collect_harness_ms"].as_object().is_some());
     }
 }
