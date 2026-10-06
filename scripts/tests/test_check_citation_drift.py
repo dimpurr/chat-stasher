@@ -18,7 +18,7 @@ SPEC.loader.exec_module(checker)
 
 
 def run_binding(doc: str, markers: tuple[str, ...], text: str,
-                files: dict[str, str]) -> list[str]:
+                files: dict[str, str], *, keep_all: bool = False) -> list[str]:
     """The problems for the bindings whose claim lives at `markers` in `doc`.
 
     The document is keyed under the binding's own name because
@@ -28,6 +28,11 @@ def run_binding(doc: str, markers: tuple[str, ...], text: str,
     keeps each fixture honest when SEMANTIC_BINDINGS grows: a new binding
     matching the same document must fail or pass on its own legs, not on
     this file's assertions about some other binding.
+
+    `keep_all` returns the unfiltered problems, which is what an assertion
+    about ambiguity needs: a claim found in two paragraphs is reported once
+    for the binding and its own markers, and filtering by the markers this
+    file believes the binding uses would hide the failure it is asserting.
     """
     basenames = {os.path.basename(path): path for path in files}
     citations, parse_problems = checker.parse_text(
@@ -42,6 +47,8 @@ def run_binding(doc: str, markers: tuple[str, ...], text: str,
         {doc: text},
         lambda path: files[path].splitlines() if path in files else [],
     )
+    if keep_all:
+        return problems
     return [
         problem
         for problem in problems
@@ -554,7 +561,7 @@ class W820SemanticBindingTests(unittest.TestCase):
             "",
         ])
         files = {"crates/chat-stasher/src/store.rs": source}
-        markers = ("plaintext JSON", "0700")
+        markers = ("plaintext JSON", "parent directory tightened")
 
         # The old anchor: one span holding the rationale and the whole write
         # path — 50 lines, which no bounded range can prove.
@@ -571,6 +578,19 @@ class W820SemanticBindingTests(unittest.TestCase):
             claim + "(`crates/chat-stasher/src/store.rs:1-3`, `:45-48`).\n", files,
         )
         self.assertEqual(fixed, [])
+
+        # A second paragraph repeating the mode value must not make the claim
+        # ambiguous. Keyed on `0700` this document has two matching paragraphs —
+        # the exposure above and the confirmed weakness that restates it — and a
+        # binding cannot tell the claim from its own restatement. Unfiltered:
+        # the ambiguity is reported for the binding's markers, not this file's.
+        doubled = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/store.rs:1-3`, `:45-48`).\n\n"
+            "The master key is plaintext JSON again in a `0700` parent.\n",
+            files, keep_all=True,
+        )
+        self.assertEqual(doubled, [])
 
     def test_threat_model_kimi_claim_needs_a_range_that_names_the_source(self) -> None:
         doc = "docs-dev/threat-model.md"

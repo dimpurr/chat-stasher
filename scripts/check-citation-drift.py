@@ -249,9 +249,14 @@ SEMANTIC_BINDINGS = [
     # the mode mechanism, so the claim is pinned by two: the "mode is set
     # when the file is created" rationale, and the two mode values with the
     # create-with-mode call.
+    #
+    # The claim markers are phrases, not the mode value: `0700` appears in two
+    # paragraphs of this document — the exposure under "Other programs running
+    # on your machine, as you" and the restatement under "Confirmed weaknesses"
+    # — so a binding keyed on it would go red the moment both said "plaintext JSON".
     {
         "doc": "docs-dev/threat-model.md",
-        "claim_markers": ("plaintext JSON", "0700"),
+        "claim_markers": ("plaintext JSON", "parent directory tightened"),
         "requirements": [
             {
                 "target": "crates/chat-stasher/src/store.rs",
@@ -667,8 +672,14 @@ def semantic_binding_problems(
                 )
             continue
         if len(matches) != 1:
+            # 🔴 The markers and the paragraphs that matched are both named. A
+            # count alone says the binding fired and nothing else, which is the
+            # one diagnosis a reader cannot act on.
+            wanted = ", ".join(repr(marker) for marker in binding["claim_markers"])
+            where = ", ".join(f"{doc}:{line}" for line, _ in matches)
             problems.append(
-                f"[semantic citation mismatch] {doc}: expected one paragraph containing the semantic citation claim; found {len(matches)}"
+                f"[semantic citation mismatch] {doc}: expected one paragraph containing "
+                f"{wanted}; found {len(matches)} (at {where})"
             )
             continue
 
