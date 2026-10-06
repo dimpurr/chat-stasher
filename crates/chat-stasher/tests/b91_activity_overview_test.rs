@@ -467,6 +467,60 @@ fn activity_index_records_the_dimensions_an_opencode_export_states() {
     );
 }
 
+/// TICKET-4D-09 · the workspace folders Zed's `threads.folder_paths` column
+/// records for a thread reach the index: every folder as a `container`, the
+/// first as the session's `cwd`.
+#[test]
+fn activity_index_records_the_workspace_folders_zed_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "zed.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"#,
+            r#""id":"synthetic-zed","summary":"synthetic-summary","#,
+            r#""updated_at":"2025-01-15T12:34:56.789Z","#,
+            r#""folder_paths":["/w/one","/w/two"]}}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/one", "/w/two"]),
+        "every workspace folder the thread belongs to is a container"
+    );
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the primary folder is the session's working directory"
+    );
+}
+
 /// An opencode row that recorded no project and no archive moment states those
 /// two dimensions not at all, and the written index must not state them
 /// either: the fields are absent from the line, never empty and never inferred.
@@ -896,6 +950,53 @@ fn activity_index_leaves_an_unrecorded_codex_dimension_absent() {
         row.get("dimensions").is_none(),
         "no dimension was observed, so no dimension object is written: {}",
         row
+    );
+}
+
+/// A Zed thread belonging to no folder records no folder: NULL stays
+/// unobserved in the index line, never an empty array or a placeholder.
+#[test]
+fn activity_index_leaves_a_zed_thread_without_folders_unobserved() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "zed.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"#,
+            r#""id":"synthetic-zed","summary":"synthetic-summary","#,
+            r#""updated_at":"2025-01-15T12:34:56.789Z","folder_paths":null}}"#
+        )
+        .to_string()],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&index).unwrap().trim()).unwrap();
+    assert!(
+        row["dimensions"].get("container").is_none() && row["dimensions"].get("cwd").is_none(),
+        "a NULL folder_paths records no folder: {}",
+        row["dimensions"]
     );
 }
 

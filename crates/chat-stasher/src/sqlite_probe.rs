@@ -1651,7 +1651,9 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     for index in 0..statement.column_count() {
         let name = statement.column_name(index)?.to_string();
         let val_ref = row.get_ref(index)?;
-        if name == "data" {
+        if name == "folder_paths" {
+            object.insert(name, folder_paths_to_json(val_ref));
+        } else if name == "data" {
             let data_json = match val_ref {
                 ValueRef::Blob(bytes) => {
                     if data_type == "zstd" {
@@ -1696,6 +1698,27 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         }
     }
     Ok(Value::Object(object))
+}
+
+/// Export Zed's `threads.folder_paths` column as the JSON array of workspace
+/// paths it holds.
+///
+/// Zed stores the list newline-separated and lexicographically sorted (see
+/// `PathList::serialize` in Zed's `crates/util/src/path_list.rs`), and writes
+/// NULL when the thread belongs to no folder. The array is the shape the 4D
+/// projection in `activity.rs` reads: NULL stays NULL and an empty list
+/// becomes an empty array, so "no folder observed" has exactly one spelling
+/// per state instead of a string that might be empty, absent, or blank.
+fn folder_paths_to_json(value: ValueRef<'_>) -> Value {
+    let ValueRef::Text(bytes) = value else {
+        return sqlite_value_to_json(value, false);
+    };
+    let paths: Vec<Value> = String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| Value::String(line.to_string()))
+        .collect();
+    Value::Array(paths)
 }
 
 /// Enumerate qualified composers in Cursor's legacy workspaceStorage. Each
@@ -3415,6 +3438,66 @@ mod zed_tests {
         assert_eq!(val["session"]["summary"], "synthetic-summary");
         assert_eq!(val["session"]["data"]["title"], "synthetic-title");
         assert_eq!(val["session"]["data"]["messages"][0]["text"], "hello");
+        // TICKET-4D-09: the workspace folders the thread belongs to are
+        // preserved in the export as the array of paths the 4D projection
+        // reads — the newline-separated column text, split and filtered.
+        assert_eq!(
+            val["session"]["folder_paths"],
+            serde_json::json!(["/path/to/folder"])
+        );
+    }
+
+    /// TICKET-4D-09: a thread belonging to no folder writes a NULL column, and
+    /// the export keeps it NULL — "no folder observed" must not become an
+    /// empty array or a placeholder at the export boundary.
+    #[test]
+    fn zed_export_keeps_a_null_folder_paths_unobserved() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("threads.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                data BLOB NOT NULL,
+                parent_id TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                created_at TEXT
+            );",
+        )
+        .unwrap();
+
+        let raw_json = br#"{"title":"synthetic-title","messages":[]}"#;
+        let compressed = zstd::encode_all(&raw_json[..], 3).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "synthetic-zed-null",
+                "synthetic-summary",
+                "2026-10-03T10:00:00.000000+00:00",
+                "zstd",
+                compressed,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                "2026-10-03T09:00:00.000000+00:00",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let spec = zed_schema();
+        let snapshot = read_zed_session(&db, &spec, "synthetic-zed-null").unwrap();
+        let val: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            val["session"]["folder_paths"],
+            Value::Null,
+            "a thread with no folder records no folder: NULL stays NULL"
+        );
     }
 
     #[test]
