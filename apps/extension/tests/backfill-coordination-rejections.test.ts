@@ -6,9 +6,11 @@
  * coordination bucket a URL belongs to, and it **fails closed** — a request it
  * cannot place is not sent. `tests/w212-coordination.test.ts` covers the routes
  * every plan declares, the final "request is not declared" throw, and already
- * pins the gemini query refusal at one URL (`rpcids=unplanned`, :38-39); unpinned were
- * the platform refusal and the query refusal's neighbouring outcomes. Those are
- * the sentences a future edit is most likely to break without anything else going red:
+ * pins the gemini query refusal at one URL (`rpcids=unplanned`, the last
+ * assertion of its 'classifies platform detail routes separately from list
+ * routes' case); unpinned were the platform refusal and the query refusal's
+ * neighbouring outcomes. Those are the sentences a future edit is most likely to
+ * break without anything else going red:
  *
  *  · **no plan for the platform** (`backfillPlanFor`'s miss). Without it, a
  *    platform id that is not in the table would be classified against nothing;
