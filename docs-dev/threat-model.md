@@ -121,7 +121,7 @@ Concretely, five separate plaintext exposures:
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
    inside a parent directory tightened to `0700`
-   (`crates/chat-stasher/src/store.rs:1996-2066`); on platforms without Unix
+   (`crates/chat-stasher/src/store.rs:2000-2006`, `:2034-2062`); on platforms without Unix
    modes it inherits whatever the filesystem gives it. That keeps it away from
    *other* users, not from you: any process running as you can read it and,
    combined with access to your destination, decrypt the entire archive.
@@ -159,7 +159,7 @@ your user, it is the dominant risk in this document.
 
 | | |
 |---|---|
-| **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:239`). Loopback is not a security boundary. |
+| **Can see** | Any program running as you can connect to the dashboard's port, because it listens on `127.0.0.1` (`crates/chat-stasher/src/view.rs:239-241`). Loopback is not a security boundary. |
 | **Cannot see** | Anything, without the random token printed in the URL at launch. Every accepted GET route checks it with a constant-time comparison, and any method other than GET is refused (`crates/chat-stasher/src/view.rs:343-376`, `:246`). |
 
 **Who can start it.** There are two ways, and both end in the same
@@ -280,7 +280,9 @@ other
 platforms are places where the extension sends a credential rather than only
 cookies** (backfill requests, and on Gemini the live leg too): Kimi reads the page
 origin's own `localStorage.access_token` at request time, sends it to Kimi's two
-backfill paths and nothing else, and holds no copy (`apps/extension/lib/platform-auth.ts:303-357`);
+backfill paths and nothing else, and holds no copy
+(`apps/extension/lib/platform-auth.ts:217`, `:327-361`;
+`apps/extension/entrypoints/dw-bridge.content.ts:495-513`);
 Gemini reads three values out of the page's own `WIZ_global_data` — the XSRF token
 that goes in the request body, and two identifiers that go in the query — through
 a page-world pull, per request, holding no copy, and attaches them to its two RPCs

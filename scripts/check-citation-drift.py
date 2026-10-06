@@ -203,6 +203,137 @@ SEMANTIC_BINDINGS = [
             },
         ],
     },
+    # W820 · The no-project-endpoint claim rests on two mechanisms in two
+    # files: the default port that throws instead of fetching, and the
+    # admission check that names the things it refuses. Neither was wrong —
+    # but nothing stopped this sentence from being re-cited at only one of
+    # them, which would hold true bytes and let the other default rot
+    # unnoticed, so both legs are pinned.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("only outbound HTTP port", "checkBackfillRequest"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/backfill/engine.ts",
+                "source_markers": ("notWiredHttp", "refused to fetch"),
+            },
+            {
+                "target": "apps/extension/lib/backfill/tab-port.ts",
+                "source_markers": ("checkBackfillRequest", "url is not same-origin with the page"),
+            },
+        ],
+    },
+    # W820 · The dashboard row cited `bind_ephemeral`'s signature line alone
+    # for "it listens on 127.0.0.1" — the address is the line *below* the one
+    # cited — and its gate sentence had no anchor pairing the constant-time
+    # compare with the method refusal it sits beside. Both legs now name the
+    # mechanism: the bind of `Ipv4Addr::LOCALHOST`, and `ct_eq` within the
+    # method gate.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("Loopback is not a security boundary", "constant-time comparison"),
+        "requirements": [
+            {
+                "target": "crates/chat-stasher/src/view.rs",
+                "source_markers": ("bind_ephemeral", "Ipv4Addr::LOCALHOST"),
+            },
+            {
+                "target": "crates/chat-stasher/src/view.rs",
+                "source_markers": ("ct_eq", 'method != "GET"'),
+            },
+        ],
+    },
+    # W820 · The master-key modes were cited as one 71-line span holding the
+    # rationale comment and the whole write path together. A span wider than
+    # SEMANTIC_MAX_LINES cannot prove content, and no bounded range carried
+    # the mode mechanism, so the claim is pinned by two: the "mode is set
+    # when the file is created" rationale, and the two mode values with the
+    # create-with-mode call.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("plaintext JSON", "0700"),
+        "requirements": [
+            {
+                "target": "crates/chat-stasher/src/store.rs",
+                "source_markers": ("0o700", "0o600", "options.mode(0o600)"),
+            },
+            {
+                "target": "crates/chat-stasher/src/store.rs",
+                "source_markers": ("The mode is set *when the file is created*",),
+            },
+        ],
+    },
+    # W820 · The threat-model copy of the Kimi claim carried the same gap as
+    # the privacy one below: a wrapper cited for a token *source* its range
+    # never named — `localStorage.access_token` appeared in no anchor, and
+    # the reader lived in a file the sentence did not mention.
+    {
+        "doc": "docs-dev/threat-model.md",
+        "claim_markers": ("localStorage.access_token", "holds no copy"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("KIMI_ACCESS_TOKEN_STORAGE_KEY", "'access_token'"),
+            },
+            {
+                "target": "apps/extension/entrypoints/dw-bridge.content.ts",
+                "source_markers": ("localStorage", "KIMI_ACCESS_TOKEN_STORAGE_KEY"),
+            },
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("needsKimiBearer", "options.readToken()"),
+            },
+        ],
+    },
+    # W820 · W346 pinned the threat-model copy of the session-token claim and
+    # left this, the privacy.md copy, outside that round. Three legs: the read
+    # of `/api/auth/session`; the gate that limits the bearer header to
+    # ChatGPT's list/body paths — the mechanism behind "never attached to any
+    # other request"; and the module's token rules, the only lines that say
+    # "never storage, IndexedDB, logs, or anything sent to the native host"
+    # — which the old citation never contained.
+    {
+        "doc": "docs-dev/privacy.md",
+        "claim_markers": ("access token", "/api/auth/session"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("readSessionToken", "CHATGPT_SESSION_PATH", ".accessToken"),
+            },
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("needsChatgptBearer", "CHATGPT_LIST_PATH", "CHATGPT_DETAIL_PATH"),
+            },
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("Rules for the token", "never storage, IndexedDB, logs"),
+            },
+        ],
+    },
+    # W820 · The Kimi sentence names where the token lives — the page origin's
+    # `localStorage` under `access_token` — but both its anchors sat in the
+    # wrapper that attaches it: the storage key's literal was never cited, and
+    # the re-read-once/retry code sat below the cited range. Three legs: the
+    # key constant, the reader in the bridge, and the attach gate beside the
+    # once-only retry.
+    {
+        "doc": "docs-dev/privacy.md",
+        "claim_markers": ("Kimi", "access_token", "localStorage"),
+        "requirements": [
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("KIMI_ACCESS_TOKEN_STORAGE_KEY", "'access_token'"),
+            },
+            {
+                "target": "apps/extension/entrypoints/dw-bridge.content.ts",
+                "source_markers": ("localStorage", "KIMI_ACCESS_TOKEN_STORAGE_KEY"),
+            },
+            {
+                "target": "apps/extension/lib/platform-auth.ts",
+                "source_markers": ("needsKimiBearer", "options.readToken()", "first.status !== 401"),
+            },
+        ],
+    },
 ]
 
 # The widest a bound citation may be and still count as "an implementation
