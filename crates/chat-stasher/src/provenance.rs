@@ -8,8 +8,9 @@
 //! bundle** carries (see [`dimensions_from_jsonl`]), and the **harness-side
 //! readers** that read what a session's own records say about themselves —
 //! `activity::build_row` for a Claude Code transcript's working directory and
-//! owning organization. Neither origin can overwrite the other's facts, and a
-//! bundle that carries no dimension says nothing about the ones it omits.
+//! owning organization, and for a Cursor composer's workspace and tracked
+//! repositories. Neither origin can overwrite the other's facts, and a bundle
+//! that carries no dimension says nothing about the ones it omits.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

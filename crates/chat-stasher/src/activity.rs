@@ -2336,13 +2336,14 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Four
+/// opposed to what the collection path or the registry already recorded. Five
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
-/// directory, project and archive fact) and `grok` (its CLI `session_docs`
-/// row's `cwd`); every other harness answers with the empty set, which is the
-/// honest answer for a dimension nothing was read from — and never a value
-/// inferred from the harness name.
+/// directory, project and archive fact), `cursor` (its workspace and tracked
+/// repositories), and `grok` (its CLI `session_docs` row's `cwd`); every other
+/// harness answers with the empty set, which is the honest answer for a
+/// dimension nothing was read from — and never a value inferred from the
+/// harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
 /// this module: an unreadable line is not evidence about a dimension.
@@ -2394,6 +2395,14 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                         fold_gemini_cli_dimensions(&mut dimensions, document);
                     }
                 }
+            }
+        }
+        "cursor" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_cursor_dimensions(&mut dimensions, &record);
             }
         }
         "grok" => {
@@ -2558,6 +2567,111 @@ fn fold_grok_dimensions(
     if let Some(cwd) = non_empty_str(session.get("cwd")) {
         dimensions.insert_cwd(cwd);
     }
+}
+
+/// TICKET-4D-05 · Cursor states, on the **composer object**, which workspace the
+/// conversation ran in and which git repositories it was tracking.
+///
+/// The capture wraps that object one of two ways, and they are told apart
+/// structurally here for the same reason `normalize::cursor` tells them apart
+/// that way — the shape is the evidence, and a label the caller may have spelled
+/// differently is not:
+///
+/// * global store (`cursorDiskKV`): `{"…","session":{"key":…,"value":{composer}}}`
+/// * legacy workspace store (`ItemTable`): `{"…","session":{composer}}`
+///
+/// `workspaceIdentifier.uri` is the container, kept **as the composer spelled
+/// it**. That is what makes the `cwd ≠ repo identity` rule readable here: a
+/// `vscode-remote://` workspace and a local `file://` one are different
+/// containers and stay distinguishable, while the path below is an OS execution
+/// location — never a repository identity, and never promoted into `container`
+/// on its own.
+///
+/// `trackedGitRepos` contributes its repository identities to the same
+/// dimension, so a composer opened on a git repository records that repository
+/// beside the workspace that contains it instead of one dimension replacing the
+/// other.
+///
+/// **The composer's `status` is deliberately not read.** `none` / `completed` /
+/// `aborted` is the state of the *generation run* when the row was written: it
+/// changes while the user watches, and `"none"` is what an idle composer says
+/// rather than what its lifecycle is. Folding it into `status` would assert that
+/// a conversation was archived because a run finished — the claim the
+/// `missing archived/pinned ≠ active` rule forbids. With no lifecycle marker
+/// recorded, the dimension stays empty.
+fn fold_cursor_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    let Some(composer) = cursor_composer(record) else {
+        return;
+    };
+    if let Some(uri) = cursor_workspace_uri(composer) {
+        dimensions.insert_container(uri.clone());
+        if let Some(path) = cursor_file_path(&uri) {
+            dimensions.insert_cwd(path);
+        }
+    }
+    if let Some(repos) = composer
+        .get("trackedGitRepos")
+        .and_then(serde_json::Value::as_array)
+    {
+        for repo in repos {
+            if let Some(repo) = non_empty_str(Some(repo)) {
+                dimensions.insert_container(repo);
+            }
+        }
+    }
+}
+
+/// The composer an exported Cursor session line carries, or `None` when the
+/// line carries no `session` at all. A `value` that is a bare string is still
+/// returned: a value column that did not decode to JSON holds no field to read,
+/// and letting the lookups below find nothing says so without a second shape
+/// check here.
+fn cursor_composer(record: &serde_json::Value) -> Option<&serde_json::Value> {
+    let session = record.get("session")?;
+    match session.get("value") {
+        Some(value) => Some(value),
+        None => Some(session),
+    }
+}
+
+/// The workspace URI as the composer spells it, whether it wrote the URI text
+/// itself or the object VS Code serializes a URI into (whose `external` is that
+/// same text). Any other shape — absent, null, an empty string, an object with
+/// no `external` — is left unobserved rather than rebuilt from a sibling field
+/// such as `fsPath`: a boundary the record did not spell is not one that was
+/// recorded, and guessing it from a path would put a repository identity and an
+/// OS location in one value.
+fn cursor_workspace_uri(composer: &serde_json::Value) -> Option<String> {
+    let uri = composer.pointer("/workspaceIdentifier/uri")?;
+    if uri.is_string() {
+        non_empty_str(Some(uri))
+    } else {
+        non_empty_str(uri.get("external"))
+    }
+}
+
+/// The OS path a `file://` workspace URI names, or `None` for every other
+/// scheme and for any spelling this function cannot reproduce byte for byte.
+///
+/// A workspace reached over `vscode-remote://` or inside a dev container names
+/// no local directory, so its cwd stays unobserved — the container above is
+/// still recorded, because a remote workspace is a real boundary that is simply
+/// not a directory this machine ran in.
+///
+/// A percent-escape is the other refusal, and it is the common one: a folder
+/// with a space in it is spelled `file:///…/My%20Folder`, and undoing that needs
+/// a URI parser this crate does not depend on. Emitting the escaped text would
+/// record a path that does not exist, so nothing is recorded instead — the raw
+/// shard still holds the composer's own spelling for anyone who wants it.
+fn cursor_file_path(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix("file://")?;
+    if path.is_empty() || path.contains('%') {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -2958,6 +3072,31 @@ mod tests {
             r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{{fields}}},"messages":[],"orphan_parts":[]}}"#
         )
     }
+
+    // ------------------------------------------------ TICKET-4D-05 · cursor
+    //
+    // The two boundaries a Cursor composer states about itself: the workspace it
+    // ran in, and the git repositories it was tracking.
+
+    /// One exported Cursor composer line with whatever provenance the caller
+    /// spells in. The default is the global `cursorDiskKV` wrapper, the shape the
+    /// composer is measured in; `cursor_composer_with` swaps it for the legacy
+    /// workspace wrapper.
+    fn cursor_composer_with(workspace: &str, extra: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{{"key":"composerData:eeeeeeee-5555","value":{{"composerId":"eeeeeeee-5555","createdAt":1753000000000,"fullConversationHeadersOnly":[],"conversationMap":{{}},{workspace}{extra}}}}}}}"#
+        )
+    }
+
+    /// A workspace URI in the object VS Code serializes one into — the shape
+    /// measured on the local global store. `scheme` is what says whether the
+    /// path below names a local directory.
+    fn file_workspace(uri: &str) -> String {
+        format!(
+            r#""workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/w/one","external":"{uri}","path":"/w/one","scheme":"file"}}}}"#
+        )
+    }
+
     #[test]
     fn gemini_cli_records_its_project_hash_as_the_container() {
         let line = gemini_doc(r#","projectHash":"hash-fixture""#);
@@ -2966,6 +3105,42 @@ mod tests {
         assert!(
             row.dimensions.cwd.is_empty(),
             "a digest is not a path, so it never becomes a cwd: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn a_cursor_composer_records_its_workspace_and_the_directory_it_names() {
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["file:///w/one"],
+            "the container is the workspace boundary as Cursor spelled it, not the \
+             stripped path below it"
+        );
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a `file://` workspace names the directory the session ran in"
+        );
+    }
+
+    #[test]
+    fn a_remote_workspace_is_a_container_but_names_no_local_directory() {
+        let uri = "vscode-remote://ssh-remote+host.example/srv/repo";
+        let line = cursor_composer_with(
+            &format!(
+                r#""workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/srv/repo","external":"{uri}","path":"/srv/repo","scheme":"vscode-remote"}}}}"#
+            ),
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, [uri]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a workspace on another machine is a boundary, not a directory this \
+             machine ran in: {:?}",
             row.dimensions.cwd
         );
     }
@@ -3020,6 +3195,30 @@ mod tests {
     }
 
     #[test]
+    fn tracked_git_repositories_are_recorded_beside_the_workspace() {
+        let line = cursor_composer_with(
+            &file_workspace("file:///w/one"),
+            r#","trackedGitRepos":["git@host.example:org/one.git","/w/one/vendor"]"#,
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            [
+                "/w/one/vendor",
+                "file:///w/one",
+                "git@host.example:org/one.git"
+            ],
+            "a composer opened on a git repository records that repository beside \
+             the workspace holding it, rather than one replacing the other"
+        );
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a tracked repository is not a working directory"
+        );
+    }
+
+    #[test]
     fn an_absent_empty_or_mistyped_project_hash_records_no_container() {
         let row = build_row(
             "s",
@@ -3037,6 +3236,79 @@ mod tests {
         assert!(
             row.dimensions.is_empty(),
             "an empty or mistyped value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn an_empty_tracked_repo_list_is_not_a_container() {
+        // 4 of the 23 composers measured on the local global store carry the key
+        // with nothing in it. An empty array is the absence of a repository, not
+        // a repository named "none" that every such composer would share.
+        let line =
+            cursor_composer_with(&file_workspace("file:///w/one"), r#","trackedGitRepos":[]"#);
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file:///w/one"]);
+    }
+
+    #[test]
+    fn a_composer_without_workspace_metadata_records_no_container() {
+        // The other two composers measured on the local global store name a
+        // workspace by `id` only, or carry no `trackedGitRepos` key at all. An
+        // `id` is a workspace handle Cursor mints internally rather than a
+        // boundary this archive can compare a directory against, so neither
+        // shape is turned into one.
+        let by_id = cursor_composer_with(
+            r#""workspaceIdentifier":{"id":"empty-window"}"#,
+            r#","trackedGitRepos":[]"#,
+        );
+        let bare = cursor_composer_with("", "");
+        for (case, line) in [("id-only", by_id), ("bare", bare)] {
+            let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "a {case} composer stated no boundary this dimension can hold: {:?}",
+                row.dimensions
+            );
+            assert!(row.dimensions.is_valid());
+        }
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_workspace_uri_records_nothing() {
+        let unparseable = "not json at all";
+        let null_workspace = cursor_composer_with(r#""workspaceIdentifier":null"#, "");
+        let mistyped_uri = cursor_composer_with(r#""workspaceIdentifier":{"uri":7}"#, "");
+        let empty_uri = cursor_composer_with(r#""workspaceIdentifier":{"uri":""}"#, "");
+        // The object form with no `external` is not rebuilt from its sibling
+        // `fsPath`: that would file an OS location in the container dimension and
+        // blur the one rule that keeps the two apart.
+        let no_external = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","fsPath":"/w/one"}}"#,
+            "",
+        );
+        let repos = cursor_composer_with("", r#","trackedGitRepos":["",7,null]"#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "cursor",
+            &[
+                unparseable,
+                null_workspace.as_str(),
+                mistyped_uri.as_str(),
+                empty_uri.as_str(),
+                no_external.as_str(),
+                repos.as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an unreadable or non-reproducible value is nothing observed, never a \
+             value: {:?}",
             row.dimensions
         );
         assert!(
@@ -3201,6 +3473,94 @@ mod tests {
     }
 
     #[test]
+    fn a_percent_escaped_path_is_recorded_as_a_container_and_not_as_a_directory() {
+        // A folder with a space in it is spelled `file:///…/My%20Folder`, and
+        // undoing that needs a URI parser this crate does not depend on. The
+        // escaped text names no directory, so it becomes no cwd — the boundary is
+        // still recorded, and the composer's own spelling stays in the raw shard.
+        let line = cursor_composer_with(
+            r#""workspaceIdentifier":{"uri":{"scheme":"file","external":"file:///w/%20one"}}"#,
+            "",
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["file:///w/%20one"]);
+        assert!(
+            row.dimensions.cwd.is_empty(),
+            "a path this reader cannot reproduce byte for byte is not a path it \
+             observed: {:?}",
+            row.dimensions.cwd
+        );
+    }
+
+    #[test]
+    fn an_undecodable_composer_column_leaves_every_dimension_unobserved() {
+        let line = r#"{"schema":"chat-stasher.sqlite.session.v1","table":"cursorDiskKV","session":{"key":"composerData:ffffffff-6666","value":"not json"}}"#;
+        let row = build_row("s", "mbp", "cursor", &[line]);
+        assert!(row.dimensions.is_empty(), "{:?}", row.dimensions);
+    }
+
+    #[test]
+    fn the_legacy_workspace_export_states_the_same_two_boundaries() {
+        // The per-workspace `ItemTable` store writes the composer itself as
+        // `session`; the global store wraps it in `value`. Telling them apart by
+        // that shape rather than by a label is what makes one reader serve both.
+        let line = format!(
+            r#"{{"schema":"chat-stasher.cursor.legacy.session.v1","session":{{"composerId":"ffffffff-6666","createdAt":1753000000000,"conversation":[],"workspaceIdentifier":{{"id":"b9aaf50f1cc29397064ab565777ef13d","uri":{{"$mid":1,"fsPath":"/w/two","external":"file:///w/two","path":"/w/two","scheme":"file"}}}},"trackedGitRepos":["/w/two/vendor"]}}}}"#
+        );
+        let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["/w/two/vendor", "file:///w/two"]);
+        assert_eq!(row.dimensions.cwd, ["/w/two"]);
+    }
+
+    #[test]
+    fn a_generation_status_is_not_a_lifecycle_status() {
+        // `status` on a composer is the state of the generation *run* at the
+        // moment the row was written: it moves while the user watches, and
+        // "none" is what an idle composer says. Recording any of the three as
+        // lifecycle state would claim a conversation was archived because a run
+        // finished.
+        for status in ["none", "completed", "aborted"] {
+            let line = cursor_composer_with(
+                &file_workspace("file:///w/one"),
+                &format!(r#","status":"{status}""#),
+            );
+            let row = build_row("s", "mbp", "cursor", &[line.as_str()]);
+            assert!(
+                row.dimensions.status.is_empty(),
+                "`status: {status:?}` is generation state, not lifecycle: {:?}",
+                row.dimensions
+            );
+            assert_eq!(row.dimensions.container, ["file:///w/one"]);
+        }
+    }
+
+    #[test]
+    fn cursor_dimensions_travel_in_the_index_line() {
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let json = to_jsonl(&build_row("s", "mbp", "cursor", &[line.as_str()]));
+        assert!(
+            json.contains(r#""container":["file:///w/one"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            !json.contains(r#""status""#),
+            "no lifecycle marker was recorded, so none is written: {json}"
+        );
+
+        let bare = to_jsonl(&build_row(
+            "s",
+            "mbp",
+            "cursor",
+            &[cursor_composer_with("", "").as_str()],
+        ));
+        assert!(
+            !bare.contains("\"dimensions\""),
+            "an unobserved dimension is omitted rather than written empty: {bare}"
+        );
+    }
+
+    #[test]
     fn another_harness_reads_no_opencode_dimensions() {
         // A Claude Code harness handed an opencode envelope: the same bytes
         // exist, and dimensions are still read per harness, not per shape.
@@ -3334,6 +3694,20 @@ mod tests {
         assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
         assert!(!json.contains("\"tenant\""), "line: {json}");
         assert!(!json.contains("\"container\""), "line: {json}");
+    }
+
+    #[test]
+    fn another_harness_reads_no_cursor_dimensions() {
+        // A Claude Code transcript has a `workspaceIdentifier` of nobody's, but
+        // reading it here would file a Cursor boundary under a harness that
+        // recorded none.
+        let line = cursor_composer_with(&file_workspace("file:///w/one"), "");
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are read per harness: {:?}",
+            row.dimensions
+        );
     }
 
     // ------------------------------------------------- W219 · account keys
