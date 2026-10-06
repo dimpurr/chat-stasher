@@ -354,15 +354,26 @@ describe('W2 · synthetic chain: page → bridge → background → outbox → h
     vi.stubGlobal('window', fakeWin);
     await loadBridge();
 
+    // The pinned DeepSeek conversation route (W473): the session is named in
+    // the request's chat_session_id query, and the body echoes the same
+    // nested id — that equality is what the bridge binding requires.
+    const SESSION_ID = 'c622b5dd-0000-4000-8000-00000000abcd';
     const rawBody = JSON.stringify({
-      session_id: 'c622b5dd-0000-4000-8000-00000000abcd',
-      message: { content: 'synthetic answer, never printed in reports', reasoning_content: '' },
+      code: 0,
+      data: {
+        biz_data: {
+          chat_session: { id: SESSION_ID },
+          chat_messages: [
+            { message_id: 1, role: 'USER', content: 'synthetic answer, never printed in reports' },
+          ],
+        },
+      },
     });
     fakeWin.fetch = async () =>
       new Response(rawBody, { status: 200, headers: { 'content-type': 'application/json' } });
     await loadMainHook();
 
-    const fakeUrl = 'https://chat.deepseek.com/api/v0/chat/session/c622b5dd-0000-4000-8000-00000000abcd';
+    const fakeUrl = `https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${SESSION_ID}`;
     await (fakeWin.fetch as any)(fakeUrl);
 
     // 🔴 W616 · Wait for the three facts the assertions below read, in that order.
@@ -445,11 +456,21 @@ describe('W2 · synthetic chain: page → bridge → background → outbox → h
     host = createSyntheticHost({ up: false });
     await loadBackground();
 
+    // The same pinned capture as above, so the record the write-ahead leaves
+    // is one the bridge would have accepted.
     const payload: CapturedFetch = {
-      url: 'https://chat.deepseek.com/api/v0/chat/session/aaaa1111-bbbb-4000-8000-00000000ffff',
-      method: 'POST',
+      url: 'https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=aaaa1111-bbbb-4000-8000-00000000ffff',
+      method: 'GET',
       status: 200,
-      text: JSON.stringify({ session_id: 'aaaa1111-bbbb-4000-8000-00000000ffff', message: { content: 'x' } }),
+      text: JSON.stringify({
+        code: 0,
+        data: {
+          biz_data: {
+            chat_session: { id: 'aaaa1111-bbbb-4000-8000-00000000ffff' },
+            chat_messages: [],
+          },
+        },
+      }),
       capturedAt: Date.now(),
     };
     const { handleCaptured } = await import('../entrypoints/background');

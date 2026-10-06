@@ -11,11 +11,24 @@ describe('dual-path page hook deduplication', () => {
     const listeners: Record<string, Array<(event: any) => void>> = {};
     const posted: unknown[] = [];
     let originalCalls = 0;
+    // The pinned DeepSeek conversation route (W473): the session named by the
+    // request's chat_session_id query, its body echoing the same nested id.
+    const SESSION_ID = 'synthetic-session-id';
+    const CONVERSATION_URL = `https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${SESSION_ID}`;
+    const CONVERSATION_BODY = JSON.stringify({
+      code: 0,
+      data: {
+        biz_data: {
+          chat_session: { id: SESSION_ID },
+          chat_messages: [{ message_id: 1, role: 'USER' }],
+        },
+      },
+    });
     const fakeWindow: any = {
       location: { origin: 'https://chat.deepseek.com' },
       fetch: async () => {
         originalCalls += 1;
-        return new Response(JSON.stringify({ session_id: 'synthetic-session-id' }), { status: 200 });
+        return new Response(CONVERSATION_BODY, { status: 200 });
       },
       addEventListener(name: string, listener: (event: any) => void) {
         (listeners[name] ??= []).push(listener);
@@ -33,7 +46,7 @@ describe('dual-path page hook deduplication', () => {
     installPageFetchHook(PAGE_HOOK_OPTIONS);
     installPageFetchHook(PAGE_HOOK_OPTIONS);
 
-    await fakeWindow.fetch('https://chat.deepseek.com/api/v0/chat/session/synthetic-session-id');
+    await fakeWindow.fetch(CONVERSATION_URL);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const captures = posted.filter(

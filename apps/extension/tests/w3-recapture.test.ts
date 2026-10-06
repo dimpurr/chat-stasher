@@ -146,10 +146,13 @@ function chatgptCapture(text: string): CapturedFetch {
   };
 }
 
+// The pinned DeepSeek conversation route (W473): the session is named by the
+// request's chat_session_id query, and a conforming body repeats the same
+// nested id — the capture contract the two cases below deliver.
 function deepseekCapture(text: string, sid: string): CapturedFetch {
   return {
-    url: `https://chat.deepseek.com/api/v0/chat/session/${sid}`,
-    method: 'POST',
+    url: `https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${sid}`,
+    method: 'GET',
     status: 200,
     text,
     capturedAt: (lastCapturedAt += 1),
@@ -413,7 +416,7 @@ describe('W3-RECAPTURE · handleCaptured', () => {
 
   it('a platform with no registered volatile fields is always delivered', async () => {
     const sid = 'dddddddd-1111-4222-8333-000000000000';
-    const body = JSON.stringify({ session_id: sid, message: { content: 'synthetic answer' } });
+    const body = JSON.stringify({ data: { biz_data: { chat_session: { id: sid }, chat_messages: [] } } });
 
     const first = await dispatch(deepseekCapture(body, sid));
     const second = await dispatch(deepseekCapture(body, sid));
@@ -462,7 +465,7 @@ describe('W3-RECAPTURE · handleCaptured', () => {
   //    answers for these conversations only by exact bytes, exactly as before.
   it('🔴 a deepseek bundle omits the fingerprint key entirely', async () => {
     const sid = 'dddddddd-1111-4222-8333-000000000002';
-    const body = JSON.stringify({ session_id: sid, message: { content: 'synthetic answer' } });
+    const body = JSON.stringify({ data: { biz_data: { chat_session: { id: sid }, chat_messages: [] } } });
 
     hostMode = 'down';
     const result = await dispatch(deepseekCapture(body, sid));

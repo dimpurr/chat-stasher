@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Instant;
 
 #[path = "../src/test_support.rs"]
 mod test_support;
@@ -1882,6 +1883,11 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
 
     // Native messaging starts a process per request. Bound the host's clock by
     // the call boundaries instead of assuming startup takes less than a second.
+    // The cooldown is a wall-clock deadline, and each of the two requests below
+    // is answered by a *separate* host process that reads the clock again
+    // (`nativehost.rs`: `wait = cooldown_until - now`). Bound both the deadline
+    // and the wall-clock elapsed time.
+    let cooldown_armed = Instant::now();
     let rate_started = chrono::Utc::now().timestamp_millis();
     let limited = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
         "request_id":"rate-a","mode":"rate_limit","platform":"chatgpt","install_id":"install-b",
@@ -1890,7 +1896,10 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
     assert_eq!(exit_code(&limited), 0, "stderr: {}", stderr_of(&limited));
     let limited = one_frame(&limited.stdout);
     assert_matches_schema(&limited);
-    assert_eq!(limited["wait_ms"], 300_000);
+    assert_eq!(
+        limited["wait_ms"], 300_000,
+        "the acknowledged cooldown is the header it was given: {limited}"
+    );
     let deadline = limited["cooldown_until"]
         .as_i64()
         .expect("cooldown deadline");
@@ -1901,16 +1910,29 @@ fn coordination_serializes_installs_propagates_cooldown_and_expires_leases() {
     let token_started = chrono::Utc::now().timestamp_millis();
     let blocked = fixture.chrome(&frame(&json!({"protocol":1,"type":"coordination",
         "request_id":"token-a","mode":"token","platform":"chatgpt","install_id":"install-b","segment":"detail"})));
+    let elapsed = cooldown_armed.elapsed().as_millis() as i64;
     let token_finished = chrono::Utc::now().timestamp_millis();
     assert_eq!(exit_code(&blocked), 0, "stderr: {}", stderr_of(&blocked));
     let blocked = one_frame(&blocked.stdout);
     assert_matches_schema(&blocked);
     assert_eq!(blocked["granted"], false);
-    assert_eq!(blocked["cooldown_until"], limited["cooldown_until"]);
+    assert_eq!(
+        blocked["cooldown_until"], limited["cooldown_until"],
+        "the cooldown reaches every install as the same deadline: {blocked}"
+    );
     let wait = blocked["wait_ms"].as_i64().expect("remaining cooldown");
     assert!(
         ((deadline - token_finished).max(0)..=(deadline - token_started).max(0)).contains(&wait),
         "cooldown reaches every install with the remaining wait: {blocked}"
+    );
+    assert!(
+        wait <= 300_000,
+        "a wait can only be the cooldown that is left, never longer: {blocked}"
+    );
+    assert!(
+        wait + elapsed >= 300_000,
+        "cooldown reaches every install: {blocked}; {wait}ms left after {elapsed}ms \
+         of test wall clock is short of the 300000ms header"
     );
 }
 

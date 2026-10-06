@@ -3,7 +3,7 @@ import {
   UNSUPPORTED_TRANSPORT_WARNING,
 } from '../lib/page-hook';
 import { installPageFetchHook, PAGE_HOOK_OPTIONS } from '../lib/page-hook';
-import { CAPTURE_MESSAGE } from '../lib/contract';
+import { CAPTURE_MESSAGE, isCapturedFetchShape } from '../lib/contract';
 
 /**
  * A fresh XHR class per test. The hook patches `open`/`send` on the class it is given, and a
@@ -194,6 +194,11 @@ describe('XHR capture (DeepSeek loads conversations over XHR)', () => {
     expect(captures()).toHaveLength(1);
     expect(captures()[0].payload).toMatchObject({ url, method: 'GET', status: 200, text: deepseekHistoryBody() });
     expect(typeof captures()[0].payload.capturedAt).toBe('number');
+    // 🔴 The seam. The hook's own shape gate deliberately omits W473's id
+    //    binding, so a payload posted here can still be refused at the bridge.
+    //    Asserting the gate accepts it is what keeps this file's "captured"
+    //    meaning "archived" rather than "posted and silently discarded".
+    expect(isCapturedFetchShape(captures()[0].payload)).toBe(true);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -202,9 +207,13 @@ describe('XHR capture (DeepSeek loads conversations over XHR)', () => {
     const xhr = new fakeWindow.XMLHttpRequest();
     xhr.responseType = '';
     xhr.responseText = deepseekHistoryBody();
-    xhr.open('GET', 'https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=abc12345');
+    // The query names the session the body nests (W473): this case's subject is
+    // the empty responseType, so it must not quietly stand in for a payload the
+    // bridge refuses.
+    xhr.open('GET', 'https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=5fa1d6ed-0000-4000-8000-000000000001');
     xhr.send();
     expect(captures()).toHaveLength(1);
+    expect(isCapturedFetchShape(captures()[0].payload)).toBe(true);
   });
 
   it('a readable candidate with the wrong shape gets the shape warning and is not captured', () => {

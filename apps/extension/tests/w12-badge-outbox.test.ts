@@ -194,13 +194,14 @@ describe('W12 · the backfill leg does not go through the outbox, so it cannot l
     expect(before!.pending).toBe(1);
 
     const { deliverBackfillItem } = await import('../entrypoints/background');
+    // The pinned DeepSeek conversation route (W473): a real capture, so the
+    // badge case below rides a delivery, not a refusal.
     const result = await deliverBackfillItem({
-      url: 'https://chat.deepseek.com/api/v0/chat/session/aaaa1111-bbbb-4000-8000-00000000ffff',
+      url: 'https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=aaaa1111-bbbb-4000-8000-00000000ffff',
       method: 'GET',
       status: 200,
       text: JSON.stringify({
-        session_id: 'aaaa1111-bbbb-4000-8000-00000000ffff',
-        message: { content: 'x' },
+        data: { biz_data: { chat_session: { id: 'aaaa1111-bbbb-4000-8000-00000000ffff' }, chat_messages: [] } },
       }),
       capturedAt: Date.now(),
     });

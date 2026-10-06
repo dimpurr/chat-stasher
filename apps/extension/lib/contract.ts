@@ -357,33 +357,49 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
   {
     id: 'deepseek',
     origins: ['https://chat.deepseek.com'],
-    pathHints: ['/api/v0/chat', '/chat/session'],
-    methods: ['GET', 'POST'],
+    // W473 · Measured, in a live logged-in session (2026-09-13): the page
+    // loads one conversation over XHR from the GET below, with the session
+    // named by a chat_session_id query, and the envelope keys named here —
+    // chat_session.id is a JSON string, chat_messages a collection (the
+    // surviving record of that observation is
+    // apps/extension/tests/unsupported-transport.test.ts:139-158 and the
+    // provenance at lib/backfill/enumerate.ts).
+    // ASSUMED, never measured: that the response's nested chat_session.id
+    // EQUALS the chat_session_id the request named. If that is wrong,
+    // every live stable-build capture is refused at the bridge
+    // (isCapturedFetchShape) and capture on this platform silently
+    // disappears; the missing measurement is one logged-in session that
+    // compares the two values.
+    // Deliberately outside this row now: the neighboring
+    // chat_session/fetch_page route (an index, not a conversation) and the
+    // POSTs under the old '/api/v0/chat' prefix (the generate endpoint),
+    // which the broad hints used to let through.
+    pathHints: ['/api/v0/chat/history_messages'],
+    methods: ['GET'],
     status: { min: 200, max: 299 },
     responseShape: {
       encoding: 'json',
-      requiredAnyPaths: [
-        // Live shape of GET /api/v0/chat/history_messages, observed in a
-        // logged-in session on 2026-09-13 (key names only, loaded over XHR):
-        // { code, msg, data: { biz_code, biz_msg, biz_data: { chat_session: {
-        // id, ... }, chat_messages: [...], cache_control, cache_reset_at } } }.
-        // None of the older paths below match it; they are kept for the other
-        // endpoints and earlier shapes this row has matched.
-        'data.biz_data.chat_messages',
-        'data.biz_data.chat_session.id',
-        'session_id',
-        'sessionId',
-        'data.session_id',
-        'data.sessionId',
-        'data.chat_session_id',
-        'data.messages',
-        'messages',
-      ],
+      // The response contract for this route: the current session identity and
+      // its message collection both live inside biz_data. A missing nested
+      // field is a changed/unreadable response, never an empty conversation
+      // (an EMPTY chat_messages array passes: a count of zero is a
+      // measurement).
+      // 🔴 The id binding (query chat_session_id = nested
+      //    chat_session.id) is enforced only in isCapturedFetchShape, the
+      //    page→content gate. The page hook's own copy of this row still
+      //    posts a body whose nested id mismatches, or whose request
+      //    carried no chat_session_id, with no warning — the required paths
+      //    pass there and the hook adds no binding — and the bridge then
+      //    refuses it silently. That is deliberate: a page payload is
+      //    untrusted, and a mismatched body gets the same silent refusal
+      //    a page-supplied sessionId gets (C21).
+      requiredPaths: ['data.biz_data.chat_session.id'],
+      // The collection is an array, measured: `chat_messages: []` is a
+      // conversation with no messages yet (a measurement), while a
+      // non-array value at that path is a changed response.
+      requiredArrayPaths: ['data.biz_data.chat_messages'],
     },
-    sessionIdPatterns: [
-      '/chat/session/([0-9a-fA-F-]{8,})',
-      '[?&]chat_session_id=([^&]+)',
-    ],
+    sessionIdPatterns: ['[?&]chat_session_id=([^&]+)'],
     // External source evidence checked 2026-08-17 (source code, not README), from
     // THREE independent reference implementations. No project name, licence
     // identifier, commit hash or URL is recorded here on purpose: the public
@@ -407,6 +423,11 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     // 0.1.0.18): real conversations were archived end to end on a real
     // machine on all five stable-channel platforms. Perplexity and kimi were
     // inert in that stable build, so they carry no lastVerified record.
+    // That record verified the row as it stood then — the BROAD row
+    // ('/api/v0/chat' + '/chat/session', GET or POST, requiredAnyPaths) —
+    // so it is true as a dated fact about build 0.1.0.18 and NOT a
+    // verification of the narrowed route above, which postdates it and has
+    // never been live-verified.
     lastVerified: {
       date: '2026-09-24',
       version: 'extension 0.1.0.18',
@@ -895,7 +916,6 @@ export const CONTENT_MATCHES: string[] = contentMatchesForChannel(currentRelease
 
 /** Convenience back-compat alias for the incumbent platform origin. */
 export const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
-export const CHAT_PATH_HINTS = ['/api/v0/chat', '/chat/session'];
 
 /** Look up a platform by exact origin in the specified or active channel. */
 export function getPlatformByOrigin(origin: string, channel?: ReleaseChannel): ChatPlatform | undefined {
@@ -1108,6 +1128,23 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
     value.status > platform.status.max
   ) return false;
   if (typeof value.text !== 'string' || value.text.length === 0) return false;
+  // W473 · Bind this DeepSeek body to the current-session request that named it.
+  // The endpoint's nested id and query id are assumed to be two views of the
+  // same conversation (assumed, not measured — see the row comment); a mismatch
+  // is not a capture, and sibling/list routes are outside this contract.
+  if (platform.id === 'deepseek') {
+    try {
+      const url = new URL(value.url);
+      if (url.pathname !== '/api/v0/chat/history_messages') return false;
+      const requestedId = url.searchParams.get('chat_session_id');
+      const body = JSON.parse(value.text) as { data?: { biz_data?: { chat_session?: { id?: unknown } } } };
+      if (typeof requestedId !== 'string' || requestedId.length === 0
+        || typeof body.data?.biz_data?.chat_session?.id !== 'string'
+        || body.data.biz_data.chat_session.id !== requestedId) return false;
+    } catch {
+      return false;
+    }
+  }
   if (value.pageUrl !== undefined && typeof value.pageUrl !== 'string') return false;
   // 🔴 C21: `sessionId` is the extension-internal authoritative identity channel
   //    (used by the backfill leg) and it decides the file name directly. A page

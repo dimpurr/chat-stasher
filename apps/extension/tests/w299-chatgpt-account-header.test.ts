@@ -63,7 +63,12 @@ const PAGED = (id: string): string => `${ORIGIN}/backend-api/conversations/${id}
 const DEEPSEEK_URL = `${DEEPSEEK_ORIGIN}/api/v0/chat/history_messages?chat_session_id=${ID_1}`;
 /** The ChatGPT row's declared shape, so a capture is not refused for the wrong reason. */
 const CHATGPT_BODY = JSON.stringify({ mapping: {}, current_node: 'node-0' });
-const DEEPSEEK_BODY = JSON.stringify({ session_id: ID_1 });
+/**
+ * The DeepSeek row's declared shape (W473), naming the same session as the
+ * request above, so the capture is not refused for the wrong reason: this
+ * file's subject is where a `ChatGPT-Account-Id` may appear, not DeepSeek.
+ */
+const DEEPSEEK_BODY = JSON.stringify({ data: { biz_data: { chat_session: { id: ID_1 }, chat_messages: [] } } });
 const HEADER_A = 'acct-fixture-alpha';
 const HEADER_B = 'acct-fixture-beta';
 const FORGED = 'forged-account-fixture';
