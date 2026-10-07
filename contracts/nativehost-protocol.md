@@ -568,6 +568,15 @@ least three reports spaced 18–30 hours apart and remains true thereafter; shor
 intervals do not break the streak, while a gap over 30 hours resets the streak
 before it qualifies.
 
+`status` may also carry an optional `build_stamp`, the revision that wrote the
+record. It is distinct from `extension_version`, which names the release: two
+installs can report the same version and be told apart only by this value, which
+is the second half of the identity `lib/extension-build.ts` composes. Absent — an
+extension built before the field existed — is recorded as unknown, never as the
+version. The host **nacks** a status object carrying a name it does not know, so
+adding this field is a host change as well as an extension one: an older host
+refuses the whole report cleanly rather than silently dropping the field.
+
 `status` may also carry an optional `report_seq` and its `report_nonce`, EXT-13's
 per-instance counter and the token minted with it. They are the same two fields
 `deliver` carries (§6.2), and they are **evidence only as a pair**: the rule

@@ -225,6 +225,10 @@ struct InstallView<'a> {
     browser: Option<&'a str>,
     profile: Option<&'a str>,
     extension_version: Option<&'a str>,
+    /// W912 · Which build wrote the record, when the report carried a stamp.
+    /// `None` is the report saying nothing about its build — an extension that
+    /// predates the field — and is never filled with the version or a placeholder.
+    build_stamp: Option<&'a str>,
     reported_unix: Option<i64>,
     platforms: BTreeMap<String, PlatformCell>,
     attention: Attention,
@@ -311,6 +315,9 @@ impl<'a> InstallView<'a> {
                 .and_then(serde_json::Value::as_str),
             extension_version: install
                 .get("extension_version")
+                .and_then(serde_json::Value::as_str),
+            build_stamp: install
+                .get("build_stamp")
                 .and_then(serde_json::Value::as_str),
             reported_unix: install
                 .get("reported_at")
@@ -688,7 +695,8 @@ fn extension_table(rows: &[&InstallView], local: bool, data: &UiData, token: &st
 }
 
 /// The rest of it, collapsed: the absolute instant behind the relative one, the
-/// extension version the install reported, and why a paused platform is paused.
+/// extension version and build stamp the install reported, and why a paused
+/// platform is paused.
 ///
 /// A list rather than a second table, because a details block that repeats the
 /// table above it is the length this page exists to lose. The pause reasons live
@@ -713,6 +721,14 @@ fn extension_details(rows: &[&InstallView], now_unix: i64) -> String {
         match view.extension_version {
             Some(version) => out.push_str(&format!(" · extension {}", esc(version))),
             None => out.push_str(" · extension version not recorded"),
+        }
+        // W912 · Which build wrote this record, when it said. A record with no
+        // stamp — an older extension — says so, rather than showing the version
+        // as if it were the revision: two installs on one version are told apart
+        // by this value and by nothing else on the page.
+        match view.build_stamp {
+            Some(stamp) => out.push_str(&format!(" · build {}", esc(stamp))),
+            None => out.push_str(" · build stamp not recorded"),
         }
         // EXT-13 · Why the install is in conflict, and what clears it. The row's
         // word says what is wrong; this is the only place the page says what to

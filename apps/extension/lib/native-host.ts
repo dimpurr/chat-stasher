@@ -23,6 +23,7 @@
  * field is not the `ack` this contract describes.
  */
 
+import { bakedBuildStamp } from './extension-build';
 import { withReportSeq } from './report-seq';
 
 /**
@@ -860,6 +861,21 @@ export async function reportInstallStatus(status: {
 }): Promise<boolean> {
   const requestId = newRequestId();
   if (!requestId) return false;
+  /**
+   * 🔴 W912 · **The build stamp is folded in here, beside the sequence, for the
+   * same reason: it is a fact about *this build*, not about the caller's data.**
+   * No caller can forget it, and two installs that report the same manifest
+   * version stay distinguishable by revision (`0.2.0.24+bmtq3x1f`). It is read
+   * from the bundle (`bakedBuildStamp`, `lib/extension-build.ts`), which is the
+   * same value a halt record is stamped with — one fact, one source.
+   *
+   * 🔴 `null` omits the field rather than sending `''`: the host records an
+   *    absent `build_stamp` as unknown ("this extension predates the field"),
+   *    and an empty string would be a value a writer can send that means
+   *    nothing. The same rule the sequence's absence follows.
+   */
+  const buildStamp = bakedBuildStamp();
+  const withBuild = buildStamp === null ? status : { ...status, build_stamp: buildStamp };
   const outcome = await withReportSeq(async (stamp) => sendOnce(
     getRuntime(),
     {
@@ -867,8 +883,8 @@ export async function reportInstallStatus(status: {
       type: 'status',
       request_id: requestId,
       status: stamp === null
-        ? status
-        : { ...status, report_seq: stamp.seq, report_nonce: stamp.nonce },
+        ? withBuild
+        : { ...withBuild, report_seq: stamp.seq, report_nonce: stamp.nonce },
     },
     REQUEST_TIMEOUT_MS,
   ));

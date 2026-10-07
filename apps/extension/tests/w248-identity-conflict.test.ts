@@ -53,6 +53,7 @@ import {
   type PopupModel,
 } from '../lib/popup-view';
 import { deliver, identityState, reportInstallStatus } from '../lib/native-host';
+import { TEST_BUILD_STAMP } from './i18n-harness';
 import { createSyntheticHost } from './synthetic-native-host';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -266,6 +267,23 @@ describe('the wire carries the sequence', () => {
     // two writers' frames indistinguishable from one writer's retry.
     expect((status.status as Record<string, unknown>).report_nonce)
       .not.toBe(delivery.report_nonce);
+  });
+
+  it('🔴 W912 · carries the build stamp so two installs on one version are told apart by revision', async () => {
+    // The version names the release; the stamp names the build that wrote the
+    // record. Both travel on the same frame, and the stamp is the bundler's
+    // value (`__CS_BUILD_STAMP__`, pinned for the suite), not a second copy of
+    // the version.
+    vi.stubGlobal('chrome', { storage: { local: fakeStorage() } });
+    const host = createSyntheticHost({ up: true });
+    stubRuntime(host);
+
+    await reportInstallStatus(statusBody());
+    const status = host.requests().find((request) => request.type === 'status')!;
+    expect((status.status as Record<string, unknown>).extension_version).toBe('0.4.0');
+    expect((status.status as Record<string, unknown>).build_stamp).toBe(TEST_BUILD_STAMP);
+    // The stamp is the build's, not a second spelling of the version.
+    expect((status.status as Record<string, unknown>).build_stamp).not.toBe('0.4.0');
   });
 
   it('🔴 omits the sequence and the nonce together rather than inventing either', async () => {

@@ -37,10 +37,10 @@ Understanding the roles below requires knowing the path the content takes.
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
-   (`apps/extension/lib/native-host.ts:769-819`;
-   `crates/chat-stasher/src/nativehost.rs:3003-3014`). The bundle leaves the
+   (`apps/extension/lib/native-host.ts:770-820`;
+   `crates/chat-stasher/src/nativehost.rs:3025-3036`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:1118-1127`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:1134-1143`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:867-917`).
@@ -59,7 +59,7 @@ boundary, and it is also the only step that can involve a network.
 |---|---|
 | **Can see** | Nothing. |
 | **Cannot see** | Your conversation content, your session ids, your account identity, your destination address, whether you run this at all. |
-| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:32`, `:746-753`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
+| **Evidence** | The repository contains no project-operated endpoint. The CLI's only network capability is the rustic/opendal backend you configure yourself (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:115-120,166-182`). The extension's only outbound HTTP port defaults to a function that refuses to send (`apps/extension/lib/backfill/engine.ts:161-164`), and when it is wired every request goes through `checkBackfillRequest`, which refuses anything that is not same-origin, not in the platform table, not on a platform with a backfill plan, not one of that plan's exact paths (a plan may name three: the list, the body, and a body's optional second step), or not carrying a permitted method (`apps/extension/lib/backfill/tab-port.ts:442-481`). Its one other process boundary is `runtime.sendNativeMessage` to the pinned host name (`apps/extension/lib/native-host.ts:33`, `:747-754`), which is a local pipe to a binary on your machine, not a network call. The extension declares no host permissions and no telemetry endpoint (`apps/extension/wxt.config.ts:125`). |
 
 **Why this is worth stating precisely:** this is not a promise we are keeping.
 It is a property of there being no such link in the code. We could not read your
@@ -615,11 +615,11 @@ The properties that bound this boundary:
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:2876-2885`;
-  `apps/extension/lib/native-host.ts:1118-1127`).
+  (`crates/chat-stasher/src/nativehost.rs:2898-2907`;
+  `apps/extension/lib/native-host.ts:1134-1143`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:2892-2898`).
+  (`crates/chat-stasher/src/nativehost.rs:2914-2920`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -713,10 +713,10 @@ They reach three different places, and the differences matter:
 - **A per-install status record**, written by the host into the stage as
   `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
-  `crates/chat-stasher/src/nativehost.rs:2583`, `:2608-2624`). It carries the
-  install id, browser, profile label, extension version, a report time, and one
-  row per platform naming the platform, how many captures this browser
-  confirmed, how many are still pending, why a leg is paused, and — for a row
+  `crates/chat-stasher/src/nativehost.rs:2589`, `:2630-2646`). It carries the
+  install id, browser, profile label, extension version and its build stamp, a
+  report time, and one row per platform naming the platform, how many captures
+  this browser confirmed, how many are still pending, why a leg is paused, and — for a row
   that has one — that account's install-local fingerprint, which stays
   incomparable across installs by construction. It is metadata only — counts,
   codes, a version string and timestamps — and it carries no conversation text,
@@ -755,7 +755,7 @@ every status report and every capture delivery, and mints a fresh random
 `report_nonce` with each sequence, persisting the pair *before* the message that
 carries it is sent, through one serialised chain
 (`apps/extension/lib/report-seq.ts:1-36`, `:45`, `:170-213`;
-`apps/extension/lib/native-host.ts:1075-1114`). Two copies start from the same
+`apps/extension/lib/native-host.ts:1091-1130`). Two copies start from the same
 stored counter and advance independently, so they eventually **allocate the same
 number** — each doing so with its own random nonce. The host therefore compares
 the pair and not the number: a repeated pair is one allocation arriving twice, a
