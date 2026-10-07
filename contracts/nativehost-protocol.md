@@ -595,12 +595,15 @@ reason code, or `null`, which is the positive fact "nothing halted"). The
 the record alone; `null` means the running build cannot name itself. All five
 are optional, and absence is a real state — an extension older than the
 fields — which the host records as unknown rather than refusing. A
-wrongly-typed or over-long value is malformed, not unknown, and the whole
-report is refused. A **host** older than these fields refuses a report that
-carries them (`unknown status field`), exactly as it refuses `report_seq`'s:
-the pair carries them only after both halves are updated, a refused report
-leaves the previous record untouched, and an extension never treats the
-refusal as a successful empty report.
+wrongly-typed, empty or over-long value is malformed, not unknown, and the
+whole report is refused: the reason codes are closed sets and the stamp names
+a build, so a blank string is a member of neither, and `null` is already where
+the two designed "nothing halted" and "cannot name itself" states live. A
+**host** older than these fields refuses a report that carries them (`unknown
+status field`), exactly as it refuses `report_seq`'s: the pair carries them
+only after both halves are updated, a refused report leaves the previous
+record untouched, and an extension never treats the refusal as a successful
+empty report.
 
 **What the pair means.** A copied browser profile carries `storage.local`, so it
 carries the same `install_id` and the same counter; two live writers on one id

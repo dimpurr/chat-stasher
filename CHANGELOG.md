@@ -208,14 +208,16 @@ under its own heading below.
   stamp.** The host accepts five optional fields on a `status` report —
   `tick_ran`, `tick_reason`, `tick_stopped`, `tick_halted` and `build_stamp` —
   and records them verbatim, `tick_halted: null` included, which is "nothing
-  halted" and not an unknown. A badly-typed or over-long value makes the whole
-  report a bad-request refusal rather than a record. The extensions page's
-  details line now says per install what its own last tick did — ran and how
-  the run stopped, or did not run and which gate stopped it — and which build
-  sent the report, so two installs reporting the same version but built from
-  different source stay distinguishable; a record from a report older than
-  the fields says "not recorded" instead of inventing an outcome, and a
-  build that cannot name itself says "not named", which is a distinct state.
+  halted" and not an unknown. A badly-typed, empty or over-long value makes the
+  whole report a bad-request refusal rather than a record: a blank code or
+  stamp names nothing, and the two designed nulls are not blanks. The
+  extensions page's details line now says per install what its own last tick
+  did — ran and how the run stopped, or did not run and which gate stopped it —
+  and which build sent the report, so two installs reporting the same version
+  but built from different source stay distinguishable; a record from a report
+  older than the fields says "not recorded" instead of inventing an outcome,
+  and a build that cannot name itself says "not named", which is a distinct
+  state.
 
 #### Changed
 

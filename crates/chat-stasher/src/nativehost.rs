@@ -2493,9 +2493,10 @@ fn other_install_count(output: &[u8], current_install_id: &str) -> Option<u64> {
 /// that passed the shape check, so the caller does not read it a second time.
 ///
 /// `build_stamp` is optional, and absent is a real state — an extension
-/// built before the stamp existed. A present string is the revision that
-/// wrote the record; a present `null` is the build's own "I cannot name
-/// myself" (W59b). Anything else is malformed, not unknown.
+/// built before the stamp existed. A present non-empty string is the revision
+/// that wrote the record; a present `null` is the build's own "I cannot name
+/// myself" (W59b). Anything else — another type, or an empty string, which
+/// names nothing a reader could read — is malformed, not unknown.
 fn validate_status(
     status: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<&str, &'static str> {
@@ -2551,24 +2552,32 @@ fn validate_status(
         // fields are members of the same closed sets the trace writes.
         || status.get("tick_ran").is_some_and(|v| !v.is_boolean())
         // `tick_reason` / `tick_stopped` are always codes on the wire — a
-        // `null` there is not a designed state, so only a string within the
-        // bound passes.
+        // `null` there is not a designed state, so only a non-empty string
+        // within the bound passes.
         || status
             .get("tick_reason")
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 120))
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120))
         || status
             .get("tick_stopped")
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 120))
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120))
         // `tick_halted: null` and `build_stamp: null` are *designed* states
         // ("nothing halted" / "this build cannot name itself"), so a null is
-        // recorded verbatim and only a wrongly-typed or oversized value is
-        // malformed.
+        // recorded verbatim. A present value must still be a **non-empty**
+        // string within the bound: an empty one names nothing, and it would
+        // reach the reader as the bare word it cannot read — "last tick did
+        // not run ()", " · build ". That is the rule `extension_version`
+        // keeps, and the one W912 wrote for `build_stamp` before the null
+        // state joined it: an unknown is never recorded as empty.
         || status
             .get("tick_halted")
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 120))
+            .is_some_and(|v| {
+                !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120)
+            })
         || status
             .get("build_stamp")
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 80))
+            .is_some_and(|v| {
+                !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80)
+            })
     {
         return Err("malformed status fields");
     }
@@ -4852,6 +4861,19 @@ mod tests {
 
         let mut malformed = status;
         malformed["build_stamp"] = serde_json::json!(7);
+        assert_eq!(
+            validate_status(malformed.as_object().expect("object")),
+            Err("malformed status fields")
+        );
+
+        // W913 (c4) · An **empty** stamp is malformed too, and this is the
+        // half the rebase dropped. W912 refused it ("a present value must be a
+        // non-empty string"); adding the designed `null` ("this build cannot
+        // name itself") must not also admit `""`, which says nothing and would
+        // print as the empty word `· build `. Two states are already spoken
+        // for, so a blank can only be a bad value: an unknown is never
+        // recorded as empty.
+        malformed["build_stamp"] = serde_json::json!("");
         assert_eq!(
             validate_status(malformed.as_object().expect("object")),
             Err("malformed status fields")

@@ -723,7 +723,12 @@ fn status_reports_replace_per_install_without_merging() {
 /// extension that predates them sends none, and its reports are still
 /// accepted — but a value of the wrong type is malformed, not unknown: a
 /// record that archived `tick_ran: "yes"` would hand a reader a string where
-/// every consumer expects a verdict.
+/// every consumer expects a verdict. An **empty** string is malformed on the
+/// same footing: these fields carry closed-set codes and an identity, none of
+/// which has a blank member, so `""` is a value the record could never have
+/// meant — and it would render as the word it cannot read ("last tick did
+/// not run ()", " · build "). The designed nulls (`tick_halted`,
+/// `build_stamp`) stay accepted; a blank is not one of them.
 #[test]
 fn status_tick_outcome_fields_of_the_wrong_type_are_a_bad_request() {
     let fixture = Fixture::new();
@@ -757,6 +762,26 @@ fn status_tick_outcome_fields_of_the_wrong_type_are_a_bad_request() {
             "build_stamp is longer than the bound",
             "build_stamp",
             json!("b".repeat(81)),
+        ),
+        (
+            "tick_reason is empty and names nothing",
+            "tick_reason",
+            json!(""),
+        ),
+        (
+            "tick_stopped is empty and names nothing",
+            "tick_stopped",
+            json!(""),
+        ),
+        (
+            "tick_halted is empty, which is not its designed null",
+            "tick_halted",
+            json!(""),
+        ),
+        (
+            "build_stamp is empty, which is not its designed null",
+            "build_stamp",
+            json!(""),
         ),
     ] {
         let mut status = json!({
