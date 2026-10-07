@@ -892,10 +892,10 @@ export async function reportInstallStatus(status: {
    * from the bundle (`bakedBuildStamp`, `lib/extension-build.ts`), which is the
    * same value a halt record is stamped with — one fact, one source.
    *
-   * 🔴 `null` omits the field rather than sending `''`: the host records an
-   *    absent `build_stamp` as unknown ("this extension predates the field"),
-   *    and an empty string would be a value a writer can send that means
-   *    nothing. The same rule the sequence's absence follows.
+   * 🔴 A stamp this build cannot name travels as `null`, never as `''`: the
+   *    host records `null` as "I cannot name myself" and an absent field as
+   *    unknown ("this extension predates the field"), the same rule the
+   *    sequence's absence follows — a blank is a value that means nothing.
    */
   const buildStamp = bakedBuildStamp();
   const withBuild = buildStamp === null ? status : { ...status, build_stamp: buildStamp };
