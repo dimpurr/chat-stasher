@@ -54,6 +54,15 @@ export function haltNote(
       //    ids were already pending — the review's third finding). The sentence a
       //    user sees must be true of every state it is printed in; `{detail}` names
       //    the segment for anyone who needs it.
+      //
+      // 🔴 W914 · The sentence must not promise that a login is the whole fix. The
+      //    reason is raised on a refusal measured on the credential path
+      //    (`engine.ts:783`), not on a measurement that the profile is logged out —
+      //    a malformed batch that took that path is indistinguishable from a stale
+      //    token from here, and the field case that forced this had a platform hold
+      //    the reason for eleven days without recovering. So the login is offered as
+      //    the first thing to try, said to be no guarantee, and the cause is left to
+      //    `{detail}`. The catalog comment above the message carries the full case.
       return t('popup.notes.halted.authRefused', {
         platform: platform,
         detail: halted.detail,

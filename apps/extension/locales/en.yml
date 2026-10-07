@@ -718,17 +718,32 @@ popup:
       #     state a user is most likely to be looking at. A sentence has to be true
       #     of every state it is printed in, and `{detail}` still names which
       #     request it was.
+      #
+      # 🔴 W914 · **It must not promise that a login is the whole fix.** The first
+      #    version read "Every refusal measured on this platform means the login
+      #    token was missing or no longer valid … and that is all it takes". Both
+      #    halves overstate a measurement the leg cannot make: a Gemini 400 that
+      #    survived the credential re-read is promoted to this reason even when the
+      #    refused request was a malformed batch that took the credential path
+      #    (`engine.ts:783`), and the field case that forced this had a platform
+      #    hold the reason for eleven days without recovering — which the record
+      #    cannot separate into "the profile is logged out" and "the credential path
+      #    broke". So the login is the first thing to try and the sentence says it is
+      #    not a guarantee, while the retry and the nothing-written-off reassurance
+      #    stay. This is the same rule `refusedUnknown` below applies: do not name a
+      #    cause the measurement did not establish.
       authRefused: >-
         This leg has come to a stop, and it is not a change to the platform:
         {platform} refused a request and said so in its own answer ({detail}).
-        Every refusal measured on this platform means the login token was missing
-        or no longer valid, so the fix is to open {platform} in this browser and
-        sign in again — and that is all it takes: this leg keeps asking by itself,
-        next in about {minutes} minute(s) (attempt {attempts} of this streak), so a
-        fresh login is picked up on its own. Nothing was counted, passed over, or
-        written off while this stood: a refused request records nothing, whatever
-        had already been read stays exactly as it was, and what was not read is
-        still unread.
+        On this platform a refusal like this is how a missing or expired login
+        shows up, so the first thing to try is to open {platform} in this browser
+        and sign in again. That is not a guarantee: a refusal that is not about
+        the login looks the same from here, and signing in would not clear it.
+        Either way this leg keeps asking by itself, next in about {minutes}
+        minute(s) (attempt {attempts} of this streak), so a fresh login is picked
+        up on its own. Nothing was counted, passed over, or written off while this
+        stood: a refused request records nothing, whatever had already been read
+        stays exactly as it was, and what was not read is still unread.
       # 🔴 W61b · The same in-band refusal with a code this build cannot read. Its
       # own sentence, because the thing it must not do is guess: `waitingRetry`
       # would say the platform "refused or dropped a request" and leave the user
