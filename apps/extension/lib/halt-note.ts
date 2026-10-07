@@ -39,7 +39,9 @@ export function haltNote(
       //    reason it must never read as is `other`. `other` would say "the platform
       //    refused a request (auth-refused) — <detail>", which describes the record
       //    instead of the two things a user needs: that nothing was read, and that
-      //    the fix is a login.
+      //    a login is where to start. (This half read "the fix is a login" until
+      //    W914; a refusal the login cannot clear looks the same from here, so the
+      //    sentence offers the login instead of promising it — see the note below.)
       //
       // 🔴 W61b · It carries the retry moment as well (the reason is transient now,
       //    `haltClassOf`), and both halves have to be in one sentence: the login is

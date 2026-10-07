@@ -326,7 +326,9 @@ describe('W64-5 · the user is told to sign in, not that the API changed', () =>
     expect(sentence).not.toBe(t('popup.notes.halted.waitingRetry', {
       reason: 'auth-refused', attempts: 1, minutes: 30, detail: 'kimi list returned HTTP 401',
     }));
-    // "the fix is to open kimi and sign in again" — the action a 401 has.
+    // The action a 401 has: "open kimi and sign in again". (Until W914 this line read
+    // "the fix is to open kimi and sign in again" — the promise around the action is
+    // what the assertions below forbid, not the action itself.)
     expect(sentence.toLowerCase()).toContain('sign in');
     // 🔴 W914 · But the action may not be sold as the whole fix. The reason is raised on a
     //    refusal measured on the credential path (`engine.ts:783`), not on a measurement that
