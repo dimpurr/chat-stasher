@@ -24,6 +24,7 @@ pub mod inbox;
 pub mod inbox_config;
 mod inbox_rate;
 pub mod inbox_status;
+pub mod install_provenance;
 pub mod json_out;
 pub mod keydecl;
 pub mod manifest;

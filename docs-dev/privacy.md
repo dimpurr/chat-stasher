@@ -376,7 +376,8 @@ different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:843-853`, `:975-1036`;
+(`crates/chat-stasher/src/inbox.rs:843-853`, `:991-1023`;
+`crates/chat-stasher/src/install_provenance.rs:178-244`;
 `crates/chat-stasher/src/nativehost.rs:3111-3115`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the

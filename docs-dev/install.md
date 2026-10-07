@@ -547,7 +547,7 @@ Two properties of that directory, both from
   before they allocate a shard sequence number**, so two browsers, two profiles,
   or a host racing a manual `ingest` cannot pick the same number. The wait is
   bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
-  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1249-1277`).
+  extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1232-1260`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);

@@ -686,6 +686,7 @@ dependencies = [
  "ed25519-dalek",
  "jsonschema",
  "libc",
+ "memchr",
  "opendal",
  "rayon",
  "rusqlite",

@@ -871,6 +871,76 @@ fn a_copied_install_is_refused_with_install_conflict_not_config() {
     );
 }
 
+/// W930 · The stage-local index of sealed install provenance, on the wire.
+///
+/// D4's refusal used to be produced by reading every shard in the stage on
+/// every `deliver` — 196–205 s on this machine's 12 GB stage, against the
+/// extension's 60 s request budget, so every delivery answered past the budget,
+/// the `ack` was never read, and the debt was never settled. The evidence is now
+/// written down when the seal happens (`meta/<machine>/install-provenance-v1.jsonl`)
+/// and the stage is read only when the index has nothing to say about the
+/// install being asked about.
+///
+/// Two halves, and both have to hold: the seal must write the index down, and
+/// the index must never be the *authority* — a stage whose shards were sealed
+/// before the index existed has to be read, and still refuses the copy.
+#[test]
+fn a_sealed_install_is_indexed_and_the_index_is_never_the_authority() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let index = fixture
+        .stage
+        .join("meta")
+        .join(&machine)
+        .join("install-provenance-v1.jsonl");
+
+    // ① The seal writes down what it made true.
+    let original = identity_bundle("sess-a", "hello a", "install-w930", "Chrome", "Personal");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-orig",
+        "deepseek-sess-a.json",
+        &original,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    assert_eq!(one_frame(&output.stdout)["type"], "ack");
+    let written = fs::read_to_string(&index).unwrap_or_else(|error| {
+        panic!(
+            "the seal must index its provenance at {}: {error}",
+            index.display()
+        )
+    });
+    assert!(
+        written.contains("install-w930"),
+        "the index names the install that sealed: {written}"
+    );
+
+    // ② Throw the index away, the way a stage sealed before this index existed
+    //    has none: the copy is refused anyway, because the shards are read.
+    fs::remove_file(&index).expect("remove the index");
+    let copy = identity_bundle("sess-b", "hello b", "install-w930", "Chrome", "Work");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-copy",
+        "deepseek-sess-b.json",
+        &copy,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "nack");
+    assert_eq!(response["kind"], "install-conflict");
+    assert!(
+        !fixture.session_dir(&machine, "deepseek.sess-b").exists(),
+        "a refused delivery must seal nothing"
+    );
+    assert!(
+        fs::read_to_string(&index)
+            .expect("the read refills the index")
+            .contains("install-w930"),
+        "what reading the stage found is written down again"
+    );
+}
+
 // ------------------------------------------------------------------ §6.6 has
 
 /// A content fingerprint. The host compares it as an opaque string, so any 64

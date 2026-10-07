@@ -849,7 +849,7 @@ pub fn seal_payload(
         parsed.browser.as_deref(),
         parsed.profile_label.as_deref(),
     ) {
-        if install_identity_conflicts(stage, install_id, browser, profile_label)
+        if install_identity_conflicts(stage, machine, install_id, browser, profile_label)
             .map_err(SealError::Other)?
         {
             return Err(SealError::IdentityCollision);
@@ -949,6 +949,27 @@ pub fn seal_payload(
     )
     .map_err(SealError::Other)?;
 
+    // W930 · Write down what this seal just made true, so the next `deliver` for
+    // this install is answered without reading the stage (see
+    // `crate::install_provenance`). 🔴 **After** the shard, always: an index line
+    // may never describe a shard that is not there, and a line that is lost
+    // costs one re-read of the shards, never a shard. The failure is reported on
+    // stderr and does not fail the seal — the stage is the archive and the index
+    // is derived from it.
+    if let (Some(install_id), Some(browser), Some(profile_label)) = (
+        record.install_id.as_deref(),
+        record.browser.as_deref(),
+        record.profile_label.as_deref(),
+    ) {
+        crate::install_provenance::record_sealed(
+            stage,
+            machine,
+            install_id,
+            browser,
+            profile_label,
+        );
+    }
+
     if let Some(key) = &audit_key {
         crate::audit_store::record_shard(stage, machine, &parsed.id, line.as_bytes(), key, true)
             .map_err(SealError::Other)?;
@@ -991,49 +1012,30 @@ fn names_a_profile(label: &str) -> bool {
 /// A profile goes [unnamed → named] as its normal first-run flow, so a
 /// placeholder label on either side of the comparison is treated as the
 /// absence of a claim rather than as a different profile.
+///
+/// W930 · Where the provenance comes from is
+/// [`crate::install_provenance::sealed_observations_for`]'s business, and this
+/// function no longer reads the stage itself: that read is 196–205 s on a 12 GB
+/// stage, against the extension's 60 s request budget, so every delivery
+/// answered past the budget and no `ack` was ever read. The observations are the
+/// same sealed records either way; only the number of times they are read from
+/// disk changed. The *decision* stays here, next to the bundle semantics it is
+/// about, and it is unchanged.
 fn install_identity_conflicts(
     stage: &Path,
+    machine: &str,
     install_id: &str,
     browser: &str,
     profile_label: &str,
 ) -> anyhow::Result<bool> {
-    let sessions = stage.join(store::SESSIONS_DIR);
-    let machines = match fs::read_dir(&sessions) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).with_context(|| format!("read {}", sessions.display())),
-    };
-    for machine in machines {
-        let machine = machine?;
-        if !machine.file_type()?.is_dir() {
-            continue;
-        }
-        for session in fs::read_dir(machine.path())? {
-            let session = session?;
-            if !session.file_type()?.is_dir() {
-                continue;
-            }
-            for (_, shard) in store::sealed_shard_entries(&session.path())? {
-                let raw = fs::read(&shard)
-                    .with_context(|| format!("read install provenance from {}", shard.display()))?;
-                for line in raw.split(|byte| *byte == b'\n') {
-                    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
-                        continue;
-                    };
-                    let saved_browser = record.get("browser").and_then(|value| value.as_str());
-                    let saved_label = record.get("profile_label").and_then(|value| value.as_str());
-                    let label_conflict = saved_label.is_some_and(|saved| {
-                        names_a_profile(saved)
-                            && names_a_profile(profile_label)
-                            && saved != profile_label
-                    });
-                    if record.get("install_id").and_then(|value| value.as_str()) == Some(install_id)
-                        && (saved_browser != Some(browser) || label_conflict)
-                    {
-                        return Ok(true);
-                    }
-                }
-            }
+    for observation in
+        crate::install_provenance::sealed_observations_for(stage, machine, install_id)?
+    {
+        let label_conflict = observation.profile_label.as_deref().is_some_and(|saved| {
+            names_a_profile(saved) && names_a_profile(profile_label) && saved != profile_label
+        });
+        if observation.browser.as_deref() != Some(browser) || label_conflict {
+            return Ok(true);
         }
     }
     Ok(false)
