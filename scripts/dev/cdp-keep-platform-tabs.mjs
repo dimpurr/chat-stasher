@@ -12,9 +12,9 @@
 // channels go with it and the leg falls back to 'no-http-port' even with the
 // tabs still open — only a reload of the page re-injects. This helper closes
 // that loop. It is the repo's copy of the discipline the TBR run applied by
-// hand (testbrowser/reload-tabs-tbr.mjs, itself modelled on
-// nm/w102-work/reload-tabs-w102.mjs): an exact-host allowlist, one reload
-// each, >=10 s apart, and nothing outside the allowlist is ever touched.
+// hand with a throwaway script of its own, itself modelled on the W102 run's:
+// an exact-host allowlist, one reload each, >=10 s apart, and nothing outside
+// the allowlist is ever touched.
 //
 // It is opt-in and dev-only. It drives a real browser over CDP, so it must
 // never be pointed at a browser whose tabs you care about: point it at the
