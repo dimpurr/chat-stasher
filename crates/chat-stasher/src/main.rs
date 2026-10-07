@@ -5711,15 +5711,14 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
     if let Some(text) = chat_stasher::ui::describe_selector(&data.launch) {
         say!("[ui] filter       : {text}");
     }
+    let ui_banner_selection = chat_stasher::ui::select(&data.sessions, &data.launch);
     say!(
         "[ui] machines     : {} · sources {}",
         data.machine_keys().len(),
-        chat_stasher::ui::select(&data.sessions, &data.launch)
-            .in_view()
-            .iter()
-            .map(|s| s.source_label())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
+        // The labels the page's own matrix prints under, so this number and the
+        // table it describes cannot disagree: an id space holding two producers
+        // (`grok`) is two sources here, exactly as it is two columns there.
+        chat_stasher::ui::source_labels(&ui_banner_selection.in_view()).len()
     );
     say!("[ui] data blobs read: {}", data.data_blobs_read);
     say!("[ui] bound        : {addr} (loopback only, OS-assigned port)");

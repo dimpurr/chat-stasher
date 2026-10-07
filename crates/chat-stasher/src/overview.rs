@@ -180,9 +180,43 @@ pub fn machine_count(rows: &[OverviewRow]) -> usize {
     distinct_labels(rows, |r| &r.machine).len()
 }
 
-/// Number of distinct harnesses.
+/// Number of distinct harnesses **as this row set prints them**.
+///
+/// One per platform, except for an id space holding both producers (`grok`:
+/// a web platform and a local CLI harness), which counts twice — because that
+/// is how many rows the summary, the matrix and the JSON carry for it. Counting
+/// the bare id here while the report prints the split would put a number in the
+/// headline that contradicts the table under it.
 pub fn harness_count(rows: &[OverviewRow]) -> usize {
-    distinct_labels(rows, |r| &r.harness).len()
+    let split = producer_split(rows);
+    rows.iter()
+        .map(|r| producer_label(r, &split))
+        .collect::<BTreeSet<String>>()
+        .len()
+}
+
+/// The producer split over a row set, for a caller that groups by harness.
+///
+/// See [`producer_label`]. Built once per report so the "is this id space
+/// shared" question is answered from the same rows the report prints.
+fn producer_split(rows: &[OverviewRow]) -> crate::sidecar::ProducerSplit {
+    crate::sidecar::ProducerSplit::scan(
+        rows.iter()
+            .map(|r| (r.harness.as_str(), r.session_id.as_str())),
+    )
+}
+
+/// The grouping label for one row in a report that groups by harness.
+///
+/// The bare harness id, unless the row set holds **both** producers under it —
+/// then `<harness> (<producer>)`, read off the id's own shape through the
+/// ADR-002 identity ladder ([`crate::sidecar::ProducerSplit`]). `grok` is the
+/// one id space this build knows to be shared (a web platform and a local CLI
+/// harness), and a merged label would report the healthy producer's arrival for
+/// a stalled one — the reassuring answer and the wrong one. A harness with one
+/// producer here is named exactly as it was before.
+fn producer_label(row: &OverviewRow, split: &crate::sidecar::ProducerSplit) -> String {
+    split.label(&row.harness, &row.session_id)
 }
 
 /// Distinct, sorted labels extracted from `rows` via `pick`.
@@ -833,13 +867,20 @@ fn summary_sources_json(
     rows: &[OverviewRow],
     day_of: &dyn Fn(i64) -> Option<NaiveDate>,
 ) -> Vec<serde_json::Value> {
-    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
-    let mut last: BTreeMap<&str, i64> = BTreeMap::new();
+    let split = producer_split(rows);
+    // `harness` is the producer-split label, not the bare harness id: this is
+    // the menubar's per-source **arrival** reading (`last_saved_unix` /
+    // `silence_after_days`), and a merged `grok` would carry the CLI leg's
+    // recent date for a web leg that has been dead for days. A single-producer
+    // harness is named exactly as before.
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut last: BTreeMap<String, i64> = BTreeMap::new();
     for r in rows {
-        *counts.entry(r.harness.as_str()).or_insert(0) += 1;
+        let key = producer_label(r, &split);
+        *counts.entry(key.clone()).or_insert(0) += 1;
         if r.has_known_time() {
             if let Some(at) = r.last_unix.or(r.first_unix) {
-                let entry = last.entry(r.harness.as_str()).or_insert(at);
+                let entry = last.entry(key).or_insert(at);
                 if at > *entry {
                     *entry = at;
                 }
@@ -849,18 +890,16 @@ fn summary_sources_json(
     counts
         .into_iter()
         .map(|(harness, count)| {
+            let group = || {
+                rows.iter()
+                    .filter(|row| producer_label(row, &split) == harness)
+            };
             serde_json::json!({
                 "harness": harness,
                 "count": count,
-                "last_saved_unix": last.get(harness).copied(),
-                "active_days": active_days(
-                    rows.iter().filter(|row| row.harness == harness),
-                    day_of,
-                ),
-                "silence_after_days": silence_after_days(
-                    rows.iter().filter(|row| row.harness == harness),
-                    day_of,
-                ),
+                "last_saved_unix": last.get(&harness).copied(),
+                "active_days": active_days(group(), day_of),
+                "silence_after_days": silence_after_days(group(), day_of),
             })
         })
         .collect()
@@ -1090,12 +1129,21 @@ fn display_name(machine: &str, display_names: &BTreeMap<String, String>) -> Stri
 /// never folded into a time-based cell.
 pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
     let machines = distinct_labels(rows, |r| &r.machine);
-    let harnesses = distinct_labels(rows, |r| &r.harness);
+    let split = producer_split(rows);
+    // Columns are harness ids, except where one id space holds both producers
+    // (grok): then two columns, so the cell's span is that producer's own
+    // arrival and not the healthy leg's date shown for the stalled one.
+    let harnesses = rows
+        .iter()
+        .map(|r| producer_label(r, &split))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     if machines.is_empty() {
         return "(no sessions)".to_string();
     }
 
-    // Per (machine, harness) aggregation.
+    // Per (machine, harness/producer) aggregation.
     let mut cell_sessions: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut cell_lines: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut cell_first: BTreeMap<(String, String), i64> = BTreeMap::new();
@@ -1104,7 +1152,7 @@ pub fn render_matrix(rows: &[OverviewRow], width: usize) -> String {
     let mut unknown_by_machine: BTreeMap<String, usize> = BTreeMap::new();
 
     for r in rows {
-        let key = (r.machine.clone(), r.harness.clone());
+        let key = (r.machine.clone(), producer_label(r, &split));
         *cell_sessions.entry(key.clone()).or_insert(0) += 1;
         *cell_lines.entry(key.clone()).or_insert(0) += r.line_count;
         if r.has_known_time() {
@@ -1223,6 +1271,7 @@ fn cell_text(
 /// A dedicated tally for time-unknown sessions — one line per
 /// (machine, harness) plus a total. These are never merged into a time cell.
 pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
+    let split = producer_split(rows);
     let mut by_key: BTreeMap<(String, String), (usize, u64, String)> = BTreeMap::new();
     for r in rows {
         if r.has_known_time() || r.is_no_conversation_content() {
@@ -1236,7 +1285,7 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
             _ => String::new(),
         };
         let e = by_key
-            .entry((r.machine.clone(), r.harness.clone()))
+            .entry((r.machine.clone(), producer_label(r, &split)))
             .or_insert((0, 0, why));
         e.0 += 1;
         e.1 += r.line_count;
@@ -1267,13 +1316,14 @@ pub fn render_time_unknown(rows: &[OverviewRow]) -> String {
 /// (ADR-035): empty shards or metadata-only lines. Listed separately so they
 /// are never read as time-unknown or as a missing session.
 pub fn render_no_conversation_content(rows: &[OverviewRow]) -> String {
+    let split = producer_split(rows);
     let mut by_key: BTreeMap<(String, String), (usize, u64)> = BTreeMap::new();
     for r in rows {
         if !r.is_no_conversation_content() {
             continue;
         }
         let e = by_key
-            .entry((r.machine.clone(), r.harness.clone()))
+            .entry((r.machine.clone(), producer_label(r, &split)))
             .or_insert((0, 0));
         e.0 += 1;
         e.1 += r.line_count;
@@ -2457,6 +2507,53 @@ mod tests {
         assert!(m.contains("[2026-05-02~2026-05-08]"));
     }
 
+    /// W911 · a shared id space (grok: a web platform and a local CLI harness)
+    /// is **two** matrix columns, so the web leg's stalled span is not hidden
+    /// behind the CLI's recent one — the reassuring answer and the wrong one.
+    /// A single-producer harness keeps one column, named exactly as before.
+    #[test]
+    fn matrix_splits_a_shared_id_space_by_producer() {
+        let rows = vec![
+            row(
+                "grok.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+                "air",
+                "grok",
+                Some(D1),
+                Some(D1),
+                5,
+                TimeSource::Exact,
+            ),
+            row(
+                "grok.air.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+                "air",
+                "grok",
+                Some(D1P7),
+                Some(D1P7),
+                7,
+                TimeSource::Exact,
+            ),
+            row(
+                "codex.air.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+                "air",
+                "codex",
+                Some(D1),
+                Some(D1),
+                3,
+                TimeSource::Exact,
+            ),
+        ];
+        let m = render_matrix(&rows, 200);
+        assert!(m.contains("grok (web capture)"), "{m}");
+        assert!(m.contains("grok (local harness)"), "{m}");
+        // Each producer column carries its own span: the web leg's date is the
+        // old one, never the CLI's fresh date.
+        assert!(m.contains("[2026-05-01~2026-05-01]"), "{m}");
+        assert!(m.contains("[2026-05-08~2026-05-08]"), "{m}");
+        // The single-producer harness is unchanged — one column, bare id.
+        assert!(m.contains("codex"), "{m}");
+        assert!(!m.contains("codex ("), "{m}");
+    }
+
     #[test]
     fn density_ramp_is_monotonic_and_empty_is_distinct() {
         // One row, one bucket: two sessions → higher density than one session.
@@ -3061,6 +3158,62 @@ mod tests {
             v["sources"][0]["last_saved_unix"],
             serde_json::json!(null),
             "no known time must be null, never a fabricated epoch"
+        );
+    }
+
+    /// W911 · the menubar's per-source arrival (`last_saved_unix`) is split by
+    /// producer for a shared id space, so a fresh local leg cannot report the
+    /// web leg as current. The two entries carry their own newest dates.
+    #[test]
+    fn summary_sources_split_a_shared_id_space_by_producer() {
+        let rows = vec![
+            row(
+                "grok.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+                "air",
+                "grok",
+                Some(D1),
+                Some(D1),
+                5,
+                TimeSource::Exact,
+            ),
+            row(
+                "grok.air.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+                "air",
+                "grok",
+                Some(D1P7),
+                Some(D1P7),
+                7,
+                TimeSource::Exact,
+            ),
+        ];
+        let day_of = |_unix: i64| None;
+        let sources = summary_sources_json(&rows, &day_of);
+        let harnesses: Vec<&str> = sources
+            .iter()
+            .filter_map(|entry| entry["harness"].as_str())
+            .collect();
+        assert_eq!(
+            harnesses,
+            ["grok (local harness)", "grok (web capture)"],
+            "two entries, sorted by label"
+        );
+        let web = sources
+            .iter()
+            .find(|entry| entry["harness"] == "grok (web capture)")
+            .expect("the web producer entry");
+        assert_eq!(
+            web["last_saved_unix"],
+            serde_json::json!(D1),
+            "the web leg's own (old) arrival"
+        );
+        let local = sources
+            .iter()
+            .find(|entry| entry["harness"] == "grok (local harness)")
+            .expect("the local producer entry");
+        assert_eq!(
+            local["last_saved_unix"],
+            serde_json::json!(D1P7),
+            "the local leg's own (fresh) arrival"
         );
     }
 

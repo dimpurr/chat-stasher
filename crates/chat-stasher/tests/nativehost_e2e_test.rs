@@ -2130,10 +2130,12 @@ fn the_shapes_the_new_queries_produce_match_the_committed_schema() {
         sessions: vec![
             StageSession {
                 harness: Some("deepseek".to_string()),
+                session_id: "deepseek.synthetic-1".to_string(),
                 newest_mtime: Some(1_760_000_000),
             },
             StageSession {
                 harness: None,
+                session_id: String::new(),
                 newest_mtime: None,
             },
         ],

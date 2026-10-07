@@ -51,7 +51,7 @@ pub(super) fn json_overview(data: &UiData) -> String {
         })
         .collect();
     let total_bytes: u64 = in_view.iter().map(|s| s.bytes).sum();
-    let sources: BTreeSet<String> = in_view.iter().map(|s| s.source_label()).collect();
+    let sources: BTreeSet<String> = super::source_labels(&in_view);
     let v = serde_json::json!({
         "schema_version": 1,
         "command": "ui",

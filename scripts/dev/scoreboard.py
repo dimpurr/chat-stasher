@@ -617,11 +617,42 @@ def read_ext_status(path: str | None) -> ExtStatusReading:
 # ---------------------------------------------------------------------------
 
 
+# The two producers an archived id can have, as the report words them. They
+# name the two ADR-002 identity shapes, not two degrees of one thing: a web
+# capture (`<platform>.<native-id>`) and a local harness session
+# (`<platform>.<machine>.<native-id>`).
+PRODUCER_WEB = "web capture"
+PRODUCER_LOCAL = "local harness"
+
+
+def id_producer(session_id: str) -> str | None:
+    """Which producer wrote an archived id, by its dot-segment count.
+
+    A mirror of the Rust `sidecar::id_producer` (the same rule the product
+    prints with), read off the serialized `session_id` rather than re-derived
+    from a stored field — the identity ladder *is* the id's shape. Two segments
+    is the web form; three or more is the local form. `None` means the shape
+    cannot say: a name with no `.`, or the display short form whose head
+    truncated the machine segment away.
+    """
+    if len(session_id) == 15 and session_id[8] == "~":
+        return None
+    head = session_id.split(".", 1)[0].split("~", 1)[0]
+    if not head:
+        return None
+    separators = session_id.count(".")
+    if separators == 0:
+        return None
+    return PRODUCER_LOCAL if separators >= 2 else PRODUCER_WEB
+
+
 @dataclass
 class SessionObservation:
     machine: str
     machine_display: str
     harness: str
+    # `PRODUCER_WEB`, `PRODUCER_LOCAL`, or None when the id's shape cannot say.
+    producer: str | None
     known: bool
     no_content: bool
     anchor: dt.datetime | None
@@ -636,10 +667,51 @@ class OverviewReading:
     machines: list[str] = field(default_factory=list)
     display: dict[str, str] = field(default_factory=dict)
     conversations_by_harness: dict[str, int] | None = None
+    # The same deduped conversation axis, keyed by the producer-split label so
+    # a shared id space can report each producer's own conversation count.
+    conversations_by_label: dict[str, int] | None = None
     malformed_rows: int = 0
+    # Harness ids this archive holds from **both** producers, computed once from
+    # the session shapes. A shared id space is a fact about *this* archive, not
+    # a list of ids the script believes collide.
+    shared: set[str] = field(default_factory=set)
 
     def sessions_for_harness(self, harness: str) -> list[SessionObservation]:
         return [s for s in self.sessions if s.harness == harness]
+
+    def label_for(self, session: SessionObservation) -> str:
+        """The group label one session's row carries.
+
+        The bare harness id when its id space has one producer here, and
+        `<harness> (<producer>)` when it has two. Grouping by this label is what
+        stops a merged number being printed; a single-producer platform is named
+        exactly as it was before.
+        """
+        if session.harness in self.shared and session.producer is not None:
+            return f"{session.harness} ({session.producer})"
+        return session.harness
+
+    def group_labels(self, harness: str) -> list[str]:
+        """The group labels present for `harness`, web capture first.
+
+        One label for a single-producer platform (the bare id), two for a
+        shared id space — so each producer's own arrival is printed instead of
+        one merged number.
+        """
+        labels = {
+            self.label_for(session)
+            for session in self.sessions
+            if session.harness == harness
+        }
+        order = {
+            f"{harness} ({PRODUCER_WEB})": 0,
+            f"{harness} ({PRODUCER_LOCAL})": 1,
+            harness: 2,
+        }
+        return sorted(labels, key=lambda label: (order.get(label, 3), label))
+
+    def sessions_for_label(self, label: str) -> list[SessionObservation]:
+        return [s for s in self.sessions if self.label_for(s) == label]
 
 
 def _classify_time(session: dict[str, Any]) -> tuple[bool, bool, dt.datetime | None]:
@@ -726,11 +798,13 @@ def read_overview(path: str | None) -> OverviewReading:
             reading.display[machine] = display if isinstance(display, str) and display else machine
             seen_machines.append(machine)
         known, no_content, anchor = _classify_time(raw_session)
+        session_id = raw_session.get("session_id")
         reading.sessions.append(
             SessionObservation(
                 machine=machine,
                 machine_display=reading.display[machine],
                 harness=harness,
+                producer=id_producer(session_id) if isinstance(session_id, str) else None,
                 known=known,
                 no_content=no_content,
                 anchor=anchor,
@@ -738,14 +812,31 @@ def read_overview(path: str | None) -> OverviewReading:
         )
     reading.machines = seen_machines
     reading.malformed_rows = malformed
+    # Which harness ids hold both producers *in this archive*, computed from the
+    # rows just read. An id space with one producer stays one label.
+    shapes: dict[str, set[str]] = {}
+    for session in reading.sessions:
+        if session.producer is not None:
+            shapes.setdefault(session.harness, set()).add(session.producer)
+    reading.shared = {harness for harness, producers in shapes.items() if len(producers) > 1}
     conversations = parsed.get("conversations")
     if isinstance(conversations, list):
         counts: dict[str, int] = {}
+        by_label: dict[str, int] = {}
         for conversation in conversations:
             if isinstance(conversation, dict) and isinstance(conversation.get("harness"), str):
                 harness = conversation["harness"]
                 counts[harness] = counts.get(harness, 0) + 1
+                session_id = conversation.get("session_id")
+                producer = id_producer(session_id) if isinstance(session_id, str) else None
+                label = (
+                    f"{harness} ({producer})"
+                    if harness in reading.shared and producer is not None
+                    else harness
+                )
+                by_label[label] = by_label.get(label, 0) + 1
         reading.conversations_by_harness = counts
+        reading.conversations_by_label = by_label
     return reading
 
 
@@ -1250,25 +1341,29 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
                 web_too_young.append(f"{platform.id} (tracked {fmt_age(tracked_age)})")
 
     # -- no-new-capture (local tools) + per-machine xy cells -----------------
+    # Cell stats and arrivals are keyed by the producer-split label, so a
+    # shared id space (grok: web captures and the local CLI) reports each
+    # producer's own count and newest session instead of one merged number.
     for session in overview.sessions:
-        key = (session.machine, session.harness)
+        key = (session.machine, overview.label_for(session))
         total, unknown, no_content = ev.cell_stats.get(key, (0, 0, 0))
         ev.cell_stats[key] = (total + 1, unknown + (0 if session.known or session.no_content else 1), no_content + (1 if session.no_content else 0))
     for tool in args.catalog.local:
-        rows = overview.sessions_for_harness(tool.id)
-        anchors = [(s.anchor, s.machine) for s in rows if s.known and s.anchor is not None]
-        if not anchors:
-            ev.tool_newest[tool.id] = None
-            continue
-        newest = max(anchors, key=lambda pair: pair[0])
-        ev.tool_newest[tool.id] = newest
-        age = (now - newest[0]).total_seconds()
-        if age > quiet_seconds:
-            ev.anomalies.append(
-                f"no-new-capture: {tool.id} — newest archived session content is {fmt_age(age)} old "
-                f"({iso_z(newest[0])}, machine {newest[1]})"
-            )
-    for (machine, harness), (total, unknown, no_content) in sorted(ev.cell_stats.items()):
+        for label in overview.group_labels(tool.id):
+            rows = overview.sessions_for_label(label)
+            anchors = [(s.anchor, s.machine) for s in rows if s.known and s.anchor is not None]
+            if not anchors:
+                ev.tool_newest[label] = None
+                continue
+            newest = max(anchors, key=lambda pair: pair[0])
+            ev.tool_newest[label] = newest
+            age = (now - newest[0]).total_seconds()
+            if age > quiet_seconds:
+                ev.anomalies.append(
+                    f"no-new-capture: {label} — newest archived session content is {fmt_age(age)} old "
+                    f"({iso_z(newest[0])}, machine {newest[1]})"
+                )
+    for (machine, group), (total, unknown, no_content) in sorted(ev.cell_stats.items()):
         denominator = total - no_content
         if denominator <= 0 or unknown == 0:
             continue
@@ -1276,7 +1371,7 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
         if share > args.unknown_share:
             label = machine_label(machine, overview.display.get(machine))
             ev.anomalies.append(
-                f"time-unknown-share: {label} / {harness} — "
+                f"time-unknown-share: {label} / {group} — "
                 f"{fmt_int(unknown)} of {fmt_int(denominator)} conversations time-unknown ({pct(unknown, denominator)})"
             )
 
@@ -1393,9 +1488,10 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     else:
         no_known_time: list[str] = []
         for tool in args.catalog.local:
-            rows = overview.sessions_for_harness(tool.id)
-            if rows and ev.tool_newest.get(tool.id) is None:
-                no_known_time.append(tool.id)
+            for label in overview.group_labels(tool.id):
+                rows = overview.sessions_for_label(label)
+                if rows and ev.tool_newest.get(label) is None:
+                    no_known_time.append(label)
         if no_known_time:
             ev.not_evaluable.append(
                 "no-new-capture (local tools) — sessions exist but none carries a known time, so no age can be read: "
@@ -1748,45 +1844,52 @@ def render_markdown(
     out.append("|" + "---|" * len(header))
     for tool in catalog.local:
         entry = editorial.for_row(FAMILY_LOCAL, tool.id)
-        cells: list[str] = [esc(tool.display)]
-        if tool.id in catalog.shared_ids:
-            cells[0] += " 🔶"
-        row_total = 0
-        for machine in machines:
-            stats = ev.cell_stats.get((machine, tool.id))
-            if stats is None:
-                cells.append("0")
-                continue
-            total, unknown, no_content = stats
-            row_total += total
-            denominator = total - no_content
-            if denominator > 0:
-                cells.append(f"{fmt_int(total)} sess · {pct(unknown, denominator)} time-unknown")
+        # One row per producer. A single-producer id space yields the bare tool
+        # id; a shared one (grok: a web platform and a local CLI harness in one
+        # id space) yields one row per producer, so the newest-session column
+        # cannot show the healthy leg's date for a stalled one.
+        labels = overview.group_labels(tool.id) or [tool.id]
+        for label in labels:
+            producer = label[len(tool.id) + 2 : -1] if label != tool.id else None
+            cells: list[str] = [esc(tool.display) + (f" · {producer}" if producer else "")]
+            if tool.id in catalog.shared_ids:
+                cells[0] += " 🔶"
+            row_total = 0
+            for machine in machines:
+                stats = ev.cell_stats.get((machine, label))
+                if stats is None:
+                    cells.append("0")
+                    continue
+                total, unknown, no_content = stats
+                row_total += total
+                denominator = total - no_content
+                if denominator > 0:
+                    cells.append(f"{fmt_int(total)} sess · {pct(unknown, denominator)} time-unknown")
+                else:
+                    cells.append(f"{fmt_int(total)} sess · share n/a (no conversation content)")
+            if machines:
+                cells.append(fmt_int(row_total))
             else:
-                cells.append(f"{fmt_int(total)} sess · share n/a (no conversation content)")
-        if machines:
-            cells.append(fmt_int(row_total))
-        else:
-            cells.append(ABSENT)
-        if overview.available and overview.conversations_by_harness is not None:
-            conversations = overview.conversations_by_harness.get(tool.id)
-            cells.append(fmt_int(conversations) if conversations is not None else ABSENT)
-        else:
-            cells.append(ABSENT)
-        newest = ev.tool_newest.get(tool.id)
-        if newest is None:
-            if not overview.available:
                 cells.append(ABSENT)
-            elif not overview.sessions_for_harness(tool.id):
-                cells.append("0 sessions")
+            if overview.available and overview.conversations_by_label is not None:
+                conversations = overview.conversations_by_label.get(label)
+                cells.append(fmt_int(conversations) if conversations is not None else ABSENT)
             else:
-                cells.append("unknown (no known-time session)")
-        else:
-            cells.append(when(newest[0], now))
-        cells.append(editorial_cell(entry, "status"))
-        cells.append(editorial_cell(entry, "dev_priority"))
-        cells.append(last_verified_cell(entry))
-        out.append("| " + " | ".join(cells) + " |")
+                cells.append(ABSENT)
+            newest = ev.tool_newest.get(label)
+            if newest is None:
+                if not overview.available:
+                    cells.append(ABSENT)
+                elif not overview.sessions_for_label(label):
+                    cells.append("0 sessions")
+                else:
+                    cells.append("unknown (no known-time session)")
+            else:
+                cells.append(when(newest[0], now))
+            cells.append(editorial_cell(entry, "status"))
+            cells.append(editorial_cell(entry, "dev_priority"))
+            cells.append(last_verified_cell(entry))
+            out.append("| " + " | ".join(cells) + " |")
     out.append("")
     if overview.available:
         extra: dict[str, int] = {}
@@ -1801,11 +1904,20 @@ def render_markdown(
             )
         if catalog.shared_ids:
             names = ", ".join(sorted(catalog.shared_ids))
-            out.append(
-                f"- 🔶 id(s) shared between a local tool and a web platform ({names}): the archive's "
-                "id space mixes the local tool's sessions with that platform's web captures, and these "
-                "cells cannot separate them"
-            )
+            split_here = sorted(overview.shared)
+            if split_here:
+                out.append(
+                    f"- 🔶 id(s) shared between a local tool and a web platform ({names}); this archive "
+                    f"holds both producers under {', '.join(split_here)}, so the row is printed once per "
+                    "producer and each producer's newest-session date is its own. A producer whose leg has "
+                    "gone quiet is visible as that producer's own row, never hidden behind the other's arrival"
+                )
+            else:
+                out.append(
+                    f"- 🔶 id(s) shared between a local tool and a web platform ({names}): this archive "
+                    "holds only one of the two producers, so no split is printed — the row is that one "
+                    "producer's own reading"
+                )
         if overview.malformed_rows:
             out.append(
                 f"- {fmt_int(overview.malformed_rows)} malformed session row(s) in the overview "
@@ -2027,6 +2139,7 @@ def _session(
     unix: int = UNIX_FRESH,
     session_index: int = 0,
     machine_display: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     if kind == "known":
         boundary = {"kind": "known", "unix": unix}
@@ -2038,7 +2151,7 @@ def _session(
         boundary = {"kind": "unknown", "why": "no timestamp field found within the line"}
         time_source = {"kind": "unknown", "why": "…"}
     return {
-        "session_id": f"{harness}.{machine}.0000000{session_index:02d}-0000-4000-8000-000000000001",
+        "session_id": session_id or f"{harness}.{machine}.0000000{session_index:02d}-0000-4000-8000-000000000001",
         "machine": machine,
         "machine_display": machine_display if machine_display is not None else machine.replace("machine-", "Machine ").title(),
         "harness": harness,
@@ -2396,6 +2509,52 @@ def selftest() -> int:
             "state carries every install's counters",
         )
 
+        # ---------------- case: a shared id space is split by producer ------
+        # grok is one id space with two producers (the grok.com web captures and
+        # the local Grok CLI scanner). Read together, the CLI's fresh arrival
+        # hides a web leg that stopped days ago — the reassuring answer and the
+        # wrong one. The row must be printed once per producer, each producer's
+        # newest-session date its own, and a single-producer platform unchanged.
+        split_sessions = [
+            _session(
+                "grok", "machine-a", "known", UNIX_QUIET,
+                session_id="grok.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            ),
+            _session(
+                "grok", "machine-a", "known", UNIX_FRESH,
+                session_id="grok.machine-a.019bf00d-97b6-7eb2-9bf8-eacbacc09765",
+            ),
+            _session("codex", "machine-a", "known", UNIX_FRESH),
+        ]
+        split_path = _write_json(
+            os.path.join(tmp, "overview-split.json"), _overview_doc(split_sessions), mtime=UNIX_NOW
+        )
+        result = run_cli(base_args(repo_root, None, split_path) + ["--no-state"])
+        text = result.stdout
+        expect(result.returncode == 0, f"split run exits 0 (got {result.returncode}: {result.stderr})")
+        expect(
+            "| Grok (xAI CLI) · web capture 🔶 |" in text,
+            "the web producer gets its own row, marked as the shared id",
+        )
+        expect(
+            "| Grok (xAI CLI) · local harness 🔶 |" in text,
+            "the local producer gets its own row",
+        )
+        expect(
+            "| Grok (xAI CLI) |" not in text,
+            "the merged grok row is gone: a single number can no longer hide the dead leg",
+        )
+        expect(
+            "no-new-capture: grok (web capture) — newest archived session content is 4.0 d old" in text,
+            "the stalled web producer is flagged by its own content age",
+        )
+        expect(
+            "no-new-capture: grok (local harness)" not in text,
+            "the fresh local producer is not flagged, so the split does not invent a stall",
+        )
+        # A single-producer platform is unchanged: codex has one row, no
+        # producer qualifier, exactly as before.
+        expect("| OpenAI Codex CLI |" in text, "a single-producer platform keeps its bare name")
 
         # ---------------- case: the share threshold boundary --------------------
         boundary_sessions: list[dict[str, Any]] = []

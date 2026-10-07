@@ -173,6 +173,13 @@ const SHORT_HEAD_CHARS: usize = 8;
 /// Number of sha256 hex digits appended as the discriminator.
 const SHORT_TAG_CHARS: usize = 6;
 
+/// Total length of [`short_session_id`]'s output: head, separator, tag. Named
+/// because a caller that has to recognise the short form without re-deriving it
+/// is reading this shape, not guessing at it.
+pub const SHORT_ID_LEN: usize = SHORT_HEAD_CHARS + 1 + SHORT_TAG_CHARS;
+/// Index of the `~` separator in that output — the end of the kept head.
+pub const SHORT_ID_HEAD: usize = SHORT_HEAD_CHARS;
+
 /// Privacy-safe short form of a session id, for reports and terminal output.
 ///
 /// The short id has exactly one job: let a human tell two sessions apart in a
@@ -233,7 +240,11 @@ pub const MAX_PATH_COMPONENT_BYTES: usize = 255;
 
 /// Hex digits of SHA-256 in the bounded form's tag. 32 digits is 128 bits: the
 /// tag is the whole reason two values that share a head stay distinct.
-const PATH_COMPONENT_TAG_HEX: usize = 32;
+///
+/// Public because [`crate::sidecar::id_producer`] reads the tag length to tell
+/// this shape from [`short_session_id`]'s — the two are the only ways an
+/// archived id can carry a `~`, and only one of them deletes a segment.
+pub const PATH_COMPONENT_TAG_HEX: usize = 32;
 
 /// Preserve values within `budget` verbatim; otherwise use a UTF-8 prefix plus
 /// `~` and the first 32 lowercase hex digits of SHA-256 of the full UTF-8 value.

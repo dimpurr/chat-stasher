@@ -224,7 +224,11 @@ Response on success:
    "last_24h": {"kind": "known", "count": 12},
    "by_harness": [
      {"harness": "claude-code", "total": {"kind": "known", "count": 9},
-      "last_24h": {"kind": "known", "count": 3}}
+      "last_24h": {"kind": "known", "count": 3}},
+     {"harness": "grok (web capture)", "total": {"kind": "known", "count": 7},
+      "last_24h": {"kind": "known", "count": 0}},
+     {"harness": "grok (local harness)", "total": {"kind": "known", "count": 12},
+      "last_24h": {"kind": "known", "count": 9}}
    ]
  },
  "last_push": {"kind": "known", "unix": 1757800000}}
@@ -235,9 +239,10 @@ sealed shards in each session directory, each shard's own mtime, and
 `run-state.json` in the CLI's state directory. It never opens a shard, never
 decrypts the repository, never touches the network, and reads no configuration
 beyond the stage and the machine id `hello` already resolves. The response
-carries counts, one word per harness, the window, and the run-state timestamp —
-no conversation content, no titles, no session ids, no paths beyond what
-`hello` already returns.
+carries counts, one label per harness (a label that names the producer too,
+where one id space holds two — see *What a number means*), the window, and the
+run-state timestamp — no conversation content, no titles, no session ids, no
+paths beyond what `hello` already returns.
 
 **What a number means.**
 
@@ -248,12 +253,20 @@ no conversation content, no titles, no session ids, no paths beyond what
   was written** within the last `window_hours`. That is file mtime, not the
   conversation's own time, because reading the conversation's time would mean
   opening the shard.
-- `by_harness` splits both counts by the leading dot-segment of the session
-  directory name (`deepseek.abc` → `deepseek`), which is the same rule
-  `sidecar::infer_harness` applies to archived ids. `harness` is `null` for a
-  directory name with no usable prefix; that bucket is still counted, so the
-  per-harness totals always add up to `total`. `by_harness` is empty — and only
-  empty — when `total` is `unknown`.
+- `by_harness` splits both counts by a **report label**: the leading dot-segment
+  of the session directory name (`deepseek.abc` → `deepseek`), which is the same
+  rule `sidecar::infer_harness` applies to archived ids — except inside an id
+  space this stage holds from **both** producers, where the split is the segment
+  plus the producer the id's shape names: `grok (web capture)` for a
+  `grok.<native-id>` bundle the extension wrote, `grok (local harness)` for a
+  `grok.<machine>.<native-id>` session the scanner archived. `grok` is the one
+  id space with two producers today, and its two legs have independent arrival
+  dates: one `grok` bucket would report whichever leg is still writing for both.
+  A harness holding one producer keeps its bare id, so the split adds no name
+  where there is nothing to separate. `harness` is `null` for a directory name
+  with no usable prefix; that bucket is still counted, so the per-harness totals
+  always add up to `total`. `by_harness` is empty — and only empty — when `total`
+  is `unknown`.
 
 **Unknown is never zero.** Every count is one of `{"kind": "known", "count": n}`
 or `{"kind": "unknown", "why": "..."}`, and `last_push` is either
