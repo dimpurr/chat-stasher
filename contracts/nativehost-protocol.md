@@ -552,7 +552,7 @@ version is a new document section, never an edit to an existing one.
 Request:
 
 ```json
-{"protocol":1,"type":"status","request_id":"<request id>","status":{"install_id":"<UUID>","browser":"Chrome","profile_label":"Personal","extension_version":"<version>","reported_at":"<RFC3339>","platforms":[{"platform":"chatgpt","captured_by_this_browser":12,"pending":3,"paused_reason":null,"account_fingerprint":"<per-install salted SHA-256>"}]}}
+{"protocol":1,"type":"status","request_id":"<request id>","status":{"install_id":"<UUID>","browser":"Chrome","profile_label":"Personal","extension_version":"<version>","reported_at":"<RFC3339>","tick_ran":true,"tick_reason":"ran","tick_stopped":"queue-empty","tick_halted":null,"build_stamp":"<build stamp>","platforms":[{"platform":"chatgpt","captured_by_this_browser":12,"pending":3,"paused_reason":null,"account_fingerprint":"<per-install salted SHA-256>"}]}}
 ```
 
 The host writes one file atomically at `ext-status/<machine>/<install_id>.json`,
@@ -581,6 +581,29 @@ refuses the whole report cleanly rather than silently dropping the field.
 per-instance counter and the token minted with it. They are the same two fields
 `deliver` carries (§6.2), and they are **evidence only as a pair**: the rule
 below is the whole of what the host concludes from them.
+
+The report may also carry the **tick outcome** and the **build stamp**. The
+tick outcome is the same four facts the extension's own durable tick trace
+keeps: `tick_ran` (whether this report's tick ran), `tick_reason` (the
+closed-set code for why it did not), `tick_stopped` (how it ended, at
+whichever layer ended it — the run's stop, falling back to the tick's own
+reason on a tick that never reached a run), and `tick_halted` (the halt's
+reason code, or `null`, which is the positive fact "nothing halted"). The
+`build_stamp` is the identity halts are stamped with (`__CS_BUILD_STAMP__`, a
+`b`-prefixed base-36 string), so two installs reporting the same
+`extension_version` but built from different source stay distinguishable by
+the record alone; `null` means the running build cannot name itself. All five
+are optional, and absence is a real state — an extension older than the
+fields — which the host records as unknown rather than refusing. A
+wrongly-typed, empty or over-long value is malformed, not unknown, and the
+whole report is refused: the reason codes are closed sets and the stamp names
+a build, so a blank string is a member of neither, and `null` is already where
+the two designed "nothing halted" and "cannot name itself" states live. A
+**host** older than these fields refuses a report that carries them (`unknown
+status field`), exactly as it refuses `report_seq`'s: the pair carries them
+only after both halves are updated, a refused report leaves the previous
+record untouched, and an extension never treats the refusal as a successful
+empty report.
 
 **What the pair means.** A copied browser profile carries `storage.local`, so it
 carries the same `install_id` and the same counter; two live writers on one id
@@ -649,7 +672,9 @@ A `nack` leaves the caller's status unconfirmed. Old hosts refuse the new messag
 extensions treat that as a failed report, never as a successful empty status.
 
 `overview --json` and `overview --json --summary` expose archived latest records
-as `installs[]`, each with `reported_at`, `stale`, and `reported_daily`. Stale means the timestamp is
+as `installs[]`, each with `reported_at`, `stale`, and `reported_daily`, and
+carrying the tick outcome and `build_stamp` fields verbatim when the record
+has them. Stale means the timestamp is
 invalid or more than 48 hours before the reader's current UTC time. The list is
 per install and pending counts are never added across installs. Archives written
 before this message simply have no `installs` records.

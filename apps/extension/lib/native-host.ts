@@ -857,6 +857,29 @@ export async function reportInstallStatus(status: {
   profile_label: string | null;
   extension_version: string;
   reported_at: string;
+  /**
+   * W913 (c4) · The outcome of the report's own tick, so the archived record
+   * can answer "why did this install go quiet?" with more than "it went
+   * quiet". The four fields are the same four the durable local trace keeps
+   * (`cs_last_backfill_tick`): `tick_ran` / why it did not run / how it ended
+   * (at whichever layer ended it, W47's rule) / why it was halted.
+   * `tick_halted: null` is the positive fact "nothing halted" — an extension
+   * that predates these fields sends none of them, which the host records as
+   * unknown.
+   */
+  tick_ran: boolean;
+  tick_reason: string;
+  tick_stopped: string;
+  tick_halted: string | null;
+  /**
+   * W913 (c4) · The build stamp the bundler baked in (`__CS_BUILD_STAMP__`,
+   * lib/extension-build.ts) — the same identity a halt record carries (W59b),
+   * so two installs reporting the same manifest version but built from
+   * different source can be told apart by the record alone. Null is "this
+   * build cannot name itself", the state extension-build.ts defines; absent
+   * is "this extension predates the field".
+   */
+  build_stamp: string | null;
   platforms: Array<{ platform: string; captured_by_this_browser: number; pending: number; paused_reason: string | null; account_fingerprint?: string }>;
 }): Promise<boolean> {
   const requestId = newRequestId();
@@ -869,10 +892,10 @@ export async function reportInstallStatus(status: {
    * from the bundle (`bakedBuildStamp`, `lib/extension-build.ts`), which is the
    * same value a halt record is stamped with — one fact, one source.
    *
-   * 🔴 `null` omits the field rather than sending `''`: the host records an
-   *    absent `build_stamp` as unknown ("this extension predates the field"),
-   *    and an empty string would be a value a writer can send that means
-   *    nothing. The same rule the sequence's absence follows.
+   * 🔴 A stamp this build cannot name travels as `null`, never as `''`: the
+   *    host records `null` as "I cannot name myself" and an absent field as
+   *    unknown ("this extension predates the field"), the same rule the
+   *    sequence's absence follows — a blank is a value that means nothing.
    */
   const buildStamp = bakedBuildStamp();
   const withBuild = buildStamp === null ? status : { ...status, build_stamp: buildStamp };

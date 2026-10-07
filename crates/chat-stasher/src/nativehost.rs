@@ -2492,9 +2492,11 @@ fn other_install_count(output: &[u8], current_install_id: &str) -> Option<u64> {
 /// silently drops a field it cannot read. The returned `install_id` is the one
 /// that passed the shape check, so the caller does not read it a second time.
 ///
-/// `build_stamp` is optional, and absent is a real state — an extension built
-/// before the stamp existed. A present value must be a non-empty string within
-/// the bound `extension_version` uses; anything else is malformed, not unknown.
+/// `build_stamp` is optional, and absent is a real state — an extension
+/// built before the stamp existed. A present non-empty string is the revision
+/// that wrote the record; a present `null` is the build's own "I cannot name
+/// myself" (W59b). Anything else — another type, or an empty string, which
+/// names nothing a reader could read — is malformed, not unknown.
 fn validate_status(
     status: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<&str, &'static str> {
@@ -2516,13 +2518,6 @@ fn validate_status(
             .get("extension_version")
             .and_then(|v| v.as_str())
             .is_none_or(|v| v.is_empty() || v.len() > 80)
-        // W912 · The build stamp, distinct from the version: `0.2.0.24` is a
-        // release, the stamp is the revision that wrote the record. Optional
-        // for the same reason `report_seq` is — an extension that predates the
-        // field sends none, and absence is recorded as unknown.
-        || status
-            .get("build_stamp")
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80))
         || status
             .get("reported_at")
             .and_then(|v| v.as_str())
@@ -2545,6 +2540,44 @@ fn validate_status(
             .get("report_nonce")
             .is_some_and(|v| v.as_str().is_none_or(|s| !valid_nonce(s)))
         || (status.get("report_nonce").is_some() && status.get("report_seq").is_none())
+        // W913 (c4) · The tick outcome and the build stamp are optional, and
+        // their absence is a real state — "this extension predates the
+        // fields", which the record keeps as unknown exactly as report_seq's
+        // absence is. A present value of the wrong type is malformed, not
+        // unknown: `tick_ran` is a verdict, `tick_halted`/`build_stamp` are
+        // codes or an explicit null, and a reader that had to guess a type
+        // would read a string where it expects "did this tick run". The
+        // length bounds are the ones the report's own vocabulary keeps
+        // (`paused_reason`'s 120, `extension_version`'s 80), because these
+        // fields are members of the same closed sets the trace writes.
+        || status.get("tick_ran").is_some_and(|v| !v.is_boolean())
+        // `tick_reason` / `tick_stopped` are always codes on the wire — a
+        // `null` there is not a designed state, so only a non-empty string
+        // within the bound passes.
+        || status
+            .get("tick_reason")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120))
+        || status
+            .get("tick_stopped")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120))
+        // `tick_halted: null` and `build_stamp: null` are *designed* states
+        // ("nothing halted" / "this build cannot name itself"), so a null is
+        // recorded verbatim. A present value must still be a **non-empty**
+        // string within the bound: an empty one names nothing, and it would
+        // reach the reader as the bare word it cannot read — "last tick did
+        // not run ()", " · build ". That is the rule `extension_version`
+        // keeps, and the one W912 wrote for `build_stamp` before the null
+        // state joined it: an unknown is never recorded as empty.
+        || status
+            .get("tick_halted")
+            .is_some_and(|v| {
+                !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 120)
+            })
+        || status
+            .get("build_stamp")
+            .is_some_and(|v| {
+                !v.is_null() && v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80)
+            })
     {
         return Err("malformed status fields");
     }
@@ -2555,10 +2588,14 @@ fn validate_status(
                 | "browser"
                 | "profile_label"
                 | "extension_version"
-                | "build_stamp"
                 | "reported_at"
                 | "report_seq"
                 | "report_nonce"
+                | "tick_ran"
+                | "tick_reason"
+                | "tick_stopped"
+                | "tick_halted"
+                | "build_stamp"
                 | "platforms"
         )
     }) {
@@ -4824,6 +4861,19 @@ mod tests {
 
         let mut malformed = status;
         malformed["build_stamp"] = serde_json::json!(7);
+        assert_eq!(
+            validate_status(malformed.as_object().expect("object")),
+            Err("malformed status fields")
+        );
+
+        // W913 (c4) · An **empty** stamp is malformed too, and this is the
+        // half the rebase dropped. W912 refused it ("a present value must be a
+        // non-empty string"); adding the designed `null` ("this build cannot
+        // name itself") must not also admit `""`, which says nothing and would
+        // print as the empty word `· build `. Two states are already spoken
+        // for, so a blank can only be a bad value: an unknown is never
+        // recorded as empty.
+        malformed["build_stamp"] = serde_json::json!("");
         assert_eq!(
             validate_status(malformed.as_object().expect("object")),
             Err("malformed status fields")

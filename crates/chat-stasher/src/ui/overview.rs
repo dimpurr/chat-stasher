@@ -225,11 +225,28 @@ struct InstallView<'a> {
     browser: Option<&'a str>,
     profile: Option<&'a str>,
     extension_version: Option<&'a str>,
-    /// W912 · Which build wrote the record, when the report carried a stamp.
-    /// `None` is the report saying nothing about its build — an extension that
-    /// predates the field — and is never filled with the version or a placeholder.
-    build_stamp: Option<&'a str>,
     reported_unix: Option<i64>,
+    /// W913 (c4) · The outcome of this report's own tick, when the record
+    /// carries one: whether it ran, the closed-set code for why it did not,
+    /// how it ended (at whichever layer ended it), and why it was halted.
+    ///
+    /// `None` across the four is the state of a record from an extension
+    /// that predates the fields, and it is not a verdict: the page says the
+    /// tick was not recorded rather than describing one that did not happen.
+    tick_ran: Option<bool>,
+    tick_reason: Option<&'a str>,
+    tick_stopped: Option<&'a str>,
+    /// `Some(reason)` when the tick was halted. The record's explicit `null`
+    /// — "nothing halted" — is a positive fact, and renders as no word, the
+    /// same rule `paused_reason: null` follows.
+    tick_halted: Option<&'a str>,
+    /// W913 (c4) · The build stamp, so two installs that report the same
+    /// manifest version but were built from different source stay
+    /// distinguishable by the record alone. Three states, not two: an
+    /// absent field is a record from an extension that predates it, a `null`
+    /// is the build's own "I cannot name myself" (W59b), and only a string
+    /// is a stamp.
+    build_stamp: Option<Option<&'a str>>,
     platforms: BTreeMap<String, PlatformCell>,
     attention: Attention,
     /// EXT-13 · Why the id is known to be shared, when the record says. `None`
@@ -316,14 +333,27 @@ impl<'a> InstallView<'a> {
             extension_version: install
                 .get("extension_version")
                 .and_then(serde_json::Value::as_str),
-            build_stamp: install
-                .get("build_stamp")
-                .and_then(serde_json::Value::as_str),
             reported_unix: install
                 .get("reported_at")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                 .map(|value| value.timestamp()),
+            tick_ran: install.get("tick_ran").and_then(serde_json::Value::as_bool),
+            tick_reason: install
+                .get("tick_reason")
+                .and_then(serde_json::Value::as_str),
+            tick_stopped: install
+                .get("tick_stopped")
+                .and_then(serde_json::Value::as_str),
+            // A `null` halt and an absent halt field both read `None` here,
+            // deliberately: the visible outvoting word for "nothing halted"
+            // is no word at all, so the two states need no separate rendering
+            // — and an absent field's whole group already says "not recorded"
+            // through `tick_ran`.
+            tick_halted: install
+                .get("tick_halted")
+                .and_then(serde_json::Value::as_str),
+            build_stamp: install.get("build_stamp").map(serde_json::Value::as_str),
             platforms,
             attention,
         }
@@ -722,13 +752,42 @@ fn extension_details(rows: &[&InstallView], now_unix: i64) -> String {
             Some(version) => out.push_str(&format!(" · extension {}", esc(version))),
             None => out.push_str(" · extension version not recorded"),
         }
-        // W912 · Which build wrote this record, when it said. A record with no
-        // stamp — an older extension — says so, rather than showing the version
-        // as if it were the revision: two installs on one version are told apart
-        // by this value and by nothing else on the page.
+        // W913 (c4) · What the install's *own tick* did, in the codes the
+        // report's vocabulary already uses (the same closed sets a pause
+        // reason comes from), placed where the reader who asks "why did this
+        // one go quiet?" has just read its age. A record that predates the
+        // fields says so rather than inventing an outcome; a `tick_stopped`
+        // that falls back to the tick's own reason is the writer's rule
+        // (W47), not a guess made here.
+        match view.tick_ran {
+            None => out.push_str(" · last tick not recorded"),
+            Some(false) => match view.tick_reason {
+                Some(reason) => {
+                    out.push_str(&format!(" · last tick did not run ({})", esc(reason)))
+                }
+                None => out.push_str(" · last tick did not run"),
+            },
+            Some(true) => {
+                out.push_str(" · last tick ran");
+                if let Some(stopped) = view.tick_stopped {
+                    out.push_str(&format!(", stopped {}", esc(stopped)));
+                }
+                // An explicit `tick_halted: null` renders no word: "nothing
+                // halted" needs none, and a missing word is not an unknown
+                // here the way it is for `paused_reason`, because the halt
+                // the reader cares about is precisely one that *is* named.
+                if let Some(halted) = view.tick_halted {
+                    out.push_str(&format!(", halted {}", esc(halted)));
+                }
+            }
+        }
         match view.build_stamp {
-            Some(stamp) => out.push_str(&format!(" · build {}", esc(stamp))),
-            None => out.push_str(" · build stamp not recorded"),
+            Some(Some(stamp)) => out.push_str(&format!(" · build {}", esc(stamp))),
+            // The record's own "this build cannot name itself" (W59b's null),
+            // worded in the same family as the popup's "a build that record
+            // did not name" — a fact about the build, not a missing field.
+            Some(None) => out.push_str(" · build not named"),
+            None => out.push_str(" · build not recorded"),
         }
         // EXT-13 · Why the install is in conflict, and what clears it. The row's
         // word says what is wrong; this is the only place the page says what to

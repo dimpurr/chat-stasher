@@ -204,6 +204,20 @@ under its own heading below.
   survey incomplete, so "no candidates" is never claimed on a partial read.
   Nothing calls this command for you: it adds no schedule, no call from `push`
   or `run-once`, and no write path, and `append_only` is untouched.
+- **The extension status record carries its tick's outcome and the build
+  stamp.** The host accepts five optional fields on a `status` report —
+  `tick_ran`, `tick_reason`, `tick_stopped`, `tick_halted` and `build_stamp` —
+  and records them verbatim, `tick_halted: null` included, which is "nothing
+  halted" and not an unknown. A badly-typed, empty or over-long value makes the
+  whole report a bad-request refusal rather than a record: a blank code or
+  stamp names nothing, and the two designed nulls are not blanks. The
+  extensions page's details line now says per install what its own last tick
+  did — ran and how the run stopped, or did not run and which gate stopped it —
+  and which build sent the report, so two installs reporting the same version
+  but built from different source stay distinguishable; a record from a report
+  older than the fields says "not recorded" instead of inventing an outcome,
+  and a build that cannot name itself says "not named", which is a distinct
+  state.
 
 #### Changed
 
@@ -559,6 +573,18 @@ under its own heading below.
   workspace nobody identified. Reading back a workspace the account is not
   signed into is how a backfill files one person's conversations under
   another's, so failing closed here is the point.
+- **Every status report carries its tick's own outcome.** The report the
+  install files at the end of each backfill tick now says what that tick did:
+  whether it ran, the closed-set code for why it did not, how it stopped (the
+  run's stop, or the tick's own reason when nothing ran), whether anything
+  halted it, and the build stamp — the same identity a stop record carries —
+  so an archived record tells a quiet install with nothing owed apart from
+  one that stopped mid-work, and two builds that report the same version stay
+  distinguishable. The four outcome values are the same four the local tick
+  trace keeps, written once and read by both, and absent fields remain the
+  honest "not recorded" rather than a default. A host older than the fields
+  refuses the report that carries them, which reads as a failed report, never
+  as a successful empty status.
 
 #### Changed
 
@@ -744,6 +770,15 @@ on `PATH`, and macOS 13 or newer.
   improvising when the Developer ID certificate or the notary credentials are
   absent, and a self-check command answers ready, missing, or could not
   tell, which is its own answer and not a pass.
+- **The extension-report warning fires for every stale report.** Any install
+  the dashboard's stale flag names is called out in the popover, not only one
+  with three consecutive reporting days on record — an install that ticks
+  every few minutes never establishes that cadence, so gating on it kept the
+  common silent install out of this one surface while the dashboard flagged
+  it. The line says the install is not reporting, and the sub-line names both
+  causes of the stale flag, a report over 48 hours old and one whose time
+  cannot be read, rather than quoting the 48 hours as if they were the only
+  state the flag knows.
 
 ### Repository and release tooling
 

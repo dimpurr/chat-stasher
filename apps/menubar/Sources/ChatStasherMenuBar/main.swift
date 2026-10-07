@@ -368,7 +368,13 @@ enum ArchiveStatus {
         case .needsAttention(let count):
             count == 1 ? "1 machine needs attention" : "\(count) machines need attention"
         case .silent(let machine, let days): "\(machine) has been silent for \(days) days"
-        case .extensionStale(let install): "\(install) hasn't reported for more than 48 hours"
+        // W913 review · The stale flag the dashboard computes is true for a
+        // report more than 48 hours old *and* for one whose time cannot be
+        // read at all, so a sentence that quotes the 48 hours overclaims in
+        // the unreadable case. The headline says what is established in both
+        // states — the reports stopped being readable as fresh — and the
+        // explanation carries the two causes precisely.
+        case .extensionStale(let install): "\(install) is not reporting"
         case .healthy: "All saved"
         case .waiting(let count): "\(count) conversations waiting to upload"
         case .localFailure(let reason): reason
@@ -386,6 +392,12 @@ enum ArchiveStatus {
         case .unreadable(let reason), .localFailure(let reason): return reason
         case .setup(_, let explanation): return explanation
         case .destination(_, let sentence, _): return sentence
+        // W913 review · Same honesty as the sentence: the one-line status
+        // words both causes behind the dashboard's stale flag, because the
+        // reader who opens the panel should not have to infer that "48 hours"
+        // was a guess between the two.
+        case .extensionStale:
+            return "Its last report is over 48 hours old, or its time can't be read."
         case .cliMissing: return "Install chat-stasher from the project release page, then reopen this panel."
         case .cliTooOld: return "Use the command for your install: brew upgrade chat-stasher; npm install -g chat-stasher; or rerun the install script."
         case .credentialsUnavailable: return "Add credentials to chat-stasher's app-readable configuration."
@@ -461,10 +473,32 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     }) {
         return .sourceStopped(stopped.label)
     }
-    if let stale = snapshot.extensionInstalls.first(where: { $0.stale && $0.reportedDaily == true }) {
+    if let stale = snapshot.extensionInstalls.first(where: extensionInstallNeedsWarning) {
         return .extensionStale("\(stale.label) on \(stale.machine)")
     }
     return .healthy
+}
+
+/// Whether the menu bar should flag this install's row.
+///
+/// Replaces the old `stale && reportedDaily == true` test, which could never
+/// fire for an install that reports on a few-minute tick without ever
+/// establishing a daily cadence (`EXTA-OUT.md §4 c5`). A stale report is a
+/// stale report: the report's own age is what the dashboard's `stale` flag
+/// already says, and the menu bar should agree with it. `reported_daily` is
+/// deliberately *not* part of the test — it is the host's record of whether
+/// this install has reported on three consecutive days, and an install that
+/// ticks every few minutes never produces it, so gating on it would put the
+/// warning back out of reach for the most common silent install.
+///
+/// The whole-machine fallback ladder (`silent`, the 7-day default) still
+/// covers a machine that has gone quiet entirely; this warning is for the
+/// install whose *report* is stale while the install itself may still be
+/// running. A stale install whose ticks require the backfill switch is not
+/// necessarily broken, and the sentence it produces says only that — it does
+/// not claim the install is down.
+func extensionInstallNeedsWarning(install: ExtensionInstall) -> Bool {
+    install.stale
 }
 
 /// The card for a refresh that produced no snapshot. The class was decided
