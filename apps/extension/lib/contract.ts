@@ -872,6 +872,25 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
   },
 ];
 
+// 🔴 W915 · Microsoft Copilot (the web chat) has no row in this table. That
+// absence is a decision, not a backlog item — recorded 2026-08-16 in the
+// archived status report (§124, the "R20 platform diff" round), restated here
+// 2026-10-08 so it is read next to the table it governs.
+//
+// The recorded reason is the transport, not difficulty. Copilot's web chat
+// carries its conversation over a WebSocket (`wss://…/sydney/ChatHub`), and
+// when the decision was made the page hook intercepted only `fetch` and
+// `XMLHttpRequest` (lib/page-hook.ts), so those frames were invisible to any
+// row this table could add; the two recorded paths forward were a WebSocket
+// hook, which did not exist yet, or DOM scraping, fragile. Since then the
+// opt-in per-row `webSocketCapture` switch and its Main-world wrapper have
+// landed, but enabling them for Copilot would be a new decision with its own
+// frame-shape validation ahead of it, not work this table owes anyone. No
+// shipped row opts in.
+//
+// Not GitHub Copilot CLI: that is a coding agent with local transcripts, a
+// supported CLI harness, unrelated to this table.
+
 /**
  * 🔴 W91 · Return platforms active in the specified release channel.
  * In 'stable' builds, experimental platforms are omitted entirely.

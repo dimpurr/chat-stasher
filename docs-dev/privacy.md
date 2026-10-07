@@ -960,6 +960,19 @@ blob, document) is never read and only prints a console warning (`:635-638`,
 either, so a stream that only looks like a candidate route just gets the
 console warning (`apps/extension/lib/page-hook.ts:683-687`, `:772-775`).
 
+**One platform is absent by decision, not by oversight.** Microsoft Copilot's
+web chat carries its conversation over a WebSocket (`wss://…/sydney/ChatHub`),
+and when that was decided the hook above read only `fetch` and
+`XMLHttpRequest` responses, so a row could not have captured anything.
+Copilot therefore has no row in the platform table
+(`apps/extension/lib/contract.ts:356-873`), and that absence was recorded as
+a decision, not a backlog item, in the R20 platform-diff round (§124) of the
+archived status report, 2026-08-16; restated here 2026-10-08. The opt-in
+`webSocketCapture` switch above postdates that decision, and turning it on
+for Copilot would be a new decision with frame-shape validation behind it,
+not a promised row. This is the web chat only — GitHub Copilot CLI is a
+coding agent with local transcripts, and is a supported harness.
+
 ## 6. What each permission is for
 
 The extension declares exactly four permissions and no host permissions
