@@ -114,10 +114,10 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 </tbody></table></div>
 <details><summary>Details for these 4 installs</summary>
 <ul>
-<li><b>Chrome · Work</b> — last report 2026-01-28 22:40 UTC (4d ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Arc · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Arc · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Chrome · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · build stamp not recorded</li>
+<li><b>Chrome · Work</b> — last report 2026-01-28 22:40 UTC (4d ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Arc · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Arc · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
 </ul></details>
 </section>
 <section><h2>Machine 1 <span class=h2note>· this machine</span></h2>
@@ -133,10 +133,10 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 <p class=sub>An exact browser profile match is unavailable for 1 of these 4 installs, so that row has no open action; open it from the named browser profile.</p>
 <details><summary>Details for these 4 installs</summary>
 <ul>
-<li><b>Chrome · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · build stamp not recorded · claude paused (retry-after)</li>
-<li><b>Arc · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Arc · Work</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Chrome · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · build stamp not recorded</li>
+<li><b>Chrome · Work</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · last tick not recorded · build not recorded · claude paused (retry-after)</li>
+<li><b>Arc · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Arc · Work</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-02 01:40 UTC (1h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
 </ul></details>
 </section>
 <section><h2>Machine 3</h2>
@@ -152,10 +152,10 @@ nav.top{font-size:.85rem;margin:0 0 1rem}
 </tbody></table></div>
 <details><summary>Details for these 4 installs</summary>
 <ul>
-<li><b>Chrome · Work</b> — last report 2026-02-01 21:40 UTC (5h ago) · extension 0.5.0 · build stamp not recorded · chatgpt pause state unknown · claude pause state unknown</li>
-<li><b>Arc · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Arc · Work</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · build stamp not recorded</li>
-<li><b>Chrome · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · build stamp not recorded</li>
+<li><b>Chrome · Work</b> — last report 2026-02-01 21:40 UTC (5h ago) · extension 0.5.0 · last tick not recorded · build not recorded · chatgpt pause state unknown · claude pause state unknown</li>
+<li><b>Arc · Personal</b> — last report 2026-02-02 00:40 UTC (2h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Arc · Work</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
+<li><b>Chrome · Personal</b> — last report 2026-02-01 23:40 UTC (3h ago) · extension 0.5.0 · last tick not recorded · build not recorded</li>
 </ul></details>
 </section>
 </main>
