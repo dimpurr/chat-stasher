@@ -3285,6 +3285,10 @@ pub struct StageSession {
     /// rule, reused rather than re-implemented). `None` = no usable prefix; the
     /// session is still counted.
     pub harness: Option<String>,
+    /// The directory name itself — the archived session id. The `summary` split
+    /// reads the id's *shape* to tell a web capture from a local harness inside
+    /// one id space (`grok` is both), which the harness segment alone cannot.
+    pub session_id: String,
     /// Newest sealed shard's mtime, seconds since the epoch. `None` = no usable
     /// mtime, which makes the window count a lower bound.
     pub newest_mtime: Option<i64>,
@@ -3398,7 +3402,8 @@ pub fn scan_stage(stage: &Path) -> StageScan {
                 .iter()
                 .filter_map(|(_, path)| shard_mtime_secs(path))
                 .max();
-            let harness = crate::sidecar::infer_harness(&session.file_name().to_string_lossy());
+            let session_id = session.file_name().to_string_lossy().into_owned();
+            let harness = crate::sidecar::infer_harness(&session_id);
             if newest_mtime.is_none() {
                 scan.time_unknown.push(format!(
                     "a session directory under machine {fingerprint} has a shard with no readable mtime"
@@ -3406,6 +3411,7 @@ pub fn scan_stage(stage: &Path) -> StageScan {
             }
             scan.sessions.push(StageSession {
                 harness,
+                session_id,
                 newest_mtime,
             });
         }
@@ -3473,10 +3479,25 @@ pub fn build_summary(
         (None, Ok(_), None) => None,
     };
 
+    // One bucket per *report label*: the harness id, or `<harness> (<producer>)`
+    // for an id space this stage holds from both producers. `grok` is that case
+    // — the web platform's captures and this machine's Grok CLI sessions share
+    // one prefix, and one `grok` number would report the leg that is still
+    // writing for the leg that stopped. A harness with one producer here keeps
+    // its bare id, and the buckets still sum to `sessions.total`.
+    let split = crate::sidecar::ProducerSplit::scan(
+        scan.sessions
+            .iter()
+            .filter_map(|s| s.harness.as_deref().map(|h| (h, s.session_id.as_str()))),
+    );
     let mut buckets: std::collections::BTreeMap<Option<String>, HarnessCount> =
         std::collections::BTreeMap::new();
     for session in &scan.sessions {
-        let bucket = buckets.entry(session.harness.clone()).or_default();
+        let label = session
+            .harness
+            .as_deref()
+            .map(|harness| split.label(harness, &session.session_id));
+        let bucket = buckets.entry(label).or_default();
         bucket.total += 1;
         match session.newest_mtime {
             Some(at) if cutoff.is_some_and(|cutoff| at >= cutoff) => bucket.recent += 1,
@@ -4418,10 +4439,21 @@ mod tests {
     // -------------------------------------------------- §6.4 summary: counts
 
     /// One synthetic session. `harness` and `mtime` are the only two facts the
-    /// scanner produces per session, so that is the whole fixture shape.
+    /// scanner produces per session, so the id is the harness with one synthetic
+    /// native segment: the web shape, which is all a single-producer stage holds.
     fn session(harness: Option<&str>, mtime: Option<i64>) -> StageSession {
+        let session_id = harness
+            .map(|h| format!("{h}.synthetic-1"))
+            .unwrap_or_default();
+        session_as(harness, &session_id, mtime)
+    }
+
+    /// A session whose **id** is stated too: inside an id space two producers
+    /// share, the shape of the id is the only thing that tells them apart.
+    fn session_as(harness: Option<&str>, session_id: &str, mtime: Option<i64>) -> StageSession {
         StageSession {
             harness: harness.map(str::to_string),
+            session_id: session_id.to_string(),
             newest_mtime: mtime,
         }
     }
@@ -4441,6 +4473,20 @@ mod tests {
 
     const NOW: i64 = 1_760_000_000;
     const HOUR: i64 = 3600;
+    const DAY: i64 = 24 * HOUR;
+
+    /// The one bucket a summary carries under `name`, with a failure that names
+    /// what it did carry — a split that silently did not happen is exactly the
+    /// regression this module cannot afford.
+    fn bucket_named(summary: &serde_json::Value, name: &str) -> serde_json::Value {
+        summary["sessions"]["by_harness"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|bucket| bucket["harness"].as_str() == Some(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no bucket named {name} in {summary}"))
+    }
 
     fn summary_of(scan: &StageScan, last_push: TimeState) -> serde_json::Value {
         build_summary(scan, last_push, SUMMARY_WINDOW_HOURS, Ok(NOW))
@@ -4497,6 +4543,76 @@ mod tests {
 
     /// The honesty rule at the heart of §6.4: a partition nobody could list
     /// must not turn into `count: 0`.
+    /// The stage is where the two grok producers physically meet: the extension
+    /// writes `grok.<native-id>` bundles and the scanner writes
+    /// `grok.<machine>.<native-id>` sessions into the same tree. One `grok`
+    /// bucket would carry the CLI's fresh writes as the web leg's own arrival,
+    /// which is the reassuring answer and the wrong one.
+    #[test]
+    fn two_grok_producers_in_one_stage_get_two_buckets() {
+        let scan = StageScan {
+            sessions: vec![
+                session_as(Some("grok"), "grok.synthetic-web-1", Some(NOW - 30 * DAY)),
+                session_as(Some("grok"), "grok.synthetic-web-2", Some(NOW - 29 * DAY)),
+                session_as(Some("grok"), "grok.mbp-2.synthetic-cli-1", Some(NOW - HOUR)),
+                session_as(Some("grok"), "grok.mbp-2.synthetic-cli-2", Some(NOW - HOUR)),
+                session_as(Some("grok"), "grok.mbp-2.synthetic-cli-3", Some(NOW - HOUR)),
+            ],
+            unreadable: Vec::new(),
+            time_unknown: Vec::new(),
+        };
+        let summary = summary_of(&scan, known_push());
+        let buckets = summary["sessions"]["by_harness"].as_array().expect("array");
+
+        let names = buckets
+            .iter()
+            .map(|bucket| bucket["harness"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            buckets.len(),
+            2,
+            "one id space, two producers, two buckets: {names:?}"
+        );
+        assert!(!names.contains(&"grok".to_string()), "{names:?}");
+        let web = bucket_named(&summary, "grok (web capture)");
+        let local = bucket_named(&summary, "grok (local harness)");
+        assert_eq!(count_of(&web["total"]), 2);
+        assert_eq!(count_of(&local["total"]), 3);
+        assert_eq!(
+            count_of(&web["last_24h"]),
+            0,
+            "the dead leg reports its own zero, not the live leg's count"
+        );
+        assert_eq!(count_of(&local["last_24h"]), 3);
+        let sum: u64 = buckets
+            .iter()
+            .map(|bucket| count_of(&bucket["total"]))
+            .sum();
+        assert_eq!(
+            sum,
+            count_of(&summary["sessions"]["total"]),
+            "splitting a bucket must not lose or invent a session"
+        );
+    }
+
+    /// A stage holding one producer keeps one bare bucket: the split is a fact
+    /// about the rows, and where there is nothing to split the name is unchanged.
+    #[test]
+    fn a_one_producer_grok_stage_keeps_the_bare_bucket() {
+        let scan = StageScan {
+            sessions: vec![
+                session_as(Some("grok"), "grok.synthetic-web-1", Some(NOW - HOUR)),
+                session_as(Some("grok"), "grok.synthetic-web-2", Some(NOW - HOUR)),
+            ],
+            unreadable: Vec::new(),
+            time_unknown: Vec::new(),
+        };
+        let summary = summary_of(&scan, known_push());
+        let buckets = summary["sessions"]["by_harness"].as_array().expect("array");
+        assert_eq!(buckets.len(), 1, "{summary}");
+        assert_eq!(buckets[0]["harness"].as_str(), Some("grok"));
+    }
+
     #[test]
     fn an_unreadable_partition_is_unknown_never_zero() {
         let scan = StageScan {

@@ -1031,12 +1031,22 @@ private func sourceDisplayName(_ value: String) -> String {
     return names[normalized] ?? value.replacingOccurrences(of: "-", with: " ").capitalized
 }
 
-private func sourceGroup(_ source: SourceRow) -> String {
-    webSourceNames.contains(source.id.lowercased()) ? "Web chats" : "Coding agents"
+/// The bare harness id behind a source label: `grok (web capture)` → `grok`.
+///
+/// The overview splits an id space shared by a web platform and a local tool
+/// (grok), and the group and icon are facts about the harness, not the producer
+/// — so both are decided on the id before the producer qualifier.
+func baseHarnessId(_ value: String) -> String {
+    guard let open = value.firstIndex(of: "(") else { return value }
+    return value[..<open].trimmingCharacters(in: .whitespaces)
+}
+
+func sourceGroup(_ source: SourceRow) -> String {
+    webSourceNames.contains(baseHarnessId(source.id).lowercased()) ? "Web chats" : "Coding agents"
 }
 
 func sourceSymbol(_ source: SourceRow) -> String {
-    switch source.id.lowercased() {
+    switch baseHarnessId(source.id).lowercased() {
     case "claude-code": "terminal"
     case "claude": "sparkles"
     case "codex": "chevron.left.forwardslash.chevron.right"

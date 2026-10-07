@@ -527,6 +527,27 @@ final class StatusTests: XCTestCase {
                                               lastSavedUnix: nil, health: .unknown)), "questionmark.app")
     }
 
+    /// W911 · a producer-split source (`grok (web capture)`) is grouped and
+    /// iconed by its base harness, not by the producer suffix: the overview
+    /// splits the shared grok id space so a stalled web leg is its own row, and
+    /// both rows must read exactly as the merged `grok` row did. The id `grok`
+    /// is a web source name here, so both producers land in "Web chats" — the
+    /// point is that the *producer* suffix does not change the answer.
+    func testProducerSplitSourcesGroupByBaseHarness() {
+        let web = SourceRow(id: "grok (web capture)", label: "Grok (Web Capture)",
+                            count: 4, lastSavedUnix: nil, health: .stopped)
+        let local = SourceRow(id: "grok (local harness)", label: "Grok (Local Harness)",
+                              count: 40, lastSavedUnix: nil, health: .healthy)
+        XCTAssertEqual(baseHarnessId("grok (web capture)"), "grok")
+        XCTAssertEqual(baseHarnessId("grok"), "grok")
+        XCTAssertEqual(sourceGroup(web), sourceGroup(SourceRow(id: "grok", label: "grok",
+                                                               count: 1, lastSavedUnix: nil, health: .unknown)))
+        XCTAssertEqual(sourceGroup(local), sourceGroup(SourceRow(id: "grok", label: "grok",
+                                                                 count: 1, lastSavedUnix: nil, health: .unknown)))
+        XCTAssertEqual(sourceSymbol(web), "asterisk")
+        XCTAssertEqual(sourceSymbol(local), "asterisk")
+    }
+
     func testDestinationStatusRanksWorstResultAndKeepsDestinationName() {
         XCTAssertGreaterThan(destinationStatusRank(.silent("Demo Mac", 9)), destinationStatusRank(.healthy))
         XCTAssertGreaterThan(destinationStatusRank(.localFailure("Timer failed")), destinationStatusRank(.silent("Demo Mac", 9)))

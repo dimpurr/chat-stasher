@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:3938-3972`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:3959-3993`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -599,7 +599,7 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:3938-3972`).
+  (`crates/chat-stasher/src/nativehost.rs:3959-3993`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
@@ -805,7 +805,7 @@ kept separate and never merged or averaged, because neither copy may be assumed
 to be the original. A pre-migration flat status file is superseded by the keyed
 one for the same `(machine, install_id)`, so one profile is not listed twice, and
 a record that has not reported for more than 48 hours is marked stale — never as
-zero (`crates/chat-stasher/src/overview.rs:668-674`, `:688-745`).
+zero (`crates/chat-stasher/src/overview.rs:702-708`, `:722-779`).
 
 ### Anyone else on the network between you and your destination
 
@@ -856,9 +856,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:8277-8281`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:8276-8280`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:8250-8257`).
+  (`crates/chat-stasher/src/main.rs:8249-8256`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -869,7 +869,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:6217-6225`).
+  as many words (`crates/chat-stasher/src/main.rs:6216-6224`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -916,7 +916,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:461-464,8773-8933`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:461-464,8772-8932`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:722-808`) — see exposure 5

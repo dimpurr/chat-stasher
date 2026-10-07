@@ -178,11 +178,53 @@ pub const DESTINATION_JOIN: &str = ",";
 const PROVENANCE_HARNESS_TITLE: &str = "label source: the harness's own title";
 const PROVENANCE_FIRST_USER_LINE: &str = "label source: the first user line";
 
+/// The producer split over a set of dashboard rows, for a caller that counts or
+/// groups by source.
+///
+/// Built from the rows in view, so "is this id space shared" is answered from
+/// what the page actually holds rather than from a list of names this build
+/// believes collide.
+pub fn source_split(sessions: &[&UiSession]) -> crate::sidecar::ProducerSplit {
+    crate::sidecar::ProducerSplit::scan(
+        sessions
+            .iter()
+            .filter_map(|s| s.harness.as_deref().map(|h| (h, s.session_id.as_str()))),
+    )
+}
+
+/// The source labels a set of rows prints under — one per source, with an id
+/// space holding both producers counted **twice**.
+///
+/// The same split the machine × source matrix shows, so a page's "sources"
+/// number and the table under it cannot disagree. Counting the bare harness
+/// while the table splits it would report one number for a platform the page has
+/// already drawn in two.
+pub fn source_labels(sessions: &[&UiSession]) -> std::collections::BTreeSet<String> {
+    let split = source_split(sessions);
+    sessions
+        .iter()
+        .map(|s| s.split_source_label(&split))
+        .collect()
+}
+
 impl UiSession {
     pub fn source_label(&self) -> String {
         self.harness
             .clone()
             .unwrap_or_else(|| NO_HARNESS.to_string())
+    }
+
+    /// This session's label in a report that splits an id space by producer.
+    ///
+    /// [`Self::source_label`] everywhere it already said the harness id, and
+    /// `<harness> (<producer>)` inside an id space `split` holds from both
+    /// producers — which today means `grok`, the web platform's captures and a
+    /// local CLI harness under one prefix.
+    pub fn split_source_label(&self, split: &crate::sidecar::ProducerSplit) -> String {
+        match self.harness.as_deref() {
+            None => NO_HARNESS.to_string(),
+            Some(harness) => split.label(harness, &self.session_id),
+        }
     }
 
     /// The same rule [`OverviewRow::has_known_time`] applies, so the dashboard's
@@ -4191,6 +4233,57 @@ mod tests {
         assert!(
             !matrix.contains("harness=we%2Cird") && !matrix.contains("harness=we,ird"),
             "no link may name the separator-carrying id: {matrix}"
+        );
+    }
+
+    /// W911 · a harness whose id space holds both producers (grok: the web
+    /// platform and the local CLI harness) is **two** columns in the machine ×
+    /// source matrix, so one merged count cannot hide the stalled web leg
+    /// behind the local CLI's sessions. A producer-split cell is a count, never
+    /// a link: no `--harness` filter names one producer inside a shared id
+    /// space.
+    #[test]
+    fn the_matrix_splits_a_shared_id_space_by_producer() {
+        let mut d = fixture::groups_data();
+        let local = d
+            .sessions
+            .iter()
+            .find(|s| s.harness.as_deref() == Some("grok"))
+            .cloned()
+            .expect("the fixture holds a local grok session");
+        assert_eq!(
+            crate::sidecar::id_producer(&local.session_id),
+            Some(crate::sidecar::IdProducer::LocalHarness),
+            "the fixture's grok session is the local form"
+        );
+        let mut web = local.clone();
+        web.index = d.sessions.len();
+        web.session_id = "grok.019bf00d-97b6-7eb2-9bf8-eacbacc09765".to_string();
+        web.short_id = "grok~webcap".to_string();
+        d.sessions.push(web);
+
+        let html = req("/", &d, &NoContent).body;
+        let matrix = html
+            .split("<h2>Machine × source</h2>")
+            .nth(1)
+            .and_then(|rest| rest.split("</section>").next())
+            .expect("the matrix section must exist");
+        assert!(matrix.contains(">grok (web capture)</th>"), "{matrix}");
+        assert!(matrix.contains(">grok (local harness)</th>"), "{matrix}");
+        assert!(
+            !matrix.contains(">grok</th>"),
+            "the merged grok column must be gone: {matrix}"
+        );
+        assert!(
+            matrix.contains(
+                "title=\"this id space holds two producers (a web platform and a local harness); \
+                 no harness filter can select one of them\""
+            ),
+            "a producer-split cell is a count, never a lying link: {matrix}"
+        );
+        assert!(
+            !matrix.contains("harness=grok&") && !matrix.contains("harness=grok&amp;"),
+            "no split column may link to a `--harness=grok` set that returns both producers: {matrix}"
         );
     }
 

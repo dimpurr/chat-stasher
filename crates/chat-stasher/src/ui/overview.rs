@@ -16,7 +16,8 @@ use super::html::{
     footer, head, launch_banner, machines_without_index_banner, merged_counts,
 };
 use super::{
-    health_of, percent_encode, select, Health, UiData, UiSession, NO_HARNESS, STALE_AFTER_DAYS,
+    health_of, percent_encode, select, source_labels, Health, UiData, UiSession, NO_HARNESS,
+    STALE_AFTER_DAYS,
 };
 
 // ------------------------------------------------------------- overview page
@@ -39,7 +40,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     out.push_str(&machines_without_index_banner(data));
 
     let total_bytes: u64 = in_view.iter().map(|s| s.bytes).sum();
-    let sources: BTreeSet<String> = in_view.iter().map(|s| s.source_label()).collect();
+    let sources: BTreeSet<String> = source_labels(&in_view);
     let machines = data.machine_keys();
     let filtered = describe_selector(&data.launch).is_some();
     // W219 · the headline total is the **conversation** count: distinct archive
@@ -847,36 +848,81 @@ fn render_machines(
     out
 }
 
+/// One column of the machine × source matrix.
+struct MatrixColumn {
+    /// The header text: the harness id, or `<harness> (<producer>)` when this
+    /// view holds both producers under it (the shared `grok` id space).
+    label: String,
+    /// The harness id a `--harness` filter would name to select exactly this
+    /// column, when one can. `None` for the no-harness bucket and for a
+    /// producer-split column: no existing filter separates one producer from
+    /// the other in a shared id space, so a link would promise a count it
+    /// cannot deliver.
+    filter: Option<String>,
+    /// The facet group the column belongs to, decided on the base harness id —
+    /// a producer split does not change the platform group. `None` is the
+    /// no-harness column, which no group claims.
+    group: Option<PlatformGroup>,
+}
+
 /// Order the matrix's source columns by group (UIA-3, 29-UI-DESIGN §3.1):
 /// web platforms, coding agents, agent platforms, then the ungrouped bucket — each sorted
 /// alphabetically within itself so the order is stable across launches — and
 /// the no-harness column last, a *rowspan* header of its own rather than a
 /// group member, because it is the absence of a classifiable source, not one
-/// more group. `BTreeSet` iteration is already sorted, so grouping is a
-/// four-way stable partition of it.
-fn grouped_sources(
-    sources: &BTreeSet<String>,
-    no_harness: &str,
-) -> Vec<(String, Option<PlatformGroup>)> {
-    let mut out: Vec<(String, Option<PlatformGroup>)> = Vec::new();
-    for group in [
-        PlatformGroup::WebPlatforms,
-        PlatformGroup::CodingAgents,
-        PlatformGroup::AgentPlatforms,
-        PlatformGroup::Ungrouped,
-    ] {
-        out.extend(
-            sources
-                .iter()
-                .filter(|s| s.as_str() != no_harness)
-                .filter(|s| facets::group_of(s) == group)
-                .map(|s| (s.clone(), Some(group))),
-        );
+/// more group.
+///
+/// A harness whose id space holds both producers (grok: a web platform and a
+/// local CLI harness) becomes **two** columns, so a merged count can never
+/// report the healthy leg for a stalled one. The group is read off the base
+/// harness id, so both columns stay in their platform's group.
+fn matrix_columns(
+    in_view: &[&UiSession],
+    split: &crate::sidecar::ProducerSplit,
+) -> Vec<MatrixColumn> {
+    let mut by_label: BTreeMap<String, MatrixColumn> = BTreeMap::new();
+    for s in in_view {
+        let column = match s.harness.as_deref() {
+            None => MatrixColumn {
+                label: NO_HARNESS.to_string(),
+                filter: None,
+                group: None,
+            },
+            Some(harness) => {
+                let label = s.split_source_label(split);
+                // `label == harness` means this id space has one producer here,
+                // so the bare id is still an exact `--harness` filter value. A
+                // split column keeps no filter: the producer is not a filter
+                // dimension, and inventing one is out of scope.
+                let filter = (label == harness).then(|| harness.to_string());
+                MatrixColumn {
+                    label,
+                    filter,
+                    group: Some(facets::group_of(harness)),
+                }
+            }
+        };
+        by_label.entry(column.label.clone()).or_insert(column);
     }
-    if sources.contains(no_harness) {
-        out.push((no_harness.to_string(), None));
+    let mut columns: Vec<MatrixColumn> = by_label.into_values().collect();
+    columns.sort_by(|a, b| {
+        group_rank(a.group)
+            .cmp(&group_rank(b.group))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    columns
+}
+
+/// The matrix's column order: the facet groups in their fixed order, then the
+/// no-harness column last.
+fn group_rank(group: Option<PlatformGroup>) -> usize {
+    match group {
+        Some(PlatformGroup::WebPlatforms) => 0,
+        Some(PlatformGroup::CodingAgents) => 1,
+        Some(PlatformGroup::AgentPlatforms) => 2,
+        Some(PlatformGroup::Ungrouped) => 3,
+        None => 4,
     }
-    out
 }
 
 /// The two header rows of the machine × source matrix: the group cells — one
@@ -885,18 +931,9 @@ fn grouped_sources(
 /// total header cells span both rows, which is what keeps their meaning where
 /// it already was; the no-harness column is a single `rowspan=2` cell, because
 /// no group claims it and saying so twice would invent a label for it.
-fn matrix_header(sources: &[(String, Option<PlatformGroup>)]) -> String {
+fn matrix_header(columns: &[MatrixColumn]) -> String {
     let mut runs: Vec<(PlatformGroup, usize)> = Vec::new();
-    for (_, group) in sources.iter().filter_map(|(s, g)| {
-        // The no-harness column is not part of any run; it renders as its own
-        // spanning cell in the first row.
-        if g.is_none() {
-            None
-        } else {
-            Some((s, *g))
-        }
-    }) {
-        let group = group.expect("the no-harness column was filtered out above");
+    for group in columns.iter().filter_map(|column| column.group) {
         match runs.last_mut() {
             Some((last, n)) if *last == group => *n += 1,
             _ => runs.push((group, 1)),
@@ -911,18 +948,21 @@ fn matrix_header(sources: &[(String, Option<PlatformGroup>)]) -> String {
         ));
     }
     let mut bottom = String::from("<tr>");
-    for (source, group) in sources {
-        match group {
+    for column in columns {
+        match column.group {
             Some(group) => bottom.push_str(&format!(
                 "<th class=\"n {}\">{}</th>",
                 group.css(),
-                esc(source)
+                esc(&column.label)
             )),
             None => {
                 // The rowspan cell belongs in the *first* row, beside the
                 // group cells, not the second: a cell spanning both header
                 // rows is one header, not a group with one member.
-                top.push_str(&format!("<th rowspan=2 class=n>{}</th>", esc(source)));
+                top.push_str(&format!(
+                    "<th rowspan=2 class=n>{}</th>",
+                    esc(&column.label)
+                ));
             }
         }
     }
@@ -932,11 +972,11 @@ fn matrix_header(sources: &[(String, Option<PlatformGroup>)]) -> String {
 }
 
 fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> String {
-    let mut sources: BTreeSet<String> = BTreeSet::new();
-    for s in in_view {
-        sources.insert(s.source_label());
-    }
-    let sources = grouped_sources(&sources, NO_HARNESS);
+    let split = super::source_split(in_view);
+    let columns = matrix_columns(in_view, &split);
+    // The label each row carries, from the same split the header was built
+    // from, so the cell lookup and the column set agree by construction.
+    let label_of = |s: &UiSession| s.split_source_label(&split);
     let mut out = String::from(
         "<section><h2>Machine × source</h2>\n<p class=sub>Session counts. A cell links to that \
          machine and source; the row label links to the whole machine. Columns are grouped by \
@@ -944,7 +984,7 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
          build does not classify).</p>\n\
          <div class=scroll><table>\n",
     );
-    out.push_str(&matrix_header(&sources));
+    out.push_str(&matrix_header(&columns));
 
     for m in machines {
         out.push_str(&format!(
@@ -954,15 +994,15 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
             m = esc(m),
         ));
         let mut row_total = 0usize;
-        for (h, group) in &sources {
+        for column in &columns {
             let n = in_view
                 .iter()
-                .filter(|s| s.machine == *m && s.source_label() == *h)
+                .filter(|s| s.machine == *m && label_of(s) == column.label)
                 .count();
             row_total += n;
             if n == 0 {
                 out.push_str("<td class=n>·</td>");
-            } else if group.is_none() {
+            } else if column.group.is_none() {
                 // Not expressible as a `--harness` filter: the shared selector's
                 // harness constraint needs a harness to compare against, and
                 // these ids have none. Linking to something that would return a
@@ -972,22 +1012,32 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
                     "<td class=n title=\"not expressible as a harness filter — see the list \
                      below\">{n}</td>"
                 ));
-            } else if !facets::is_expressible_as_filter_value(h) {
-                // A harness containing the value-list separator cannot be
-                // named by any `--harness` filter — the grammar would split
-                // it into ids that do not exist, so the link would return a
-                // different set than the count promises. Same rule as the
-                // no-prefix cells: a count that says why, never a lying link.
-                out.push_str(&format!(
-                    "<td class=n title=\"this source's id contains the harness list separator, \
-                     so no harness filter can select it\">{n}</td>"
-                ));
+            } else if let Some(harness) = &column.filter {
+                if facets::is_expressible_as_filter_value(harness) {
+                    out.push_str(&format!(
+                        "<td class=n><a href=\"/sessions?machine={qm}&harness={qh}&token={t}\">{n}</a></td>",
+                        qm = percent_encode(m),
+                        qh = percent_encode(harness),
+                        t = percent_encode(token),
+                    ));
+                } else {
+                    // A harness containing the value-list separator cannot be
+                    // named by any `--harness` filter — the grammar would split
+                    // it into ids that do not exist, so the link would return a
+                    // different set than the count promises. Same rule as the
+                    // no-prefix cells: a count that says why, never a lying link.
+                    out.push_str(&format!(
+                        "<td class=n title=\"this source's id contains the harness list separator, \
+                         so no harness filter can select it\">{n}</td>"
+                    ));
+                }
             } else {
+                // A producer-split column: the count is a measurement, but no
+                // filter can name one producer inside a shared id space, so the
+                // cell says why instead of promising a set it cannot return.
                 out.push_str(&format!(
-                    "<td class=n><a href=\"/sessions?machine={qm}&harness={qh}&token={t}\">{n}</a></td>",
-                    qm = percent_encode(m),
-                    qh = percent_encode(h),
-                    t = percent_encode(token),
+                    "<td class=n title=\"this id space holds two producers (a web platform and a \
+                     local harness); no harness filter can select one of them\">{n}</td>"
                 ));
             }
         }
@@ -997,7 +1047,7 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
     // Two independent reasons a cell is a count rather than a link, each
     // said only when its column is on the page — a note about a column this
     // table does not hold would be a claim about nothing.
-    if sources.iter().any(|(_, group)| group.is_none()) {
+    if columns.iter().any(|column| column.group.is_none()) {
         out.push_str(&format!(
             "<p class=sub>Sessions counted under <code>{}</code> cannot be selected with \
              <code>--harness</code>: the archived id carries no harness prefix, so the filter \
@@ -1006,14 +1056,28 @@ fn render_matrix(machines: &[String], in_view: &[&UiSession], token: &str) -> St
             esc(NO_HARNESS)
         ));
     }
-    let has_inexpressible = sources
-        .iter()
-        .any(|(source, group)| group.is_some() && !facets::is_expressible_as_filter_value(source));
+    let has_inexpressible = columns.iter().any(|column| {
+        column
+            .filter
+            .as_deref()
+            .is_some_and(|harness| !facets::is_expressible_as_filter_value(harness))
+    });
     if has_inexpressible {
         out.push_str(
             "<p class=sub>A source whose id contains the harness list separator cannot be \
              named by any <code>--harness</code> filter — the filter would split it into ids \
              that do not exist. Those cells are counts, not links.</p>\n",
+        );
+    }
+    if columns
+        .iter()
+        .any(|column| column.group.is_some() && column.filter.is_none())
+    {
+        out.push_str(
+            "<p class=sub>A source whose id space holds two producers (a web platform and a \
+             local harness — <code>grok</code> today) is listed once per producer, and neither \
+             cell links: no <code>--harness</code> filter can select one producer inside a \
+             shared id space. The two rows have independent arrival dates.</p>\n",
         );
     }
     out.push_str("</section>\n");
