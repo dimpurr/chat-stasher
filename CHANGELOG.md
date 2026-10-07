@@ -21,9 +21,17 @@ under its own heading below.
   lifetime. `--list` reports active, expired and revoked keys, and `--revoke`
   persists an irreversible refusal. Posting keys contain a public encryption
   recipient and signing secret, never the inbox decryption identity or an
-  archive key. Backend credentials are supplied separately as a JSON map;
-  their permissions are not probed. CLI send/pull and backend opening remain
-  pending.
+  archive key. The supplied JSON credential map is embedded in the posting
+  secret; its permissions are not probed. Pull CLI and remote provider opening
+  remain pending.
+- **Keyless explicit-file posting to a filesystem inbox.** `send --path <file>
+  --session <native-id>` reads a posting key from `CHAT_STASHER_SEND_KEY` (or
+  the variable named by `--key-env`), checks expiry, encrypts and signs a
+  bounded file with fidelity `unknown`, and posts an opaque object to an
+  absolute `fs://` inbox. It creates no archive key or machine identity.
+  A best-effort local upload receipt skips unchanged retries; missing or
+  unusable receipts cause safe resends. Provider-backed inboxes, registry
+  discovery, pull CLI and scheduling remain pending.
 - **Per-phase timers and counters for one `run-once` pass.** Every
   `run-once` pass now measures the wall time of each phase — registry
   scan, collect (per harness, keyed by harness id), stage audit,
@@ -265,6 +273,14 @@ under its own heading below.
 
 #### Fixed
 
+- **OpenDAL filesystem destinations publish objects atomically.** Concurrent
+  readers no longer see a snapshot before its write finishes. `opendal:fs`
+  defaults `atomic_write_dir` to `.chat-stasher-tmp` under the repository root.
+  OpenDAL creates that directory when opening the backend, including read-only
+  opens: the root needs write permission unless the directory already exists.
+  An explicit `[destinations.<name>.options]` `atomic_write_dir` overrides the
+  default and must stay on the same filesystem. A crashed write can leave
+  staging files; they are not automatically cleaned up.
 - **`collect` accepts long OpenClaw cold transcript filenames.** Hex encoding
   could expand a valid source filename beyond the 255-byte stage directory
   limit, causing `File name too long`. Oversized native and composed IDs now

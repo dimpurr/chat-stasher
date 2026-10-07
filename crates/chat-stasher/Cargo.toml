@@ -162,7 +162,7 @@ version = "2.2.0"
 [dependencies.opendal]
 version = "=0.57.0"
 default-features = false
-features = ["blocking", "services-memory"]
-[dev-dependencies.tokio]
+features = ["blocking", "services-memory", "services-fs"]
+[dependencies.tokio]
 version = "1"
 features = ["rt-multi-thread"]

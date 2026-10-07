@@ -208,6 +208,9 @@ enum Command {
     /// Issuance prints the secret once on stdout, after its policy is durable.
     /// No backend permissions are probed; supply a provider-scoped write credential.
     SendKey(SendKeyArgs),
+    /// Encrypt and post an explicit file using an environment posting key.
+    /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
+    Send(SendArgs),
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -1657,6 +1660,7 @@ fn run() -> ExitCode {
         Command::Init => cmd_init(),
         Command::InboxInit { name, locator } => cmd_inbox_init(&name, &locator),
         Command::SendKey(args) => cmd_send_key(args),
+        Command::Send(args) => cmd_send(args),
         Command::Setup {
             stage,
             destination,
@@ -17950,6 +17954,66 @@ fn cmd_send_key(args: SendKeyArgs) -> ExitCode {
             } else {
                 ExitCode::from(1)
             }
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct SendArgs {
+    /// Explicit transcript file, bounded to 4 MiB; fidelity is unknown.
+    #[arg(long)]
+    path: PathBuf,
+    /// Native session id supplied by the producer; no machine id is inferred.
+    #[arg(long)]
+    session: String,
+    /// Name of the environment variable holding the posting secret.
+    #[arg(long, default_value = "CHAT_STASHER_SEND_KEY")]
+    key_env: String,
+}
+fn cmd_send(args: SendArgs) -> ExitCode {
+    let token = match std::env::var(&args.key_env) {
+        Ok(token) if !token.is_empty() => token,
+        _ => {
+            eprintln!("send usage error: posting key environment variable required");
+            return ExitCode::from(2);
+        }
+    };
+    let key = match chat_stasher::send_key::SendKey::parse(&token) {
+        Ok(key) => key,
+        Err(_) => {
+            eprintln!("send refused: invalid posting key");
+            return ExitCode::from(1);
+        }
+    };
+    let now = match u64::try_from(chrono::Utc::now().timestamp()) {
+        Ok(now) => now,
+        Err(_) => {
+            eprintln!("send incomplete: clock unavailable");
+            return ExitCode::from(3);
+        }
+    };
+    let cursor_root = scanner::xdg_state_home().join("chat-stasher/send-cursors");
+    match chat_stasher::send::send_explicit(&args.path, &args.session, &key, now, &cursor_root) {
+        Ok(report) => {
+            if !report.cursor_saved {
+                eprintln!("send warning: resume cursor unavailable; retry may resend");
+            }
+            if writeln!(
+                std::io::stdout().lock(),
+                "send complete: uploaded={}; resumed={}",
+                usize::from(!report.resumed),
+                usize::from(report.resumed)
+            )
+            .is_err()
+            {
+                eprintln!("send incomplete: output unavailable");
+                return ExitCode::from(3);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("send failed: {}", error.reason);
+            ExitCode::from(if error.incomplete { 3 } else { 1 })
         }
     }
 }
