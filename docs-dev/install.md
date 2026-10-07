@@ -141,6 +141,22 @@ and the leg carries on by itself as soon as one is open. One open page per
 platform you want archived is the whole operational requirement; it is the price
 of the permission model, not a fault to wait out.
 
+🔴 **Opening the tabs is necessary but not sufficient: the channels die with the
+worker.** When Chrome reclaims the service worker, the injected pages go with
+it and the leg falls back to `no-http-port` even with every tab still open —
+only a reload of the page re-injects. For a browser that has to keep working
+unattended there is an opt-in dev helper, `scripts/dev/cdp-keep-platform-tabs.mjs`:
+pointed at a dedicated test browser's debugging port, it reads the leg's last
+tick from the extension's own storage over CDP, makes sure each platform has a
+tab (opening its canonical host for any that has none, and never a second tab
+for a platform already represented by a host it redirects through), and reloads
+those tabs — exact-host allowlist, one reload each, ≥10 s apart — whenever the
+leg reports `no-http-port`
+(`scripts/dev/cdp-keep-platform-tabs.mjs:25-36`). It is deliberately not wired
+into anything automatic: it drives a real browser, so it must never be pointed
+at a browser whose tabs you care about, and `--dry-run` prints what a pass
+would do without touching anything.
+
 🔴 There is no longer a middle tier: the "can list conversations but saves none of
 their content" row was Perplexity's, and W84 (2026-09-23) filled that plan's body
 segment in from a live probe, so every platform in the table above now fetches

@@ -518,6 +518,15 @@ jobs:
       - name: Extension reload script behaves
         run: bash scripts/dev/test-reload-extension.sh
 
+      # W932 · the no-http-port keepalive helper. Same job, same reason: it runs
+      # against a mock DevTools endpoint (HTTP + WebSocket) built into the test
+      # file, so it needs no browser and no toolchain. The mock records every
+      # Page.reload with its timestamp, which is what makes the two properties
+      # that matter assertable — that only exact-allowlist hosts are reloaded,
+      # and that reloads are spaced — without driving a real browser.
+      - name: Platform-tab keepalive helper behaves
+        run: bash scripts/dev/test-cdp-keep-platform-tabs.sh
+
       # The two W289 guard self-tests. Each drives its script against a
       # throwaway cache root with the parts it cannot own (a real repository or
       # the user's config) shimmed on PATH, so they need no repository, no

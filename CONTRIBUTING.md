@@ -156,6 +156,7 @@ bash scripts/selftest-check-static-binary.sh
 bash scripts/selftest-crates-version-state.sh
 bash scripts/selftest-npm-latest-tag.sh
 bash scripts/dev/test-reload-extension.sh
+bash scripts/dev/test-cdp-keep-platform-tabs.sh
 bash scripts/dev/test-rebase-onto-main.sh
 bash scripts/dev/test-merge-drivers.sh
 bash scripts/dev/test-cache-isolation-guard.sh
@@ -173,6 +174,21 @@ bash scripts/smoke/linux-smoke.sh
 repository and a stub build command, so it needs no extension toolchain, no
 network and no browser. It is the guard for the reload script's mechanics, which
 is why it sits here rather than only in the section below that describes them.
+The cases from 16 on are the guard for which `node_modules` the build runs from:
+a checkout whose install cannot serve the ref being built must trigger an
+install *inside the throwaway worktree* and must not be written to, because the
+checkout it was invoked in may be the tree the developer's own browser loads
+from.
+
+`test-cdp-keep-platform-tabs.sh` is the same shape for
+`scripts/dev/cdp-keep-platform-tabs.mjs`, the opt-in dev helper that keeps the
+platform tabs the backfill leg needs open in a dedicated CDP test browser. It
+runs against a mock DevTools endpoint built into the test file — HTTP plus a
+minimal WebSocket handshake, no browser and no network — and that mock records
+every `Page.reload` with its own timestamp, which is what makes the two
+properties worth asserting assertable without driving a real Chrome: only an
+exact-host allowlist is reloaded, and the reloads are spaced. Both are the
+properties that keep the helper from being a way to hammer someone's browser.
 
 `test-rebase-onto-main.sh` and `test-merge-drivers.sh` are the pair for the
 derived-file merge rule described under "Resolving a merge" below. Both build
@@ -482,6 +498,18 @@ inside the window the next run refuses to touch the load dir and asks for
 extension is left manual, because the browser offers no supported API for it; the
 script prints it: toggle the extension off and on in chrome://extensions, then
 reload the platform tabs.
+
+The worktree borrows the checkout's `node_modules` by symlink so the build needs
+no install and no network — but only when that tree can serve the ref being
+built. The check is against the *ref's* `apps/extension/package.json`, not the
+checkout's, because the ref is what gets built: a ref whose dependencies moved
+past the checkout's install is exactly the stale case. When a declared
+dependency is not linked, the script says so by name and runs
+`pnpm install --frozen-lockfile --prefer-offline` **inside the throwaway
+worktree** — never in your checkout, which is very often the directory your own
+browser loads its unpacked extension from. `--frozen-lockfile` is what keeps
+that honest: a ref whose lockfile disagrees fails there rather than quietly
+building a different dependency tree than the one committed.
 
 That toggle is removable when Chrome was started with
 `--remote-debugging-port`. Passing `--cdp-port <port>` makes the script find the

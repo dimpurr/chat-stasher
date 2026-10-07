@@ -16,6 +16,17 @@
 # It builds from a throwaway git worktree of the ref so uncommitted edits in
 # the current checkout can never leak into the build.
 #
+# The worktree symlinks the checkout's node_modules so the build runs offline
+# and fast — but only when that node_modules can serve the ref being built. The
+# tree to satisfy is the *worktree's* package.json, not the checkout's: a
+# --ref whose dependencies moved past the checkout's install is exactly the
+# stale case, and it is the worktree's bundle that dies with "Cannot find
+# module 'ajv/dist/2020.js'", which reads as a source bug and is not one. When
+# the checkout's copy is missing or stale the script installs inside the
+# worktree instead (pnpm install --frozen-lockfile --prefer-offline) and never
+# writes to the operator checkout, which may be the tree the user's own browser
+# loads from.
+#
 # The swap is two renames, not one atomic step: the build is staged in a
 # sibling temp directory, the previous build is renamed aside to
 # <load-dir>.prev, and then the staged directory is renamed into place. Each
@@ -61,8 +72,11 @@
 # must leave a built extension (including manifest.json) under
 # <extension-dir>/.output/chrome-mv3/. When CS_RELOAD_TEST_FAIL_SWAP=1 the
 # rename of the staged build into place is forced to fail, so the recovery path
-# can be exercised without a real filesystem failure. Both exist so that the
-# bash test needs no toolchain.
+# can be exercised without a real filesystem failure. CS_RELOAD_INSTALL_CMD,
+# when set, replaces the pnpm install that a missing or stale node_modules
+# triggers: it is invoked as "$CS_RELOAD_INSTALL_CMD" <extension-dir> with the
+# worktree's extension dir, and must leave a complete node_modules there. All
+# three exist so that the bash test needs no toolchain.
 
 set -euo pipefail
 
@@ -92,6 +106,37 @@ dir_is_empty() {
   [ -d "$1" ] || return 1
   found="$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 1
   [ -z "$found" ]
+}
+
+# Prints the direct dependencies `manifest` declares that `nm` does not link,
+# comma-separated; prints nothing when the tree is complete. pnpm links direct
+# dependencies at the top level, so a missing one means the install cannot
+# serve this manifest — the W932 failure was a build of a ref that declared ajv
+# 8.20.0 against a node_modules that linked nothing. Transitive dependencies
+# are not walked: pnpm creates a top-level link and its .pnpm entry together,
+# so a present link implies a present entry, and the install a missing link
+# triggers fixes anything deeper too. `optionalDependencies` are not asked
+# either: pnpm legitimately omits a package whose platform this machine is
+# not, and treating that as stale would reinstall on every run. A manifest that
+# cannot be parsed prints nothing, which is "assume complete": the failure there
+# is the build's to report, not this check's.
+nm_missing_deps() {
+  local nm="$1" manifest="$2"
+  [ -d "$nm" ] || { printf 'the whole directory'; return 0; }
+  python3 - "$nm" "$manifest" <<'PY'
+import json, os, sys
+nm, manifest = sys.argv[1], sys.argv[2]
+try:
+    with open(manifest) as fh:
+        pkg = json.load(fh)
+except Exception:
+    sys.exit(0)
+deps = {}
+deps.update(pkg.get("dependencies") or {})
+deps.update(pkg.get("devDependencies") or {})
+missing = [d for d in sorted(deps) if not os.path.exists(os.path.join(nm, *d.split("/")))]
+sys.stdout.write(", ".join(missing))
+PY
 }
 
 REF=HEAD
@@ -293,19 +338,53 @@ git worktree add --detach "$WT" "$REF" || {
 
 # The throwaway worktree shares only git history, not node_modules or the
 # generated .wxt. Symlink whichever the current checkout has so the build runs
-# offline and fast without re-running pnpm install.
+# offline and fast without re-running pnpm install — but only when the
+# checkout's node_modules can serve the ref being built (see the header): the
+# manifest to satisfy is the worktree's, and a stale one fails deep inside the
+# bundle with a message that reads as a source bug and is not one.
 CUR_NM="$EXT_DIR/node_modules"
 CUR_WXT="$EXT_DIR/.wxt"
-[ -d "$CUR_NM" ] && ln -s "$CUR_NM" "$WT/apps/extension/node_modules"
-[ -d "$CUR_WXT" ] && ln -s "$CUR_WXT" "$WT/apps/extension/.wxt"
+WT_EXT="$WT/apps/extension"
+
+# A check that cannot run (python3 missing) is not a check that passed: it must
+# not symlink a tree nobody looked at. It returns non-zero and falls through to
+# the worktree's own install below.
+if MISSING_DEPS="$(nm_missing_deps "$CUR_NM" "$WT_EXT/package.json")" && [ -z "$MISSING_DEPS" ]; then
+  ln -s "$CUR_NM" "$WT_EXT/node_modules"
+  # .wxt is generated build state owned by whichever node_modules the build
+  # uses: it travels with the copy it was prepared for. Reusing the checkout's
+  # when the build runs from a worktree-local install would also mean writing
+  # into the operator checkout, which is the tree the user's browser loads from.
+  [ -d "$CUR_WXT" ] && ln -s "$CUR_WXT" "$WT_EXT/.wxt"
+fi
+
+if ! path_exists "$WT_EXT/node_modules"; then
+  # Nothing usable to symlink: install the worktree's own copy from the shared
+  # pnpm store. --frozen-lockfile refuses to move the lockfile, so a ref whose
+  # dependencies changed fails here rather than building a different tree than
+  # the one committed; --prefer-offline keeps it off the network when the
+  # store already has the packages.
+  command -v pnpm >/dev/null 2>&1 || {
+    echo "reload-extension.sh: the checkout's node_modules cannot serve $REF (missing: ${MISSING_DEPS:-undeterminable}) and pnpm is not on PATH to install the worktree's copy" >&2
+    exit 1
+  }
+  echo "reload-extension.sh: the checkout's node_modules cannot serve $REF (missing: ${MISSING_DEPS:-undeterminable}) — installing inside the throwaway worktree (the checkout is not touched)"
+  if [ -n "${CS_RELOAD_INSTALL_CMD:-}" ]; then
+    # Test-only stub install (see the header): invoked with the worktree's
+    # extension dir, exactly where pnpm would run.
+    "$CS_RELOAD_INSTALL_CMD" "$WT_EXT"
+  else
+    ( cd "$WT_EXT" && pnpm -s install --frozen-lockfile --prefer-offline )
+  fi
+fi
 
 echo "reload-extension.sh: building $REF (build $N) -> $NEW_VERSION"
 
 if [ -n "${CS_RELOAD_BUILD_CMD:-}" ]; then
   # Test-only stub build: the script leaves ./output/chrome-mv3 behind.
-  "$CS_RELOAD_BUILD_CMD" "$WT/apps/extension" "$N"
+  "$CS_RELOAD_BUILD_CMD" "$WT_EXT" "$N"
 else
-  ( cd "$WT/apps/extension" && CS_BUILD_NUMBER="$N" pnpm -s build )
+  ( cd "$WT_EXT" && CS_BUILD_NUMBER="$N" pnpm -s build )
 fi
 
 NEW_MANIFEST="$WT/apps/extension/.output/chrome-mv3/manifest.json"

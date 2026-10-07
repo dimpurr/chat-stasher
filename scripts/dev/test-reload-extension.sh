@@ -50,12 +50,27 @@ trap 'exit 143' TERM
 # --- a minimal committed repo so `git worktree add` has a ref to build ------
 REPO="$SCRATCH/repo"
 mkdir -p "$REPO/apps/extension"
-printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0"}' > "$REPO/apps/extension/package.json"
+printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0","dependencies":{"left-pad":"1.3.0"}}' > "$REPO/apps/extension/package.json"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.invalid
 git -C "$REPO" config user.name test
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm fixture
+# A ref from before the extension declared ajv, so case 18 can build a tree
+# whose manifest the checkout's node_modules does satisfy.
+OLD_REF="$(git -C "$REPO" rev-parse HEAD)"
+printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0","dependencies":{"left-pad":"1.3.0","ajv":"8.20.0"}}' > "$REPO/apps/extension/package.json"
+git -C "$REPO" commit -qam 'declare ajv'
+
+# The checkout's node_modules, complete for what the committed package.json
+# declares. It is created after the commits, so it stays untracked — the real
+# setup, where node_modules is never committed and the script symlinks the
+# checkout's copy into the throwaway worktree. The staleness cases below break
+# it on purpose, the way W932 found it: a ref that declares a dependency the
+# checkout's install does not link.
+mkdir -p "$REPO/apps/extension/node_modules/left-pad" "$REPO/apps/extension/node_modules/ajv"
+printf '%s\n' '{"name":"left-pad","version":"1.3.0"}' > "$REPO/apps/extension/node_modules/left-pad/package.json"
+printf '%s\n' '{"name":"ajv","version":"8.20.0"}' > "$REPO/apps/extension/node_modules/ajv/package.json"
 
 # --- a stub build command (invoked as <cmd> <extension-dir> <build-number>) --
 STUB="$SCRATCH/stub-build.sh"
@@ -275,6 +290,154 @@ stale="$(git -C "$REPO" worktree list | grep "chat-stasher-reload" || true)"
 [ -z "$stale" ] || fail "a stale worktree entry was left in git worktree list: $stale"
 note "an undeletable worktree is reported and left no stale entry"
 
+# --- a stale or missing node_modules for the ref being built -----------------
+# The script symlinks the checkout's node_modules into the throwaway worktree so
+# the build runs offline and fast, but a tree that cannot serve the ref is worse
+# than none: the build dies inside the bundle with "Cannot find module …", which
+# reads as a source bug and is not one (W932: origin/main declared ajv 8.20.0,
+# the operator checkout linked nothing). The script must detect that and install
+# inside the worktree instead, and must never write to the operator checkout,
+# which may be the tree the user's own browser loads from.
+#
+# The manifest that decides "can this tree serve the build" is the *worktree's*,
+# not the checkout's, because the worktree is what gets built — case 18 is the
+# check that pins which of the two the script consulted.
+#
+# CS_RELOAD_INSTALL_CMD (test-only, documented in the script header) stands in
+# for `pnpm install`: it completes the worktree's node_modules and records that
+# it was called. The build stub used here fails unless the worktree's
+# node_modules really carries ajv, so a pass means the install ran there — and
+# the checkout's own copy must still lack ajv afterwards, which is what "never
+# in the operator checkout" means observably.
+STUB2="$SCRATCH/stub-build2.sh"
+cat > "$STUB2" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ $# -eq 2 ] || exit 99
+extdir="$1"; n="$2"
+if [ -e "$extdir/UNCOMMITTED-MARKER" ]; then
+  echo "stub build: uncommitted edits leaked into the build" >&2
+  exit 98
+fi
+# The worktree's node_modules must carry ajv: a stale symlink from the checkout
+# would be missing it, and the build must not run from such a tree.
+if [ ! -e "$extdir/node_modules/ajv/package.json" ]; then
+  echo "stub build: the worktree's node_modules is incomplete (no ajv) — a stale symlink was used" >&2
+  exit 97
+fi
+# .wxt is generated build state that belongs to whichever node_modules the build
+# uses. Recorded here so a case can assert it travelled with that copy: a
+# worktree-local install must not hand it the checkout's, because writing the
+# build's generated files into the operator checkout is what the whole path is
+# there to avoid.
+if [ -L "$extdir/.wxt" ]; then
+  echo "wxt=symlink" >> "$WXT_LOG"
+elif [ -d "$extdir/.wxt" ]; then
+  echo "wxt=dir" >> "$WXT_LOG"
+else
+  echo "wxt=none" >> "$WXT_LOG"
+fi
+out="$extdir/.output/chrome-mv3"
+mkdir -p "$out"
+printf '{"name":"__MSG_extName__","version":"0.1.0.%s"}\n' "$n" > "$out/manifest.json"
+EOF
+chmod +x "$STUB2"
+INSTALL_STUB="$SCRATCH/stub-install.sh"
+cat > "$INSTALL_STUB" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+extdir="\$1"
+echo "install \$extdir" >> "$SCRATCH/install-log"
+mkdir -p "\$extdir/node_modules/ajv"
+printf '%s\n' '{"name":"ajv","version":"8.20.0"}' > "\$extdir/node_modules/ajv/package.json"
+EOF
+chmod +x "$INSTALL_STUB"
+# Exported, because the stub build runs as a subprocess of the reload script:
+# an unexported variable would reach it empty and the append would fail there,
+# not here.
+export WXT_LOG="$SCRATCH/wxt-log"
+
+# The checkout generates .wxt as a real directory; give it one holding a marker,
+# so the cases below can tell "symlinked to the checkout" from "the worktree's
+# own".
+mkdir -p "$REPO/apps/extension/.wxt"
+printf '%s\n' 'prepared by an earlier build' > "$REPO/apps/extension/.wxt/types.d.ts"
+
+# 16. a complete node_modules is symlinked, no install runs, and the worktree
+#     reuses the checkout's .wxt — the fast path, unchanged.
+: > "$SCRATCH/install-log"
+: > "$WXT_LOG"
+if ! CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 100 >"$SCRATCH/o100" 2>&1; then
+  fail "a reload with a complete node_modules should succeed"; cat "$SCRATCH/o100" >&2
+fi
+[ ! -s "$SCRATCH/install-log" ] || fail "a complete node_modules must not trigger an install"
+[ "$(cat "$WXT_LOG")" = "wxt=symlink" ] || fail "the complete fast path should reuse the checkout's .wxt, got: $(tr '\n' ' ' < "$WXT_LOG")"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.100" ] || fail "expected 0.1.0.100"
+note "a complete node_modules is symlinked and triggers no install"
+
+# 17. the ref declares ajv and the checkout's node_modules does not link it:
+#     detected by name, installed inside the worktree, checkout left untouched.
+rm -rf "$REPO/apps/extension/node_modules/ajv"
+: > "$SCRATCH/install-log"
+: > "$WXT_LOG"
+if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 101 >"$SCRATCH/o101" 2>&1; then
+  fail "a reload with a stale node_modules should install in the worktree and succeed"; cat "$SCRATCH/o101" >&2
+fi
+grep -q "cannot serve HEAD (missing: ajv" "$SCRATCH/o101" || fail "the stale node_modules should be reported by which dep is missing"
+grep -q "installing inside the throwaway worktree" "$SCRATCH/o101" || fail "the worktree install should be reported"
+[ -s "$SCRATCH/install-log" ] || fail "the install stub should have been called"
+[ ! -e "$REPO/apps/extension/node_modules/ajv" ] || fail "the install must not write into the operator checkout"
+[ "$(cat "$WXT_LOG")" = "wxt=none" ] || fail "a worktree-local install must not symlink the checkout's .wxt, got: $(tr '\n' ' ' < "$WXT_LOG")"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.101" ] || fail "expected 0.1.0.101"
+note "a node_modules that cannot serve the ref is detected and installed inside the worktree"
+
+# 18. the manifest that decides is the *ref's*, not the checkout's. Here the
+#     two disagree: the checkout's own (uncommitted) package.json no longer
+#     declares ajv and its node_modules does not link ajv, so a check that
+#     asked the checkout would call that tree complete and symlink it — and the
+#     build of HEAD, which does declare ajv, would then die inside the bundle.
+#     The script must ask the ref instead and install in the worktree.
+printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0","dependencies":{"left-pad":"1.3.0"}}' > "$REPO/apps/extension/package.json"
+: > "$SCRATCH/install-log"
+: > "$WXT_LOG"
+if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 102 >"$SCRATCH/o102" 2>&1; then
+  fail "a reload of a ref that declares a dep the checkout's node_modules lacks should install in the worktree"; cat "$SCRATCH/o102" >&2
+fi
+[ -s "$SCRATCH/install-log" ] || fail "the install should have run: the ref, not the checkout, decides what the build needs"
+[ ! -e "$REPO/apps/extension/node_modules/ajv" ] || fail "the install must not write into the operator checkout"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.102" ] || fail "expected 0.1.0.102"
+note "the ref's manifest, not the checkout's, decides whether node_modules is stale"
+
+# 19. and the other direction: a ref that predates the dependency does not need
+#     the link the checkout is missing, so the symlinked tree is the right one
+#     and no install must run. Without this, "install whenever ajv is absent"
+#     would pass as "detects staleness".
+: > "$SCRATCH/install-log"
+if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB" bash "$RELOAD" --load-dir "$LOAD" --ref "$OLD_REF" --build-number 103 >"$SCRATCH/o103" 2>&1; then
+  fail "a reload of a ref whose deps the checkout does link should succeed"; cat "$SCRATCH/o103" >&2
+fi
+[ ! -s "$SCRATCH/install-log" ] || fail "a ref that declares no ajv must not trigger an install"
+[ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.103" ] || fail "expected 0.1.0.103"
+note "a ref that does not need the missing link is served by the checkout's node_modules"
+printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0","dependencies":{"left-pad":"1.3.0","ajv":"8.20.0"}}' > "$REPO/apps/extension/package.json"
+
+# 20. an absent node_modules installs inside the worktree too.
+mv "$REPO/apps/extension/node_modules" "$SCRATCH/nm-backup"
+: > "$SCRATCH/install-log"
+: > "$WXT_LOG"
+if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 104 >"$SCRATCH/o104" 2>&1; then
+  fail "a reload with no node_modules should install in the worktree and succeed"; cat "$SCRATCH/o104" >&2
+fi
+grep -q "cannot serve HEAD" "$SCRATCH/o104" || fail "the missing node_modules should be reported"
+[ -s "$SCRATCH/install-log" ] || fail "the install stub should have been called"
+[ ! -e "$SCRATCH/nm-backup/ajv" ] || fail "the install must not write into the operator checkout"
+mv "$SCRATCH/nm-backup" "$REPO/apps/extension/node_modules"
+# Put back what case 17 removed, so the checkout's node_modules is complete
+# again for the CDP cases below.
+mkdir -p "$REPO/apps/extension/node_modules/ajv"
+printf '%s\n' '{"name":"ajv","version":"8.20.0"}' > "$REPO/apps/extension/node_modules/ajv/package.json"
+note "an absent node_modules installs inside the worktree, not the checkout"
+
 # --- CDP reload (--cdp-port) ------------------------------------------------
 # These cases mock Chrome's DevTools endpoint: a tiny HTTP + WebSocket server
 # that lists one chat-stasher service worker and answers Runtime.evaluate the
@@ -443,7 +606,7 @@ EOF
     wait "$mock_pid" 2>/dev/null || true
   }
 
-  # 16. --cdp-port reloads the worker and verifies the version. The mock starts
+  # 21. --cdp-port reloads the worker and verifies the version. The mock starts
   #     on 0.1.0.89 and moves to the expected version only when it sees the
   #     reload call, so a pass means the call really arrived.
   start_mock ok 0.1.0.89 0.1.0.90
@@ -459,7 +622,7 @@ EOF
   stop_mock
   note "--cdp-port reloads the worker and verifies the new version"
 
-  # 17. a reachable CDP port with no chat-stasher worker fails, and the swap
+  # 22. a reachable CDP port with no chat-stasher worker fails, and the swap
   #     that already happened stays (it is not rolled back by a CDP failure).
   start_mock notfound 0.1.0.90 0.1.0.91
   port="$(mock_port)"
@@ -472,7 +635,7 @@ EOF
   stop_mock
   note "a CDP port with no matching worker fails and prints the manual step"
 
-  # 18. the reload call can be sent while the worker never comes back on the
+  # 23. the reload call can be sent while the worker never comes back on the
   #     new version. The helper must wait out its budget and fail, otherwise the
   #     version check would be decoration. CS_CDP_TIMEOUT_MS (test-only, see the
   #     helper header) keeps this under a second.
@@ -486,7 +649,7 @@ EOF
   stop_mock
   note "a worker stuck on the old version fails verification"
 
-  # 19. an unreachable CDP port fails fast with the transport error. Port 1 is
+  # 24. an unreachable CDP port fails fast with the transport error. Port 1 is
   #     privileged, so nothing can be listening on it.
   if bash "$RELOAD" --load-dir "$LOAD" --build-number 93 --cdp-port 1 >"$SCRATCH/o19" 2>&1; then
     fail "an unreachable CDP port should exit non-zero"
@@ -494,7 +657,7 @@ EOF
   grep -q "no chat-stasher service worker found" "$SCRATCH/o19" || fail "the unreachable port should be reported"
   note "an unreachable CDP port fails and prints the manual step"
 
-  # 20. --cdp-port is validated before any build: a non-port is a usage error.
+  # 25. --cdp-port is validated before any build: a non-port is a usage error.
   if bash "$RELOAD" --load-dir "$LOAD" --cdp-port not-a-port >"$SCRATCH/o20" 2>&1; then
     fail "a bad --cdp-port should fail"
   else
@@ -504,7 +667,7 @@ EOF
   grep -q "cdp-port must be a TCP port number" "$SCRATCH/o20" || fail "the usage error should name --cdp-port"
   note "--cdp-port is validated up front as a usage error"
 
-  # 21. a dry run with --cdp-port plans the reload and touches nothing.
+  # 26. a dry run with --cdp-port plans the reload and touches nothing.
   if ! bash "$RELOAD" --load-dir "$LOAD" --cdp-port "$port" --dry-run >"$SCRATCH/o21" 2>&1; then
     fail "a dry run with --cdp-port should exit 0"
   fi
