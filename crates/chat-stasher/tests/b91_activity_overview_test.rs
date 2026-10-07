@@ -899,6 +899,127 @@ fn activity_index_leaves_an_unrecorded_codex_dimension_absent() {
     );
 }
 
+/// One synthetic Continue session file (`sessions/<id>.json`) for a session that
+/// names — or, with `workspace` set to `None`, does not name — its workspace
+/// directory. Written **pretty-printed**, the shape Continue puts on disk, so
+/// the shard's physical lines do not parse on their own.
+fn continue_document(session_id: &str, workspace: Option<&str>) -> String {
+    let workspace = workspace
+        .map(|directory| format!("  \"workspaceDirectory\": \"{directory}\",\n"))
+        .unwrap_or_default();
+    format!(
+        "{{\n  \"sessionId\": \"{session_id}\",\n{workspace}  \"title\": \"fixture title\",\n  \
+         \"messages\": [\n    {{\n      \"role\": \"user\",\n      \"content\": \"synthetic \
+         question\"\n    }}\n  ]\n}}\n"
+    )
+}
+
+/// TICKET-4D-11 · the workspace directory a Continue session file names reaches
+/// the written index as both dimensions that field answers: the path the session
+/// ran at, and the workspace identity the harness itself recorded.
+#[test]
+fn activity_index_records_the_workspace_directory_a_continue_session_names() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "continue.mbp-test.sess-1-continue-4d";
+    let document = continue_document("sess-1-continue-4d", Some("/w/fixture-workspace"));
+    let lines: Vec<String> = document.lines().map(str::to_string).collect();
+    assert!(
+        lines.len() > 1
+            && lines
+                .iter()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_err()),
+        "premise: a pretty-printed document whose lines do not parse alone"
+    );
+    write_shard(&stage, machine, session, &lines);
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/fixture-workspace"]),
+        "the directory the session was opened in is recorded as a path: {row}"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/fixture-workspace"]),
+        "the same recorded value is the workspace Continue named: {row}"
+    );
+    assert!(
+        row["dimensions"].get("tenant").is_none(),
+        "Continue records no tenancy field, so none appears: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("status").is_none(),
+        "and no lifecycle field either: {}",
+        row["dimensions"]
+    );
+}
+
+/// A Continue session that recorded no workspace directory states nothing, and
+/// the written index states it back: no dimensions object at all — never an
+/// empty string every such session would share, and never a directory inferred
+/// from where the archive found the file.
+#[test]
+fn activity_index_leaves_a_continue_workspace_the_session_named_nothing_about_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "continue.mbp-test.sess-1-continue-4d";
+    let document = continue_document("sess-1-continue-4d", None);
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &document.lines().map(str::to_string).collect::<Vec<_>>(),
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "a session that named no workspace carries no dimensions object: {row}"
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]

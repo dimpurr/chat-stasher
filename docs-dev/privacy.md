@@ -450,7 +450,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2766-2815`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2682-2731`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -504,7 +504,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2348-2516`,
+(`crates/chat-stasher/src/activity.rs:2335-2572`,
 `crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -553,6 +553,21 @@ execution state, not session state. The sealed export itself did not
 gain a byte; what is new is that these two fields now also sit on the
 index line beside it, as plaintext session metadata like the paths and
 ids above.
+
+A Continue session file names one workspace fact of its own:
+`workspaceDirectory`, the directory its workspace was opened in. Continue records
+no separate project key, so this one recorded value lands on both dimensions — as
+`cwd`, because it is a filesystem path like any other here, and as `container`,
+because it is the workspace the harness itself wrote down. That is the one place
+this build asks a directory to name a workspace, and the asking comes from the
+source rather than from us: the value is copied, not derived, and neither
+dimension is filled from the other. The field's absence leaves both unobserved: a
+session that recorded no workspace directory carries no dimensions object at all.
+Continue records nothing for tenancy or lifecycle, so
+those two stay empty for it, and the archive directory a session file was found
+in is not a workspace the session named. As with the Claude Code and opencode
+readers, the sealed session file gained no byte: what is new is that its
+workspace field also sits on the index line beside it.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,

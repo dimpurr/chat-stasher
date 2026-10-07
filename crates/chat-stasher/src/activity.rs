@@ -2336,13 +2336,14 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Six
+/// opposed to what the collection path or the registry already recorded. Seven
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
 /// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
 /// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
-/// row's `cwd`) and `codex` (its `session_meta` record's working directory
-/// and repository); every other harness answers with the empty set, which is
+/// row's `cwd`), `codex` (its `session_meta` record's working directory
+/// and repository), and `continue` (the workspace directory its session
+/// file names); every other harness answers with the empty set, which is
 /// the honest answer for a dimension nothing was read from — and never a
 /// value inferred from the harness name.
 ///
@@ -2437,6 +2438,32 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     continue;
                 };
                 fold_openclaw_dimensions(&mut dimensions, &record);
+            }
+        }
+        "continue" => {
+            // Continue writes one session as one **pretty-printed JSON file**
+            // (`sessions/<id>.json`), so its lines do not parse individually —
+            // the same framing problem gemini-cli has, solved the same way: try
+            // each line first, then re-read the body as the document it is.
+            let mut saw_workspace = false;
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                if fold_continue_dimensions(&mut dimensions, &record) {
+                    saw_workspace = true;
+                }
+            }
+            if !saw_workspace {
+                let body = lines.join("\n");
+                let documents = serde_json::Deserializer::from_str(&body)
+                    .into_iter::<serde_json::Value>()
+                    .collect::<Result<Vec<_>, _>>();
+                if let Ok(documents) = documents {
+                    for document in &documents {
+                        fold_continue_dimensions(&mut dimensions, document);
+                    }
+                }
             }
         }
         _ => {}
@@ -2697,6 +2724,34 @@ fn fold_openclaw_dimensions(
     if archived {
         dimensions.insert_status("archived");
     }
+}
+
+/// Continue states one provenance fact on the **top level** of its session
+/// document: `workspaceDirectory`, the directory the session's workspace was
+/// opened in. TICKET-4D-11 sends that one recorded field to the two dimensions
+/// it answers, and they are two different questions about the same bytes: the
+/// value is a filesystem path, so it is the session's `cwd` like any other path
+/// here; and it is also the **workspace** Continue itself named, which is what
+/// `container` is for — for this harness the workspace and its directory are one
+/// recorded value, so neither dimension is derived from the other and both come
+/// from the field the source wrote. Nothing else is consulted to fill a dimension
+/// this field leaves empty, which is why `tenant` and `status` stay unobserved
+/// for a Continue session: the measurement found no field for them.
+///
+/// A document that records no non-empty string under the key states nothing, so
+/// both dimensions stay exactly as empty as they were. Returns whether a
+/// directory was folded, so the caller can tell a body whose lines were read from
+/// one whose lines never parsed at all.
+fn fold_continue_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) -> bool {
+    let Some(workspace) = non_empty_str(record.get("workspaceDirectory")) else {
+        return false;
+    };
+    dimensions.insert_cwd(workspace.clone());
+    dimensions.insert_container(workspace);
+    true
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -3876,6 +3931,128 @@ mod tests {
             json.contains(r#""container":["synthetic-agent"]"#),
             "line: {json}"
         );
+        assert!(!json.contains("status"), "line: {json}");
+    }
+
+    // --------------------------------------------- TICKET-4D-11 · continue
+    //
+    // Continue states one provenance fact on the top level of its session
+    // document: `workspaceDirectory`, the workspace the session was opened in.
+
+    /// One Continue session file (`sessions/<id>.json`) carrying whatever
+    /// top-level fields the caller spells in, so each case states exactly which
+    /// fields it is about.
+    fn continue_doc(fields: &str) -> String {
+        format!(
+            r#"{{"sessionId":"sess-1-continue-4d","title":"t","messages":[{{"role":"user","content":"synthetic question"}}]{fields}}}"#
+        )
+    }
+
+    #[test]
+    fn a_continue_session_records_its_workspace_directory_as_cwd_and_container() {
+        let line = continue_doc(r#","workspaceDirectory":"/w/one""#);
+        let row = build_row("s", "mbp", "continue", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["/w/one"],
+            "the workspace directory is the workspace identity Continue itself \
+             wrote down, and the ticket sends that one recorded value to both"
+        );
+        assert!(row.dimensions.tenant.is_empty());
+        assert!(row.dimensions.status.is_empty());
+    }
+
+    /// Continue writes its session file **pretty-printed**, so — like the
+    /// gemini-cli document — its physical lines do not parse on their own and
+    /// the field is read from the whole document.
+    #[test]
+    fn a_pretty_printed_continue_document_yields_its_workspace_directory() {
+        let doc = format!(
+            "{{\n  \"sessionId\": \"sess-1-continue-4d\",\n  \"workspaceDirectory\": \
+             \"/w/one\",\n  \"messages\": [\n    {{\n      \"role\": \"user\",\n      \
+             \"content\": \"synthetic question\"\n    }}\n  ]\n}}\n"
+        );
+        let lines: Vec<&str> = doc.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .all(|l| serde_json::from_str::<serde_json::Value>(l).is_err()),
+            "premise: no individual line parses"
+        );
+        let row = build_row("s", "mbp", "continue", &lines);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(row.dimensions.container, ["/w/one"]);
+    }
+
+    #[test]
+    fn a_continue_session_without_a_workspace_directory_leaves_both_unobserved() {
+        // Absent, empty, null, and mistyped are four spellings of the same
+        // absence, and none of them becomes a value.
+        let row = build_row(
+            "s",
+            "mbp",
+            "continue",
+            &[
+                "not json at all",
+                continue_doc("").as_str(),
+                continue_doc(r#","workspaceDirectory":"""#).as_str(),
+                continue_doc(r#","workspaceDirectory":null"#).as_str(),
+                continue_doc(r#","workspaceDirectory":7"#).as_str(),
+                continue_doc(r#","workspaceDirectory":["/w/one"]"#).as_str(),
+                continue_doc(r#","workspaceDirectory":{{"path":"/w/one"}}"#).as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "a session that named no workspace observed nothing, and never a \
+             value every such session would share: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    /// A workspace directory is not a tenancy and not a lifecycle: nothing here
+    /// is filled in for the two dimensions Continue records no field for.
+    #[test]
+    fn a_continue_workspace_directory_fills_no_other_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "continue",
+            &[continue_doc(r#","workspaceDirectory":"/w/one""#).as_str()],
+        );
+        assert!(
+            row.dimensions.tenant.is_empty() && row.dimensions.status.is_empty(),
+            "no tenant and no status is recorded by this field: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_continue_dimensions() {
+        // A Claude Code transcript whose line happens to carry the key is not a
+        // Continue session file: dimensions are read per harness, not per shape.
+        let line = cc_with(r#","cwd":"/w/one","workspaceDirectory":"/w/other""#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "the continue reader is the only one that reads workspaceDirectory: {:?}",
+            row.dimensions.container
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+    }
+
+    #[test]
+    fn the_continue_dimensions_travel_in_the_index_line() {
+        let line = continue_doc(r#","workspaceDirectory":"/w/one""#);
+        let json = to_jsonl(&build_row("s", "mbp", "continue", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(json.contains(r#""container":["/w/one"]"#), "line: {json}");
+        assert!(!json.contains("\"tenant\""), "line: {json}");
         assert!(!json.contains("\"status\""), "line: {json}");
     }
 
