@@ -22,7 +22,7 @@ import {
   PLATFORMS,
   type ChatPlatform,
 } from './contract';
-import { CHATGPT_PAGED_DETAIL_PATTERN, CONVERSATION_SEEN_MESSAGE } from './platform-auth';
+import { CHATGPT_PAGED_DETAIL_PATTERN, CONVERSATION_SEEN_MESSAGE, needsChatgptAccountHeader } from './platform-auth';
 
 /** Fixed, metadata-only signal for a supported-origin transport we do not capture. */
 export const UNSUPPORTED_TRANSPORT_WARNING =
@@ -904,9 +904,16 @@ export function installPageFetchHook(options: PageHookOptions): void {
         chatgptAccountIdHeaderPresent = observed.present;
         if (chatgptAccountIdHeader !== null) {
           post({ type: options.chatgptWorkspaceObservedMessage, accountId: chatgptAccountIdHeader });
-        } else {
-          // A later request without an account header invalidates any older
-          // in-memory observation on the content side; it must not be replayed.
+        } else if (needsChatgptAccountHeader(parsed.href, pageOrigin)) {
+          // 🔴 W931 · **Only a route the backfill itself reads may invalidate the
+          //    observation.** The page's own session refresh (`/api/auth/session`) and
+          //    its other same-origin calls are headerless by construction, so clearing
+          //    on them wiped the account between the page's own backend calls and the
+          //    backfill's next request — the wrapper then refused before sending and
+          //    the leg halted `chatgpt-account-header-unavailable` with every debt still
+          //    pending. The predicate is the one the send-time wrapper already uses, so
+          //    the routes that refresh the observation and the routes that read it
+          //    cannot drift apart.
           post({ type: options.chatgptWorkspaceObservedMessage, accountId: null });
         }
       }

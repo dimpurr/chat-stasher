@@ -497,10 +497,10 @@ apps/extension/lib/page-hook.ts:857-866  ffd20a2113ae  lines=10
   <- docs-dev/threat-model.md:268  :: // ChatGPT's in-page navigation loads only a paged window o…
 apps/extension/lib/page-hook.ts:880  c2a5f81a7761  lines=1
   <- docs-dev/privacy.md:109, docs-dev/privacy.md:240, docs-dev/privacy.md:756, docs-dev/threat-model.md:28, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:880-914  45359f1a1af8  lines=35
+apps/extension/lib/page-hook.ts:880-914  b7bf7a7aa688  lines=35
   <- docs-dev/threat-model.md:27, docs-dev/threat-model.md:235  :: const text = await response.clone().text();
-apps/extension/lib/page-hook.ts:1107-1150  994e4f465747  lines=44
-  <- docs-dev/privacy.md:47  :: /**
+apps/extension/lib/page-hook.ts:1107-1150  cb2b86a499a1  lines=44
+  <- docs-dev/privacy.md:47  :: });
 apps/extension/lib/platform-auth.ts:47  b6f4f48756a7  lines=1
   <- docs-dev/privacy.md:121, docs-dev/privacy.md:242, docs-dev/threat-model.md:272  :: export const CHATGPT_SESSION_PATH = '/api/auth/session';
 apps/extension/lib/platform-auth.ts:61-71  5e4adeb00a65  lines=11
