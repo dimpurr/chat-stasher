@@ -2133,7 +2133,7 @@ impl StoreConfig {
         let mut options = BTreeMap::new();
         options.insert("connections".to_string(), self.connections.to_string());
         options.extend(self.options.iter().map(|(k, v)| (k.clone(), v.clone())));
-        options
+        self.with_atomic_fs_writes(options)
     }
 }
 
@@ -2707,5 +2707,58 @@ mod tests {
             reason = "Test-directory cleanup is intentionally best-effort after the permission assertions."
         )]
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+impl StoreConfig {
+    fn with_atomic_fs_writes(
+        &self,
+        mut options: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        // OpenDAL fs otherwise exposes the final object before its bytes are written.
+        // Stage under the repository root so publication uses a same-filesystem rename.
+        if self.repo_root == "opendal:fs" {
+            if let Some(root) = options.get("root") {
+                let staging = Path::new(root).join(".chat-stasher-tmp");
+                options
+                    .entry("atomic_write_dir".into())
+                    .or_insert_with(|| staging.display().to_string());
+            }
+        }
+        options
+    }
+}
+
+#[cfg(test)]
+mod atomic_fs_tests {
+    use super::*;
+
+    #[test]
+    fn opendal_fs_publishes_objects_atomically() {
+        let mut cfg = StoreConfig {
+            repo_root: "opendal:fs".into(),
+            options: BTreeMap::from([("root".into(), "synthetic-repo".into())]),
+            ..StoreConfig::default()
+        };
+        assert_eq!(
+            cfg.backend_options().get("atomic_write_dir"),
+            Some(
+                &Path::new("synthetic-repo")
+                    .join(".chat-stasher-tmp")
+                    .display()
+                    .to_string()
+            )
+        );
+        cfg.options
+            .insert("atomic_write_dir".into(), "fixture-custom-tmp".into());
+        assert_eq!(
+            cfg.backend_options()
+                .get("atomic_write_dir")
+                .map(String::as_str),
+            Some("fixture-custom-tmp")
+        );
+        cfg.repo_root = "opendal:s3".into();
+        cfg.options.remove("atomic_write_dir");
+        assert!(!cfg.backend_options().contains_key("atomic_write_dir"));
     }
 }

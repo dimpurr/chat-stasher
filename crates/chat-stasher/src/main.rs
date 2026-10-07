@@ -204,6 +204,10 @@ enum Command {
         #[arg(long)]
         locator: String,
     },
+    /// Issue a posting secret, list public policies, or permanently revoke a key.
+    /// Issuance prints the secret once on stdout, after its policy is durable.
+    /// No backend permissions are probed; supply a provider-scoped write credential.
+    SendKey(SendKeyArgs),
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -1652,6 +1656,7 @@ fn run() -> ExitCode {
     match cli.command {
         Command::Init => cmd_init(),
         Command::InboxInit { name, locator } => cmd_inbox_init(&name, &locator),
+        Command::SendKey(args) => cmd_send_key(args),
         Command::Setup {
             stage,
             destination,
@@ -17834,5 +17839,117 @@ mod duplicate_repair_report_tests {
             "the inventory prints the privacy-safe short id, never the raw one"
         );
         assert!(report.physical_removal.contains("separate decision"));
+    }
+}
+
+#[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("send_key_action").required(true).args(["platform", "list", "revoke"])))]
+struct SendKeyArgs {
+    /// Initialized inbox name on this trusted machine.
+    name: String,
+    /// Platform scope for a new key; does not claim platform support.
+    #[arg(long = "for", requires = "credential_file")]
+    platform: Option<String>,
+    /// Human label retained in trusted policy; defaults to the platform.
+    #[arg(long, requires = "platform")]
+    label: Option<String>,
+    /// Explicit lifetime (for example 90d); defaults to 24h.
+    #[arg(long, requires = "platform", value_parser = chat_stasher::send_key::duration_secs)]
+    expires: Option<u64>,
+    /// JSON map of provider-specific write credential settings. Contents are secret.
+    #[arg(long, requires = "platform")]
+    credential_file: Option<PathBuf>,
+    /// Maximum decrypted bundle bytes; defaults to 10 MiB.
+    #[arg(long, requires = "platform")]
+    max_bundle_bytes: Option<usize>,
+    /// Maximum objects accepted per pull; defaults to 100. This is not a time-window quota.
+    #[arg(long, requires = "platform")]
+    max_objects_per_pull: Option<usize>,
+    /// Print public metadata and active, expired or revoked state as JSON.
+    #[arg(long)]
+    list: bool,
+    /// Permanently revoke an issued key id; repeating the command is harmless.
+    #[arg(long)]
+    revoke: Option<String>,
+}
+fn cmd_send_key(args: SendKeyArgs) -> ExitCode {
+    use chat_stasher::{inbox_config, send_key};
+    let valid = inbox_config::validate(&args.name, "memory://validation").and_then(|_| {
+        match (&args.platform, &args.revoke) {
+            (Some(platform), _) => {
+                send_key::validate_metadata(platform, args.label.as_deref().unwrap_or(platform))
+            }
+            (_, Some(id)) => send_key::validate_id(id),
+            _ => Ok(()),
+        }
+    });
+    if let Err(error) = valid {
+        eprintln!("send key usage error: {error}");
+        return ExitCode::from(2);
+    }
+    // reason: These are declared product defaults, not substitutes for unknown measurements.
+    let lifetime_secs = args.expires.unwrap_or(86400);
+    // reason: A default issuance policy bounds payloads; no observed size is being inferred.
+    let max_bundle_bytes = args.max_bundle_bytes.unwrap_or(10 * 1024 * 1024);
+    // reason: A default issuance policy bounds pull work, not a measured object count.
+    let max_objects_per_pull = args.max_objects_per_pull.unwrap_or(100);
+    if max_bundle_bytes == 0 || max_objects_per_pull == 0 {
+        eprintln!("send key usage error: limits must be positive");
+        return ExitCode::from(2);
+    }
+    let now = match u64::try_from(chrono::Utc::now().timestamp()) {
+        Ok(now) => now,
+        Err(_) => {
+            eprintln!("send key clock unavailable");
+            return ExitCode::from(3);
+        }
+    };
+    if now.checked_add(lifetime_secs).is_none() {
+        eprintln!("send key usage error: invalid expiry");
+        return ExitCode::from(2);
+    }
+    let result = (|| -> anyhow::Result<()> {
+        let root = inbox_config::default_root();
+        if let Some(platform) = args.platform {
+            let label = args.label.as_deref().unwrap_or(&platform);
+            let credential_file = args
+                .credential_file
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("posting credential file required"))?;
+            let options = send_key::IssueOptions {
+                platform: &platform,
+                label,
+                lifetime_secs,
+                max_bundle_bytes,
+                max_objects_per_pull,
+            };
+            let token = send_key::issue(&root, &args.name, credential_file, &options, now)?;
+            // This is the sole intentional secret output. Handle a broken pipe
+            // as an incomplete delivery, not a panic or a successful issuance.
+            writeln!(std::io::stdout().lock(), "{token}").context("send key output incomplete")?;
+        } else if let Some(id) = args.revoke {
+            send_key::revoke(&root, &args.name, &id)?;
+            writeln!(std::io::stdout().lock(), "send key revoked")
+                .context("send key output incomplete")?;
+        } else {
+            let (_, summaries) = send_key::load_policies(&root, &args.name, now)?;
+            let bytes = serde_json::to_vec(&summaries)?;
+            let mut out = std::io::stdout().lock();
+            out.write_all(&bytes)
+                .context("send key output incomplete")?;
+            out.write_all(b"\n").context("send key output incomplete")?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("send key operation failed: {error}");
+            if error.downcast_ref::<std::io::Error>().is_some() {
+                ExitCode::from(3)
+            } else {
+                ExitCode::from(1)
+            }
+        }
     }
 }

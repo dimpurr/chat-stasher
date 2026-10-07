@@ -171,7 +171,7 @@ impl Response {
 /// a platform we have not wired up must fail to build, not quietly reach for
 /// something weaker.
 #[cfg(unix)]
-fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
     let mut f = std::fs::File::open("/dev/urandom")?;
     f.read_exact(buf)
 }
@@ -180,7 +180,7 @@ fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
 /// RNG is the documented equivalent and needs no crate — CI on `windows-latest`
 /// is what actually checks this, since it cannot be exercised here.
 #[cfg(windows)]
-fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
     #[link(name = "bcrypt")]
     extern "system" {
         fn BCryptGenRandom(
