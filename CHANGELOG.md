@@ -15,6 +15,15 @@ under its own heading below.
 
 #### Added
 
+- **Portable remote inbox posting keys.** `send-key <inbox> --for <platform>
+  --credential-file <file>` prints a versioned secret after saving its public
+  puller policy. Expiry defaults to 24 hours; `--expires 90d` requests a longer
+  lifetime. `--list` reports active, expired and revoked keys, and `--revoke`
+  persists an irreversible refusal. Posting keys contain a public encryption
+  recipient and signing secret, never the inbox decryption identity or an
+  archive key. Backend credentials are supplied separately as a JSON map;
+  their permissions are not probed. CLI send/pull and backend opening remain
+  pending.
 - **Per-phase timers and counters for one `run-once` pass.** Every
   `run-once` pass now measures the wall time of each phase — registry
   scan, collect (per harness, keyed by harness id), stage audit,
