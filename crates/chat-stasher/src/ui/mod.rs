@@ -2880,9 +2880,11 @@ mod tests {
         ];
         let html = req("/extensions?token=t", &data, &NoContent).body;
         // The stamped install names its revision; the two installs share a
-        // version and are told apart by this value alone.
+        // version and are told apart by this value alone. Both predate
+        // the tick fields, so the outcome between the version and the
+        // stamp says "not recorded" rather than inventing one.
         assert!(
-            html.contains("extension 0.2.0.24 · build bmtq3x1f"),
+            html.contains("extension 0.2.0.24 · last tick not recorded · build bmtq3x1f"),
             "{html}"
         );
         // The unstamped one says the field is absent, and the version is not

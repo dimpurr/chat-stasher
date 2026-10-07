@@ -2492,9 +2492,10 @@ fn other_install_count(output: &[u8], current_install_id: &str) -> Option<u64> {
 /// silently drops a field it cannot read. The returned `install_id` is the one
 /// that passed the shape check, so the caller does not read it a second time.
 ///
-/// `build_stamp` is optional, and absent is a real state — an extension built
-/// before the stamp existed. A present value must be a non-empty string within
-/// the bound `extension_version` uses; anything else is malformed, not unknown.
+/// `build_stamp` is optional, and absent is a real state — an extension
+/// built before the stamp existed. A present string is the revision that
+/// wrote the record; a present `null` is the build's own "I cannot name
+/// myself" (W59b). Anything else is malformed, not unknown.
 fn validate_status(
     status: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<&str, &'static str> {
@@ -2516,13 +2517,6 @@ fn validate_status(
             .get("extension_version")
             .and_then(|v| v.as_str())
             .is_none_or(|v| v.is_empty() || v.len() > 80)
-        // W912 · The build stamp, distinct from the version: `0.2.0.24` is a
-        // release, the stamp is the revision that wrote the record. Optional
-        // for the same reason `report_seq` is — an extension that predates the
-        // field sends none, and absence is recorded as unknown.
-        || status
-            .get("build_stamp")
-            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80))
         || status
             .get("reported_at")
             .and_then(|v| v.as_str())
@@ -2585,7 +2579,6 @@ fn validate_status(
                 | "browser"
                 | "profile_label"
                 | "extension_version"
-                | "build_stamp"
                 | "reported_at"
                 | "report_seq"
                 | "report_nonce"
