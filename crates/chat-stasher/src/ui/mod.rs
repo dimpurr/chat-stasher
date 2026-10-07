@@ -3000,6 +3000,132 @@ mod tests {
         assert!(!response.body.contains("/open-extension?"));
     }
 
+    /// Two installs of one browser that nobody has named are two rows a reader can
+    /// point at, not one row printed twice — and the handle that tells them apart
+    /// is the install's own id, because the page may not guess which browser
+    /// profile either record came from. An install the reader *has* named needs
+    /// nothing appended, and a record with no readable id says so instead of going
+    /// blank.
+    #[test]
+    fn unnamed_installs_of_one_browser_print_two_rows_the_reader_can_tell_apart() {
+        let mut data = fixture::data();
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "aaaaaaaa-0000-4000-8000-000000000001",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": true,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "bbbbbbbb-0000-4000-8000-000000000002",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "cccccccc-0000-4000-8000-000000000003",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            // A legacy record whose key could not be read: kept, not dropped, so
+            // the row has to say what it cannot distinguish itself with.
+            serde_json::json!({
+                "machine": "Machine 1",
+                "browser": "Firefox",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            // The host accepts a blank label, and a blank is nobody's name: it
+            // reads as the absence of one, not as an empty label.
+            serde_json::json!({
+                "install_id": "dddddddd-0000-4000-8000-000000000004",
+                "machine": "Machine 1",
+                "browser": "Edge",
+                "profile_label": "",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("<td>Chrome · Unnamed profile · <span class=mono>#aaaaaaaa</span></td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td>Chrome · Unnamed profile · <span class=mono>#bbbbbbbb</span></td>"),
+            "{html}"
+        );
+        // Neither row is the other's copy: the label a reader would read aloud is
+        // unique to the row, and it appears exactly once as a row label.
+        assert_eq!(
+            html.matches("<td>Chrome · Unnamed profile").count(),
+            2,
+            "{html}"
+        );
+        // A name the reader typed is already a distinguisher, so nothing is
+        // appended to it.
+        assert!(html.contains("<td>Arc · Work</td>"), "{html}");
+        // And the absence of an id is a sentence, not a blank.
+        assert!(
+            html.contains("<td>Firefox · Unnamed profile · install id not recorded</td>"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<td>Firefox · Unnamed profile · <span"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td>Edge · Unnamed profile · <span class=mono>#dddddddd</span></td>"),
+            "{html}"
+        );
+    }
+
+    /// The order of two rows that differ only by the install id they print follows
+    /// that printed name, not the order the two records happened to be read off
+    /// disk — otherwise the same table swaps its rows between two renders.
+    #[test]
+    fn unnamed_rows_of_one_browser_order_by_the_install_id_they_print() {
+        let unnamed = |id: &str| {
+            serde_json::json!({
+                "install_id": id,
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": null,
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            })
+        };
+        let mut data = fixture::data();
+        // Deliberately the wrong way round: the arrival order is the thing the
+        // sort must not depend on.
+        data.extension_installs = vec![
+            unnamed("bbbbbbbb-0000-4000-8000-000000000002"),
+            unnamed("aaaaaaaa-0000-4000-8000-000000000001"),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        let first = html
+            .find("<td>Chrome · Unnamed profile · <span class=mono>#aaaaaaaa")
+            .unwrap_or_else(|| panic!("{html}"));
+        let second = html
+            .find("<td>Chrome · Unnamed profile · <span class=mono>#bbbbbbbb")
+            .unwrap_or_else(|| panic!("{html}"));
+        assert!(first < second, "{html}");
+    }
+
     #[test]
     fn extensions_view_does_not_turn_an_incomplete_status_scan_into_an_empty_answer() {
         let mut data = fixture::data();

@@ -882,10 +882,18 @@ is installed in that profile
 (`crates/chat-stasher/src/ui/extension_profile.rs:146-177`). Three things out of
 those files are used — the profile's name, its directory name, and whether this
 extension is installed in it — and only to build one launch command: nothing
-read from either file is written back, sent to the host, or archived, and a name
-matching more than one profile, or a profile the extension is not installed in,
-resolves to nothing, so the row says no exact match was found instead of
-guessing.
+read from either file is written back, sent to the host, or archived. A row
+earns an action only where that mapping *decides* it: the profile name the
+install reported has to match exactly one profile and be claimed by no other
+install of that browser on this machine, and an install that reported no name is
+matched only when this machine holds exactly one install for that browser **and**
+exactly one local profile has the extension installed. Every other shape — a name
+matching more than one profile, two installs under one name, two unnamed installs
+of one browser, two profiles carrying the extension — resolves to nothing, so the
+row says no exact match was found instead of guessing. That is also why an
+unnamed install's row is labelled with a short form of its own install id rather
+than with a profile: the id is the only handle that is neither invented nor a
+claim about which of your profiles a record came from.
 
 Within those sites, not every request is captured. A response is only kept if it
 matches the platform's expected route *and* method *and* status *and* body shape

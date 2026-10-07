@@ -136,6 +136,15 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
 const BROWSER_UNKNOWN: &str = "Unknown browser";
 const PROFILE_UNNAMED: &str = "Unnamed profile";
 const MACHINE_UNKNOWN: &str = "Machine unknown";
+/// What the row says when an unnamed install carries no readable install id
+/// either. Spelled out rather than left blank: the blank would read as "this
+/// install is distinguishable some other way", and it is not.
+const INSTALL_ID_UNRECORDED: &str = "install id not recorded";
+/// How much of the install id an unnamed row prints: the leading group of the
+/// UUID, which is the same short install id the extension puts in an export file
+/// name (`apps/extension/lib/outbox.ts`). Enough to tell two installs apart in one
+/// reader's own table, short enough to sit in a row label.
+const INSTALL_ID_SHORT_LEN: usize = 8;
 
 /// What the two numbers in a platform column are. The column header is the one
 /// place a reader finds out which count is which, and a pair of bare integers
@@ -329,7 +338,11 @@ impl<'a> InstallView<'a> {
             browser: install.get("browser").and_then(serde_json::Value::as_str),
             profile: install
                 .get("profile_label")
-                .and_then(serde_json::Value::as_str),
+                .and_then(serde_json::Value::as_str)
+                // A blank is not a name somebody typed, and the host accepts one.
+                // Reading it as a name would print an empty label and claim the
+                // row is tellable apart, so a blank goes where `null` goes.
+                .filter(|label| !label.is_empty()),
             extension_version: install
                 .get("extension_version")
                 .and_then(serde_json::Value::as_str),
@@ -359,12 +372,43 @@ impl<'a> InstallView<'a> {
         }
     }
 
+    /// The row's name: this install's browser, its profile, and — for a profile
+    /// nobody has named — a short form of the install id too.
+    ///
+    /// That third part is what makes two unnamed installs of one browser two rows
+    /// rather than one row twice. The install id is the only stable, non-invented
+    /// handle an unnamed install has, and this page may not guess which of the
+    /// reader's Chrome profiles a record came from; without it the two rows print
+    /// byte-identical and the reader cannot tell the stale one from the reporting
+    /// one. A *short* form goes in the cell because the column holds a machine's
+    /// installs at once and a 36-character UUID is not a row label; the leading
+    /// group is the short install id the extension already names an export file
+    /// with (`apps/extension/lib/outbox.ts`). A named install carries neither,
+    /// because the name its own reader typed already tells it apart.
     fn label(&self) -> String {
-        format!(
+        let name = format!(
             "{} · {}",
             esc(self.browser.unwrap_or(BROWSER_UNKNOWN)),
             esc(self.profile.unwrap_or(PROFILE_UNNAMED))
-        )
+        );
+        match self.profile {
+            Some(_) => name,
+            None => format!("{name}{}", self.unnamed_suffix()),
+        }
+    }
+
+    /// What an unnamed row appends to its name: the short install id, or the
+    /// sentence saying the record carries no id to distinguish it with. Nothing
+    /// here is invented, and nothing is left blank — a blank would read as "this
+    /// row is tellable apart some other way", and it is not.
+    fn unnamed_suffix(&self) -> String {
+        match self.install_id {
+            Some(id) => format!(
+                " · <span class=mono>#{}</span>",
+                esc(&id.chars().take(INSTALL_ID_SHORT_LEN).collect::<String>())
+            ),
+            None => format!(" · {INSTALL_ID_UNRECORDED}"),
+        }
     }
 
     /// One platform cell: this install's own `captured · pending`, plus the
@@ -493,6 +537,11 @@ pub(super) fn page_extensions(data: &UiData, token: &str) -> String {
                 .cmp(&b.attention)
                 .then_with(|| a.browser.cmp(&b.browser))
                 .then_with(|| a.profile.cmp(&b.profile))
+                // Two unnamed installs of one browser are equal on every key
+                // above, and their rows now differ only by the install id the row
+                // prints — so the order follows the printed name instead of the
+                // order the two records happened to arrive in.
+                .then_with(|| a.install_id.cmp(&b.install_id))
         });
     }
     groups.sort_by(|(a, a_rows), (b, b_rows)| {
