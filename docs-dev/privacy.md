@@ -44,7 +44,7 @@ that document is the honest one.
   from the page and held in memory only (step 1 of section 1). **Gemini's were
   measured too**, and its requests carry three values out of the page's own
   bootstrap blob — read at request time through the page-world hook, held in memory
-  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1107-1150`).
+  only, and attached to its two RPCs and nothing else (`apps/extension/lib/platform-auth.ts:590-628, 635-645, 769-772`; `apps/extension/entrypoints/dw-bridge.content.ts:557-575, 593-603`; `apps/extension/lib/page-hook.ts:1114-1157`).
   Claude is the one platform whose requests are addressed by an account-scoped
   identifier the page URL does not carry; the extension resolves it from the
   page's own requests, the browser's cookie, or one extra request, and stops
