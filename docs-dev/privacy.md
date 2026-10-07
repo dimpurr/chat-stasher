@@ -413,8 +413,11 @@ becomes visible only where both records are read together, in your archive
 
 **One more thing leaves this browser besides captures: a status report.** It is
 sent at the end of a backfill tick: the install id, the browser, the
-profile label, the extension version and its build stamp, a report time, and one
-row per platform saying how many captures this browser confirmed, how many are still pending,
+profile label, the extension version, a report time, the outcome of the tick
+that is ending — whether it ran, the closed-set codes for why it did not, how
+it stopped and whether anything halted it — the build stamp that names which
+build sent it, and one row per platform
+saying how many captures this browser confirmed, how many are still pending,
 why a leg is paused, and — for a row that has one — that account's
 install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
@@ -422,7 +425,7 @@ host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 (`apps/extension/entrypoints/background.ts:3099-3128`;
 `crates/chat-stasher/src/nativehost.rs:2589`, `:2630-2646`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
-a version string and timestamps — and it carries no conversation text, no session
+a version string, a build stamp and timestamps — and it carries no conversation text, no session
 id and no account scope label.
 
 For platforms with a known volatile field (ChatGPT's `safe_urls` today), the

@@ -2545,6 +2545,36 @@ fn validate_status(
             .get("report_nonce")
             .is_some_and(|v| v.as_str().is_none_or(|s| !valid_nonce(s)))
         || (status.get("report_nonce").is_some() && status.get("report_seq").is_none())
+        // W913 (c4) · The tick outcome and the build stamp are optional, and
+        // their absence is a real state — "this extension predates the
+        // fields", which the record keeps as unknown exactly as report_seq's
+        // absence is. A present value of the wrong type is malformed, not
+        // unknown: `tick_ran` is a verdict, `tick_halted`/`build_stamp` are
+        // codes or an explicit null, and a reader that had to guess a type
+        // would read a string where it expects "did this tick run". The
+        // length bounds are the ones the report's own vocabulary keeps
+        // (`paused_reason`'s 120, `extension_version`'s 80), because these
+        // fields are members of the same closed sets the trace writes.
+        || status.get("tick_ran").is_some_and(|v| !v.is_boolean())
+        // `tick_reason` / `tick_stopped` are always codes on the wire — a
+        // `null` there is not a designed state, so only a string within the
+        // bound passes.
+        || status
+            .get("tick_reason")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 120))
+        || status
+            .get("tick_stopped")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.len() > 120))
+        // `tick_halted: null` and `build_stamp: null` are *designed* states
+        // ("nothing halted" / "this build cannot name itself"), so a null is
+        // recorded verbatim and only a wrongly-typed or oversized value is
+        // malformed.
+        || status
+            .get("tick_halted")
+            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 120))
+        || status
+            .get("build_stamp")
+            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| s.len() > 80))
     {
         return Err("malformed status fields");
     }
@@ -2559,6 +2589,11 @@ fn validate_status(
                 | "reported_at"
                 | "report_seq"
                 | "report_nonce"
+                | "tick_ran"
+                | "tick_reason"
+                | "tick_stopped"
+                | "tick_halted"
+                | "build_stamp"
                 | "platforms"
         )
     }) {

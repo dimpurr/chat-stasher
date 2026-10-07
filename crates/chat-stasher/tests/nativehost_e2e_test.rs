@@ -673,6 +673,8 @@ fn status_reports_replace_per_install_without_merging() {
     let replacement = json!({"protocol":1,"type":"status","request_id":"status-refresh","status":{
         "install_id":ids[0],"browser":"Chrome","profile_label":"Personal",
         "extension_version":"0.4.1","reported_at":"2026-09-27T12:05:00Z",
+        "tick_ran":true,"tick_reason":"ran","tick_stopped":"queue-empty","tick_halted":null,
+        "build_stamp":"bmtq3x1f",
         "platforms":[{"platform":"chatgpt","captured_by_this_browser":99,"pending":1,"paused_reason":null}]
     }});
     let output = fixture.chrome(&frame(&replacement));
@@ -691,9 +693,106 @@ fn status_reports_replace_per_install_without_merging() {
         );
         if index == 0 {
             assert_eq!(value["platforms"][0]["captured_by_this_browser"], 99);
+            // W913 (c4) · The tick outcome and the build stamp are recorded
+            // verbatim, `tick_halted: null` included: on the wire that null
+            // is the positive fact "nothing halted", and writing the field
+            // away would turn it back into the older extension's unknown.
+            assert_eq!(value["tick_ran"], true);
+            assert_eq!(value["tick_reason"], "ran");
+            assert_eq!(value["tick_stopped"], "queue-empty");
+            assert_eq!(value["tick_halted"], Value::Null);
+            assert_eq!(value["build_stamp"], "bmtq3x1f");
+        } else {
+            // The first two requests carried none of the new fields, so
+            // their records gained none: an extension that predates the
+            // fields is "unknown", and a default here would say "running"
+            // about an install that said nothing at all.
+            assert!(
+                value.get("tick_ran").is_none()
+                    && value.get("tick_reason").is_none()
+                    && value.get("tick_stopped").is_none()
+                    && value.get("tick_halted").is_none()
+                    && value.get("build_stamp").is_none()
+            );
         }
         assert!(value.get("account_id").is_none());
     }
+}
+
+/// W913 (c4) · The tick-outcome and build-stamp fields are optional — an
+/// extension that predates them sends none, and its reports are still
+/// accepted — but a value of the wrong type is malformed, not unknown: a
+/// record that archived `tick_ran: "yes"` would hand a reader a string where
+/// every consumer expects a verdict.
+#[test]
+fn status_tick_outcome_fields_of_the_wrong_type_are_a_bad_request() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let id = "11111111-1111-4111-8111-111111111111";
+    for (why, field, value) in [
+        ("tick_ran is not a boolean", "tick_ran", json!("yes")),
+        ("tick_ran is not a boolean", "tick_ran", json!(1)),
+        ("tick_reason is not a string", "tick_reason", json!(13)),
+        (
+            "tick_reason is null, which is not one of its designed states",
+            "tick_reason",
+            json!(null),
+        ),
+        (
+            "tick_stopped is not a string",
+            "tick_stopped",
+            json!({"a": 1}),
+        ),
+        (
+            "tick_halted is not a string or null",
+            "tick_halted",
+            json!(9),
+        ),
+        (
+            "build_stamp is not a string or null",
+            "build_stamp",
+            json!(4.5),
+        ),
+        (
+            "build_stamp is longer than the bound",
+            "build_stamp",
+            json!("b".repeat(81)),
+        ),
+    ] {
+        let mut status = json!({
+            "install_id": id, "browser": "Chrome", "profile_label": null,
+            "extension_version": "0.4.0", "reported_at": "2026-09-27T12:00:00Z",
+            "platforms": []
+        });
+        status[field] = value;
+        let request = json!({"protocol":1,"type":"status","request_id":format!("status-{field}"),"status":status});
+        let output = fixture.chrome(&frame(&request));
+        assert_eq!(
+            exit_code(&output),
+            0,
+            "{why}: stderr: {}",
+            stderr_of(&output)
+        );
+        let response = one_frame(&output.stdout);
+        assert_matches_schema(&response);
+        assert_eq!(response["type"], "nack", "{why}");
+        assert_eq!(response["kind"], "bad-request", "{why}");
+        assert_eq!(response["retryable"], false, "{why}");
+    }
+    // Nothing was persisted: a refused report replaces no previous record,
+    // exactly as §6.7 says a `nack` leaves the caller's status unconfirmed.
+    assert!(
+        ls_status_dir(&fixture, id).is_none(),
+        "a refused report must not persist a record"
+    );
+}
+
+/// The staged file for one install, or `None` when no record exists.
+fn ls_status_dir(fixture: &Fixture, install_id: &str) -> Option<PathBuf> {
+    let machine = first_machine(fixture);
+    let dir = fixture.stage.join("ext-status").join(&machine);
+    let path = dir.join(format!("{install_id}.json"));
+    path.is_file().then_some(path)
 }
 
 /// W205c · D4, wire-level: a copied install (same `install_id`, different

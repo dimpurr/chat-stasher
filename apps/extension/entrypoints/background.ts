@@ -109,7 +109,7 @@ import { backfillCapabilityOf, backfillPlanFor, canBackfillDetail } from '../lib
 import { DEFAULT_PACE } from '../lib/backfill/pace';
 import { readSpeedPlan, SPEED_PLANS, type SpeedPreset } from '../lib/backfill/speed';
 import { daySlowPlan, daySlowTriggeredBy, isPlatformDaySlowed, recordPlatformRateLimit } from '../lib/backfill/day-slow';
-import { runningBuildId } from '../lib/extension-build';
+import { bakedBuildStamp, runningBuildId } from '../lib/extension-build';
 import { isClaudeOrgId, orgFromRequestUrl, type OrgResolution } from '../lib/backfill/claude-org';
 import { chatGptUnresolvedScope, chatGptWorkspaceScope, fingerprintedChatGptScope, isChatGptFingerprint, isChatGptScope, isDefaultChatGptScope, isUnresolvedChatGptScope } from '../lib/backfill/chatgpt-workspace';
 import { migrateChatGptWorkspaceScopes } from '../lib/backfill/chatgpt-scope-migration';
@@ -3058,38 +3058,40 @@ async function recordAlarmTick(
   claudeScopeSource?: 'observed' | 'cookie' | 'organizations-endpoint',
 ): Promise<void> {
   const halt = result.report?.halted ?? null;
+  /**
+   * 🔴 W47 · **Every path that writes a trace names how it ended.**
+   *
+   * `report?.stopped` is the run's own stop; the fallback is the tick's own
+   * named outcome, for the paths that never reached a run (blocked at a gate,
+   * or already running). Both are existing members of closed sets — `StopReason`
+   * in lib/backfill/types.ts, `TickReason` in lib/backfill/schedule.ts — and the
+   * field is read as "how this ended, at whichever layer ended it".
+   *
+   * Why it may not stay null here: the null was the *first* thing a person read
+   * on a real machine (`{ran: false, reason: 'no-http-port', stopped: null,
+   * halted: null}`) and it says nothing that `reason` does not — but the whole
+   * audience of this record is someone asking "why is nothing moving", and the
+   * field that answers it falls back to the tick's own answer rather than to a
+   * blank. Nothing new is named: `stopped` for a gate-blocked tick is the same
+   * value `reason` already carries.
+   */
+  const stopped = result.report?.stopped ?? result.reason;
+  /**
+   * 🔴 R47 · The preflight halt is attached **only when no run happened**. It
+   *    walks every `cs_backfill_v2:*` key, not the target this tick used, so a
+   *    single unreadable record left over from another scope would otherwise
+   *    ride along on a tick that ran and archived — and the popup would say
+   *    "that tick stopped before it could finish" under a `ran: true` head, for
+   *    every tick, until someone removed the stale key by hand.
+   */
+  const halted = halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null;
   await saveLastTick(store, {
     at: Date.now(),
     ran: result.ran,
     reason: result.reason,
     targets,
-    /**
-     * 🔴 W47 · **Every path that writes a trace names how it ended.**
-     *
-     * `report?.stopped` is the run's own stop; the fallback is the tick's own
-     * named outcome, for the paths that never reached a run (blocked at a gate,
-     * or already running). Both are existing members of closed sets — `StopReason`
-     * in lib/backfill/types.ts, `TickReason` in lib/backfill/schedule.ts — and the
-     * field is read as "how this ended, at whichever layer ended it".
-     *
-     * Why it may not stay null here: the null was the *first* thing a person read
-     * on a real machine (`{ran: false, reason: 'no-http-port', stopped: null,
-     * halted: null}`) and it says nothing that `reason` does not — but the whole
-     * audience of this record is someone asking "why is nothing moving", and the
-     * field that answers it falls back to the tick's own answer rather than to a
-     * blank. Nothing new is named: `stopped` for a gate-blocked tick is the same
-     * value `reason` already carries.
-     */
-    stopped: result.report?.stopped ?? result.reason,
-    /**
-     * 🔴 R47 · The preflight is attached **only when no run happened**. It walks
-     *    every `cs_backfill_v2:*` key, not the target this tick used, so a single
-     *    unreadable record left over from another scope would otherwise ride along
-     *    on a tick that ran and archived — and the popup would say "that tick
-     *    stopped before it could finish" under a `ran: true` head, for every tick,
-     *    until someone removed the stale key by hand.
-     */
-    halted: halt?.reason ?? (result.ran ? null : preflightRefusal?.reason) ?? null,
+    stopped,
+    halted,
     detail: halt?.detail ?? (result.ran ? null : preflightRefusal?.detail) ?? null,
     tabSweep: persistSweep(tabSweep),
     schedule,
@@ -3127,6 +3129,16 @@ async function recordAlarmTick(
     await reportInstallStatus({
       install_id: identity.install_id, browser: identity.browser, profile_label: identity.profile_label,
       extension_version: version, reported_at: new Date().toISOString(), platforms: [...grouped.values()],
+      // W913 (c4) · The tick outcome, written from the same derivations the
+      // durable local trace above uses, so the archived record and
+      // `cs_last_backfill_tick` are two copies of one fact rather than two
+      // accounts that can disagree. `tick_halted: null` is "nothing halted",
+      // a positive fact — an extension predating these fields sends none of
+      // them, which is the state the host records as unknown.
+      tick_ran: result.ran, tick_reason: result.reason, tick_stopped: stopped, tick_halted: halted,
+      // W913 (c4) · The build stamp, the same identity a halt record carries
+      // (W59b): `extension_version` names the release, this names the build.
+      build_stamp: bakedBuildStamp(),
     });
   } catch (err) {
     console.warn('[chat-stasher] install status report failed', (err as Error).message);

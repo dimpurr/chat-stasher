@@ -713,14 +713,17 @@ They reach three different places, and the differences matter:
 - **A per-install status record**, written by the host into the stage as
   `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
-  `crates/chat-stasher/src/nativehost.rs:2589`, `:2630-2646`). It carries the
-  install id, browser, profile label, extension version and its build stamp, a
-  report time, and one row per platform naming the platform, how many captures
-  this browser confirmed, how many are still pending, why a leg is paused, and — for a row
+  `crates/chat-stasher/src/nativehost.rs:2583`, `:2608-2624`). It carries the
+  install id, browser, profile label, extension version, a report time, the
+  outcome of the tick that is ending — whether it ran, the closed-set codes for
+  why it did not, how it stopped and whether anything halted it — the build
+  stamp naming which build sent it, and one
+  row per platform naming the platform, how many captures this browser
+  confirmed, how many are still pending, why a leg is paused, and — for a row
   that has one — that account's install-local fingerprint, which stays
   incomparable across installs by construction. It is metadata only — counts,
-  codes, a version string and timestamps — and it carries no conversation text,
-  no session id and no scope label
+  codes, a version string, a build stamp and timestamps — and it carries no
+  conversation text, no session id and no scope label
   (`apps/extension/entrypoints/background.ts:3099-3128`). This is what makes an
   install visible *as an install*: a capture puts the same names on a shard, but
   only this record says how much that profile holds and when it last reported,

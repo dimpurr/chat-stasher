@@ -245,6 +245,14 @@ describe('the wire carries the sequence', () => {
       profile_label: 'Personal',
       extension_version: '0.4.0',
       reported_at: '2026-09-29T10:00:00Z',
+      // W913 (c4) · present on every report from a build that has them; the
+      // sequence assertions below are about the other pair of optional
+      // fields and these values are inert to them.
+      tick_ran: false,
+      tick_reason: 'no-targets',
+      tick_stopped: 'no-targets',
+      tick_halted: null,
+      build_stamp: null,
       platforms: [],
     };
   }

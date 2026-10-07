@@ -77,7 +77,12 @@ final class StatusTests: XCTestCase {
             ), local: cleanLocal, failure: nil, now: now
         )
         XCTAssertEqual(value.severity, .warning)
-        XCTAssertTrue(value.sentence.contains("Chrome · Personal on Machine 1"))
+        XCTAssertEqual(value.sentence, "Chrome · Personal on Machine 1 is not reporting")
+        // W913 review · The sentence no longer quotes "48 hours" on its own:
+        // the dashboard's stale flag is true for a report older than 48 h
+        // *and* for one whose timestamp cannot be read, so the explanation
+        // — not the headline — is where the two causes are named.
+        XCTAssertEqual(value.explanation, "Its last report is over 48 hours old, or its time can't be read.")
     }
 
     func testExtensionInstallNeedsWarningIsOnlyTheStaleFlag() {
@@ -96,8 +101,19 @@ final class StatusTests: XCTestCase {
             profileLabel: "Personal", reportedAt: "2026-09-20T12:00:00Z", stale: true,
             reportedDaily: nil, platforms: []
         )
+        // W913 review · The exact shape the old gate could not reach: the
+        // report is stale and the host has recorded daily reports before, so
+        // the streak exists but the install still went silent after one. A
+        // condition that looked at `reported_daily` again would leave this
+        // one — a real, diagnosed case — unwarned.
+        let staleAfterEstablishedDays = ExtensionInstall(
+            installID: "stale-after-daily", machine: "Machine 1", browser: "Chrome",
+            profileLabel: "Personal", reportedAt: "2026-09-20T12:00:00Z", stale: true,
+            reportedDaily: false, platforms: []
+        )
         XCTAssertFalse(extensionInstallNeedsWarning(install: fresh))
         XCTAssertTrue(extensionInstallNeedsWarning(install: stale))
+        XCTAssertTrue(extensionInstallNeedsWarning(install: staleAfterEstablishedDays))
     }
 
     // ---- one test per classification class ----------------------------------

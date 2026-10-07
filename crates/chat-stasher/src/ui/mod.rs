@@ -2849,7 +2849,8 @@ mod tests {
 
     /// W912 · The build stamp is rendered when the record carries one, and a
     /// record without one says so — it is never filled with the version, which
-    /// is the other half of the identity and not a revision.
+    /// is the other half of the identity and not a revision. (W913 split the
+    /// "without one" state in two; the W913 test below pins all three.)
     #[test]
     fn extensions_details_render_the_build_stamp_and_never_invent_one() {
         let mut data = fixture::data();
@@ -2886,8 +2887,82 @@ mod tests {
         );
         // The unstamped one says the field is absent, and the version is not
         // pressed into service as a substitute.
-        assert!(html.contains("build stamp not recorded"), "{html}");
+        assert!(html.contains("build not recorded"), "{html}");
         assert!(!html.contains("build 0.2.0.24"), "{html}");
+    }
+
+    /// W913 (c4) · The details line answers "what did this install's own tick
+    /// do?", which is the question the report's age alone never could — a
+    /// silent install and a busy one wrote the same record. The codes are the
+    /// record's own vocabulary. A record from an extension that predates the
+    /// fields says so rather than inventing an outcome, and an explicit
+    /// `tick_halted: null` ("nothing halted") adds no word, exactly as
+    /// `paused_reason: null` is not "pause unknown".
+    #[test]
+    fn extensions_details_report_the_tick_outcome_and_the_build_stamp() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "synthetic-ran",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Personal",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "tick_ran": true,
+                "tick_reason": "ran",
+                "tick_stopped": "queue-empty",
+                "tick_halted": "rate-limit",
+                "build_stamp": "bmtq3x1f",
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "synthetic-idle",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "tick_ran": false,
+                "tick_reason": "no-http-port",
+                "tick_stopped": "no-http-port",
+                "tick_halted": null,
+                "build_stamp": null,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "synthetic-older",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Work",
+                "extension_version": "0.1.0",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        assert!(
+            html.contains("last tick ran, stopped queue-empty, halted rate-limit · build bmtq3x1f"),
+            "{html}"
+        );
+        // The run-less tick names its gate, and the explicit "nothing
+        // halted" null contributes no word of its own.
+        assert!(
+            html.contains("last tick did not run (no-http-port)"),
+            "{html}"
+        );
+        assert!(!html.contains("did not run (no-http-port),"), "{html}");
+        // A build that cannot name itself (W59b's explicit null) is not the
+        // same state as a record from before the field existed.
+        assert!(html.contains("build not named"), "{html}");
+        assert!(html.contains("build not recorded"), "{html}");
+        // A record that predates the tick fields says so — no outcome is
+        // invented for an extension that could not have recorded one.
+        assert!(html.contains("last tick not recorded"), "{html}");
     }
 
     #[test]

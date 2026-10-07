@@ -368,7 +368,13 @@ enum ArchiveStatus {
         case .needsAttention(let count):
             count == 1 ? "1 machine needs attention" : "\(count) machines need attention"
         case .silent(let machine, let days): "\(machine) has been silent for \(days) days"
-        case .extensionStale(let install): "\(install) hasn't reported for more than 48 hours"
+        // W913 review · The stale flag the dashboard computes is true for a
+        // report more than 48 hours old *and* for one whose time cannot be
+        // read at all, so a sentence that quotes the 48 hours overclaims in
+        // the unreadable case. The headline says what is established in both
+        // states — the reports stopped being readable as fresh — and the
+        // explanation carries the two causes precisely.
+        case .extensionStale(let install): "\(install) is not reporting"
         case .healthy: "All saved"
         case .waiting(let count): "\(count) conversations waiting to upload"
         case .localFailure(let reason): reason
@@ -386,6 +392,12 @@ enum ArchiveStatus {
         case .unreadable(let reason), .localFailure(let reason): return reason
         case .setup(_, let explanation): return explanation
         case .destination(_, let sentence, _): return sentence
+        // W913 review · Same honesty as the sentence: the one-line status
+        // words both causes behind the dashboard's stale flag, because the
+        // reader who opens the panel should not have to infer that "48 hours"
+        // was a guess between the two.
+        case .extensionStale:
+            return "Its last report is over 48 hours old, or its time can't be read."
         case .cliMissing: return "Install chat-stasher from the project release page, then reopen this panel."
         case .cliTooOld: return "Use the command for your install: brew upgrade chat-stasher; npm install -g chat-stasher; or rerun the install script."
         case .credentialsUnavailable: return "Add credentials to chat-stasher's app-readable configuration."
