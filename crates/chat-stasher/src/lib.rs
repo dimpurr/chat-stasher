@@ -19,6 +19,7 @@ pub mod fts;
 pub mod grok_bot;
 pub mod id;
 pub mod identity;
+pub mod import;
 pub mod inbox;
 pub mod inbox_config;
 pub mod json_out;
