@@ -465,8 +465,22 @@ fn publish_bundle(inbox: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, Imp
 }
 
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    let file = fs::File::open(dir)?;
-    file.sync_all()
+    // Opening a directory to fsync it is a Unix idiom; Windows has no
+    // portable directory fsync, so every other directory fsync in this
+    // crate (shard_writer, audit_store, identity, inbox_config) is gated
+    // behind cfg(unix) and Windows keeps the rename as its durable step.
+    // This helper follows that convention: a no-op there, so the required
+    // call in `archive_raw_export` still holds on Unix, and the
+    // best-effort one in `publish_bundle` stays best-effort everywhere.
+    #[cfg(unix)]
+    {
+        fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 /// The result of archiving the whole export file.
@@ -541,8 +555,12 @@ pub fn archive_raw_export(
     drop(file);
     fs::rename(&part, &target)
         .map_err(|e| ImportError::WriteFailed(format!("seal {}: {e}", target.display())))?;
-    // Unlike the inbox's best-effort dir fsync, this one is required: the promise
-    // of this namespace is that the platform's bytes survived the run.
+    // Unlike the inbox's best-effort dir fsync, this one is required: the
+    // promise of this namespace is that the platform's bytes survived the
+    // run. On Unix that promise is proven by the directory fsync below;
+    // Windows has no portable directory fsync (see `fsync_dir`), so there
+    // the atomic rename is the durable step, as it is for every other
+    // sealed write in this crate.
     fsync_dir(&dir)
         .map_err(|e| ImportError::WriteFailed(format!("sync {}: {e}", dir.display())))?;
     write_raw_record(&dir, &sha256, source_name, bytes.len() as u64)?;
