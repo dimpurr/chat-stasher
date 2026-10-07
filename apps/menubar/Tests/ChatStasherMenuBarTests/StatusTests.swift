@@ -50,7 +50,17 @@ final class StatusTests: XCTestCase {
         XCTAssertTrue(status.sentence.contains("Arc · Work on Machine 3"))
     }
 
-    func testStaleInstallWithoutDailyHistoryDoesNotCreateWarningSentence() {
+    func testStaleInstallWithoutDailyHistoryStillWarns() {
+        // W913 · The menu bar's extension warning used to require
+        // `stale && reportedDaily == true`, and `reported_daily` only becomes
+        // true on three consecutive reports spaced 18-30 h apart — which an
+        // install that ticks every few minutes never produces. So the common
+        // silent install was flagged by the dashboard's `stale` flag and left
+        // out of the menu bar. A stale report is a stale report regardless of
+        // whether the host has recorded a daily cadence: the report's own age
+        // is what `stale` already says, and the menu bar should agree with it.
+        // The 7-day whole-machine fallback is unchanged and still outranks
+        // this warning when a machine has gone quiet entirely.
         let install = ExtensionInstall(
             installID: "old-record", machine: "Machine 1", browser: "Chrome",
             profileLabel: "Personal", reportedAt: "2026-09-20T12:00:00Z", stale: true,
@@ -66,8 +76,28 @@ final class StatusTests: XCTestCase {
                 sources: [], sourceDetails: [], destinations: 1, extensionInstalls: [install]
             ), local: cleanLocal, failure: nil, now: now
         )
-        XCTAssertEqual(value.severity, .healthy)
-        XCTAssertEqual(value.sentence, "All saved")
+        XCTAssertEqual(value.severity, .warning)
+        XCTAssertTrue(value.sentence.contains("Chrome · Personal on Machine 1"))
+    }
+
+    func testExtensionInstallNeedsWarningIsOnlyTheStaleFlag() {
+        // The extracted condition is the install's own `stale` flag — pure,
+        // and unit-testable without a snapshot. It deliberately does not look
+        // at `reported_daily`: an install that ticks every few minutes never
+        // establishes a daily cadence, and gating on it would put the warning
+        // back out of reach for the common silent install.
+        let fresh = ExtensionInstall(
+            installID: "fresh", machine: "Machine 1", browser: "Chrome",
+            profileLabel: "Personal", reportedAt: "2026-09-27T12:00:00Z", stale: false,
+            reportedDaily: true, platforms: []
+        )
+        let stale = ExtensionInstall(
+            installID: "stale", machine: "Machine 1", browser: "Chrome",
+            profileLabel: "Personal", reportedAt: "2026-09-20T12:00:00Z", stale: true,
+            reportedDaily: nil, platforms: []
+        )
+        XCTAssertFalse(extensionInstallNeedsWarning(install: fresh))
+        XCTAssertTrue(extensionInstallNeedsWarning(install: stale))
     }
 
     // ---- one test per classification class ----------------------------------

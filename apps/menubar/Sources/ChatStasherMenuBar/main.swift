@@ -461,10 +461,32 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
     }) {
         return .sourceStopped(stopped.label)
     }
-    if let stale = snapshot.extensionInstalls.first(where: { $0.stale && $0.reportedDaily == true }) {
+    if let stale = snapshot.extensionInstalls.first(where: extensionInstallNeedsWarning) {
         return .extensionStale("\(stale.label) on \(stale.machine)")
     }
     return .healthy
+}
+
+/// Whether the menu bar should flag this install's row.
+///
+/// Replaces the old `stale && reportedDaily == true` test, which could never
+/// fire for an install that reports on a few-minute tick without ever
+/// establishing a daily cadence (`EXTA-OUT.md §4 c5`). A stale report is a
+/// stale report: the report's own age is what the dashboard's `stale` flag
+/// already says, and the menu bar should agree with it. `reported_daily` is
+/// deliberately *not* part of the test — it is the host's record of whether
+/// this install has reported on three consecutive days, and an install that
+/// ticks every few minutes never produces it, so gating on it would put the
+/// warning back out of reach for the most common silent install.
+///
+/// The whole-machine fallback ladder (`silent`, the 7-day default) still
+/// covers a machine that has gone quiet entirely; this warning is for the
+/// install whose *report* is stale while the install itself may still be
+/// running. A stale install whose ticks require the backfill switch is not
+/// necessarily broken, and the sentence it produces says only that — it does
+/// not claim the install is down.
+func extensionInstallNeedsWarning(install: ExtensionInstall) -> Bool {
+    install.stale
 }
 
 /// The card for a refresh that produced no snapshot. The class was decided
