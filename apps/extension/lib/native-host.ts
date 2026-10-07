@@ -775,8 +775,10 @@ function classify(
     return { ok: false, reason: 'no-runtime-api', retryable: false };
   }
   if (outcome.kind === 'timeout') {
-    // §7: the host may have sealed it anyway; the retry is safe and answers
-    // `duplicate`. So a timeout is retryable — it is still NOT delivered.
+    // §7: the host may have sealed it anyway. `deliver` has already
+    // re-sent the identical request once by the time a timeout reaches
+    // this classification, so what is left is the next tick's retry —
+    // safe for the same reason, and still NOT delivered.
     return { ok: false, reason: 'timeout', retryable: true };
   }
   if (outcome.kind === 'error') {
@@ -1118,6 +1120,17 @@ export async function openDashboard(options: { timeoutMs?: number } = {}): Promi
  *    only place its sequence reaches the host. Both fields are omitted when no
  *    stamp could be reserved, which is the "seq unknown" the host accepts —
  *    never a number or a nonce this side invented.
+ *
+ * 🔴 W930 · A timeout re-sends the **identical** request once, under the
+ *    same stamp: a timeout does not mean the host did not seal (the host
+ *    answers inside the stage lock, and a cold stage can outlast the budget
+ *    while it fills the install-provenance index once). A repeated
+ *    `(report_seq, report_nonce)` pair is one allocation arriving twice
+ *    (`lib/report-seq.ts` ②), and the host answers the re-send `duplicate`
+ *    from the bytes alone (§7) — so the ack this delivery already earned is
+ *    read now, instead of the debt waiting for the next tick, which
+ *    re-fetches the conversation with a new `capturedAt` and seals a second
+ *    shard the byte-level duplicate rule cannot recognise.
  */
 export async function deliver(
   name: string,
@@ -1139,9 +1152,8 @@ export async function deliver(
     };
   }
 
-  const outcome = await withReportSeq(async (stamp) => sendOnce(
-    getRuntime(),
-    {
+  const outcome = await withReportSeq(async (stamp) => {
+    const message = {
       protocol: PROTOCOL,
       type: 'deliver',
       request_id: requestId,
@@ -1151,9 +1163,17 @@ export async function deliver(
       ...(fingerprint === null ? {} : { fingerprint }),
       ...(accountId ? { account_id: accountId } : {}),
       ...(stamp === null ? {} : { report_seq: stamp.seq, report_nonce: stamp.nonce }),
-    },
-    REQUEST_TIMEOUT_MS,
-  ));
+    };
+    let outcome = await sendOnce(getRuntime(), message, REQUEST_TIMEOUT_MS);
+    if (outcome.kind === 'timeout') {
+      // The identical request, once more, under the same stamp — see the
+      // W930 note above. One re-send, not a loop: a host that answers
+      // neither send is a host this delivery cannot reach, and the debt
+      // stays pending exactly as it did before, for the next tick.
+      outcome = await sendOnce(getRuntime(), message, REQUEST_TIMEOUT_MS);
+    }
+    return outcome;
+  });
   const classified = classify(outcome, (value) => {
     if (value.type !== 'ack') return "type is neither 'ack' nor 'nack'";
     const ack = validateAck(value);

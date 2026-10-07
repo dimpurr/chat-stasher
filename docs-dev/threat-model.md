@@ -745,10 +745,28 @@ words with different consequences:
   could never succeed. The capture stays in the outbox, listed rejected with that
   instruction, and is never merged with the first install's record
   (`crates/chat-stasher/src/inbox.rs:758-766`, `:837-847`, `:991-1023`;
-  `crates/chat-stasher/src/install_provenance.rs:178-244`;
+  `crates/chat-stasher/src/install_provenance.rs:209-287`;
   `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
   deliberately *not* evidence of a conflict, and neither is the same browser under
   the same label — that case is invisible here, by construction.
+- 🔴 **The refusal is answered from an index, and the index is invalidated by a
+  stat walk.** Reading every shard on every delivery measured 196–205 s on a
+  12 GB stage — past the extension's 60 s request budget, so every delivery
+  answered too late and no `ack` was ever read. The provenance is now written
+  down when the seal happens (`meta/<machine>/install-provenance-v1.jsonl`),
+  and the stage is read only when the index cannot answer
+  (`crates/chat-stasher/src/install_provenance.rs:361-445`). The index is
+  trusted only while the session tree holds no entry newer than the index
+  itself: every write this tool makes is a shard write followed, inside the
+  same stage lock, by the index write that records it, so a newer tree entry
+  means the tree changed without this tool — a restored or merged stage — and
+  the stage is read again, whole, healing the index for every install at once
+  (`crates/chat-stasher/src/install_provenance.rs:289-393`). Two limits are
+  named rather than hidden: a mutation that preserves the mtime of every entry
+  it touches (a restore with `--preserve`, say) is invisible to any mtime-based
+  check, and a mutation that lands while the read is running can be missed the
+  way it always could be. The first is the price of not re-reading 12 GB per
+  delivery; the second is not new.
 - 🔴 **`identity-conflict`** (EXT-13) — one `report_seq` reached the host twice
   under two different nonces. Unlike the refusal above, this one is **retryable**
   and the bytes are not wrong, only unattributable, so the captures stay queued

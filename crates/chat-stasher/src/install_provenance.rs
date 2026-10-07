@@ -24,13 +24,30 @@
 //! So the evidence is written where it is produced:
 //! `<stage>/meta/<machine>/install-provenance-v1.jsonl`, one line per sealed
 //! observation, appended in the same stage lock the seal already holds. The
-//! check reads that file. The stage itself is read **only** when the index has
-//! no line for the install being asked about — a stage sealed before this index
-//! existed, an index whose line was lost, or an index that is damaged — and what
-//! that read finds is written down, so the next question for the same install is
-//! answered from memory. Nothing is ever concluded from a missing line: "this
-//! index has not seen it" and "the stage has sealed nothing" stay different
-//! states, and only the second can answer "no conflict" (invariant 1).
+//! check reads that file. The stage itself is read **only** when the index
+//! cannot answer — no index at all (a stage sealed before this index
+//! existed), an index with no line for the install being asked about, an
+//! index the session tree has outgrown, or an index that is damaged — and
+//! what that read finds is written down, so the next question for the same
+//! install is answered from memory. Nothing is ever concluded from a missing
+//! line: "this index has not seen it" and "the stage has sealed nothing"
+//! stay different states, and only the second can answer "no conflict"
+//! (invariant 1).
+//!
+//! The index is trusted only while the session tree stands still. Every
+//! write this tool makes to the tree is a shard write followed, inside the
+//! same stage lock, by the index write that records it, so the index's own
+//! mtime is never older than the tree it was written from. An entry of the
+//! tree newer than the index therefore means the tree changed without this
+//! tool — a restored or merged stage, the hazard above — and the index is
+//! not trusted to answer for an install it has a line for: the stage is
+//! read again. The check is a **stat walk** over the tree (every entry is
+//! listed and stat'ed, no file is read), which is what keeps the answer
+//! inside the budget while still failing closed. Two limits are named, not
+//! hidden: a mutation that preserves the mtime of every entry it touches is
+//! invisible to any mtime-based check, and so is a mutation that lands
+//! while the walk is running. Both are written down in
+//! `docs-dev/threat-model.md` next to D4.
 //!
 //! The index only ever *caches* an answer the shards already hold, and that is
 //! what makes it safe to keep: the shard is written first and durably, the index
@@ -40,6 +57,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -93,6 +111,19 @@ enum Index {
     /// rewrite can keep them, but no question is answered from this file alone —
     /// the line that was lost may be the one being asked about.
     Damaged(Vec<Observation>),
+}
+
+impl Index {
+    /// The lines that parsed, kept for a repair: a line the stage no longer
+    /// backs is still kept, because the index is allowed to say more than the
+    /// stage — an observation that says too much can only refuse a delivery,
+    /// never admit one the stage would have refused — but never less.
+    fn into_observations(self) -> Vec<Observation> {
+        match self {
+            Index::Absent => Vec::new(),
+            Index::Complete(observations) | Index::Damaged(observations) => observations,
+        }
+    }
 }
 
 fn read_index(stage: &Path, machine: &str) -> Result<Index> {
@@ -153,11 +184,11 @@ fn append(stage: &Path, machine: &str, observation: &Observation) -> Result<()> 
 /// Replace the index with exactly `observations`, losing nothing and inventing
 /// nothing.
 ///
-/// Used only to repair a damaged file: the whole set is already in hand (the
-/// lines that parsed plus what the stage was just read for), and appending to a
-/// file that will not parse would leave every later question walking the stage
-/// again. The write is not atomic, deliberately: a torn rewrite costs the next
-/// question a re-read of the stage, which is where every answer comes from
+/// Used by every path that reads the stage: the whole set is already in hand
+/// (the lines that parsed plus what the stage was just read for), and appending
+/// to a file that will not parse would leave every later question walking the
+/// stage again. The write is not atomic, deliberately: a torn rewrite costs the
+/// next question a re-read of the stage, which is where every answer comes from
 /// anyway, and the shards are never touched.
 fn rewrite(stage: &Path, machine: &str, observations: &[Observation]) -> Result<()> {
     let path = index_path(stage, machine);
@@ -175,8 +206,8 @@ fn rewrite(stage: &Path, machine: &str, observations: &[Observation]) -> Result<
     Ok(())
 }
 
-/// Every observation of `install_id` sealed anywhere in this stage's session
-/// tree, read from the shards themselves.
+/// Every install identity sealed anywhere in this stage's session tree,
+/// read from the shards themselves.
 ///
 /// **Bounded by a necessary condition, never by a guess.** A record can only
 /// carry an `install_id` if the file spells the field's name, so a shard that
@@ -190,7 +221,14 @@ fn rewrite(stage: &Path, machine: &str, observations: &[Observation]) -> Result<
 /// **hand-authored** to escape the field name itself would not be seen — this
 /// tool never writes one that way, and the index answers for everything sealed
 /// since it existed.
-fn walk(stage: &Path, install_id: &str) -> Result<Vec<Observation>> {
+///
+/// The walk extracts **every** install it finds, not just the one a question
+/// was asked about: the scan already visits every shard that spells the field,
+/// so keeping them all costs the parse and nothing more, and a read taken for
+/// one install must not leave another install's answer stale behind a fresh
+/// index mtime — the interleaving a hand-merged stage makes possible, and the
+/// one direction that must not fail.
+fn walk(stage: &Path) -> Result<Vec<Observation>> {
     let mut out: Vec<Observation> = Vec::new();
     let sessions = stage.join(store::SESSIONS_DIR);
     let machines = match fs::read_dir(&sessions) {
@@ -218,8 +256,12 @@ fn walk(stage: &Path, install_id: &str) -> Result<Vec<Observation>> {
                     let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
                         continue;
                     };
-                    if record.get("install_id").and_then(|value| value.as_str()) != Some(install_id)
-                    {
+                    let Some(install_id) =
+                        record.get("install_id").and_then(|value| value.as_str())
+                    else {
+                        continue;
+                    };
+                    if install_id.is_empty() {
                         continue;
                     }
                     let observation = Observation {
@@ -243,75 +285,148 @@ fn walk(stage: &Path, install_id: &str) -> Result<Vec<Observation>> {
     Ok(out)
 }
 
+/// The newest modification time anywhere in this stage's session tree, or
+/// `None` when the tree has no entry at all.
+///
+/// A **stat walk**: every entry is listed and stat'ed, and no file is read,
+/// so the cost is a directory traversal — measured ~0.4 s over this machine's
+/// stage (13,030 shards in 8,845 sessions), against the ~17 s reading the
+/// same bytes costs and the 196–205 s parsing them did. It runs inside the
+/// stage lock, so it is also the bound on what a concurrent delivery waits
+/// for: well inside the 10-second `stage-unavailable` budget.
+///
+/// This is the index's invalidation signal. Every write this tool makes to
+/// the session tree is a shard write, and every shard write is followed —
+/// inside the same stage lock — by the index write that records it, so the
+/// index's own mtime is never older than the tree it was written from. An
+/// entry newer than the index therefore means the tree changed without this
+/// tool: a restored or merged stage, the hazard the module header names. The
+/// index is then not trusted to answer for an install it has a line for, and
+/// the stage is read again.
+///
+/// One limit, stated: a mutation that preserves the mtime of every entry it
+/// touches (a restore with `--preserve`, say) is invisible to this walk, as
+/// is a mutation that lands while it runs. Both are named in
+/// `docs-dev/threat-model.md` next to D4.
+fn sessions_newest_mtime(stage: &Path) -> Result<Option<SystemTime>> {
+    let sessions = stage.join(store::SESSIONS_DIR);
+    let mut newest = match fs::metadata(&sessions) {
+        Ok(metadata) => Some(metadata.modified()?),
+        // A tree that is not there has no mtime to offer, and "nothing
+        // changed" is the answer that keeps the fast path usable on a
+        // stage whose sessions directory does not exist yet.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", sessions.display())),
+    };
+    let mut pending: Vec<PathBuf> = vec![sessions];
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let modified = fs::metadata(&path)?.modified()?;
+            newest = match newest {
+                Some(newest) if newest >= modified => Some(newest),
+                _ => Some(modified),
+            };
+            if entry.file_type()?.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(newest)
+}
+
+/// Whether the session tree holds an entry newer than the index file — the
+/// signal that the tree changed without this tool, and the gate on the fast
+/// path in [`sealed_observations_for`].
+///
+/// The caller holds the stage lock, so no write of this tool can land
+/// between the index's read and this comparison; only an out-of-band
+/// mutation can, and that is exactly what is being looked for.
+fn session_tree_changed_since(stage: &Path, index: &Path) -> Result<bool> {
+    let written = fs::metadata(index)?.modified()?;
+    let newest = sessions_newest_mtime(stage)?;
+    Ok(match newest {
+        Some(newest) => newest > written,
+        None => false,
+    })
+}
+
 /// The provenance this stage has sealed under `install_id`.
 ///
-/// Answers from the index when it holds a line for this install, and otherwise
-/// reads the stage and writes down what it found. An empty answer therefore
-/// always means "the stage was read and holds nothing", never "the index had
-/// nothing to say".
+/// Answers from the index when it holds a line for this install **and**
+/// the session tree has not changed since the index was written, and
+/// otherwise reads the stage and writes down what it found. An empty
+/// answer therefore always means "the stage was read and holds nothing",
+/// never "the index had nothing to say".
 ///
-/// The caller must hold the stage lock: this both reads the index and, on the
-/// paths that fill it, appends to it.
+/// The caller must hold the stage lock: this both reads the index and,
+/// on the paths that fill it, rewrites it.
 ///
-/// 🔴 A read that finds nothing writes **nothing**. A line saying "this stage
-/// has sealed nothing under this install" would be a claim, and it would be a
-/// stale one the moment a shard carrying this install arrived from anywhere the
-/// index does not watch — a restored or merged stage — which is the direction
-/// that must not fail. The absence of a line costs one more read of the stage
-/// and nothing else, so that is the price paid here.
+/// 🔴 A read that finds nothing writes **nothing**. A line saying "this
+/// stage has sealed nothing under this install" would be a claim, and it
+/// would be a stale one the moment a shard carrying this install arrived
+/// from anywhere the index does not watch — a restored or merged stage —
+/// which is the direction that must not fail. The absence of a line
+/// costs one more read of the stage and nothing else, so that is the
+/// price paid here.
 ///
-/// A failure to record what the read found is reported on stderr and does **not**
-/// fail the caller. The stage is the archive and the index is derived from it,
-/// so the cost of a lost line is one re-read of the shards — the same class of
-/// best-effort write the extension's own capture record is, and not worth
-/// turning a sealed delivery into a refusal over.
+/// 🔴 The fast path's gate is [`session_tree_changed_since`]: an index
+/// that holds a line for this install is still not trusted while the
+/// tree is newer than the index, because a tree newer than the index is
+/// a tree the index has not seen. And the read that follows extracts
+/// **every** install in the stage, not just this one, so one read heals
+/// the index for every install at once — a read taken for install A must
+/// not leave install B's answer stale behind a fresh index mtime, which
+/// is the interleaving a hand-merged stage makes possible.
+///
+/// A failure to record what the read found is reported on stderr and does
+/// **not** fail the caller. The stage is the archive and the index is
+/// derived from it, so the cost of a lost line is one re-read of the
+/// shards — the same class of best-effort write the extension's own
+/// capture record is, and not worth turning a sealed delivery into a
+/// refusal over.
 pub fn sealed_observations_for(
     stage: &Path,
     machine: &str,
     install_id: &str,
 ) -> Result<Vec<Observation>> {
-    match read_index(stage, machine)? {
-        Index::Complete(observations) => {
-            let known: Vec<Observation> = observations
-                .into_iter()
-                .filter(|observation| observation.install_id == install_id)
-                .collect();
-            if !known.is_empty() {
-                return Ok(known);
-            }
-            let found = walk(stage, install_id)?;
-            record(stage, machine, &found);
-            Ok(found)
-        }
-        Index::Absent => {
-            let found = walk(stage, install_id)?;
-            record(stage, machine, &found);
-            Ok(found)
-        }
-        Index::Damaged(kept) => {
-            let found = walk(stage, install_id)?;
-            let mut repaired = kept;
-            for observation in &found {
-                if !repaired.contains(observation) {
-                    repaired.push(observation.clone());
-                }
-            }
-            if let Err(error) = rewrite(stage, machine, &repaired) {
-                eprintln!("native-host: install provenance index could not be repaired: {error:#}");
-            }
-            Ok(found)
+    let index = read_index(stage, machine)?;
+    if let Index::Complete(observations) = &index {
+        let known: Vec<Observation> = observations
+            .iter()
+            .filter(|observation| observation.install_id == install_id)
+            .cloned()
+            .collect();
+        if !known.is_empty() && !session_tree_changed_since(stage, &index_path(stage, machine))? {
+            return Ok(known);
         }
     }
-}
-
-/// Write down what a read of the stage found. Best-effort, by the contract on
-/// [`sealed_observations_for`].
-fn record(stage: &Path, machine: &str, found: &[Observation]) {
-    for observation in found {
-        if let Err(error) = append(stage, machine, observation) {
-            eprintln!("native-host: install provenance index could not be written: {error:#}");
+    // Every state that is not the fast path — no index, an index with
+    // nothing to say about this install, an index the session tree has
+    // outgrown, a damaged one — is answered by reading the stage, and
+    // the read is written back whole: the lines that parsed plus what
+    // the stage holds, so the next question, about any install, is
+    // answered from memory.
+    let found = walk(stage)?;
+    let mut repaired = index.into_observations();
+    for observation in &found {
+        if !repaired.contains(observation) {
+            repaired.push(observation.clone());
         }
     }
+    if let Err(error) = rewrite(stage, machine, &repaired) {
+        eprintln!("native-host: install provenance index could not be written: {error:#}");
+    }
+    Ok(found
+        .into_iter()
+        .filter(|observation| observation.install_id == install_id)
+        .collect())
 }
 
 /// Record one observation at seal time, so the next question about this install
@@ -323,6 +438,10 @@ fn record(stage: &Path, machine: &str, found: &[Observation]) {
 /// than of what the stage holds — and every read of it would grow with that
 /// count. An index that is absent or damaged is appended to anyway: a repeated
 /// line costs a reader nothing, and a missing one costs a re-read of the stage.
+///
+/// The append is also what keeps the fast path's mtime gate honest for the
+/// seal it belongs to: the shard is written first, this line second, so the
+/// index's mtime is never older than the tree it was written from.
 pub fn record_sealed(stage: &Path, machine: &str, install_id: &str, browser: &str, label: &str) {
     let observation = Observation {
         install_id: install_id.to_string(),
@@ -373,17 +492,22 @@ mod tests {
     /// and absent from the file afterwards. This is the whole point of the
     /// change — the answer used to cost 196–205 s of reading every shard in a
     /// 12 GB stage.
+    ///
+    /// The shard is planted **before** the index line, so the index's mtime is
+    /// the newer of the two: the gate on this fast path compares the session
+    /// tree against the index, and a tree newer than the index is a tree the
+    /// index has not seen — the case below.
     #[test]
     fn an_indexed_observation_answers_without_reading_the_stage() {
         let stage = tempfile::tempdir().expect("stage");
         let stage = stage.path();
-        append(stage, MACHINE, &observation("Chrome")).expect("seed the index");
-        let seeded = index_lines(stage);
         plant_shard(
             stage,
             "deepseek.abc",
             r#"{"install_id":"w9300000-0000-4000-8000-000000000000","browser":"Firefox"}"#,
         );
+        append(stage, MACHINE, &observation("Chrome")).expect("seed the index");
+        let seeded = index_lines(stage);
 
         let found = sealed_observations_for(stage, MACHINE, INSTALL).expect("answer");
 
@@ -396,6 +520,77 @@ mod tests {
             index_lines(stage),
             seeded,
             "nothing was appended: the stage was not read"
+        );
+    }
+
+    /// 🔴 The fast path's gate: a session tree newer than the index is a tree
+    /// the index has not seen, so the index is **not** the answer — the stage
+    /// is read, and what it holds is what decides. This is the direction that
+    /// must not fail: a shard that entered the tree without passing through
+    /// `seal_payload` (a restored or merged stage) has to be visible to the
+    /// conflict check, exactly as it was when every delivery read the whole
+    /// stage.
+    #[test]
+    fn a_session_tree_newer_than_the_index_rereads_the_stage() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        append(stage, MACHINE, &observation("Chrome")).expect("seed the index");
+        plant_shard(
+            stage,
+            "deepseek.abc",
+            r#"{"install_id":"w9300000-0000-4000-8000-000000000000","browser":"Firefox"}"#,
+        );
+
+        let found = sealed_observations_for(stage, MACHINE, INSTALL).expect("answer");
+
+        assert_eq!(
+            found,
+            vec![observation("Firefox")],
+            "the stage is the answer: the shard the index had not seen is read"
+        );
+        let healed = index_lines(stage);
+        assert!(
+            healed.contains("Firefox"),
+            "what the read found is written down: {healed}"
+        );
+    }
+
+    /// A read taken for one install heals the index for **every** install: the
+    /// walk extracts all of them, so a change that lands between two questions
+    /// is caught by the question asked about *any* install — the index's mtime
+    /// may not advance past a change the index has not seen. Without this, a
+    /// merge that added an observation for install B would stay invisible to
+    /// the next question about install A, once A's own question had refreshed
+    /// the index's mtime.
+    #[test]
+    fn a_read_for_one_install_heals_the_index_for_every_install() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        plant_shard(
+            stage,
+            "deepseek.abc",
+            &format!(r#"{{"install_id":"{INSTALL}","browser":"Chrome"}}"#),
+        );
+        append(stage, MACHINE, &observation("Chrome")).expect("seed the index");
+        // A second install enters the tree after the index was written: the
+        // shape a hand-merged stage has.
+        plant_shard(
+            stage,
+            "deepseek.def",
+            r#"{"install_id":"w9300000-0000-4000-8000-00000000beef","browser":"Firefox"}"#,
+        );
+
+        let found = sealed_observations_for(stage, MACHINE, INSTALL).expect("answer");
+
+        assert_eq!(
+            found,
+            vec![observation("Chrome")],
+            "the answer for the install asked about is what the stage holds"
+        );
+        let healed = index_lines(stage);
+        assert!(
+            healed.contains("beef"),
+            "the read heals the index for the install it was not asked about: {healed}"
         );
     }
 

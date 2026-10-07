@@ -173,12 +173,41 @@ describe('W2 · 🔴 regression: without a matching ack it is never delivered', 
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const pending = deliver(NAME, PAYLOAD);
     await waitUntilSent();
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    // W930: a timeout re-sends the identical request once, so the
+    // budget is spent twice before the delivery is called a timeout.
+    await vi.advanceTimersByTimeAsync(2 * REQUEST_TIMEOUT_MS + 1);
     const result = await pending;
 
     expect(result.delivered).toBe(false);
     expect(result).toMatchObject({ reason: 'timeout', retryable: true });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
     console.log('[W2-NM] timeout:', result);
+  });
+
+  it('W930 · a timeout the re-send answers ⇒ delivered, and the re-send is the identical request under the same stamp', async () => {
+    // The host is slow — it seals, but the first answer does not
+    // arrive inside the budget. The identical re-send is what reads
+    // the ack the first send already earned: the host answers it
+    // `duplicate` from the bytes alone (§7), so no second shard is
+    // sealed and no debt is left for the next tick.
+    let sends = 0;
+    responder = (message) => {
+      sends += 1;
+      if (sends === 1) return { via: 'silent' };
+      return { via: 'callback', response: ackFor(message, { status: 'duplicate' }) };
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = deliver(NAME, PAYLOAD);
+    await waitUntilSent();
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1);
+    const result = await pending;
+
+    expect(result.delivered).toBe(true);
+    expect(result).toMatchObject({ status: 'duplicate' });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+    console.log('[W2-NM] timeout answered by the re-send:', result);
   });
 
   it('runtime.lastError ⇒ send-failed (named, not silent)', async () => {
