@@ -22,9 +22,12 @@ THE CYCLE
 ---------
   1. snapshot    per-session shard count, byte total and content digest, plus
                  one `digest-root` over the whole platform
-  2. wipe        every session dir for the platform, or a deterministic random
-                 half of them; the same choice applied to the root's
-                 `browser-state/` directory
+  2. wipe        every *web* session dir for the platform, or a deterministic
+                 random half of them; the same choice applied to the root's
+                 `browser-state/` directory. Local-harness dirs in the same
+                 bucket (`<platform>.<machine>.<id>`, 27-ORACLE §3.3) are never
+                 touched: a browser re-backfill cannot return one, so wiping one
+                 would report a loss that is not a loss
   3. re-collect  the collect path is re-run against the isolated root (an
                  external command; see --collect-cmd)
   4. re-compare  the oracle (`compare.py`) is re-run against the isolated stage
@@ -40,7 +43,7 @@ DRY RUN
 -------
 `--dry-run` prints exactly which session directories and browser-state entries
 would be removed, and where the collect and the oracle would run, and removes
-nothing. It is the only mode the 2026-10-07 prep run used, because the stress
+nothing. A dry run, like a refusal, exits 3: it establishes nothing. It is the only mode the 2026-10-07 prep run used, because the stress
 test it prepares still needs a browser.
 
 WHAT IS CONFINED, AND WHAT IS NOT
