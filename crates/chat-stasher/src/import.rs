@@ -775,6 +775,39 @@ fn publish_inbox_dir(inbox: &Path) -> Result<(), ImportError> {
         .map_err(|e| ImportError::WriteFailed(format!("create inbox {}: {e}", inbox.display())))
 }
 
+/// Importing a platform's official export (ADR-055) — the per-platform parser
+/// half, beside the producer skeleton above.
+///
+/// ADR-055 D4 splits the import groundwork into three isolated pieces: the
+/// producer skeleton (`chat-stasher import <platform> <export-file>`, W901),
+/// the raw-export archive namespace (W902), and the per-platform parsers. The
+/// parsers are the third piece and nothing else: they turn one platform's
+/// export file into observation-level records behind a pure function, and they
+/// are wired to no command.
+///
+/// Two properties hold for every parser under here, because they are the two the
+/// archive is built on (CLAUDE.md · Invariants):
+///
+/// * **An unknown is never recorded as empty.** A field the export did not
+///   carry, one it wrote as `null`, and one it carried in a shape this build
+///   cannot read are three different states, and each parser keeps them apart in
+///   its own types rather than collapsing them into a zero or an empty list.
+/// * **Nothing is skipped in silence.** An export that cannot be read at all is
+///   a named failure; a record *inside* a readable export that cannot be turned
+///   into a result is a named failure reported beside the results, so a caller
+///   that counted only the successes would be reporting a smaller number that
+///   looks complete (ADR-014: incomplete is a failure, never a whole copy).
+///
+/// **No archiving lives here.** ADR-055 D4 says the whole export file is
+/// archived once, byte-exact, in its own non-session namespace, and that path
+/// belongs to the producer skeleton. A parser under here reads no file, writes
+/// nothing and reaches no network: the caller hands it bytes, which is also
+/// what makes it safe to run over a real export on an isolated copy while the
+/// archive under measurement stays untouched (ADR-055 D6). Re-archiving the
+/// bytes here would be a second archiving path for the same file, which is
+/// exactly what the groundwork is arranged to avoid.
+pub mod gemini;
+
 #[cfg(test)]
 mod tests {
     use super::*;
