@@ -520,10 +520,13 @@ jobs:
 
       # W932 · the no-http-port keepalive helper. Same job, same reason: it runs
       # against a mock DevTools endpoint (HTTP + WebSocket) built into the test
-      # file, so it needs no browser and no toolchain. The mock records every
-      # Page.reload with its timestamp, which is what makes the two properties
-      # that matter assertable — that only exact-allowlist hosts are reloaded,
-      # and that reloads are spaced — without driving a real browser.
+      # file, so it needs no browser. It does need Node 22 or newer: the helper
+      # speaks WebSocket through the global, as does the mock, and the gates
+      # runner image ships Node 22 by default — unlike the npm launcher step
+      # below, which pins 18 on purpose. The mock records every Page.reload with
+      # its timestamp, which is what makes the two properties that matter
+      # assertable — that only exact-allowlist hosts are reloaded, and that
+      # reloads are spaced — without driving a real browser.
       - name: Platform-tab keepalive helper behaves
         run: bash scripts/dev/test-cdp-keep-platform-tabs.sh
 

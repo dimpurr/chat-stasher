@@ -364,16 +364,20 @@ if ! path_exists "$WT_EXT/node_modules"; then
   # dependencies changed fails here rather than building a different tree than
   # the one committed; --prefer-offline keeps it off the network when the
   # store already has the packages.
-  command -v pnpm >/dev/null 2>&1 || {
-    echo "reload-extension.sh: the checkout's node_modules cannot serve $REF (missing: ${MISSING_DEPS:-undeterminable}) and pnpm is not on PATH to install the worktree's copy" >&2
-    exit 1
-  }
   echo "reload-extension.sh: the checkout's node_modules cannot serve $REF (missing: ${MISSING_DEPS:-undeterminable}) — installing inside the throwaway worktree (the checkout is not touched)"
   if [ -n "${CS_RELOAD_INSTALL_CMD:-}" ]; then
     # Test-only stub install (see the header): invoked with the worktree's
     # extension dir, exactly where pnpm would run.
     "$CS_RELOAD_INSTALL_CMD" "$WT_EXT"
   else
+    # pnpm is demanded only where it is used. Asking for it before this branch
+    # made the stub install above unreachable on a machine without pnpm, which
+    # is every CI runner that runs the bash suite — the reload test then failed
+    # on the install path with the stub never called (W932).
+    command -v pnpm >/dev/null 2>&1 || {
+      echo "reload-extension.sh: the checkout's node_modules cannot serve $REF (missing: ${MISSING_DEPS:-undeterminable}) and pnpm is not on PATH to install the worktree's copy" >&2
+      exit 1
+    }
     ( cd "$WT_EXT" && pnpm -s install --frozen-lockfile --prefer-offline )
   fi
 fi

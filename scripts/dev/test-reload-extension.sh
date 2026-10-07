@@ -100,7 +100,20 @@ export CS_RELOAD_BUILD_CMD="$STUB"
 
 LOAD="$SCRATCH/ext-load"
 PASS=0
-fail() { echo "FAIL: $1" >&2; exit 1; }
+# Prints the failure and exits. A case whose failure is the script under test
+# should hand its captured output to $2: `fail "..."; cat "$SCRATCH/oNN"` reads
+# as if it printed the log, but `fail` exits first, so the log never reached
+# anyone — which is how the first CI run of case 17 reported a failure with no
+# diagnostic at all (W932).
+fail() {
+  echo "FAIL: $1" >&2
+  if [ -n "${2:-}" ] && [ -s "${2:-}" ]; then
+    echo "--- captured output ($2) ---" >&2
+    cat "$2" >&2
+    echo "--- end captured output ---" >&2
+  fi
+  exit 1
+}
 note() { echo "ok: $1"; PASS=$((PASS + 1)); }
 
 manifest_version() {
@@ -368,7 +381,7 @@ printf '%s\n' 'prepared by an earlier build' > "$REPO/apps/extension/.wxt/types.
 : > "$SCRATCH/install-log"
 : > "$WXT_LOG"
 if ! CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 100 >"$SCRATCH/o100" 2>&1; then
-  fail "a reload with a complete node_modules should succeed"; cat "$SCRATCH/o100" >&2
+  fail "a reload with a complete node_modules should succeed" "$SCRATCH/o100"
 fi
 [ ! -s "$SCRATCH/install-log" ] || fail "a complete node_modules must not trigger an install"
 [ "$(cat "$WXT_LOG")" = "wxt=symlink" ] || fail "the complete fast path should reuse the checkout's .wxt, got: $(tr '\n' ' ' < "$WXT_LOG")"
@@ -381,7 +394,7 @@ rm -rf "$REPO/apps/extension/node_modules/ajv"
 : > "$SCRATCH/install-log"
 : > "$WXT_LOG"
 if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 101 >"$SCRATCH/o101" 2>&1; then
-  fail "a reload with a stale node_modules should install in the worktree and succeed"; cat "$SCRATCH/o101" >&2
+  fail "a reload with a stale node_modules should install in the worktree and succeed" "$SCRATCH/o101"
 fi
 grep -q "cannot serve HEAD (missing: ajv" "$SCRATCH/o101" || fail "the stale node_modules should be reported by which dep is missing"
 grep -q "installing inside the throwaway worktree" "$SCRATCH/o101" || fail "the worktree install should be reported"
@@ -401,7 +414,7 @@ printf '%s\n' '{"name":"chat-stasher-ext","version":"0.1.0","dependencies":{"lef
 : > "$SCRATCH/install-log"
 : > "$WXT_LOG"
 if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 102 >"$SCRATCH/o102" 2>&1; then
-  fail "a reload of a ref that declares a dep the checkout's node_modules lacks should install in the worktree"; cat "$SCRATCH/o102" >&2
+  fail "a reload of a ref that declares a dep the checkout's node_modules lacks should install in the worktree" "$SCRATCH/o102"
 fi
 [ -s "$SCRATCH/install-log" ] || fail "the install should have run: the ref, not the checkout, decides what the build needs"
 [ ! -e "$REPO/apps/extension/node_modules/ajv" ] || fail "the install must not write into the operator checkout"
@@ -414,7 +427,7 @@ note "the ref's manifest, not the checkout's, decides whether node_modules is st
 #     would pass as "detects staleness".
 : > "$SCRATCH/install-log"
 if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB" bash "$RELOAD" --load-dir "$LOAD" --ref "$OLD_REF" --build-number 103 >"$SCRATCH/o103" 2>&1; then
-  fail "a reload of a ref whose deps the checkout does link should succeed"; cat "$SCRATCH/o103" >&2
+  fail "a reload of a ref whose deps the checkout does link should succeed" "$SCRATCH/o103"
 fi
 [ ! -s "$SCRATCH/install-log" ] || fail "a ref that declares no ajv must not trigger an install"
 [ "$(manifest_version "$LOAD/manifest.json")" = "0.1.0.103" ] || fail "expected 0.1.0.103"
@@ -426,7 +439,7 @@ mv "$REPO/apps/extension/node_modules" "$SCRATCH/nm-backup"
 : > "$SCRATCH/install-log"
 : > "$WXT_LOG"
 if ! CS_RELOAD_INSTALL_CMD="$INSTALL_STUB" CS_RELOAD_BUILD_CMD="$STUB2" bash "$RELOAD" --load-dir "$LOAD" --build-number 104 >"$SCRATCH/o104" 2>&1; then
-  fail "a reload with no node_modules should install in the worktree and succeed"; cat "$SCRATCH/o104" >&2
+  fail "a reload with no node_modules should install in the worktree and succeed" "$SCRATCH/o104"
 fi
 grep -q "cannot serve HEAD" "$SCRATCH/o104" || fail "the missing node_modules should be reported"
 [ -s "$SCRATCH/install-log" ] || fail "the install stub should have been called"
