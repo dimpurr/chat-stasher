@@ -34,6 +34,36 @@
 //!
 //! Read-only on the source (ADR-011): the export file is opened for reading and
 //! never moved, renamed, rewritten or deleted.
+//!
+//! ADR-055 D4 splits the groundwork into three isolated pieces: this
+//! producer (W901), the raw-export archive namespace (W902), and the
+//! per-platform parsers. The parsers are the third piece and live under
+//! this module ([`deepseek`] is the first): each turns one platform's
+//! export bytes into conversation-level records behind a pure function,
+//! and is wired to no command. Two properties hold for every parser
+//! under here, because they are the two the archive is built on
+//! (CLAUDE.md · Invariants):
+//!
+//! * **An unknown is never recorded as empty.** A field the export did
+//!   not carry, one it wrote as `null`, and one it carried in a shape
+//!   this build cannot read are three different states, and each parser
+//!   keeps them apart in its own types rather than collapsing them into
+//!   a zero or an empty list.
+//! * **Nothing is skipped in silence.** An export that cannot be read at
+//!   all is a named failure; a conversation *inside* a readable export
+//!   that cannot be turned into a record is a named failure reported
+//!   beside the records, so a caller that counted only the successes
+//!   would be reporting a smaller number that looks complete (ADR-014:
+//!   incomplete is a failure, never a whole copy).
+//!
+//! A parser reads no file, writes nothing and reaches no network: the
+//! caller hands it bytes, which is also what makes it safe to run over
+//! a real export on an isolated copy while the archive under measurement
+//! stays untouched (ADR-055 D6).
+
+/// The per-platform export parsers, the third piece of the ADR-055 D4
+/// split (see the module docs for the properties every parser holds).
+pub mod deepseek;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
