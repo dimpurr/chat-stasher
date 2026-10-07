@@ -149,7 +149,7 @@ the sentence.
    `runtime.sendNativeMessage`
    (`apps/extension/lib/native-host.ts:33`, `:770-820`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:3025-3036`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:3034-3045`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
@@ -355,7 +355,7 @@ Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1099-1143`,
-`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2872-3087`,
+`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2881-3096`,
 `crates/chat-stasher/src/inbox.rs:513-523`, `:906-908`).
 
 The bundle also names the **install** that captured it: three fields — a random
@@ -376,7 +376,7 @@ different browser, or a different label the user actually named, while the same
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
 (`crates/chat-stasher/src/inbox.rs:837-847`, `:956-1017`;
-`crates/chat-stasher/src/nativehost.rs:3102-3106`;
+`crates/chat-stasher/src/nativehost.rs:3111-3115`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
@@ -423,7 +423,7 @@ install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
 (`apps/extension/entrypoints/background.ts:3099-3128`;
-`crates/chat-stasher/src/nativehost.rs:2589`, `:2630-2646`;
+`crates/chat-stasher/src/nativehost.rs:2598`, `:2639-2655`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
 a version string, a build stamp and timestamps — and it carries no conversation text, no session
 id and no account scope label.
