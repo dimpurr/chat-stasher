@@ -39,12 +39,19 @@ A step that was not configured is reported `not-run` and the whole run is
 `incomplete`. A run is `complete` only when every step ran. Nothing is ever
 reported as zero in place of unknown.
 
+A wipe that matches no `<platform>.<id>` dir at all — a `--platform` or
+`--machine` that names the wrong bucket, or a stage that was never collected —
+removes nothing, and the run reads `nothing-wiped` and exits 3 rather than 0: a
+durability cycle that wiped nothing establishes nothing, and a green `held`
+there would be a pass with no measurement behind it.
+
 DRY RUN
 -------
 `--dry-run` prints exactly which session directories and browser-state entries
 would be removed, and where the collect and the oracle would run, and removes
-nothing. A dry run, like a refusal, exits 3: it establishes nothing. It is the only mode the 2026-10-07 prep run used, because the stress
-test it prepares still needs a browser.
+nothing. A dry run, like a refusal, exits 3: it establishes nothing. It is the
+only mode the 2026-10-07 prep run used, because the stress test it prepares
+still needs a browser.
 
 WHAT IS CONFINED, AND WHAT IS NOT
 ---------------------------------
@@ -77,7 +84,8 @@ EXIT CODES
      session was lost, or the content of a kept session changed — or the
      self-test failed
   2  usage error
-  3  not established: refused, a dry run, or a step left `not-run`
+  3  not established: refused, a dry run, a wipe that removed nothing, or a step
+     left `not-run`
 """
 
 from __future__ import annotations
@@ -447,6 +455,15 @@ def describe(snap: dict | None) -> str:
     return f"{snap['shards']} shard(s) {snap['bytes']} B"
 
 
+def digest_text(value: str | None) -> str:
+    """A `digest-root`, or why there is not one: `None` measured nothing.
+
+    The digest of a platform that holds no session at all is not the digest of
+    an empty set, so it is never printed as a value.
+    """
+    return "not-measured" if value is None else value
+
+
 def short_id(name: str) -> str:
     """The part after the platform prefix, cut to 8 chars for the report."""
     _, _dot, rest = name.partition(".")
@@ -596,6 +613,18 @@ def execute(args: argparse.Namespace) -> tuple[int, dict]:
         if broken or metric_moves:
             report["verdict"] = "regressed"
             return EXIT_FAIL, report
+        if not wiped_sessions:
+            # Nothing matched the platform prefix — the wrong `--platform` or
+            # `--machine` bucket, or a stage that was never collected — so
+            # nothing was wiped and nothing was proven. The cycle still ran and
+            # is reported as it ran; only the verdict changes, because "held"
+            # here would be a pass with no measurement behind it.
+            report["verdict"] = "nothing-wiped"
+            report["not_established"] = (
+                f"no {args.platform}.* web session dir under {platform_dir} — a "
+                "wipe that removes nothing proves nothing"
+            )
+            return EXIT_NOT_ESTABLISHED, report
         if not complete:
             report["verdict"] = "incomplete"
             return EXIT_NOT_ESTABLISHED, report
@@ -626,9 +655,14 @@ def render(report: dict) -> str:
     )
     add(f"  isolated base : {report['isolated_base']}")
     add(f"  real archive  : {report['real_data_root']} (never touched)")
+    after_digest = (
+        digest_text(report["digest_root_after"])
+        if "digest_root_after" in report
+        else "not-run"
+    )
     add(
-        f"  digest-root   : before {report['digest_root_before']} · "
-        f"after {report.get('digest_root_after', 'not-run')}"
+        f"  digest-root   : before {digest_text(report['digest_root_before'])} · "
+        f"after {after_digest}"
     )
     before = report["before"]
     add(
@@ -650,6 +684,8 @@ def render(report: dict) -> str:
     if "browser_state_after" in report:
         add(f"                  after  {describe(report['browser_state_after'])}")
     add(f"  steps         : {', '.join(f'{k}={v}' for k, v in report['steps'].items())}")
+    if report.get("not_established"):
+        add(f"  not established: {report['not_established']}")
 
     if report["dry_run"]:
         add("")
@@ -991,6 +1027,33 @@ def run_self_test() -> int:
             str(report.get("must_not_move_moved")),
         )
 
+        # 4b. a wipe that matches nothing proves nothing: it must not read as a
+        # pass. A platform name that lands on an empty bucket is the shape of
+        # this: the run has no session to lose and no session to restore, so a
+        # green "held" would be a verdict with no measurement behind it.
+        root = os.path.join(base, "nomatch")
+        _seed_root(root, machine, {}, platform)
+        stage_before = snapshot_tree(os.path.join(root, "stage"))
+        code, out = _quiet(
+            [*common, "--platform", "gemini", "--root", root, "--collect-cmd", collect_cmd,
+             "--json"]
+        )
+        report = json.loads(out)
+        check(
+            "a wipe that matches nothing exits 3",
+            code == EXIT_NOT_ESTABLISHED,
+            f"exit {code}",
+        )
+        check(
+            "a wipe that matches nothing is not a pass",
+            report.get("verdict") == "nothing-wiped",
+            str(report.get("verdict")),
+        )
+        check(
+            "a wipe that matches nothing removes nothing",
+            snapshot_tree(os.path.join(root, "stage")) == stage_before,
+        )
+
         # 5. refusals change nothing
         real_keep = os.path.join(real, "stage", "sessions", "extval-isolated", "keep")
         code, out = _quiet([*common, "--root", real, "--collect-cmd", collect_cmd])
@@ -1013,9 +1076,23 @@ def run_self_test() -> int:
         check("an escaping --stage-subdir is refused", code == EXIT_NOT_ESTABLISHED, f"exit {code}")
         check("the escape refusal names the root", "outside the isolated root" in out, out.strip())
 
-        # 6. a self-created root is deleted; --keep keeps it
-        code, _out = _quiet([*common, "--collect-cmd", collect_cmd])
-        check("a self-created root runs", code == EXIT_OK, f"exit {code}")
+        # 6. a self-created root is deleted; --keep keeps it. A root the driver
+        # creates is empty, so it holds no session to wipe: the cycle still runs
+        # and every step still reports, but the verdict is `nothing-wiped`
+        # rather than a `held` that measured nothing.
+        code, out = _quiet([*common, "--collect-cmd", collect_cmd, "--json"])
+        report = json.loads(out)
+        check(
+            "a self-created root runs every step",
+            report.get("steps")
+            == {"snapshot": "ran", "wipe": "ran", "collect": "ran", "compare": "ran"},
+            str(report.get("steps")),
+        )
+        check(
+            "a self-created root holds nothing to wipe, so it is not established",
+            code == EXIT_NOT_ESTABLISHED and report.get("verdict") == "nothing-wiped",
+            f"exit {code} verdict {report.get('verdict')}",
+        )
         check(
             "a self-created root is deleted",
             not [n for n in os.listdir(base) if n.startswith("extval-deepseek-")],
@@ -1023,7 +1100,7 @@ def run_self_test() -> int:
         )
         code, _out = _quiet([*common, "--collect-cmd", collect_cmd, "--keep"])
         kept = [n for n in os.listdir(base) if n.startswith("extval-deepseek-")]
-        check("--keep keeps the self-created root", code == EXIT_OK and len(kept) == 1, str(kept))
+        check("--keep keeps the self-created root", len(kept) == 1, str(kept))
         for name in kept:
             shutil.rmtree(os.path.join(base, name), ignore_errors=True)
 
