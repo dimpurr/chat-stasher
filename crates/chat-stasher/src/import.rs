@@ -691,9 +691,15 @@ pub fn run(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "export".to_string());
 
-    let raw = archive_raw_export(stage, slug, &source_name, &bytes)?;
-
+    // Parse before archiving, not after. The raw namespace's promise is that the
+    // platform's own bytes of an *imported* export survived the run, and a file
+    // this producer refuses has no business being kept byte-exact on the strength
+    // of having been named on a command line: a Claude manifest is valid JSON
+    // whose `export_url` values are one-time-use credentials, and archiving it
+    // first would write those tokens into the stage and then exit 2 as if nothing
+    // had happened. So a run that ends `2` or `3` has written nothing anywhere.
     let parsed = parse_claude_conversations(&bytes)?;
+    let raw = archive_raw_export(stage, slug, &source_name, &bytes)?;
     publish_inbox_dir(inbox)?;
 
     let mut bundles_written = 0usize;

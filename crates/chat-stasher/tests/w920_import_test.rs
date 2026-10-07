@@ -22,7 +22,9 @@
 //! The manifest case carries the security half too: a Claude manifest's
 //! `export_url` values are one-time-use credentials (27-ORACLE §3.2), so the
 //! refusal names the file as a manifest *without* echoing a token from it, and
-//! that absence is asserted, not assumed.
+//! that absence is asserted, not assumed. It is not archived either — the
+//! byte-exact namespace holds exactly the exports this producer imported, so a
+//! run that answers `2` or `3` has written nothing anywhere.
 //!
 //! Every fixture here is synthetic — a two-conversation fake `conversations.json`
 //! built in this file. No real takeout, archive, destination or inbox is touched.
@@ -253,6 +255,11 @@ fn import_refuses_a_manifest_and_never_echoes_its_download_url() {
         bundled_names(&rig.inbox()).is_empty(),
         "a refused input writes nothing"
     );
+    assert!(
+        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
+        "a manifest must not reach the byte-exact namespace: its `export_url` values \
+         are one-time-use credentials, and archiving a refused file would keep them"
+    );
     assert_eq!(
         store::sealed_shard_count(&rig.stage()).unwrap(),
         0,
@@ -279,6 +286,11 @@ fn import_calls_a_truncated_export_a_read_that_never_finished() {
     assert!(
         bundled_names(&rig.inbox()).is_empty(),
         "a run that never read the file must not emit a partial conversation set"
+    );
+    assert!(
+        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
+        "bytes that never parsed are not an export, so the byte-exact namespace holds \
+         exactly the files this producer imported — and nothing it refused"
     );
 }
 
