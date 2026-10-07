@@ -66,11 +66,13 @@ const LIST_URL = `${ORIGIN}${GROK_LIST_PATH}?${GROK_LIST_PAGE_SIZE_PARAM}=20`;
 const GROK_ROW = PLATFORMS.find((platform) => platform.id === 'grok')!;
 
 /**
- * The per-response field set, **measured**. These are the 45 names every element of every
- * archived live Grok bundle carries (438 elements over 61 bundles, 2026-10-07). The values
- * below are invented; only the names are the measurement, and they are here so that "the
- * content response carries no conversation-level field" is a list a reader can check rather
- * than a claim they have to take.
+ * The per-response field set, **measured**. These are the 45 distinct names that appear across
+ * the 438 response elements of the 61 archived live Grok bundles (2026-10-07). They are not all
+ * present on every element: 129 carry all 45, 301 carry 41 (no `requestMetadata`, `uiLayout`,
+ * `thinkingStartTime`, `thinkingEndTime`), and 8 also lack `parentResponseId`. The values below
+ * are invented; only the names are the measurement, and they are here so that "the content
+ * response carries no conversation-level field" is a list a reader can check rather than a claim
+ * they have to take.
  */
 function responseElement(responseId: string, message: string, sender: string): Record<string, unknown> {
   return {
