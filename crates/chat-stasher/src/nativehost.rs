@@ -2483,21 +2483,23 @@ fn other_install_count(output: &[u8], current_install_id: &str) -> Option<u64> {
     Some(count)
 }
 
-/// Atomically replace one install's content-free latest status in the stage.
-fn status_report(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
-    let parsed: serde_json::Value = request;
-    if !parsed
-        .get("request_id")
-        .and_then(|v| v.as_str())
-        .is_some_and(valid_request_id)
-    {
-        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
-    }
-    let Some(status) = parsed.get("status").and_then(|v| v.as_object()) else {
-        return nack(request_id, NackKind::BadRequest, "missing status object");
-    };
+/// W912 · **The shape of a `status` object, and the names the host knows.**
+///
+/// Split out of [`status_report`] so the version-skew rule this file enforces is
+/// testable without a stage. The host **nacks** a name it does not know rather
+/// than ignoring it, so adding a field to the record is a host change as well as
+/// an extension one: an older host refuses the whole report, and it never
+/// silently drops a field it cannot read. The returned `install_id` is the one
+/// that passed the shape check, so the caller does not read it a second time.
+///
+/// `build_stamp` is optional, and absent is a real state — an extension built
+/// before the stamp existed. A present value must be a non-empty string within
+/// the bound `extension_version` uses; anything else is malformed, not unknown.
+fn validate_status(
+    status: &serde_json::Map<String, serde_json::Value>,
+) -> Result<&str, &'static str> {
     let Some(install_id) = status.get("install_id").and_then(|v| v.as_str()) else {
-        return nack(request_id, NackKind::BadRequest, "missing install_id");
+        return Err("missing install_id");
     };
     if install_id.len() != 36
         || !install_id
@@ -2514,6 +2516,13 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             .get("extension_version")
             .and_then(|v| v.as_str())
             .is_none_or(|v| v.is_empty() || v.len() > 80)
+        // W912 · The build stamp, distinct from the version: `0.2.0.24` is a
+        // release, the stamp is the revision that wrote the record. Optional
+        // for the same reason `report_seq` is — an extension that predates the
+        // field sends none, and absence is recorded as unknown.
+        || status
+            .get("build_stamp")
+            .is_some_and(|v| v.as_str().is_none_or(|s| s.is_empty() || s.len() > 80))
         || status
             .get("reported_at")
             .and_then(|v| v.as_str())
@@ -2537,7 +2546,7 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
             .is_some_and(|v| v.as_str().is_none_or(|s| !valid_nonce(s)))
         || (status.get("report_nonce").is_some() && status.get("report_seq").is_none())
     {
-        return nack(request_id, NackKind::BadRequest, "malformed status fields");
+        return Err("malformed status fields");
     }
     if status.keys().any(|key| {
         !matches!(
@@ -2546,13 +2555,14 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 | "browser"
                 | "profile_label"
                 | "extension_version"
+                | "build_stamp"
                 | "reported_at"
                 | "report_seq"
                 | "report_nonce"
                 | "platforms"
         )
     }) {
-        return nack(request_id, NackKind::BadRequest, "unknown status field");
+        return Err("unknown status field");
     }
     for row in status["platforms"].as_array().expect("validated array") {
         if row.get("platform").and_then(|v| v.as_str()).is_none()
@@ -2568,11 +2578,7 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 .get("account_fingerprint")
                 .is_some_and(|v| v.as_str().is_none_or(|s| !valid_sha256(s)))
         {
-            return nack(
-                request_id,
-                NackKind::BadRequest,
-                "malformed platform status row",
-            );
+            return Err("malformed platform status row");
         }
         if row.as_object().is_none_or(|o| {
             o.keys().any(|key| {
@@ -2586,13 +2592,29 @@ fn status_report(request: serde_json::Value, request_id: Option<String>) -> serd
                 )
             })
         }) {
-            return nack(
-                request_id,
-                NackKind::BadRequest,
-                "unknown platform status field",
-            );
+            return Err("unknown platform status field");
         }
     }
+    Ok(install_id)
+}
+
+/// Atomically replace one install's content-free latest status in the stage.
+fn status_report(request: serde_json::Value, request_id: Option<String>) -> serde_json::Value {
+    let parsed: serde_json::Value = request;
+    if !parsed
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(valid_request_id)
+    {
+        return nack(request_id, NackKind::BadRequest, "malformed `request_id`");
+    }
+    let Some(status) = parsed.get("status").and_then(|v| v.as_object()) else {
+        return nack(request_id, NackKind::BadRequest, "missing status object");
+    };
+    let install_id = match validate_status(status) {
+        Ok(install_id) => install_id,
+        Err(detail) => return nack(request_id, NackKind::BadRequest, detail),
+    };
     let Some(request_id) = parsed
         .get("request_id")
         .and_then(|v| v.as_str())
@@ -4757,6 +4779,55 @@ mod tests {
             .as_str()
             .expect("detail")
             .contains("machine"));
+    }
+
+    /// W912 · **A new status field is a host change, not only an extension one.**
+    ///
+    /// The whitelist nacks a name it does not know instead of ignoring it, so an
+    /// older host refuses the whole report cleanly and never records a field it
+    /// cannot read. `build_stamp` is the name this change adds and it is
+    /// accepted; a name from the future is still refused, and a malformed stamp
+    /// is a malformed report rather than an unknown one.
+    #[test]
+    fn status_reports_accept_the_build_stamp_and_still_refuse_an_unknown_field() {
+        let status = serde_json::json!({
+            "install_id": "11111111-1111-4111-8111-111111111111",
+            "browser": "Chrome",
+            "profile_label": null,
+            "extension_version": "0.2.0.24",
+            "build_stamp": "bmtq3x1f",
+            "reported_at": "2026-10-07T00:00:00Z",
+            "platforms": [],
+        });
+        assert_eq!(
+            validate_status(status.as_object().expect("object")).ok(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+
+        // Absent is a real state: an extension built before the field existed.
+        let mut unstamped = status.clone();
+        unstamped
+            .as_object_mut()
+            .expect("object")
+            .remove("build_stamp");
+        assert_eq!(
+            validate_status(unstamped.as_object().expect("object")).ok(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+
+        let mut unknown = status.clone();
+        unknown["future_field"] = serde_json::json!(1);
+        assert_eq!(
+            validate_status(unknown.as_object().expect("object")),
+            Err("unknown status field")
+        );
+
+        let mut malformed = status;
+        malformed["build_stamp"] = serde_json::json!(7);
+        assert_eq!(
+            validate_status(malformed.as_object().expect("object")),
+            Err("malformed status fields")
+        );
     }
 
     // ------------------------------------------------- §6.5 dashboard argv

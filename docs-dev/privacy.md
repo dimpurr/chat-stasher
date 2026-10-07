@@ -147,13 +147,13 @@ the sentence.
    Messaging host — the `chat-stasher` binary **you** registered with
    `chat-stasher install-native-host --stage <your-stage>` — with
    `runtime.sendNativeMessage`
-   (`apps/extension/lib/native-host.ts:32`, `:769-819`). The host seals it into
+   (`apps/extension/lib/native-host.ts:33`, `:770-820`). The host seals it into
    the stage you configured, using the same code path and the same guarantees as
-   `ingest` (`crates/chat-stasher/src/nativehost.rs:3003-3014`).
+   `ingest` (`crates/chat-stasher/src/nativehost.rs:3025-3036`).
    🔴 **The bundle is deleted from the outbox only when the host answers an
    `ack` whose `request_id` and `sha256` equal the ones sent.** A `nack`, a
    timeout or a disconnect leaves it queued
-   (`apps/extension/lib/native-host.ts:1118-1127`;
+   (`apps/extension/lib/native-host.ts:1134-1143`;
    `apps/extension/lib/outbox.ts:485-500`).
 4. **Push.** `push` writes the staged shards into a `rustic` repository —
    encrypted — at a destination **you** configure, local or remote
@@ -354,8 +354,8 @@ from this key — and that field is never what these comparisons match on.
 Without an unambiguous readable masterkey,
 the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
-`apps/extension/lib/native-host.ts:1083-1127`,
-`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2850-3065`,
+`apps/extension/lib/native-host.ts:1099-1143`,
+`crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2872-3087`,
 `crates/chat-stasher/src/inbox.rs:513-523`, `:906-908`).
 
 The bundle also names the **install** that captured it: three fields — a random
@@ -376,7 +376,7 @@ different browser, or a different label the user actually named, while the same
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
 (`crates/chat-stasher/src/inbox.rs:837-847`, `:956-1017`;
-`crates/chat-stasher/src/nativehost.rs:3080-3084`;
+`crates/chat-stasher/src/nativehost.rs:3102-3106`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
 staged shards — exactly like the account fingerprint; this extension transmits
@@ -413,14 +413,14 @@ becomes visible only where both records are read together, in your archive
 
 **One more thing leaves this browser besides captures: a status report.** It is
 sent at the end of a backfill tick: the install id, the browser, the
-profile label, the extension version, a report time, and one row per platform
-saying how many captures this browser confirmed, how many are still pending,
+profile label, the extension version and its build stamp, a report time, and one
+row per platform saying how many captures this browser confirmed, how many are still pending,
 why a leg is paused, and — for a row that has one — that account's
 install-local fingerprint. Your
 host writes it into the stage as `ext-status/<machine>/<install_id>.json`, and
 `push` puts it into your archive with everything else
 (`apps/extension/entrypoints/background.ts:3099-3128`;
-`crates/chat-stasher/src/nativehost.rs:2583`, `:2608-2624`;
+`crates/chat-stasher/src/nativehost.rs:2589`, `:2630-2646`;
 `crates/chat-stasher/src/metahash.rs:1-12`). It is metadata only — counts, codes,
 a version string and timestamps — and it carries no conversation text, no session
 id and no account scope label.
@@ -551,7 +551,7 @@ What is kept there:
 | `cs_last_delivered_v1` | One entry per conversation this profile has delivered: the delivery name it went out under, and the **content fingerprint** of the response — a SHA-256 over the response body with that platform's known volatile fields removed, so two views of one unchanged conversation share it. Nothing else: no URL, no title, no account, no conversation text, and — since W50c — no stage or machine id either, because where a copy went is answered by the host from its own archive rather than remembered here. 🔴 Its only use is to decide whether asking the host is worth a round trip (`has`, "What the host answers back" above). It cannot by itself mark a conversation archived: the extension asks the `chat-stasher` binary still, and only a positive answer from the stage the host is writing to now is acted on. Up to 2000 entries, oldest forgotten first — an entry that has been forgotten costs one delivery of a conversation the archive may already hold, never a skipped one. | `apps/extension/lib/recapture.ts:46`, `:103`, `:274-304`, `:342-354` |
 | `cs_live_capture_v1:<platform>` | When a live capture from that platform was last **confirmed to be in your archive**, and how many are **on record as newly stored** — one record per platform. It exists because nothing else said when a live capture had last arrived: `cs_last_delivered_v1` (above) maps a delivery name to the fingerprint of the response it stored and carries no time at all, so "did a capture arrive at time T" was a gap in the record. It is written at the one place the live leg decides a capture was **stored**, so a capture that was merely queued, rejected or refused leaves no record. 🔴 Its two fields change for different reasons, and the popup names both: the **time** moves for every arrival that was stored, including one whose whole content the archive already held (the page re-sent a conversation it had already sent — ChatGPT does this on every view), because that still measures the page-to-archive path; the **count** rises only for an arrival that was **newly** stored, so four views of one conversation are not four stored conversations. Nothing else is in it: a platform id, a timestamp and a count. 🔴 A platform with **no record** is not a platform with zero captures: no writer creates a row out of nothing — a row exists only where a capture reached the archive — so the popup reads an absent record as "nothing has been recorded here", a gap in the record, and never as "no capture arrived". A `count` of `0` *inside* a row is not that absence and is not rounded up either: it says nothing new is on record there, beside a time that says a capture did arrive. | `apps/extension/lib/live-capture.ts:149-151`, `:273-308`; `apps/extension/entrypoints/background.ts:384-386`, `:405,481` |
 | `cs_install_identity_v1` | This browser profile's own identity for the extension: a random UUID minted the first time this profile captures (from the browser's own crypto random, written down only after a write-and-read-back confirms it), the detected browser family — `Edge`, `Brave`, `Opera`, `Firefox`, `Vivaldi`, `Arc`, `Chrome`, or `Chromium`, a name read from the navigator and nothing else — and the profile label you typed in the popup, `null` until you name it and then trimmed and cut at 80 characters. No history is kept: writing the UUID is a one-time act, and a rename overwrites the label in place. 🔴 A profile whose storage or random source cannot be used **refuses to capture** rather than inventing a per-session identity, and a stored record this build cannot read is refused rather than replaced — both keep "which install produced this" answered by exactly one stable id, never by a guess. Its values leave this browser profile only inside a capture bundle, whose destinations are section 3a and 3c above and below. | `apps/extension/lib/install-identity.ts:1-5`, `:13-23`, `:39-69`, `:114-124`; `apps/extension/entrypoints/background.ts:245-255` |
-| `cs_report_seq_v1` | This install's own **report counter**: the next number it will send, with the random value minted beside that number, written down before the message carrying it goes out. It exists so that two live copies of one install can be told apart — they start at the same counter position but not with the same future, so both eventually reserve one number and your host sees that number under two different random values, which a single writer cannot produce. 🔴 A number whose record cannot be read is **unknown, never `0`**: a fabricated zero is exactly what a copy's displaced counter would look like, and guessing one would accuse an honest install of being a copy, so the message goes out with no number at all and the host records "no evidence" rather than a reading. Nothing else is in it, and it is never compared against a count of anything you did. | `apps/extension/lib/report-seq.ts:1-36`, `:45`; `apps/extension/lib/native-host.ts:1075-1114` |
+| `cs_report_seq_v1` | This install's own **report counter**: the next number it will send, with the random value minted beside that number, written down before the message carrying it goes out. It exists so that two live copies of one install can be told apart — they start at the same counter position but not with the same future, so both eventually reserve one number and your host sees that number under two different random values, which a single writer cannot produce. 🔴 A number whose record cannot be read is **unknown, never `0`**: a fabricated zero is exactly what a copy's displaced counter would look like, and guessing one would accuse an honest install of being a copy, so the message goes out with no number at all and the host records "no evidence" rather than a reading. Nothing else is in it, and it is never compared against a count of anything you did. | `apps/extension/lib/report-seq.ts:1-36`, `:45`; `apps/extension/lib/native-host.ts:1091-1130` |
 
 
 Three things in that table deserve to be called out rather than buried:
@@ -963,7 +963,7 @@ The extension declares exactly four permissions and no host permissions
 
 | Permission | Why it is needed | What it does **not** allow |
 |---|---|---|
-| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3959-3993`, `:499-612`; `crates/chat-stasher/src/main.rs:2239-2254`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
+| `nativeMessaging` | This is the delivery channel. A captured conversation is handed to the `chat-stasher` binary already on your machine, which you registered per-user with `chat-stasher install-native-host --stage <path>`; the host manifest names exactly one allowed extension id, and the host refuses to serve any other origin. The registration is per user account, not per install: one host manifest per browser, shared by every profile of it, all pointing at the same binary and the same stage (`crates/chat-stasher/src/nativehost.rs:155-168`, `:647-691`, `:3981-4015`, `:499-612`; `crates/chat-stasher/src/main.rs:2239-2254`) | It cannot reach any program other than the one host manifest you registered, and that host is the `chat-stasher` binary you installed yourself. There is no fallback channel: without a registered host, captures wait in the outbox instead. |
 | `storage` | Persists the items listed in [section 3b](#3-where-your-data-is-stored) — the backfill switch and progress header (so an interrupted backfill can resume instead of restarting; the id list itself is in the `chat-stasher-backfill` IndexedDB database), the last host-status answer, the pause record, and the last-export stamp. (`apps/extension/lib/backfill/store.ts:18-27`) | This is `storage.local` only: `localArea()` reads `browser?.storage?.local` / `chrome?.storage?.local` and nothing else (`apps/extension/lib/backfill/store.ts:85-97`). Nothing is written to `storage.sync`, so nothing here is uploaded to your browser account by us. |
 | `alarms` | Gives the backfill leg a periodic heartbeat, so history archiving can finish over days without you having to keep the specific chat tab open — the leg does need *some* open, logged-in page of that platform to fetch through, and the install guide states that precondition in full; since the Native Messaging rewrite the same alarm is also when the outbox is drained and retried. (`apps/extension/wxt.config.ts:103-107`; `apps/extension/lib/backfill/alarm.ts`; `apps/extension/lib/outbox-alarm.ts:22-48`) | It does not grant any network or data access. |
 | `unlimitedStorage` | The outbox is an IndexedDB queue of undelivered bundles, capped at 256 MiB by us (`apps/extension/lib/outbox.ts:54`); the backfill id list (`chat-stasher-backfill`, ids only, no conversation text) is a second IndexedDB database. Without this permission Chrome may evict best-effort IndexedDB data under disk pressure, which would mean silently losing captures the user was told were queued. (`apps/extension/wxt.config.ts:115`) | It removes the browser's eviction path for data the extension already stores. It is not a claim on your disk beyond that, and the outbox refuses new captures rather than growing without bound. |

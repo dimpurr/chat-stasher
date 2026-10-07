@@ -2847,6 +2847,49 @@ mod tests {
         assert!(html.contains("extension 0.5.0"), "{html}");
     }
 
+    /// W912 · The build stamp is rendered when the record carries one, and a
+    /// record without one says so — it is never filled with the version, which
+    /// is the other half of the identity and not a revision.
+    #[test]
+    fn extensions_details_render_the_build_stamp_and_never_invent_one() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "synthetic-stamped",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Personal",
+                "extension_version": "0.2.0.24",
+                "build_stamp": "bmtq3x1f",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "synthetic-unstamped",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Work",
+                "extension_version": "0.2.0.24",
+                "reported_at": "2026-09-27T12:00:00Z",
+                "stale": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        // The stamped install names its revision; the two installs share a
+        // version and are told apart by this value alone.
+        assert!(
+            html.contains("extension 0.2.0.24 · build bmtq3x1f"),
+            "{html}"
+        );
+        // The unstamped one says the field is absent, and the version is not
+        // pressed into service as a substitute.
+        assert!(html.contains("build stamp not recorded"), "{html}");
+        assert!(!html.contains("build 0.2.0.24"), "{html}");
+    }
+
     #[test]
     fn extensions_view_links_only_a_verified_local_profile_to_open_action() {
         let mut data = fixture::data();

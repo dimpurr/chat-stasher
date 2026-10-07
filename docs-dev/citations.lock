@@ -433,17 +433,17 @@ apps/extension/lib/live-capture.ts:149-151  a42f85895173  lines=3
   <- docs-dev/privacy.md:552  :: /** Storage key prefix. One row per platform. */
 apps/extension/lib/live-capture.ts:273-308  144411873cfe  lines=36
   <- docs-dev/privacy.md:552  :: /**
-apps/extension/lib/native-host.ts:32  9da915f38ab1  lines=1
+apps/extension/lib/native-host.ts:33  9da915f38ab1  lines=1
   <- docs-dev/privacy.md:150, docs-dev/threat-model.md:62  :: export const NATIVE_HOST_NAME = 'com.chat_stasher.host';
-apps/extension/lib/native-host.ts:746-753  e90a35f31514  lines=8
+apps/extension/lib/native-host.ts:747-754  e90a35f31514  lines=8
   <- docs-dev/threat-model.md:62  :: return;
-apps/extension/lib/native-host.ts:769-819  90149cb2b330  lines=51
+apps/extension/lib/native-host.ts:770-820  90149cb2b330  lines=51
   <- docs-dev/privacy.md:150, docs-dev/threat-model.md:40  :: outcome: SendOutcome,
-apps/extension/lib/native-host.ts:1075-1114  3442ac2fe511  lines=40
+apps/extension/lib/native-host.ts:1091-1130  3442ac2fe511  lines=40
   <- docs-dev/privacy.md:554, docs-dev/threat-model.md:758  :: * 🔴 EXT-13 · The send is stamped with this instance's next …
-apps/extension/lib/native-host.ts:1083-1127  4c329d3958a3  lines=45
+apps/extension/lib/native-host.ts:1099-1143  4c329d3958a3  lines=45
   <- docs-dev/privacy.md:357  :: export async function deliver(
-apps/extension/lib/native-host.ts:1118-1127  d19b8c8b9924  lines=10
+apps/extension/lib/native-host.ts:1134-1143  d19b8c8b9924  lines=10
   <- docs-dev/install.md:67, docs-dev/privacy.md:156, docs-dev/threat-model.md:43, docs-dev/threat-model.md:619  :: const classified = classify(outcome, (value) => {
 apps/extension/lib/outbox-alarm.ts:22-48  175432e0734b  lines=27
   <- docs-dev/privacy.md:968  :: export const OUTBOX_ALARM_NAME = 'cs-outbox-retry';
@@ -891,29 +891,29 @@ crates/chat-stasher/src/nativehost.rs:2149-2160  d41b221503c0  lines=12
   <- docs-dev/install.md:428, docs-dev/install.md:541  :: "no `[native_host] stage` in {}; fix with: \
 crates/chat-stasher/src/nativehost.rs:2166-2195  03341b34c42b  lines=30
   <- docs-dev/install.md:566, docs-dev/threat-model.md:607  :: }
-crates/chat-stasher/src/nativehost.rs:2583  e184724f0636  lines=1
+crates/chat-stasher/src/nativehost.rs:2589  e184724f0636  lines=1
   <- docs-dev/privacy.md:423, docs-dev/threat-model.md:716  :: | "pending"
-crates/chat-stasher/src/nativehost.rs:2608-2624  ffbea61087d6  lines=17
+crates/chat-stasher/src/nativehost.rs:2630-2646  ffbea61087d6  lines=17
   <- docs-dev/privacy.md:423, docs-dev/threat-model.md:716  :: let result = (|| -> anyhow::Result<()> {
-crates/chat-stasher/src/nativehost.rs:2850-3065  312983d6d3b4  lines=216
+crates/chat-stasher/src/nativehost.rs:2872-3087  312983d6d3b4  lines=216
   <- docs-dev/privacy.md:358  :: }
-crates/chat-stasher/src/nativehost.rs:2876-2885  c520f35286ca  lines=10
+crates/chat-stasher/src/nativehost.rs:2898-2907  c520f35286ca  lines=10
   <- docs-dev/threat-model.md:618  :: .as_ref()
-crates/chat-stasher/src/nativehost.rs:2892-2898  8e276fcd074b  lines=7
+crates/chat-stasher/src/nativehost.rs:2914-2920  8e276fcd074b  lines=7
   <- docs-dev/threat-model.md:622  :: return nack(
-crates/chat-stasher/src/nativehost.rs:3003-3014  c59ec0364dc5  lines=12
+crates/chat-stasher/src/nativehost.rs:3025-3036  c59ec0364dc5  lines=12
   <- docs-dev/privacy.md:152, docs-dev/threat-model.md:41  :: return nack(
-crates/chat-stasher/src/nativehost.rs:3077-3079  41fa7027a5d7  lines=3
+crates/chat-stasher/src/nativehost.rs:3099-3101  41fa7027a5d7  lines=3
   <- docs-dev/install.md:556  :: }
-crates/chat-stasher/src/nativehost.rs:3080-3084  6f4ef0f1d2be  lines=5
+crates/chat-stasher/src/nativehost.rs:3102-3106  6f4ef0f1d2be  lines=5
   <- docs-dev/privacy.md:379  :: // The refusal is *retryable* on purpose: the bytes are not…
-crates/chat-stasher/src/nativehost.rs:3085-3087  471cf338d1db  lines=3
+crates/chat-stasher/src/nativehost.rs:3107-3109  471cf338d1db  lines=3
   <- docs-dev/install.md:556  :: request_id,
-crates/chat-stasher/src/nativehost.rs:3294  5f92d12a3656  lines=1
+crates/chat-stasher/src/nativehost.rs:3316  5f92d12a3656  lines=1
   <- docs-dev/install.md:326  :: pub newest_mtime: Option<i64>,
-crates/chat-stasher/src/nativehost.rs:3574-3584  6a277da09fed  lines=11
+crates/chat-stasher/src/nativehost.rs:3596-3606  6a277da09fed  lines=11
   <- docs-dev/install.md:326  :: /// What the run record says about the last successful push…
-crates/chat-stasher/src/nativehost.rs:3959-3993  e6fbfd65512b  lines=35
+crates/chat-stasher/src/nativehost.rs:3981-4015  e6fbfd65512b  lines=35
   <- docs-dev/privacy.md:966, docs-dev/threat-model.md:174, docs-dev/threat-model.md:602  :: // ========================================================…
 crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends

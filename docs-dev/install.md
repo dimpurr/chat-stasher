@@ -64,7 +64,7 @@ is written down in [`contracts/nativehost-protocol.md`](../contracts/nativehost-
 
 🔴 **A conversation counts as delivered only when the host answers an `ack`
 whose `request_id` and `sha256` equal the ones the extension sent**
-(`apps/extension/lib/native-host.ts:1118-1127`). Everything else — a `nack`, a
+(`apps/extension/lib/native-host.ts:1134-1143`). Everything else — a `nack`, a
 timeout, a disconnect — is *not delivered*, and the capture stays in the
 extension's own outbox until a matching `ack` deletes it
 (`apps/extension/lib/outbox.ts:485-500`). There is no "probably delivered".
@@ -323,7 +323,7 @@ What one install per profile means, once done:
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3574-3584`, `:3294`).
+  (`crates/chat-stasher/src/nativehost.rs:3596-3606`, `:3316`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -553,7 +553,7 @@ Two properties of that directory, both from
   directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2094-2161`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:3077-3079`, `:3085-3087`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:3099-3101`, `:3107-3109`). In every case
   the reason names the fix.
 
 Put it somewhere you will not delete: these shards are the archive's input, and
