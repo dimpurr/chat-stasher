@@ -323,7 +323,7 @@ What one install per profile means, once done:
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3574-3584`, `:3294`).
+  (`crates/chat-stasher/src/nativehost.rs:3596-3606`, `:3316`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
