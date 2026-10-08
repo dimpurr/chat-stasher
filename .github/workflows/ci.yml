@@ -375,6 +375,16 @@ jobs:
       - name: Citation semantic binding regression tests
         run: python3 -m unittest scripts/tests/test_check_citation_drift.py
 
+      # The scanner both the terminology lint and the output inventory read
+      # through. Its malformed-input contract - no reported end may equal the
+      # start position - is what keeps a regeneration pass over an
+      # unparseable source file from spinning forever (the failure a W932
+      # regeneration hit). The spin case runs in a subprocess under a
+      # timeout, so a regression fails in seconds here instead of hanging
+      # this job.
+      - name: User-string scanner regression tests
+        run: python3 -m unittest scripts/tests/test_user_strings.py
+
       # The relocation script's own self-test, for the same reason the two
       # above are here: a gate that cannot prove it still catches anything is
       # worth nothing. It builds throwaway repositories under a temp directory
