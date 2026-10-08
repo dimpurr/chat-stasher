@@ -525,7 +525,13 @@ fn durable_stage_without_archive_proof_never_retires() {
         )
         .unwrap();
         assert_eq!(report.stored, 1);
-        assert_eq!(report.refused, vec![Refusal::Unproven]);
+        if unreadable {
+            assert_eq!(report.refused, vec![Refusal::ArchiveRead]);
+            assert_eq!(report.exit_status(), 3);
+        } else {
+            assert_eq!(report.refused, vec![Refusal::Unproven]);
+            assert_eq!(report.exit_status(), 1);
+        }
         assert_eq!(remote.list().unwrap().items.len(), 1);
         let retry = pull(
             &remote,
@@ -695,4 +701,42 @@ fn invalid_signature_cannot_consume_another_keys_quota() {
     .unwrap();
     assert_eq!(valid.stored, 1);
     assert_eq!(valid.refused, [Refusal::Unproven]);
+}
+
+#[test]
+fn pull_exit_codes_preserve_unknown_in_mixed_passes() {
+    assert_eq!(PullReport::default().exit_status(), 0);
+    for reason in [
+        Refusal::Envelope,
+        Refusal::UnknownKey,
+        Refusal::RevokedKey,
+        Refusal::ExpiredKey,
+        Refusal::SizeLimit,
+        Refusal::RateLimit,
+        Refusal::Signature,
+        Refusal::Decrypt,
+        Refusal::Contract,
+        Refusal::Scope,
+        Refusal::Seal,
+        Refusal::Retire,
+        Refusal::Unproven,
+    ] {
+        let report = PullReport {
+            refused: vec![reason],
+            ..PullReport::default()
+        };
+        assert_eq!(report.exit_status(), 1, "{reason:?}");
+    }
+    for reason in [
+        Refusal::Fetch,
+        Refusal::RateAccounting,
+        Refusal::ArchiveRead,
+    ] {
+        let report = PullReport {
+            stored: 1,
+            refused: vec![Refusal::Contract, reason],
+            ..PullReport::default()
+        };
+        assert_eq!(report.exit_status(), 3, "{reason:?}");
+    }
 }

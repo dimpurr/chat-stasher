@@ -131,6 +131,8 @@ pub enum Refusal {
     Fetch,
     Retire,
     Unproven,
+    /// Archive proof could not finish reading; presence remains unknown.
+    ArchiveRead,
 }
 #[derive(Debug, Default)]
 pub struct PullReport {
@@ -282,7 +284,7 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
             }
             if !archive
                 .holds(machine, &outcome)
-                .map_err(|_| Refusal::Unproven)?
+                .map_err(|_| Refusal::ArchiveRead)?
             {
                 return Err(Refusal::Unproven);
             }
@@ -295,4 +297,23 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
         }
     }
     Ok(report)
+}
+
+impl PullReport {
+    /// Unknown reads/accounting dominate completed refusals in mixed passes.
+    /// An empty, successfully read inbox exits 0; sealed counts are not proof.
+    pub fn exit_status(&self) -> u8 {
+        if self.refused.iter().any(|reason| {
+            matches!(
+                reason,
+                Refusal::Fetch | Refusal::RateAccounting | Refusal::ArchiveRead
+            )
+        }) {
+            3
+        } else if !self.refused.is_empty() {
+            1
+        } else {
+            0
+        }
+    }
 }

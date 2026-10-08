@@ -211,6 +211,12 @@ enum Command {
     /// Encrypt and post an explicit file using an environment posting key.
     /// Creates no archive key or machine identity. Currently opens fs:// inboxes.
     Send(SendArgs),
+    /// Pull a declared fs:// inbox into sealed stage; run-once never pulls.
+    /// Archive proof is not wired yet: sealed objects remain queued, exit 3.
+    /// Retain <name>.rates.sqlite3 beside the inbox declaration across pulls;
+    /// deleting or moving it can reset local hourly accounting. Waiting is the
+    /// pre-pull listing count; stored/duplicates refer to sealed stage only.
+    InboxPull(InboxPullArgs),
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -1695,6 +1701,7 @@ fn run() -> ExitCode {
         Command::InboxInit { name, locator } => cmd_inbox_init(&name, &locator),
         Command::SendKey(args) => cmd_send_key(args),
         Command::Send(args) => cmd_send(args),
+        Command::InboxPull(args) => cmd_inbox_pull(args),
         Command::Setup {
             stage,
             destination,
@@ -18133,6 +18140,141 @@ fn cmd_send(args: SendArgs) -> ExitCode {
         Err(error) => {
             eprintln!("send failed: {}", error.reason);
             ExitCode::from(if error.incomplete { 3 } else { 1 })
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct InboxPullArgs {
+    /// Initialized inbox name on this trusted puller.
+    name: String,
+    /// Stage directory holding the puller's sealed sessions tree.
+    #[arg(long)]
+    stage: PathBuf,
+    /// Storage partition only; this does not stamp the remote producer's origin.
+    #[arg(long)]
+    machine: Option<String>,
+    /// Maximum sealed shards per bucket.
+    #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+    shard_bucket_cap: usize,
+}
+
+fn cmd_inbox_pull(args: InboxPullArgs) -> ExitCode {
+    use chat_stasher::{inbox_config, remote_inbox, send_key};
+    if inbox_config::validate(&args.name, "memory://validation").is_err() {
+        eprintln!("inbox-pull usage error: invalid inbox name");
+        return ExitCode::from(2);
+    }
+    let root = inbox_config::default_root();
+    let inbox = match inbox_config::load(&root, &args.name) {
+        Ok(Some(inbox)) => inbox,
+        Ok(None) => {
+            eprintln!("inbox-pull usage error: initialize this inbox first");
+            return ExitCode::from(2);
+        }
+        Err(_) => {
+            eprintln!("inbox-pull incomplete: configuration unavailable; preserve its identity");
+            return ExitCode::from(3);
+        }
+    };
+    let Some(backend) = inbox
+        .locator
+        .strip_prefix("fs://")
+        .map(Path::new)
+        .filter(|p| p.is_absolute())
+    else {
+        eprintln!("inbox-pull refused: only absolute fs:// inbox locators are wired");
+        return ExitCode::from(1);
+    };
+    // OpenDAL's filesystem builder can create a missing root. A pull must
+    // observe the existing inbox instead of manufacturing an empty answer.
+    match std::fs::symlink_metadata(backend) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => {
+            eprintln!("inbox-pull incomplete: backend unavailable; waiting count unknown");
+            return ExitCode::from(3);
+        }
+    }
+    let now = match u64::try_from(chrono::Utc::now().timestamp()) {
+        Ok(now) => now,
+        Err(_) => {
+            eprintln!("inbox-pull incomplete: clock unavailable");
+            return ExitCode::from(3);
+        }
+    };
+    let (policies, _) = match send_key::load_policies(&root, &args.name, now) {
+        Ok(policies) => policies,
+        Err(_) => {
+            eprintln!("inbox-pull incomplete: trusted key policies unavailable");
+            return ExitCode::from(3);
+        }
+    };
+    let config = match config_or_refuse("inbox-pull") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("inbox-pull", &config, args.machine.as_deref()) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    // This sibling of the durable declaration is independent of stage,
+    // partition and current directory. Retain it across invocations; deleting
+    // or relocating trusted inbox state can reset this machine's local quota.
+    let rate_state = root.join(format!("{}.rates.sqlite3", args.name));
+    struct UnavailableArchive;
+    impl remote_inbox::ArchiveProof for UnavailableArchive {
+        fn holds(&self, _: &str, _: &chat_stasher::inbox::SealOutcome) -> anyhow::Result<bool> {
+            anyhow::bail!("archive proof unavailable")
+        }
+    }
+    let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let entered = runtime.enter();
+        let backend = backend
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid inbox locator"))?;
+        let operator =
+            opendal::Operator::new(opendal::services::Fs::default().root(backend))?.finish();
+        let operator = opendal::blocking::Operator::new(operator)?;
+        drop(entered);
+        let transport = remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024);
+        remote_inbox::pull(
+            &transport,
+            &inbox.identity,
+            &policies,
+            now,
+            &args.stage,
+            &machine,
+            args.shard_bucket_cap,
+            &rate_state,
+            &UnavailableArchive,
+        )
+    })();
+    match result {
+        Ok(report) => {
+            for reason in &report.refused {
+                eprintln!("inbox-pull refused: {reason:?}");
+            }
+            // Counts describe the listing and sealed stage, never archive proof.
+            if writeln!(
+                std::io::stdout().lock(),
+                "inbox-pull: waiting={}; stored={}; duplicates={}; refused={}",
+                report.waiting,
+                report.stored,
+                report.duplicates,
+                report.refused.len()
+            )
+            .is_err()
+            {
+                eprintln!("inbox-pull incomplete: output unavailable");
+                return ExitCode::from(3);
+            }
+            ExitCode::from(report.exit_status())
+        }
+        Err(_) => {
+            // No backend errors or credential-bearing paths enter diagnostics.
+            eprintln!("inbox-pull incomplete: listing unavailable; waiting count unknown");
+            ExitCode::from(3)
         }
     }
 }
