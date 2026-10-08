@@ -181,7 +181,7 @@ pub fn render_pull(
             let label = pull_label(name);
             vec![TemplateFile {
                 name: format!("{label}.plist"),
-                content: render_launchd_job(&argv, interval, home, &label, &label),
+                content: render_launchd_job(&argv, interval, home, &label, &label, machine),
             }]
         }
         Format::Systemd => {
@@ -1761,17 +1761,20 @@ pub fn hourly_minute_for_machine(seed: &str) -> u32 {
 /// again. `home` is deliberately not a parameter: the render `home` is
 /// `config::home_dir()`, which `default_data_root` already derives from.
 ///
-/// `--machine`, then the identity file, then the platform's own machine id:
-/// each is a value this machine has and its neighbours generally do not, which
-/// is all the seed is for. A machine with none of the three shares the literal
-/// seed below, and with it a minute — a seed that changed between renders would
-/// rewrite the installed plist on every `schedule install`, so one constant
-/// value is the price of a stable minute for a machine that cannot be told
-/// apart; `--machine` is how such a machine gets a minute of its own.
-fn resolve_machine_seed(args: &RunOnceArgs) -> String {
-    if let Some(machine) = &args.machine {
+/// `machine` is the caller's own `--machine`, if it has one (the run-once args
+/// and the inbox-pull args both carry the flag, and a renderer should seed from
+/// the flag it was given rather than from an args struct it no longer holds).
+/// Then the identity file, then the platform's own machine id: each is a value
+/// this machine has and its neighbours generally do not, which is all the seed
+/// is for. A machine with none of the three shares the literal seed below, and
+/// with it a minute — a seed that changed between renders would rewrite the
+/// installed plist on every `schedule install`, so one constant value is the
+/// price of a stable minute for a machine that cannot be told apart;
+/// `--machine` is how such a machine gets a minute of its own.
+fn resolve_machine_seed(machine: Option<&str>) -> String {
+    if let Some(machine) = machine {
         if !machine.is_empty() {
-            return machine.clone();
+            return machine.to_string();
         }
     }
     let id_path = crate::config::default_data_root().join("machine-identity");
@@ -1804,15 +1807,24 @@ fn render_launchd(
         home,
         label,
         "run-once",
+        args.machine.as_deref(),
     )
 }
 
+/// One launchd agent for one one-shot command: every job shares the same
+/// log-capped, jittered shell preamble, `RunAtLoad=false` and the same schedule
+/// rule — an hourly job (`interval` is [`HOURLY_INTERVAL_SECS`]) fires on
+/// `StartCalendarInterval` at the fixed minute [`hourly_minute_for_machine`]
+/// picks, every other interval keeps `StartInterval`. `machine` is the caller's
+/// `--machine`, if it has one; [`resolve_machine_seed`] says what is used when
+/// it does not.
 fn render_launchd_job(
     argv: &[String],
     interval: u64,
     home: &Path,
     label: &str,
     log_name: &str,
+    machine: Option<&str>,
 ) -> String {
     let success_note = if log_name == "run-once" {
         "exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error."
@@ -1851,7 +1863,7 @@ fn render_launchd_job(
         .join("\n");
 
     let schedule_key = if interval == HOURLY_INTERVAL_SECS {
-        let seed = resolve_machine_seed(args);
+        let seed = resolve_machine_seed(machine);
         let minute = hourly_minute_for_machine(&seed);
         format!(
             "  <!-- Hourly at a deterministic minute per machine (:{minute:02}) so passes do not drift by their own duration and multiple machines do not hit a destination at the same minute. -->\n  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Minute</key>\n    <integer>{minute}</integer>\n  </dict>"
@@ -2502,6 +2514,57 @@ mod tests {
         assert!(plist.contains("<key>StartInterval</key>\n  <integer>1800</integer>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
         assert!(plist.contains("jitter="));
+    }
+
+    /// The inbox-pull agent goes through the same renderer as the archive
+    /// agent, so an hourly pull job is a `StartCalendarInterval` too: the drift
+    /// this branch removes belongs to the template, not to one job.
+    ///
+    /// `--machine` seeds the pull minute exactly as it seeds the archive
+    /// agent's, and the pull agent keeps the shared `RunAtLoad=false` and the
+    /// jitter preamble.
+    #[test]
+    fn launchd_hourly_pull_job_renders_the_calendar_slot() {
+        let files = render_pull(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            "synthetic-inbox",
+            Some("machine-alpha"),
+            None,
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(files[0].name.starts_with("com.chat-stasher.inbox-pull."));
+        assert!(plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(!plist.contains("<key>StartInterval</key>"));
+        let minute = hourly_minute_for_machine("machine-alpha");
+        assert!(plist.contains(&format!(
+            "<key>Minute</key>\n    <integer>{minute}</integer>"
+        )));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// A non-hourly pull interval keeps `StartInterval`, the same fallback the
+    /// archive agent takes.
+    #[test]
+    fn launchd_non_hourly_pull_job_keeps_start_interval() {
+        let files = render_pull(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            900,
+            "synthetic-inbox",
+            None,
+            None,
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(!plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(plist.contains("<key>StartInterval</key>\n  <integer>900</integer>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
     }
 
     /// The hourly minute is derived deterministically from the machine ID and distributes across 0..=59.
