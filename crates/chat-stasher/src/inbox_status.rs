@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PullState {
     Observed,
@@ -27,7 +27,7 @@ impl PullState {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LastPull {
     pub at: u64,
@@ -176,7 +176,7 @@ pub fn record(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InboxView {
     pub name: String,
     pub waiting: Option<usize>,
@@ -186,7 +186,7 @@ pub struct InboxView {
     pub last_successful_pull: Option<u64>,
     pub last_pull: Option<LastPull>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub state: &'static str,
     pub inboxes: Vec<InboxView>,

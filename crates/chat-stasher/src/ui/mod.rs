@@ -76,6 +76,7 @@ pub(crate) mod json;
 pub(crate) mod merge;
 pub(crate) mod overview;
 pub(crate) mod reader;
+pub(crate) mod remote_inboxes;
 pub(crate) mod search;
 pub(crate) mod sessions;
 
@@ -396,6 +397,9 @@ pub struct UiData {
     /// False when the archive status scan did not finish; an empty list then
     /// must not be presented as proof that no install reports exist.
     pub extension_status_read: bool,
+    /// Local inbox observations taken before serving, independent of archive
+    /// destinations and session filters. An unobserved model stays unknown.
+    pub remote_inboxes: crate::inbox_status::Report,
 }
 
 impl UiData {
@@ -531,6 +535,10 @@ impl UiData {
             extension_open_targets: BTreeMap::new(),
             local_machine_id: None,
             extension_status_read: true,
+            remote_inboxes: crate::inbox_status::Report {
+                state: "unknown",
+                inboxes: Vec::new(),
+            },
         }
     }
 
@@ -2273,6 +2281,20 @@ mod tests {
 
     use crate::activity::TitleSource;
     use crate::overview::{Granularity, HeatmapAxis};
+
+    #[test]
+    fn remote_inboxes_not_observed_are_unknown_in_html_and_json() {
+        let data = fixture::data();
+        let html = req("/?token=t", &data, &NoContent).body;
+        assert!(html.contains("Remote inboxes"), "{html}");
+        assert!(html.contains("inbox observations unknown"), "{html}");
+        let body = req("/api/overview?token=t", &data, &NoContent).body;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["remote_inboxes"]["state"], "unknown");
+        assert_eq!(json["remote_inboxes"]["inboxes"], serde_json::json!([]));
+        assert_eq!(json["remote_inboxes"]["complete"], false);
+        assert_eq!(json["summary"]["sessions_in_view"], 4);
+    }
 
     #[test]
     fn list_and_search_paging_keep_canonical_and_legacy_surface_filters() {

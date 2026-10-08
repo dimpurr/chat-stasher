@@ -123,6 +123,7 @@ pub(super) fn page_overview(data: &UiData, token: &str) -> String {
     out.push_str(&render_matrix(&machines, &in_view, token));
     out.push_str(&render_heatmap(&in_view, data, token));
     out.push_str(&render_time_unknown(&in_view, token));
+    out.push_str(&super::remote_inboxes::render(&data.remote_inboxes));
     out.push_str(&footer(data));
     out.push_str("</body></html>\n");
     out

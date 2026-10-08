@@ -331,6 +331,65 @@ fn empty_repo(sandbox: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (repo, key)
 }
 
+#[test]
+fn remote_inboxes_are_observed_once_before_ui_launch_and_never_added_to_archive_counts() {
+    let sb = sandbox();
+    let root = sb.path();
+    let (repo, key) = empty_repo(root);
+    let configs = root.join("config/chat-stasher/inboxes");
+    let backend = root.join("synthetic-inbox-backend");
+    fs::create_dir(&backend).unwrap();
+    let locator = format!("fs://{}", backend.display());
+    chat_stasher::inbox_config::initialize(&configs, "synthetic-cloud", &locator).unwrap();
+    fs::write(backend.join("opaque-object"), b"synthetic-ciphertext").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(backend.join("opaque-object"))
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)),
+        )
+        .unwrap();
+    let report = chat_stasher::remote_inbox::PullReport {
+        waiting: 2,
+        stored: 1,
+        refused: vec![chat_stasher::remote_inbox::Refusal::RevokedKey],
+        ..Default::default()
+    };
+    chat_stasher::inbox_status::record(&configs, "synthetic-cloud", 100, Some(&Default::default()))
+        .unwrap();
+    chat_stasher::inbox_status::record(&configs, "synthetic-cloud", 101, Some(&report)).unwrap();
+    let ui = Ui::start(root, &repo, &key, &["--machine", "mbp-empty"], "ui");
+    let (status, body) = ui.get("/api/overview");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["remote_inboxes"]["state"], "known");
+    assert_eq!(json["remote_inboxes"]["complete"], true);
+    let inbox = &json["remote_inboxes"]["inboxes"][0];
+    assert_eq!(inbox["name"], "synthetic-cloud");
+    assert_eq!(inbox["waiting"], 1);
+    assert!(inbox["oldest_age_secs"].as_u64().unwrap() > 0);
+    assert_eq!(inbox["last_successful_pull"], 100);
+    assert_eq!(inbox["last_pull"]["refused"]["RevokedKey"], 1);
+    assert_eq!(json["summary"]["sessions_in_view"], 0);
+    assert_eq!(json["payload_loaded"], false);
+    assert!(!body.contains(&locator));
+    assert!(!body.contains("opaque-object"));
+    assert!(!body.contains("synthetic-ciphertext"));
+    fs::remove_file(backend.join("opaque-object")).unwrap();
+    assert_eq!(
+        ui.get("/api/overview").1,
+        body,
+        "requests use the launch observation"
+    );
+    let html = ui.get("/").1;
+    assert!(html.contains("Remote inboxes"));
+    assert!(html.contains("waiting objects are not yet archived"));
+    assert!(html.contains("RevokedKey: 1"));
+    assert!(!html.contains(&locator));
+}
+
 // ----------------------------------------------------------------- socket
 
 /// One `GET`, with the `Host` header the server's allowlist expects.

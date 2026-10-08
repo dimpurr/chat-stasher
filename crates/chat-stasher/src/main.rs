@@ -5666,6 +5666,7 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
         .collect();
     let mut data =
         chat_stasher::ui::UiData::from_reports(&reads, resolved.selector.clone(), now_unix);
+    data.remote_inboxes = chat_stasher::inbox_status::inspect_default();
     data.local_machine_id = query_machine(&config, None);
     data.extension_status_read = parts.iter().all(|part| part.extension_status_read);
     data.extension_installs = parts
