@@ -102,6 +102,11 @@ const SESSION_ID_PREFIX: &str = "c_";
 const CONVERSATION_HOST: &str = "gemini.google.com";
 /// The link path prefix a conversation id is read from.
 const CONVERSATION_PATH: &str = "/app/";
+/// The shortest id a conversation link may carry. The live capture's
+/// link pattern is `/app/([A-Za-z0-9_-]{8,})`, so a shorter token is
+/// no conversation id to the capture either — and every id measured on
+/// the Takeout file is 16 characters.
+const MIN_CONVERSATION_ID_LEN: usize = 8;
 
 /// The path that names one row, for a record that has no line number. A field
 /// or list inside it is named by appending, e.g. `[].details[]`.
@@ -631,9 +636,13 @@ impl Reader {
 /// The conversation id a `details[].url` names, in canonical form, when the link
 /// is a Gemini conversation link.
 ///
-/// The measured link is `https://gemini.google.com/app/<id>`; the id is returned
-/// with our `c_` prefix restored so it equals the session id our live capture
-/// files (`gemini.c_<id>`). A link to any other host or path — a `gems/view`
+/// The measured link is `https://gemini.google.com/app/<id>`; the id is
+/// returned with our `c_` prefix restored so it equals the session id our
+/// live capture files (`gemini.c_<id>`). The id must be at least
+/// `MIN_CONVERSATION_ID_LEN` characters of `A-Za-z0-9_-`, the same shape
+/// the capture's link pattern `/app/([A-Za-z0-9_-]{8,})` accepts, so a
+/// shorter token mints no session id the capture would never file under.
+/// A link to any other host or path — a `gems/view`
 /// link, an external source, a share link — names no conversation here and is
 /// carried only as a link.
 fn conversation_id_from_url(url: &str) -> Option<String> {
@@ -646,7 +655,7 @@ fn conversation_id_from_url(url: &str) -> Option<String> {
         Some(end) => &rest[..end],
         None => rest,
     };
-    if id.is_empty()
+    if id.chars().count() < MIN_CONVERSATION_ID_LEN
         || !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -875,6 +884,16 @@ mod tests {
         assert_eq!(
             conversation_id_from_url("https://gemini.google.com/app/"),
             None
+        );
+        // One character short of the capture's `{8,}` pattern names no
+        // conversation; eight characters do.
+        assert_eq!(
+            conversation_id_from_url("https://gemini.google.com/app/0123456"),
+            None
+        );
+        assert_eq!(
+            conversation_id_from_url("https://gemini.google.com/app/01234567"),
+            Some("c_01234567".to_string())
         );
         assert_eq!(conversation_id_from_url("not a url"), None);
     }
