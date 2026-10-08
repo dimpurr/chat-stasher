@@ -37,10 +37,10 @@ Understanding the roles below requires knowing the path the content takes.
    `chat-stasher install-native-host --stage <path>` — over
    `runtime.sendNativeMessage`. The host seals it into that stage as a *sealed
    shard*, through the same code path `ingest` uses
-   (`apps/extension/lib/native-host.ts:770-820`;
-   `crates/chat-stasher/src/nativehost.rs:3034-3045`). The bundle leaves the
+   (`apps/extension/lib/native-host.ts:770-822`;
+   `crates/chat-stasher/src/nativehost.rs:3072-3083`). The bundle leaves the
    outbox **only** on a matching `ack`
-   (`apps/extension/lib/native-host.ts:1134-1143`). Separately, the CLI reads
+   (`apps/extension/lib/native-host.ts:1147-1156`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
    (`crates/chat-stasher/src/main.rs:884-934`).
@@ -171,7 +171,7 @@ loopback-only, token-gated server:
   Native Messaging host, so the browser starts it only for an extension whose id
   is in the host manifest that `chat-stasher install-native-host` wrote;
   `crates/chat-stasher/src/nativehost.rs` refuses every other origin
-  (`crates/chat-stasher/src/nativehost.rs:3990-4024`). The extension therefore cannot be *any* extension you happen to
+  (`crates/chat-stasher/src/nativehost.rs:4040-4074`). The extension therefore cannot be *any* extension you happen to
   have installed — it has to be this one, with the pinned id, on a manifest you
   registered yourself.
 
@@ -371,10 +371,10 @@ away the only way to notice the same account twice.
 
 | Value | Where it is written | Comparable across two installs, or two machines? |
 |---|---|---|
-| **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1229-1234`; `crates/chat-stasher/src/inbox.rs:486-491`, `:554-559`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:486-491`) |
-| **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:492-510`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1363-1367`) |
-| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:514`, `:910`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
-| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1388-1396`) |
+| **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1229-1234`; `crates/chat-stasher/src/inbox.rs:502-507`, `:570-575`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:502-507`) |
+| **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:508-526`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1363-1367`) |
+| **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:530`, `:926`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
+| **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1409-1417`) |
 
 🔴 **The masterkey-derived account key is the mechanism that makes "the same
 account on two machines" answerable, and it is derived rather than observed.**
@@ -390,7 +390,7 @@ the archive can confirm that two conversations belong to one account — which i
 already the party who can read both conversations. The host never returns the
 masterkey or the derived value to the extension, the value is not in the bundle,
 the payload or the export file, and a test asserts the sealed payload never
-contains it (`crates/chat-stasher/src/inbox.rs:2024-2046`). No account id
+contains it (`crates/chat-stasher/src/inbox.rs:2045-2067`). No account id
 visible, no key file resolvable without ambiguity, or a key file that cannot be
 read each mean **no comparable key is derived** — coordination then falls back
 to a platform-wide bucket (`crates/chat-stasher/src/nativehost.rs:1310-1345`,
@@ -601,29 +601,29 @@ The properties that bound this boundary:
 - **The host refuses a launch from anyone else.** A `chrome-extension://` origin
   carrying any other id, or a Firefox-shaped launch for any other add-on, gets
   nothing on stdout, a line on stderr, and a non-zero exit
-  (`crates/chat-stasher/src/nativehost.rs:3990-4024`).
+  (`crates/chat-stasher/src/nativehost.rs:4040-4074`).
 - **The host never creates the stage, and never mints a machine identity.** A
   missing `[native_host] stage`, a relative one, a path that is not a directory,
   or no persisted identity are each a named refusal that says how to fix it —
   never a silently created one
-  (`crates/chat-stasher/src/nativehost.rs:2094-2161`, `:2166-2195`).
+  (`crates/chat-stasher/src/nativehost.rs:2132-2199`, `:2204-2233`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
   number and seal the shard, with a wait bounded at the extension's
   per-request budget, 60 seconds — the bound a delivery's timeout
   re-send depends on to outlast a first request still filling the
-  install-provenance index once (`crates/chat-stasher/src/inbox.rs:66-68`, `:1232-1260`). Two browsers, two
+  install-provenance index once (`crates/chat-stasher/src/inbox.rs:66-84`, `:1248-1281`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the
   payload bytes and refuses on a mismatch, and the extension counts a
   conversation as delivered only when the `ack` carries back both the
   `request_id` and the `sha256` it sent
-  (`crates/chat-stasher/src/nativehost.rs:2907-2916`;
-  `apps/extension/lib/native-host.ts:1134-1143`).
+  (`crates/chat-stasher/src/nativehost.rs:2945-2954`;
+  `apps/extension/lib/native-host.ts:1147-1156`).
 - **The payload is checked before it is sealed**, and a bundle this channel
   cannot archive is refused with a named `nack` rather than stored as raw bytes
-  (`crates/chat-stasher/src/nativehost.rs:2923-2929`).
+  (`crates/chat-stasher/src/nativehost.rs:2961-2967`).
 - **The host also answers three read-only questions, and writes nothing for
   any of them.** `summary` counts the sessions in the stage from its directory
   entries and each shard's own mtime plus the local `run-state.json` — it does
@@ -703,13 +703,13 @@ navigator, and the profile label is the name you typed, with the literal
 (`apps/extension/lib/install-identity.ts:1-5`, `:13-23`, `:39-69`, `:114-127`;
 `apps/extension/lib/contract.ts:1394-1397`). The third is not the extension's:
 `machine` is assigned by the host as it seals a shard, so a bundle cannot claim
-to come from a machine it is not on (`crates/chat-stasher/src/inbox.rs:529`).
+to come from a machine it is not on (`crates/chat-stasher/src/inbox.rs:539`).
 
 They reach three different places, and the differences matter:
 
 - **The sealed shard record**, beside the conversation, in your archive: the
   install id, browser and profile label verbatim, plus the host's machine
-  (`crates/chat-stasher/src/inbox.rs:524-529`). This is what lets the archive say
+  (`crates/chat-stasher/src/inbox.rs:534-539`). This is what lets the archive say
   which profile a conversation came from.
 - **The export file name**, as a short install id plus a per-export nonce, so two
   profiles exporting in the same second cannot overwrite each other's download
@@ -717,7 +717,7 @@ They reach three different places, and the differences matter:
 - **A per-install status record**, written by the host into the stage as
   `ext-status/<machine>/<install_id>.json` and then **pushed into your archive
   with everything else** (`crates/chat-stasher/src/metahash.rs:1-12`;
-  `crates/chat-stasher/src/nativehost.rs:2592`, `:2617-2633`). It carries the
+  `crates/chat-stasher/src/nativehost.rs:2630`, `:2655-2671`). It carries the
   install id, browser, profile label, extension version, a report time, the
   outcome of the tick that is ending — whether it ran, the closed-set codes for
   why it did not, how it stopped and whether anything halted it — the build
@@ -746,7 +746,7 @@ words with different consequences:
   fix lives in the browser profile and not in the host: retrying the same bytes
   could never succeed. The capture stays in the outbox, listed rejected with that
   instruction, and is never merged with the first install's record
-  (`crates/chat-stasher/src/inbox.rs:758-766`, `:837-847`, `:991-1023`;
+  (`crates/chat-stasher/src/inbox.rs:774-782`, `:853-863`, `:1007-1039`;
   `crates/chat-stasher/src/install_provenance.rs:209-287`;
   `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
   deliberately *not* evidence of a conflict, and neither is the same browser under
@@ -757,13 +757,13 @@ words with different consequences:
   answered too late and no `ack` was ever read. The provenance is now written
   down when the seal happens (`meta/<machine>/install-provenance-v1.jsonl`),
   and the stage is read only when the index cannot answer
-  (`crates/chat-stasher/src/install_provenance.rs:361-445`). The index is
+  (`crates/chat-stasher/src/install_provenance.rs:363-447`). The index is
   trusted only while the session tree holds no entry newer than the index
   itself: every write this tool makes is a shard write followed, inside the
   same stage lock, by the index write that records it, so a newer tree entry
   means the tree changed without this tool — a restored or merged stage — and
   the stage is read again, whole, healing the index for every install at once
-  (`crates/chat-stasher/src/install_provenance.rs:289-393`). Two limits are
+  (`crates/chat-stasher/src/install_provenance.rs:289-395`). Two limits are
   named rather than hidden: a mutation that preserves the mtime of every entry
   it touches (a restore with `--preserve`, say) is invisible to any mtime-based
   check, and a mutation that lands while the read is running can be missed the
@@ -781,24 +781,24 @@ every status report and every capture delivery, and mints a fresh random
 `report_nonce` with each sequence, persisting the pair *before* the message that
 carries it is sent, through one serialised chain
 (`apps/extension/lib/report-seq.ts:1-36`, `:45`, `:170-213`;
-`apps/extension/lib/native-host.ts:1091-1130`). Two copies start from the same
+`apps/extension/lib/native-host.ts:1093-1143`). Two copies start from the same
 stored counter and advance independently, so they eventually **allocate the same
 number** — each doing so with its own random nonce. The host therefore compares
 the pair and not the number: a repeated pair is one allocation arriving twice, a
 sequence under a *different* nonce is two independent allocations of one number,
 and a report that merely arrived late, out of order or after a worker restart is
-neither (`crates/chat-stasher/src/nativehost.rs:1712-1729`, `:1833`). It keeps a
+neither (`crates/chat-stasher/src/nativehost.rs:1750-1767`, `:1871`). It keeps a
 bounded window of the newest 64 pairs per `(machine, install_id)` and accepts a
 sequence older than that window **without judging it**, rather than reporting a
-comparison it did not make (`crates/chat-stasher/src/nativehost.rs:1647`). The
+comparison it did not make (`crates/chat-stasher/src/nativehost.rs:1736`). The
 conflict flag is sticky: the only way out is a new install id, which is a new key
-and starts clean (`crates/chat-stasher/src/nativehost.rs:1843-1848`).
+and starts clean (`crates/chat-stasher/src/nativehost.rs:1881-1886`).
 
 **The repair is a user action in the popup, on each conflicting copy, and it
 rewrites nothing.** The popup asks the host whether this id is known to be shared
 — a read-only question that writes nothing, asked precisely because an install
 whose backfill is switched off never sends a status report at all
-(`crates/chat-stasher/src/nativehost.rs:1956-1962`, `:1984-1985`) — and the card
+(`crates/chat-stasher/src/nativehost.rs:1994-2000`, `:2022-2023`) — and the card
 appears only when the host *says* the id is shared, never on a guess
 (`apps/extension/lib/popup-view.ts:529-545`, `:760-767`). Neither copy rotates
 automatically: that press is the only caller of the rekey, because an automatic
@@ -816,7 +816,7 @@ was lost, that history is not rewritten, and what the button does
 the same sequence, they are indistinguishable.** A copied profile whose two
 copies have never both reported looks exactly like one install, and the code says
 so instead of reporting a comparison it did not make
-(`crates/chat-stasher/src/nativehost.rs:1938-1940`). No further field can close
+(`crates/chat-stasher/src/nativehost.rs:1976-1978`). No further field can close
 that gap: a heartbeat, a timestamp or a token held in extension storage is copied
 along with everything else. What is **not** copied is the other copy's next
 random value — which is the allocation mechanism above, and is the whole of what
