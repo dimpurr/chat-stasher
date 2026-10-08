@@ -80,10 +80,13 @@ use std::collections::BTreeSet;
 /// says which one happened.
 pub fn parse_grok_export(bytes: &[u8]) -> Result<ParsedExport, ImportError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
-        if e.is_eof() {
+        if e.is_eof() || e.is_io() {
             // The JSON stopped part-way: the file was cut off
             // before a value completed, so the read never
             // finished and nothing about the contents is known.
+            // `Io` cannot occur while reading a byte slice, but it
+            // would also mean the read did not finish, so it stays
+            // on the `3` side — the same split the Claude leg makes.
             ImportError::ReadIncomplete(format!(
                 "export did not parse as JSON and was not read to the end: {e}"
             ))

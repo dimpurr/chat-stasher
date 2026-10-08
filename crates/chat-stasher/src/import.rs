@@ -101,9 +101,9 @@ pub enum ImportError {
     /// command exits `3` and not a partial success counted as whole (ADR-014).
     ReadIncomplete(String),
     /// The file was read completely and is not something this build can import —
-    /// a manifest instead of a conversations file, JSON that is not an array
-    /// or not valid JSON at all, or a platform with no parser. Nothing was
-    /// written; exit `2`.
+    /// a manifest instead of a payload file, JSON that is not the shape this
+    /// platform's parser takes or not valid JSON at all, or a platform with no
+    /// parser. Nothing was written; exit `2`.
     WrongInput(String),
     /// Everything was read and understood, and a write still failed. Exit `1`.
     WriteFailed(String),
