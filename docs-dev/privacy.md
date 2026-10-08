@@ -450,7 +450,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2627-2676`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2715-2764`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -504,7 +504,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2346-2481`,
+(`crates/chat-stasher/src/activity.rs:2347-2507`,
 `crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -532,6 +532,27 @@ moment, not a computed state: a session the source marked archived is indexed
 which no source states. The sealed export itself did not gain a byte; what is
 new is that these three fields now also sit on the index line beside it, as
 plaintext session metadata like the paths and ids above.
+
+A codex rollout states two facts of its own, read the same way. The
+`session_meta` record that opens it names the directory the session ran
+in — with the `turn_context` record of a turn as the fallback for that
+directory alone, read only when the session's own record stated none —
+and the repository the session belonged to, as its `git`
+`repository_url`, with the first workspace root the runtime gave it
+(`runtime_workspace_roots`) standing in when the session ran outside
+any repository. The directory is a **path** under the same rule as
+Claude Code's: where the harness ran, never which repository the work
+belonged to, and each place it ran rather than only the last. The
+repository URL, or that workspace root, is the one fact here that *is*
+a repository identity, kept as a container precisely so a directory is
+never asked to do that work. A `session_meta` that states no directory
+and no repository — like a value that is absent, empty or of another
+type — leaves that dimension unobserved, and no lifecycle state is read
+from the tool-call statuses a rollout also carries, because those are
+execution state, not session state. The sealed export itself did not
+gain a byte; what is new is that these two fields now also sit on the
+index line beside it, as plaintext session metadata like the paths and
+ids above.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,

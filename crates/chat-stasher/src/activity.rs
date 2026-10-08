@@ -2336,11 +2336,12 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Four
+/// opposed to what the collection path or the registry already recorded. Five
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
-/// directory, project and archive fact) and `grok` (its CLI `session_docs`
-/// row's `cwd`); every other harness answers with the empty set, which is the
+/// directory, project and archive fact), `grok` (its CLI `session_docs`
+/// row's `cwd`) and `codex` (its `session_meta` record's working directory
+/// and repository); every other harness answers with the empty set, which is the
 /// honest answer for a dimension nothing was read from — and never a value
 /// inferred from the harness name.
 ///
@@ -2402,6 +2403,31 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     continue;
                 };
                 fold_grok_dimensions(&mut dimensions, &record);
+            }
+        }
+        "codex" => {
+            // A codex rollout states its session facts on the `session_meta`
+            // record that opens it, and each turn restates the directory it
+            // started in on its `turn_context` record. The session's own
+            // record is the primary source for both dimensions; a turn
+            // context is the fallback for `cwd` alone, read only when the
+            // session's own record stated no directory — a session that
+            // already said where it ran has answered the question a turn
+            // context would.
+            let mut session_stated_cwd = false;
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                session_stated_cwd |= fold_codex_session_meta(&mut dimensions, &record);
+            }
+            if !session_stated_cwd {
+                for line in lines {
+                    let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                        continue;
+                    };
+                    fold_codex_turn_context_cwd(&mut dimensions, &record);
+                }
             }
         }
         _ => {}
@@ -2556,6 +2582,68 @@ fn fold_grok_dimensions(
         return;
     };
     if let Some(cwd) = non_empty_str(session.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
+}
+
+/// A codex rollout opens with one `session_meta` record that states the
+/// session's own facts: the directory it ran in (`cwd`), the repository it
+/// belonged to (`git.repository_url`), and the workspace roots the runtime
+/// gave it (`runtime_workspace_roots`).
+///
+/// `cwd` is a path, so it lands in `cwd` under the same rule as Claude
+/// Code's. `git.repository_url` is a repository identity, so it lands in
+/// `container`; when the session ran outside any repository — a scratch
+/// directory with no `git` — the first runtime workspace root, the
+/// workspace boundary the session was given, stands in for it. The
+/// directory itself never becomes a `container` (the `cwd ≠ repo identity`
+/// rule): only the repository URL or a workspace root does.
+///
+/// Returns whether a `cwd` was observed, so the caller can tell whether the
+/// `turn_context` fallback is needed.
+fn fold_codex_session_meta(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) -> bool {
+    if record.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+        return false;
+    }
+    let Some(payload) = record.get("payload") else {
+        return false;
+    };
+    let cwd = non_empty_str(payload.get("cwd"));
+    let cwd_observed = cwd.is_some();
+    if let Some(cwd) = cwd {
+        dimensions.insert_cwd(cwd);
+    }
+    let repository_url = payload.get("git").and_then(|git| git.get("repository_url"));
+    let workspace_root = payload
+        .get("runtime_workspace_roots")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|roots| roots.first());
+    let container = non_empty_str(repository_url).or_else(|| non_empty_str(workspace_root));
+    if let Some(container) = container {
+        dimensions.insert_container(container);
+    }
+    cwd_observed
+}
+
+/// A codex `turn_context` record states the directory each turn started
+/// in. It is the fallback for `cwd`: read only when the session's own
+/// `session_meta` record stated no directory, because a session that
+/// already said where it ran has answered the question a turn context
+/// would. It states no container, and none is read from it.
+fn fold_codex_turn_context_cwd(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("type").and_then(serde_json::Value::as_str) != Some("turn_context") {
+        return;
+    }
+    let Some(payload) = record.get("payload") else {
+        return;
+    };
+    if let Some(cwd) = non_empty_str(payload.get("cwd")) {
         dimensions.insert_cwd(cwd);
     }
 }
@@ -3334,6 +3422,231 @@ mod tests {
         assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
         assert!(!json.contains("\"tenant\""), "line: {json}");
         assert!(!json.contains("\"container\""), "line: {json}");
+    }
+
+    // --------------------------------------------- TICKET-4D-03 · codex
+    //
+    // The two facts a codex rollout states about its session: the
+    // directory it ran in, and the repository (else the workspace root)
+    // it belonged to.
+
+    /// One codex rollout record of the given `type`, carrying whatever
+    /// `payload` fields the caller spells in, so each case states
+    /// exactly which fields it is about.
+    fn codex_record(ty: &str, payload: &str) -> String {
+        format!(r#"{{"timestamp":"{RFC_T1}","type":"{ty}","payload":{{{payload}}}}}"#)
+    }
+
+    #[test]
+    fn codex_records_its_cwd_and_its_repository_as_container() {
+        let line = codex_record(
+            "session_meta",
+            r#""id":"s1","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+        );
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"],
+            "the repository URL the harness recorded is a container, which is \
+             what the directory on its own can never be"
+        );
+    }
+
+    #[test]
+    fn a_codex_repository_url_wins_over_the_workspace_root_beside_it() {
+        let line = codex_record(
+            "session_meta",
+            r#""id":"s1","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"},"runtime_workspace_roots":["/w/one","/w/other"]"#,
+        );
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"],
+            "the repository URL is the primary container; the workspace root \
+             beside it is only the fallback"
+        );
+    }
+
+    #[test]
+    fn codex_container_falls_back_to_the_first_runtime_workspace_root() {
+        // A session run outside any repository: no `git`, so the first
+        // workspace root the runtime gave it stands in for the repository
+        // identity.
+        let line = codex_record(
+            "session_meta",
+            r#""id":"s1","cwd":"/w/one","runtime_workspace_roots":["/w/one","/w/other"]"#,
+        );
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["/w/one"],
+            "the first runtime workspace root is the container when no \
+             repository URL was recorded"
+        );
+    }
+
+    #[test]
+    fn codex_cwd_without_a_repository_or_root_leaves_container_unobserved() {
+        let line = codex_record("session_meta", r#""id":"s1","cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "no repository URL and no workspace root was recorded, and none \
+             is invented from the directory: {:?}",
+            row.dimensions.container
+        );
+    }
+
+    #[test]
+    fn a_codex_session_stating_nothing_leaves_both_dimensions_unobserved() {
+        let line = codex_record("session_meta", r#""id":"s1""#);
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "a session_meta that states no directory and no repository \
+             observed nothing: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn a_codex_session_without_a_session_meta_cwd_falls_back_to_the_turn_context() {
+        // The session's own record stated no directory, so the directory
+        // the turn started in is the fallback observation.
+        let meta = codex_record(
+            "session_meta",
+            r#""id":"s1","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+        );
+        let turn = codex_record("turn_context", r#""cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "codex", &[meta.as_str(), turn.as_str()]);
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "a session_meta with no cwd leaves the turn_context cwd as the \
+             fallback observation"
+        );
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"]
+        );
+    }
+
+    #[test]
+    fn a_codex_session_meta_cwd_is_not_seconded_by_its_turn_contexts() {
+        // The session's own record already said where it ran, so the turn
+        // contexts — even one naming another directory — are not read: the
+        // fallback is for a session that stated no directory, not a second
+        // opinion beside one.
+        let meta = codex_record("session_meta", r#""id":"s1","cwd":"/w/one""#);
+        let turn = codex_record("turn_context", r#""cwd":"/w/two""#);
+        let row = build_row("s", "mbp", "codex", &[meta.as_str(), turn.as_str()]);
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "the session's own record answered the cwd question, so the turn \
+             context beside it is not a second observation"
+        );
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_codex_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "codex",
+            &[
+                "not json at all",
+                codex_record(
+                    "session_meta",
+                    r#""id":"s1","cwd":"","git":{"repository_url":""}"#,
+                )
+                .as_str(),
+                codex_record("session_meta", r#""id":"s1","cwd":null,"git":null"#).as_str(),
+                codex_record(
+                    "session_meta",
+                    r#""id":"s1","cwd":7,"git":{"repository_url":7}"#,
+                )
+                .as_str(),
+                codex_record("session_meta", r#""id":"s1","cwd":{"path":"/w/one"}"#).as_str(),
+                codex_record(
+                    "session_meta",
+                    r#""id":"s1","runtime_workspace_roots":[]"#,
+                )
+                .as_str(),
+                codex_record(
+                    "session_meta",
+                    r#""id":"s1","runtime_workspace_roots":[""]"#,
+                )
+                .as_str(),
+                codex_record(
+                    "session_meta",
+                    r#""id":"s1","runtime_workspace_roots":[7]"#,
+                )
+                .as_str(),
+                // A record the exporter did not tag `session_meta` or
+                // `turn_context` is a conversation or event record, not a
+                // session-fact record, whatever it carries.
+                codex_record(
+                    "response_item",
+                    r#""type":"message","role":"user","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+                )
+                .as_str(),
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty, mistyped, or wrongly-tagged value is nothing observed, \
+             never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_codex_dimensions() {
+        // A Claude Code harness handed a codex session_meta record: the
+        // same bytes exist, and dimensions are still read per harness, not
+        // per shape.
+        let line = codex_record(
+            "session_meta",
+            r#""id":"s1","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+        );
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are answered per harness, not read from whatever an \
+             archived line happens to carry: {:?}",
+            row.dimensions
+        );
+        // And the record under its own harness is where the facts live.
+        let row = build_row("s", "mbp", "codex", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"]
+        );
+    }
+
+    #[test]
+    fn the_codex_dimensions_travel_in_the_index_line() {
+        let line = codex_record(
+            "session_meta",
+            r#""id":"s1","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "codex", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""container":["https://github.com/org/repo-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(!json.contains("\"tenant\""), "line: {json}");
+        assert!(!json.contains("\"status\""), "line: {json}");
     }
 
     // ------------------------------------------------- W219 · account keys
