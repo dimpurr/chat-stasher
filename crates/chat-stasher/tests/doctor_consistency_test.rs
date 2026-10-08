@@ -384,8 +384,15 @@ fn doctor_keeps_skip_shaped_sources_unknown_in_both_outputs() {
         String::from_utf8_lossy(&human.stderr)
     );
     let human = String::from_utf8_lossy(&human.stderr);
+    // Two tables print this row's count, in two shapes: the registry probe
+    // table above renders `sessions=unknown`, the D3 footprint table renders
+    // `sessions unknown`. Only the footprint row's shape carries this fix
+    // (an unknown presence, not a measured "not installed"), so assert on
+    // that row. An assertion on the probe table's `sessions=unknown` would
+    // also pass with the fix reverted — that table's shape predates it.
     assert!(
-        human.contains("sessions unknown") && human.contains("confidence=unascertained"),
+        human.contains("codex      sessions unknown")
+            && human.contains("confidence=unascertained"),
         "human doctor output must keep the skip shape's unknown count and its reason; output:\n{human}"
     );
     assert!(
