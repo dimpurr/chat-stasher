@@ -207,7 +207,9 @@ test('3 · loading the same conversation again does not queue a second copy', as
   const log = await installFakePlatforms(ext.context, [chatgpt(CHATGPT_BODY)]);
 
   const { page } = await loadFixturePage(ext, `https://chatgpt.com${CHATGPT_PAGE_PATH}`);
-  const first = await waitForOutbox(ext, (rows) => rows.length >= 1);
+  // Wait for the first delivery outcome before checking that reload keeps it.
+  // A write-ahead entry alone still has attempts: 0 while delivery is pending.
+  const first = await waitForOutbox(ext, (rows) => rows.length >= 1 && rows[0]!.attempts >= 1);
   expect(first).toHaveLength(1);
 
   await page.reload({ waitUntil: 'domcontentloaded' });
