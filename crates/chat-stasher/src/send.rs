@@ -74,8 +74,15 @@ pub fn send_path(
     signing: &SigningKey,
     max_bytes: usize,
 ) -> anyhow::Result<String> {
-    let bundle = explicit_bundle(path, native_session_id, platform, key_id, max_bytes)?;
+    let bundle = explicit_bundle(path, native_session_id, platform, key_id, max_bytes, None)?;
     send_bundle(inbox, &bundle, key_id, recipient, signing)
+}
+
+/// Observed account axis for an explicitly selected registry harness. The
+/// account is a stable platform UID, never a machine, key label or partition.
+pub struct CaptureIdentity {
+    pub harness: String,
+    pub account: Option<String>,
 }
 
 fn explicit_bundle(
@@ -84,6 +91,7 @@ fn explicit_bundle(
     platform: &str,
     key_id: &str,
     max_bytes: usize,
+    identity: Option<&CaptureIdentity>,
 ) -> anyhow::Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
@@ -99,9 +107,9 @@ fn explicit_bundle(
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("send input file name invalid"))?;
-    let bundle = serde_json::json!({
+    let mut bundle = serde_json::json!({
         "schema": "chat-stasher/inbox@3", "kind": "harness-file",
-        "harness": "unknown", "nativeSessionId": native_session_id,
+        "harness": identity.map_or("unknown", |capture| capture.harness.as_str()), "nativeSessionId": native_session_id,
         "capturedAt": chrono::Utc::now().to_rfc3339(),
         "file": { "role": "transcript", "relPath": name, "byteStart": 0,
             "byteEnd": bytes.len(), "sha256": sha256_hex(&bytes) },
@@ -110,6 +118,9 @@ fn explicit_bundle(
         "dimensions": { "surface": ["cloud"] },
         "producer": { "kind": "send", "version": env!("CARGO_PKG_VERSION"), "platform": platform, "sendKeyId": key_id }
     });
+    if let Some(account) = identity.and_then(|capture| capture.account.as_deref()) {
+        bundle["identity"] = serde_json::json!({"level": "platform_uid", "value": account});
+    }
     let bytes = serde_json::to_vec(&bundle)?;
     crate::inbox::check_bundle(&bytes).map_err(|_| anyhow::anyhow!("invalid send capture"))?;
     Ok(bytes)
@@ -144,6 +155,7 @@ impl SendFailure {
     }
 }
 pub struct SendReport {
+    pub missing_account: bool,
     pub resumed: bool,
     pub cursor_saved: bool,
 }
@@ -160,23 +172,56 @@ pub fn send_explicit(
     now: u64,
     cursor_root: &std::path::Path,
 ) -> Result<SendReport, SendFailure> {
+    send_explicit_identified(path, session, key, now, cursor_root, None)
+}
+
+/// Send a named harness capture without inferring any unobserved identity or
+/// fidelity. Explicit files retain unknown fidelity even for a known harness.
+/// Registry failures are incomplete reads; an unregistered harness is a refusal.
+pub fn send_explicit_identified(
+    path: &std::path::Path,
+    session: &str,
+    key: &crate::send_key::SendKey,
+    now: u64,
+    cursor_root: &std::path::Path,
+    identity: Option<&CaptureIdentity>,
+) -> Result<SendReport, SendFailure> {
     if now >= key.expires_at || now < key.issued_at {
         return Err(SendFailure::refused("posting key expired or not yet valid"));
     }
+    if let Some(capture) = identity {
+        let registry = crate::scanner::load_registry_from_repo()
+            .map_err(|_| SendFailure::incomplete("harness registry unreadable"))?;
+        if capture.harness == "unknown"
+            || !registry.harnesses.iter().any(|h| h.id == capture.harness)
+        {
+            return Err(SendFailure::refused("harness not registered"));
+        }
+    }
+    let missing_account = identity
+        .and_then(|capture| capture.account.as_ref())
+        .is_none();
     let root = key
         .locator
         .strip_prefix("fs://")
         .map(std::path::Path::new)
         .filter(|root| root.is_absolute())
         .ok_or_else(|| SendFailure::refused("only absolute fs:// inbox locators are wired"))?;
-    let bundle = explicit_bundle(path, session, &key.platform, &key.key_id, 4 * 1024 * 1024)
-        .map_err(|e| {
-            if e.downcast_ref::<std::io::Error>().is_some() {
-                SendFailure::incomplete("input unreadable")
-            } else {
-                SendFailure::refused("input size or capture contract invalid")
-            }
-        })?;
+    let bundle = explicit_bundle(
+        path,
+        session,
+        &key.platform,
+        &key.key_id,
+        4 * 1024 * 1024,
+        identity,
+    )
+    .map_err(|e| {
+        if e.downcast_ref::<std::io::Error>().is_some() {
+            SendFailure::incomplete("input unreadable")
+        } else {
+            SendFailure::refused("input size or capture contract invalid")
+        }
+    })?;
     // Exclude capture time, but bind every other capture field and the inbox.
     // Changes to bytes, scope, key, session, filename or producer version resend.
     let mut fingerprint: serde_json::Value = serde_json::from_slice(&bundle)
@@ -196,9 +241,17 @@ pub fn send_explicit(
         return Ok(SendReport {
             resumed: true,
             cursor_saved: true,
+            missing_account,
         });
     }
-    crate::test_identity_guard::refuse_fixture_write(&[session, &key.platform], root)
+    let mut observed_identity = vec![session, key.platform.as_str()];
+    if let Some(capture) = identity {
+        observed_identity.push(&capture.harness);
+        if let Some(account) = capture.account.as_deref() {
+            observed_identity.push(account);
+        }
+    }
+    crate::test_identity_guard::refuse_fixture_write(&observed_identity, root)
         .map_err(|_| SendFailure::refused("fixture inbox write refused"))?;
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|_| SendFailure::incomplete("backend runtime unavailable"))?;
@@ -229,6 +282,7 @@ pub fn send_explicit(
     Ok(SendReport {
         resumed: false,
         cursor_saved,
+        missing_account,
     })
 }
 fn valid_receipt(path: &std::path::Path, expected: &[u8]) -> bool {

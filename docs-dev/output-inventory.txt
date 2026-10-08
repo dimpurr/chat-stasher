@@ -2082,32 +2082,37 @@ context      crates/chat-stasher/src/main.rs:18287  "send key output incomplete"
 eprintln     crates/chat-stasher/src/main.rs:18294  "send key operation failed: {error}"
 help_doc     crates/chat-stasher/src/main.rs:18306  Explicit transcript file, bounded to 4 MiB; fidelity is unknown.
 help_doc     crates/chat-stasher/src/main.rs:18309  Native session id supplied by the producer; no machine id is inferred.
-help_doc     crates/chat-stasher/src/main.rs:18312  Name of the environment variable holding the posting secret.
-eprintln     crates/chat-stasher/src/main.rs:18320  "send usage error: posting key environment variable required"
-eprintln     crates/chat-stasher/src/main.rs:18327  "send refused: invalid posting key"
-eprintln     crates/chat-stasher/src/main.rs:18334  "send incomplete: clock unavailable"
-eprintln     crates/chat-stasher/src/main.rs:18342  "send warning: resume cursor unavailable; retry may resend"
-writeln      crates/chat-stasher/src/main.rs:18346  "send complete: uploaded={}; resumed={}"
-eprintln     crates/chat-stasher/src/main.rs:18352  "send incomplete: output unavailable"
-eprintln     crates/chat-stasher/src/main.rs:18358  "send failed: {}"
-help_doc     crates/chat-stasher/src/main.rs:18366  Initialized inbox name on this trusted puller.
-help_doc     crates/chat-stasher/src/main.rs:18368  Stage directory holding the puller's sealed sessions tree.
-help_doc     crates/chat-stasher/src/main.rs:18371  Storage partition only; this does not stamp the remote producer's origin.
-help_doc     crates/chat-stasher/src/main.rs:18374  Maximum sealed shards per bucket.
-eprintln     crates/chat-stasher/src/main.rs:18393  "inbox-pull incomplete: status history unavailable; preserve existing state"
-eprintln     crates/chat-stasher/src/main.rs:18406  "inbox-pull usage error: invalid inbox name"
-eprintln     crates/chat-stasher/src/main.rs:18413  "inbox-pull usage error: initialize this inbox first"
-eprintln     crates/chat-stasher/src/main.rs:18417  "inbox-pull incomplete: configuration unavailable; preserve its identity"
-eprintln     crates/chat-stasher/src/main.rs:18427  "inbox-pull refused: only absolute fs:// inbox locators are wired"
-eprintln     crates/chat-stasher/src/main.rs:18435  "inbox-pull incomplete: backend unavailable; waiting count unknown"
-eprintln     crates/chat-stasher/src/main.rs:18442  "inbox-pull incomplete: clock unavailable"
-eprintln     crates/chat-stasher/src/main.rs:18449  "inbox-pull incomplete: trusted key policies unavailable"
-bail         crates/chat-stasher/src/main.rs:18468  "archive proof unavailable"
-anyhow       crates/chat-stasher/src/main.rs:18476  "invalid inbox locator"
-eprintln     crates/chat-stasher/src/main.rs:18498  "inbox-pull refused: {reason:?}"
-writeln      crates/chat-stasher/src/main.rs:18503  "inbox-pull: waiting={}; stored={}; duplicates={}; refused={}"
-eprintln     crates/chat-stasher/src/main.rs:18511  "inbox-pull incomplete: output unavailable"
-eprintln     crates/chat-stasher/src/main.rs:18519  "inbox-pull incomplete: listing unavailable; waiting count unknown"
+help_doc     crates/chat-stasher/src/main.rs:18312  Registry harness id for this explicit file; omitted means unknown.
+help_doc     crates/chat-stasher/src/main.rs:18315  Environment variable holding a stable platform account UID. Absent or
+help_doc     crates/chat-stasher/src/main.rs:18316  empty values leave the account axis unknown; requires --harness.
+help_doc     crates/chat-stasher/src/main.rs:18319  Name of the environment variable holding the posting secret.
+eprintln     crates/chat-stasher/src/main.rs:18327  "send usage error: posting key environment variable required"
+eprintln     crates/chat-stasher/src/main.rs:18334  "send refused: invalid posting key"
+eprintln     crates/chat-stasher/src/main.rs:18341  "send incomplete: clock unavailable"
+eprintln     crates/chat-stasher/src/main.rs:18349  "send refused: account environment value invalid"
+eprintln     crates/chat-stasher/src/main.rs:18368  "send warning: account axis unknown; capture uses a two-part session id"
+eprintln     crates/chat-stasher/src/main.rs:18371  "send warning: resume cursor unavailable; retry may resend"
+writeln      crates/chat-stasher/src/main.rs:18375  "send complete: uploaded={}; resumed={}"
+eprintln     crates/chat-stasher/src/main.rs:18381  "send incomplete: output unavailable"
+eprintln     crates/chat-stasher/src/main.rs:18387  "send failed: {}"
+help_doc     crates/chat-stasher/src/main.rs:18395  Initialized inbox name on this trusted puller.
+help_doc     crates/chat-stasher/src/main.rs:18397  Stage directory holding the puller's sealed sessions tree.
+help_doc     crates/chat-stasher/src/main.rs:18400  Storage partition only; this does not stamp the remote producer's origin.
+help_doc     crates/chat-stasher/src/main.rs:18403  Maximum sealed shards per bucket.
+eprintln     crates/chat-stasher/src/main.rs:18422  "inbox-pull incomplete: status history unavailable; preserve existing state"
+eprintln     crates/chat-stasher/src/main.rs:18435  "inbox-pull usage error: invalid inbox name"
+eprintln     crates/chat-stasher/src/main.rs:18442  "inbox-pull usage error: initialize this inbox first"
+eprintln     crates/chat-stasher/src/main.rs:18446  "inbox-pull incomplete: configuration unavailable; preserve its identity"
+eprintln     crates/chat-stasher/src/main.rs:18456  "inbox-pull refused: only absolute fs:// inbox locators are wired"
+eprintln     crates/chat-stasher/src/main.rs:18464  "inbox-pull incomplete: backend unavailable; waiting count unknown"
+eprintln     crates/chat-stasher/src/main.rs:18471  "inbox-pull incomplete: clock unavailable"
+eprintln     crates/chat-stasher/src/main.rs:18478  "inbox-pull incomplete: trusted key policies unavailable"
+bail         crates/chat-stasher/src/main.rs:18497  "archive proof unavailable"
+anyhow       crates/chat-stasher/src/main.rs:18505  "invalid inbox locator"
+eprintln     crates/chat-stasher/src/main.rs:18527  "inbox-pull refused: {reason:?}"
+writeln      crates/chat-stasher/src/main.rs:18532  "inbox-pull: waiting={}; stored={}; duplicates={}; refused={}"
+eprintln     crates/chat-stasher/src/main.rs:18540  "inbox-pull incomplete: output unavailable"
+eprintln     crates/chat-stasher/src/main.rs:18548  "inbox-pull incomplete: listing unavailable; waiting count unknown"
 context      crates/chat-stasher/src/manifest.rs:92  "system clock is before the unix epoch"
 with_context crates/chat-stasher/src/manifest.rs:112  "read {}"
 context      crates/chat-stasher/src/manifest.rs:160  "manifest path has no parent"
@@ -2341,8 +2346,8 @@ help_doc     crates/chat-stasher/src/selector.rs:367  session's conversation tim
 help_doc     crates/chat-stasher/src/selector.rs:370  DEPRECATED, use `--since`/`--until`/`--day`. Inclusive upper bound on the
 help_doc     crates/chat-stasher/src/selector.rs:371  session's conversation time, unix seconds.
 anyhow       crates/chat-stasher/src/send.rs:36  "invalid send bundle"
-anyhow       crates/chat-stasher/src/send.rs:101  "send input file name invalid"
-anyhow       crates/chat-stasher/src/send.rs:114  "invalid send capture"
+anyhow       crates/chat-stasher/src/send.rs:109  "send input file name invalid"
+anyhow       crates/chat-stasher/src/send.rs:125  "invalid send capture"
 anyhow       crates/chat-stasher/src/send_key.rs:54  "unsupported send key version"
 anyhow       crates/chat-stasher/src/send_key.rs:57  "invalid send key encoding"
 anyhow       crates/chat-stasher/src/send_key.rs:60  "invalid send key record"
