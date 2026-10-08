@@ -527,8 +527,7 @@ mod tests {
         assert!(message.contains("`conversations`"), "{message}");
         assert!(message.contains("has none"), "{message}");
 
-        let not_a_list =
-            parse_grok_export(br#"{"conversations":{"not":"a list"}}"#).unwrap_err();
+        let not_a_list = parse_grok_export(br#"{"conversations":{"not":"a list"}}"#).unwrap_err();
         let ImportError::WrongInput(message) = not_a_list else {
             panic!("`conversations` that is not a list is a wrong input: {not_a_list}");
         };
