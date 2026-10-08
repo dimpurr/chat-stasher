@@ -489,6 +489,30 @@ mod tests {
         fs::read_to_string(index_path(stage, MACHINE)).unwrap_or_default()
     }
 
+    /// Stamp `path`'s modification time, so a test says which of the two
+    /// things the gate compares is the newer one.
+    ///
+    /// The gate decides on `newest mtime in the session tree > index mtime`,
+    /// and a filesystem clock is coarse: Linux updates file times once per
+    /// tick, so the two writes a test makes microseconds apart can compare
+    /// **equal**, and "newer" is then false. Leaving that to how far apart two
+    /// writes happened to land made the tree-newer test below pass on macOS
+    /// and Windows and fail on Linux CI (2026-10-08, run 37721062117): the
+    /// shard the test had just planted read as no newer than the index, the
+    /// index answered, and the test reported that the stage had not been read.
+    /// That is the limit the module header already names — a mutation that
+    /// preserves the mtime of every entry it touches is invisible to the walk,
+    /// and at tick granularity a mutation landing in the index's own tick is
+    /// that case — so the test states the time it means instead of racing it.
+    fn stamp(path: &Path, when: SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open to stamp")
+            .set_modified(when)
+            .expect("set the modification time");
+    }
+
     /// The index answers, and the stage is **not** read to answer it: a shard
     /// holding a second, contradicting identity is both absent from the answer
     /// and absent from the file afterwards. This is the whole point of the
@@ -541,6 +565,13 @@ mod tests {
             stage,
             "deepseek.abc",
             r#"{"install_id":"w9300000-0000-4000-8000-000000000000","browser":"Firefox"}"#,
+        );
+
+        // The tree is newer than the index — the mutation the gate exists to
+        // catch — stated outright rather than left to the clock. See `stamp`.
+        stamp(
+            &index_path(stage, MACHINE),
+            SystemTime::now() - std::time::Duration::from_secs(3600),
         );
 
         let found = sealed_observations_for(stage, MACHINE, INSTALL).expect("answer");
