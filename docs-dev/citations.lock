@@ -691,45 +691,45 @@ crates/chat-stasher/src/inbox.rs:66-68  3935abac04cb  lines=3
   <- docs-dev/install.md:550, docs-dev/threat-model.md:613  :: pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
 crates/chat-stasher/src/inbox.rs:448-453  bcce48fa0bc4  lines=6
   <- docs-dev/privacy.md:372  :: /// account fingerprint is computed from state outside the …
-crates/chat-stasher/src/inbox.rs:486-491  be25a57d61cc  lines=6
+crates/chat-stasher/src/inbox.rs:492-497  be25a57d61cc  lines=6
   <- docs-dev/threat-model.md:374, docs-dev/threat-model.md:374  :: /// The `inbox@2` identity axis, preserved verbatim when th…
-crates/chat-stasher/src/inbox.rs:492-510  abff8979b232  lines=19
+crates/chat-stasher/src/inbox.rs:498-516  abff8979b232  lines=19
   <- docs-dev/threat-model.md:375  :: #[serde(skip_serializing_if = "Option::is_none")]
-crates/chat-stasher/src/inbox.rs:512-520  602333abb239  lines=9
+crates/chat-stasher/src/inbox.rs:518-526  602333abb239  lines=9
   <- docs-dev/privacy.md:373  :: account: Option<serde_json::Value>,
-crates/chat-stasher/src/inbox.rs:513-523  6639dea3f5dd  lines=11
+crates/chat-stasher/src/inbox.rs:519-529  6639dea3f5dd  lines=11
   <- docs-dev/privacy.md:360  :: /// W218 · comparable account key derived by the native hos…
-crates/chat-stasher/src/inbox.rs:514  42bff107daca  lines=1
+crates/chat-stasher/src/inbox.rs:520  42bff107daca  lines=1
   <- docs-dev/threat-model.md:376  :: /// by extension bundle bytes.
-crates/chat-stasher/src/inbox.rs:518-523  d4cd0be9ef23  lines=6
+crates/chat-stasher/src/inbox.rs:524-529  d4cd0be9ef23  lines=6
   <- docs-dev/threat-model.md:710  :: install_id: Option<String>,
-crates/chat-stasher/src/inbox.rs:523  5bd2902af347  lines=1
+crates/chat-stasher/src/inbox.rs:529  5bd2902af347  lines=1
   <- docs-dev/threat-model.md:704  :: machine: String,
-crates/chat-stasher/src/inbox.rs:531-553  46292023761e  lines=23
+crates/chat-stasher/src/inbox.rs:537-559  46292023761e  lines=23
   <- docs-dev/privacy.md:442  :: /// W50c · The **content fingerprint** the delivery was mad…
-crates/chat-stasher/src/inbox.rs:554-559  b425498bd497  lines=6
+crates/chat-stasher/src/inbox.rs:560-565  b425498bd497  lines=6
   <- docs-dev/threat-model.md:374  :: }
-crates/chat-stasher/src/inbox.rs:597-626  b5ed552e3748  lines=30
+crates/chat-stasher/src/inbox.rs:603-632  b5ed552e3748  lines=30
   <- docs-dev/openclaw-scanner.md:98  :: /// The stage session-directory name for a conversation: `<…
-crates/chat-stasher/src/inbox.rs:758-766  74c932413240  lines=9
+crates/chat-stasher/src/inbox.rs:764-772  74c932413240  lines=9
   <- docs-dev/threat-model.md:747  :: /// The variants exist because the callers have to answer d…
-crates/chat-stasher/src/inbox.rs:837-847  67213d742753  lines=11
+crates/chat-stasher/src/inbox.rs:843-853  67213d742753  lines=11
   <- docs-dev/privacy.md:379, docs-dev/threat-model.md:747  :: crate::test_identity_guard::refuse_fixture_write(&[parsed.i…
-crates/chat-stasher/src/inbox.rs:906-908  8b8c56e29c9d  lines=3
-  <- docs-dev/privacy.md:360  :: .raw
-crates/chat-stasher/src/inbox.rs:907-910  c2c7f2e010c0  lines=4
-  <- docs-dev/privacy.md:373  :: .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw…
-crates/chat-stasher/src/inbox.rs:910  663d372c8179  lines=1
+crates/chat-stasher/src/inbox.rs:927-929  97e9d6af7d86  lines=3
+  <- docs-dev/privacy.md:360  :: identity: parsed.identity,
+crates/chat-stasher/src/inbox.rs:929  663d372c8179  lines=1
   <- docs-dev/threat-model.md:376  :: account_key: account_key.map(str::to_string),
-crates/chat-stasher/src/inbox.rs:956-1017  9d576c6b4498  lines=62
+crates/chat-stasher/src/inbox.rs:930-933  488fcbe9c4c7  lines=4
+  <- docs-dev/privacy.md:373  :: install_id: parsed.install_id,
+crates/chat-stasher/src/inbox.rs:975-1036  9d576c6b4498  lines=62
   <- docs-dev/privacy.md:379  :: }))
-crates/chat-stasher/src/inbox.rs:962-1017  e5eb86fb13fc  lines=56
+crates/chat-stasher/src/inbox.rs:981-1036  e5eb86fb13fc  lines=56
   <- docs-dev/threat-model.md:747  :: /// bundle, so it can neither establish nor violate an iden…
-crates/chat-stasher/src/inbox.rs:1230-1258  2612dd531f44  lines=29
+crates/chat-stasher/src/inbox.rs:1249-1277  2612dd531f44  lines=29
   <- docs-dev/install.md:550, docs-dev/threat-model.md:613  :: .write(true)
-crates/chat-stasher/src/inbox.rs:1386-1394  07a89684eece  lines=9
+crates/chat-stasher/src/inbox.rs:1512-1520  07a89684eece  lines=9
   <- docs-dev/threat-model.md:377  :: };
-crates/chat-stasher/src/inbox.rs:2022-2044  77fcf2eb736c  lines=23
+crates/chat-stasher/src/inbox.rs:2148-2170  77fcf2eb736c  lines=23
   <- docs-dev/threat-model.md:393  :: inbox.join("deepseek-sess-unk.json"),
 crates/chat-stasher/src/main.rs:113  51c934204980  lines=1
   <- docs-dev/install.md:24  :: about = "Append-only archive for every LLM conversation, ac…

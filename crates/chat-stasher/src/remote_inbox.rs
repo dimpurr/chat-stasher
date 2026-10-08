@@ -289,6 +289,16 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
                 crate::inbox::SealOutcome::Stored(_) => report.stored += 1,
                 crate::inbox::SealOutcome::Duplicate(_) => report.duplicates += 1,
             }
+            if let Some(content) = crate::inbox::referenced_send_content(stage, machine, &outcome)
+                .map_err(|_| Refusal::Seal)?
+            {
+                if !archive
+                    .holds(machine, &content)
+                    .map_err(|_| Refusal::ArchiveRead)?
+                {
+                    return Err(Refusal::Unproven);
+                }
+            }
             if !archive
                 .holds(machine, &outcome)
                 .map_err(|_| Refusal::ArchiveRead)?

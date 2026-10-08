@@ -783,3 +783,304 @@ fn missing_account_report_follows_every_admitted_identity_level() {
         );
     }
 }
+
+#[test]
+fn changed_capture_metadata_and_key_append_provenance_without_copying_content() {
+    let (_runtime, remote) = transport();
+    let (identity, signing, mut policies) = keys();
+    let rotated = SigningKey::from_bytes(&[8; 32]);
+    let mut rotated_policy = policies["synthetic-key"].clone();
+    rotated_policy.public_key = rotated.verifying_key();
+    policies.insert("synthetic-key-rotated".into(), rotated_policy);
+    let stage = tempfile::tempdir().unwrap();
+    let mut bundle: serde_json::Value = serde_json::from_slice(BUNDLE).unwrap();
+    for (index, key) in ["synthetic-key", "synthetic-key", "synthetic-key-rotated"]
+        .into_iter()
+        .enumerate()
+    {
+        bundle["capturedAt"] = format!("2026-10-08T12:00:0{index}Z").into();
+        bundle["producer"]["sendKeyId"] = key.into();
+        if index == 1 {
+            bundle["file"]["relPath"] = "synthetic-renamed.jsonl".into();
+            bundle["platformRefs"]["session"] = "synthetic-later-ref".into();
+            bundle["fidelity"] =
+                serde_json::json!({"value": "unknown", "reason": "Synthetic changed capture"});
+            bundle["raw"] = serde_json::json!({"encoding": "base64", "data": ""});
+            // Same three bytes under a different valid representation.
+            use base64::Engine;
+            bundle["raw"]["data"] = base64::engine::general_purpose::STANDARD
+                .encode(b"{}\n")
+                .into();
+        }
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let signing = if index == 2 { &rotated } else { &signing };
+        send_bundle(&remote, &bytes, key, &identity.to_public(), signing).unwrap();
+        let report = pull(
+            &remote,
+            &identity,
+            &policies,
+            50,
+            stage.path(),
+            "synthetic-puller",
+            100,
+        )
+        .unwrap();
+        assert!(report.refused.is_empty());
+        assert_eq!(report.stored, 1);
+        // Exact retries must reuse the newly appended provenance record.
+        send_bundle(&remote, &bytes, key, &identity.to_public(), signing).unwrap();
+        let retry = pull(
+            &remote,
+            &identity,
+            &policies,
+            50,
+            stage.path(),
+            "synthetic-puller",
+            100,
+        )
+        .unwrap();
+        assert_eq!(retry.duplicates, 1);
+        assert!(retry.refused.is_empty());
+    }
+    let dir = chat_stasher::store::session_shard_dir(
+        stage.path(),
+        "synthetic-puller",
+        "claude-code.synthetic-account.synthetic-native",
+    );
+    let mut entries = chat_stasher::store::sealed_shard_entries(&dir).unwrap();
+    entries.sort_by_key(|(seq, _)| *seq);
+    let rows: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|(_, path)| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.iter().filter(|r| r.get("raw").is_some()).count(), 1);
+    assert_eq!(rows[0]["kind"], "harness-file");
+    assert_eq!(rows[0]["producer"]["sendKeyId"], "synthetic-key");
+    assert_eq!(rows[0]["raw"]["data"], "{}\n");
+    assert_eq!(rows[1]["platformRefs"]["session"], "synthetic-later-ref");
+    assert_eq!(rows[1]["fidelity"]["value"], "unknown");
+    assert_eq!(rows[1]["file"]["relPath"], "synthetic-renamed.jsonl");
+    for row in &rows[1..] {
+        assert_eq!(row["kind"], "harness-resend");
+        assert_eq!(row["content_ref"], rows[0]["file_sha256"]);
+        assert!(row.get("raw").is_none());
+        let projections = chat_stasher::audit_store::project_shard(
+            &serde_json::to_vec(row).unwrap(),
+            "claude-code.synthetic-account.synthetic-native",
+            &chat_stasher::message_audit::JoinPolicy::new([7; 32]),
+        )
+        .unwrap();
+        assert!(
+            projections.is_empty(),
+            "provenance is not another captured body"
+        );
+        assert!(chat_stasher::audit_store::record_body(row).is_err());
+    }
+    assert_eq!(rows[2]["producer"]["sendKeyId"], "synthetic-key-rotated");
+}
+
+#[test]
+fn content_dedup_keeps_account_role_range_and_changed_bytes_distinct() {
+    let stage = tempfile::tempdir().unwrap();
+    let base: serde_json::Value = serde_json::from_slice(BUNDLE).unwrap();
+    let mut variants = vec![base.clone()];
+    for field in ["account", "role", "range", "bytes"] {
+        let mut value = base.clone();
+        match field {
+            "account" => value["identity"]["value"] = "synthetic-other-account".into(),
+            "role" => value["file"]["role"] = "tool-result".into(),
+            "range" => {
+                value["file"]["byteStart"] = 10.into();
+                value["file"]["byteEnd"] = 13.into();
+            }
+            "bytes" => {
+                use sha2::{Digest, Sha256};
+                value["raw"]["data"] = "[]\n".into();
+                value["file"]["sha256"] = Sha256::digest(b"[]\n")
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+                    .into();
+            }
+            _ => unreachable!(),
+        }
+        variants.push(value);
+    }
+    for value in variants {
+        let outcome = chat_stasher::inbox::seal_payload(
+            "synthetic-object",
+            &serde_json::to_vec(&value).unwrap(),
+            stage.path(),
+            "synthetic-puller",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+        let chat_stasher::inbox::SealOutcome::Stored(row) = outcome else {
+            panic!("distinct capture was deduplicated")
+        };
+        let path =
+            chat_stasher::store::session_shard_dir(stage.path(), "synthetic-puller", &row.id);
+        let shard = chat_stasher::store::sealed_shard_entries(&path)
+            .unwrap()
+            .into_iter()
+            .find(|(_, p)| p.file_name().unwrap() == row.shard.as_str())
+            .unwrap()
+            .1;
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(shard).unwrap()).unwrap();
+        assert_eq!(record["kind"], "harness-file");
+        assert!(record.get("raw").is_some());
+    }
+}
+
+struct OnlyResendProof;
+impl ArchiveProof for OnlyResendProof {
+    fn holds(&self, _: &str, outcome: &chat_stasher::inbox::SealOutcome) -> anyhow::Result<bool> {
+        // Approve only the later sealed record, never its original content.
+        let shard = match outcome {
+            chat_stasher::inbox::SealOutcome::Stored(row) => &row.shard,
+            chat_stasher::inbox::SealOutcome::Duplicate(row) => &row.matched_shard,
+        };
+        Ok(shard != &chat_stasher::store::shard_filename(1))
+    }
+}
+#[test]
+fn resend_proof_must_cover_the_original_content_too() {
+    let (_runtime, remote) = transport();
+    let (identity, signing, policies) = keys();
+    let stage = tempfile::tempdir().unwrap();
+    let mut bundle: serde_json::Value = serde_json::from_slice(BUNDLE).unwrap();
+    chat_stasher::inbox::seal_payload(
+        "synthetic-original",
+        BUNDLE,
+        stage.path(),
+        "synthetic-puller",
+        100,
+        None,
+        None,
+    )
+    .unwrap();
+    bundle["capturedAt"] = "2026-10-08T12:00:00Z".into();
+    send_bundle(
+        &remote,
+        &serde_json::to_vec(&bundle).unwrap(),
+        "synthetic-key",
+        &identity.to_public(),
+        &signing,
+    )
+    .unwrap();
+    for duplicate in [false, true] {
+        let report = chat_stasher::remote_inbox::pull(
+            &remote,
+            &identity,
+            &policies,
+            50,
+            stage.path(),
+            "synthetic-puller",
+            100,
+            &stage.path().join("synthetic-rates.sqlite3"),
+            &OnlyResendProof,
+        )
+        .unwrap();
+        assert_eq!(report.refused, [Refusal::Unproven]);
+        assert_eq!(report.duplicates, usize::from(duplicate));
+        assert_eq!(remote.list().unwrap().items.len(), 1);
+    }
+    let retry = pull(
+        &remote,
+        &identity,
+        &policies,
+        50,
+        stage.path(),
+        "synthetic-puller",
+        100,
+    )
+    .unwrap();
+    assert!(retry.refused.is_empty());
+    assert_eq!(retry.duplicates, 1);
+    assert!(remote.list().unwrap().items.is_empty());
+}
+
+#[test]
+fn missing_or_corrupt_referenced_content_keeps_resends_waiting() {
+    for missing in [false, true] {
+        let (_runtime, remote) = transport();
+        let (identity, signing, policies) = keys();
+        let stage = tempfile::tempdir().unwrap();
+        chat_stasher::inbox::seal_payload(
+            "synthetic-original",
+            BUNDLE,
+            stage.path(),
+            "synthetic-puller",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut bundle: serde_json::Value = serde_json::from_slice(BUNDLE).unwrap();
+        bundle["capturedAt"] = "2026-10-08T12:00:00Z".into();
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        chat_stasher::inbox::seal_payload(
+            "synthetic-resend",
+            &bytes,
+            stage.path(),
+            "synthetic-puller",
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+        let parent = chat_stasher::store::shard_path_with_cap(
+            stage.path(),
+            "synthetic-puller",
+            "claude-code.synthetic-account.synthetic-native",
+            1,
+            100,
+        );
+        if missing {
+            std::fs::remove_file(&parent).unwrap();
+        } else {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&parent).unwrap()).unwrap();
+            value["raw"]["data"] = "[]\n".into();
+            std::fs::write(&parent, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        send_bundle(
+            &remote,
+            &bytes,
+            "synthetic-key",
+            &identity.to_public(),
+            &signing,
+        )
+        .unwrap();
+        let result = pull(
+            &remote,
+            &identity,
+            &policies,
+            50,
+            stage.path(),
+            "synthetic-puller",
+            100,
+        )
+        .unwrap();
+        assert_eq!(result.refused, [Refusal::Seal]);
+        assert_eq!(remote.list().unwrap().items.len(), 1);
+    }
+}
+
+#[test]
+fn malformed_resend_is_not_silently_skipped_by_audit_backfill() {
+    let row = serde_json::json!({
+        "schema": "chat-stasher/inbox@3", "kind": "harness-resend",
+        "file_sha256": "synthetic-digest", "content_ref": null,
+    });
+    assert!(chat_stasher::audit_store::project_shard(
+        &serde_json::to_vec(&row).unwrap(),
+        "claude-code.synthetic-account.synthetic-native",
+        &chat_stasher::message_audit::JoinPolicy::new([7; 32]),
+    )
+    .is_err());
+}
