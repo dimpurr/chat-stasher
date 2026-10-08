@@ -647,6 +647,36 @@ mod tests {
         },
         thread,
     };
+    fn prepare_stream(stream: &std::net::TcpStream) {
+        // Windows accepts inherit the nonblocking listener's mode; a read
+        // timeout does not turn them back into blocking connections.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+    }
+
+    #[test]
+    fn accepted_connections_wait_for_request_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        // Windows accepts inherit the listener's nonblocking flag. Force that
+        // state here so the same regression is exercised on every platform.
+        stream.set_nonblocking(true).unwrap();
+        prepare_stream(&stream);
+        let (started, waiting) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            started.send(()).unwrap();
+            let mut byte = [0];
+            stream.read_exact(&mut byte).map(|()| byte)
+        });
+        waiting.recv().unwrap();
+        thread::sleep(Duration::from_millis(50));
+        client.write_all(b"G").unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), *b"G");
+    }
+
     struct Server {
         base: String,
         stop: Arc<AtomicBool>,
@@ -672,9 +702,7 @@ mod tests {
                             continue;
                         }
                     };
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
+                    prepare_stream(&stream);
                     let mut input = [0; 8192];
                     let count = stream.read(&mut input).unwrap();
                     let request = std::str::from_utf8(&input[..count]).unwrap();
