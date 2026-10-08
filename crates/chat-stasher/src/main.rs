@@ -864,6 +864,40 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
     },
+    /// Import one official export: archive the file byte-exact, and write one
+    /// inbox bundle per conversation into a local inbox.
+    ///
+    /// Reads `<export>` whole, stores it under
+    /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it
+    /// is in no session count — and writes one `chat-stasher/inbox@3`
+    /// `web-capture` bundle per conversation into `--inbox`. A later
+    /// `ingest --inbox` is what seals them; this command never seals, never
+    /// pushes, never reads config, a destination or a machine identity, and never
+    /// modifies or moves the export file.
+    ///
+    /// Only Claude's `conversations.json` has a parser in this build; naming any
+    /// other platform is a refusal, not a guess. The archive comparison that would
+    /// suppress a body already archived is behind a probe that this build ships
+    /// unwired, so every conversation currently gets a body.
+    ///
+    /// Exit codes: 0 = the export was read whole and everything importable in it
+    /// was written; 3 = the export was never read to the end; 2 = it was read and
+    /// is not something this build imports; 1 = it was read, and a conversation or
+    /// a write failed.
+    Import {
+        /// Which platform's export this is.
+        #[arg(value_enum)]
+        platform: chat_stasher::import::TakeoutPlatform,
+        /// The export file, e.g. the unzipped Claude `conversations.json`.
+        /// A manifest is refused: its download links are one-time-use credentials.
+        export: PathBuf,
+        /// Local inbox folder to write bundles into, for a later `ingest --inbox`.
+        #[arg(long)]
+        inbox: PathBuf,
+        /// Existing stage directory receiving the byte-exact export. Never created.
+        #[arg(long)]
+        stage: PathBuf,
+    },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
     /// Reads complete `deepseek-<sessionId>.json` exports from `--inbox`
@@ -1863,6 +1897,12 @@ fn run() -> ExitCode {
             repo,
             key_file,
         ),
+        Command::Import {
+            platform,
+            export,
+            inbox,
+            stage,
+        } => cmd_import(platform, &export, &inbox, &stage),
         Command::Ingest {
             inbox,
             stage,
@@ -5968,6 +6008,85 @@ fn cmd_doctor(json: bool) -> ExitCode {
         // reports on the machine; it does not fail because the machine is
         // unhealthy. Only "I could not look" is non-zero.
         return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Import one official export, and report what the pass decided.
+///
+/// Deliberately the one producer command that asks nothing of configuration: no
+/// `config_or_refuse`, no machine identity, no destination, no `--destination`.
+/// A takeout is a file the user holds and a folder they name, and the more of the
+/// archive's ambient state this command consults, the more ways it has to reach
+/// somewhere the user did not point it.
+///
+/// The exit code is chosen from the *variant* of the failure rather than from
+/// whether `run` returned an error, because the three kinds of "no" mean three
+/// different things to a caller (invariant 2): `3` = the export was never read to
+/// the end, so nothing about its contents is known; `2` = it was read whole and is
+/// not importable, and nothing was written; `1` = it was read, understood, and
+/// something then failed. Collapsing `3` into `2` would let a truncated file be
+/// scripted as "not my problem", and collapsing `2` into `1` would let a wrong file
+/// look like a storage fault worth retrying.
+fn cmd_import(
+    platform: chat_stasher::import::TakeoutPlatform,
+    export: &Path,
+    inbox: &Path,
+    stage: &Path,
+) -> ExitCode {
+    use chat_stasher::import::ArchiveNotWired;
+    use chat_stasher::import::ImportError;
+
+    let report = match chat_stasher::import::run(platform, export, inbox, stage, &ArchiveNotWired) {
+        Ok(report) => report,
+        Err(error) => {
+            let (code, kind) = match &error {
+                ImportError::ReadIncomplete(_) => (3, "the export was never read to the end"),
+                ImportError::WrongInput(_) => (2, "the export was read and is not importable"),
+                ImportError::WriteFailed(_) => (1, "the export was read, and a write failed"),
+            };
+            eprintln!(
+                "import: FAILED exit_code={code} — {kind}. Nothing was sealed, and the export \
+                     file was left exactly as it was found: {error}"
+            );
+            return ExitCode::from(code);
+        }
+    };
+
+    println!("[import] platform         : {}", report.platform);
+    println!("[import] export           : {}", export.display());
+    println!(
+        "[import] raw archive      : {} ({} bytes, {})",
+        report.raw.path.display(),
+        report.raw.bytes,
+        if report.raw.newly_stored {
+            "newly archived"
+        } else {
+            "already archived byte-for-byte; nothing new stored"
+        }
+    );
+    println!("[import] raw sha256       : {}", report.raw.sha256);
+    println!("[import] inbox            : {}", inbox.display());
+    println!("[import] conversations    : {}", report.conversations_seen);
+    println!("[import] bundles written  : {}", report.bundles_written);
+    println!(
+        "[import] observations     : {} (bodies suppressed as already archived)",
+        report.observations_written
+    );
+    println!("[import] archive probe    : {}", report.archive_probe);
+    println!("[import] rejected         : {}", report.rejections.len());
+    for rejection in &report.rejections {
+        println!("  - {rejection}");
+    }
+
+    if !report.rejections.is_empty() {
+        eprintln!(
+            "import: FAILED exit_code=1 — {} conversation(s) in the export were read and refused, \
+             so what was written is real but the file is not fully imported. The bundles above are \
+             in the inbox; a re-run after fixing the input writes the rest.",
+            report.rejections.len()
+        );
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
