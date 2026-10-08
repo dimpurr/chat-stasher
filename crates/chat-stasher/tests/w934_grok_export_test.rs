@@ -458,6 +458,34 @@ fn grok_import_calls_a_torn_export_a_read_that_never_finished() {
     );
 }
 
+/// A file that was read to the end and is not valid JSON is a
+/// completed read of invalid input: `2`, not `3`. The exit code
+/// must not claim a read was incomplete when it finished.
+#[test]
+fn grok_import_calls_a_complete_but_malformed_export_wrong_input() {
+    let rig = Rig::new();
+    let full = synthetic_grok_export();
+    let path = rig.root().join("prod-grok-backend.json");
+    fs::write(&path, format!("{full} {{")).expect("write malformed export");
+
+    let output = import_cmd(&rig, "grok", &path);
+    let shown = text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(WRONG_INPUT),
+        "a fully read malformed document is wrong input, so 2 and not 3: {shown}"
+    );
+    assert!(shown.contains("read to the end"), "{shown}");
+    assert!(
+        bundled_names(&rig.inbox()).is_empty(),
+        "a refused input writes nothing"
+    );
+    assert!(
+        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
+        "a refused input archives nothing"
+    );
+}
+
 /// The Grok payload is a dict, not Claude's flat array, and a dict
 /// without a `conversations` key is not a Grok export either. Both
 /// were read completely and are the wrong input: `2`, not `3`.
