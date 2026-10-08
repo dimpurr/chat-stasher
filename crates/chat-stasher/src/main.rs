@@ -1803,6 +1803,7 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
             None,
+            None,
         ),
         Command::Status {
             sessions,
@@ -7241,8 +7242,8 @@ fn run_once_pass(
 
     // W880: stage audit — counting the sealed shards in the stage.
     let audit_started = std::time::Instant::now();
-    let stage_shards = match store::sealed_shard_count(stage) {
-        Ok(count) => count,
+    let counted = match store::CountedStageShards::count(stage) {
+        Ok(counted) => counted,
         Err(e) => {
             eprintln!("[run-once] result: ERROR exit_code=1 stage_audit={e:#}");
             state.failed_step = Some("stage-audit".to_string());
@@ -7250,7 +7251,15 @@ fn run_once_pass(
         }
     };
     state.phases.stage_audit_ms = audit_started.elapsed().as_millis() as u64;
-    state.stage_shards = stage_shards;
+    state.stage_shards = counted.count;
+    // The push path reuses the scan evidence and shard count this pass already
+    // produced, so `inspect_stage_for_push` does not rescan the registry and
+    // the stage is not counted again — unless the freshness token says the
+    // stage tree changed since, in which case the push recounts.
+    let collected = chat_stasher::collect::CollectedStageEvidence {
+        scan: report.scan,
+        stage_shards: counted.clone(),
+    };
     // This guard used to refuse any shard-less stage: while readers looked only at the
     // newest snapshot per machine, an empty snapshot made the machine look as if it
     // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
@@ -7262,7 +7271,7 @@ fn run_once_pass(
         stage,
         &machine_name,
         &state_dir,
-        stage_shards,
+        counted.count,
         report.changed_records > 0 || report.shards_written > 0,
     ) {
         Ok(pair) => pair,
@@ -7278,7 +7287,7 @@ fn run_once_pass(
     if !should_push {
         println!(
             "[run-once] push skipped: changed={} push_only_if_changed={} stage_shards={}",
-            changed, only_if_changed, stage_shards
+            changed, only_if_changed, counted.count
         );
         // A pass that pushes rebuilds the index on the way (see below), so the
         // archived index can only be stale when the pass pushes nothing — which
@@ -7387,6 +7396,7 @@ fn run_once_pass(
         options,
         keep_ssh_masters,
         Some(&mut state.phases),
+        Some(&collected),
     );
     if push_code != ExitCode::SUCCESS {
         eprintln!("[run-once] result: ERROR exit_code=1 push_failed");
@@ -8550,6 +8560,12 @@ fn cmd_push(
     // backup land in it. A standalone `push` has no such record
     // and passes `None`.
     mut metrics: Option<&mut chat_stasher::runstate::PassMetrics>,
+    // W881: when a `run-once` pass drives the push, collection's
+    // validated scan evidence and sealed-shard count are handed in
+    // so the preflight neither rescans the registry nor recounts the
+    // stage. A standalone `push` passes `None` and performs the full
+    // guard itself.
+    collected: Option<&chat_stasher::collect::CollectedStageEvidence>,
 ) -> ExitCode {
     let config = match config_or_refuse("push") {
         Ok(config) => config,
@@ -8570,14 +8586,24 @@ fn cmd_push(
     );
     // W880: push preflight — the empty-stage safety scan.
     let preflight_started = std::time::Instant::now();
-    let stage_check =
-        match chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine) {
-            Ok(check) => check,
-            Err(e) => {
-                eprintln!("push: cannot establish empty-stage safety: {e:#}");
-                return ExitCode::FAILURE;
-            }
-        };
+    // A run-once pass reuses the scan evidence and shard count collection
+    // already produced; a standalone push performs the full guard itself.
+    let stage_check = match collected {
+        Some(evidence) => chat_stasher::collect::inspect_stage_for_push_with_evidence(
+            &evidence.scan,
+            stage,
+            &state_dir,
+            &evidence.stage_shards,
+        ),
+        None => chat_stasher::collect::inspect_stage_for_push(&config, stage, &state_dir, &machine),
+    };
+    let stage_check = match stage_check {
+        Ok(check) => check,
+        Err(e) => {
+            eprintln!("push: cannot establish empty-stage safety: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.push_preflight_ms = preflight_started.elapsed().as_millis() as u64;
     }
@@ -8757,14 +8783,15 @@ fn cmd_push(
     };
     // W880: backup — the rustic traversal and snapshot write.
     let backup_started = std::time::Instant::now();
-    let summary = match store.push(stage, &mk) {
-        Ok(s) => s,
-        Err(e) => {
-            chat_stasher::remote_err::eprint_remote_error("push", &e, &cfg);
-            reap_remote(&cfg, keep_ssh_masters);
-            return ExitCode::FAILURE;
-        }
-    };
+    let summary =
+        match store.push_with_count(stage, &mk, collected.map(|evidence| &evidence.stage_shards)) {
+            Ok(s) => s,
+            Err(e) => {
+                chat_stasher::remote_err::eprint_remote_error("push", &e, &cfg);
+                reap_remote(&cfg, keep_ssh_masters);
+                return ExitCode::FAILURE;
+            }
+        };
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.backup_ms = backup_started.elapsed().as_millis() as u64;
     }

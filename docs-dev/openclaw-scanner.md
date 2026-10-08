@@ -29,7 +29,7 @@ continue to be scanned.
 
 Cold files under `sessions/` are considered when the file name's extension is
 `.zst`; a `.jsonl` name component is not required
-(`crates/chat-stasher/src/scanner.rs:2316-2325`). The part of the name before
+(`crates/chat-stasher/src/scanner.rs:2336-2345`). The part of the name before
 the first `.jsonl` supplies the session ID — the whole file name when the name
 contains no `.jsonl` — and a file whose part before `.jsonl` is empty is
 skipped. A file is also skipped when an identifiable SQLite archive row for the
@@ -97,4 +97,4 @@ Implementation: `crates/chat-stasher/src/sqlite_probe.rs:382-437`,
 `crates/chat-stasher/src/id.rs:239-298`,
 `crates/chat-stasher/src/inbox.rs:603-632`,
 `crates/chat-stasher/src/export.rs:962-979`, and
-`crates/chat-stasher/src/store.rs:1226-1229`.
+`crates/chat-stasher/src/store.rs:1247-1250`.

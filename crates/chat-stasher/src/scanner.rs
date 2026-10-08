@@ -913,10 +913,30 @@ pub fn scan_with_registry(config: &Config, registry: &HarnessRegistry) -> io::Re
     scan_with_registry_and_machine(config, registry, &machine)
 }
 
+/// How many times [`scan_with_machine`] has run in this process. Test-only:
+/// the collect-once-reuse path asserts a quiet run-once pass performs exactly
+/// one registry scan, and this is the counter that proves it.
+#[doc(hidden)]
+pub static SCAN_WITH_MACHINE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`SCAN_WITH_MACHINE_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn scan_with_machine_calls() -> usize {
+    SCAN_WITH_MACHINE_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`SCAN_WITH_MACHINE_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_scan_with_machine_calls() {
+    SCAN_WITH_MACHINE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Registry-driven scan with a caller-selected machine partition. Archive
 /// commands use this after resolving their explicit `--machine` or the local
 /// hostname, so a missing local hostname cannot block the explicit route.
 pub fn scan_with_machine(config: &Config, machine: &str) -> io::Result<ScanReport> {
+    SCAN_WITH_MACHINE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let registry = load_registry_from_repo()?;
     scan_with_registry_and_machine(config, &registry, machine)
 }
