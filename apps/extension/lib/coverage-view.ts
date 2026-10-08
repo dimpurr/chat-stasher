@@ -38,7 +38,7 @@ import {
   type CoverageReport,
   type CoverageRow,
 } from './coverage';
-import { DEFAULT_SPEED_PRESET, SPEED_PLANS, SPEED_PRESET_ORDER, type SpeedPreset } from './backfill/speed';
+import { presetFrom, SPEED_PLANS, SPEED_PRESET_ORDER, type SpeedPreset } from './backfill/speed';
 import { haltClassOf } from './backfill/types';
 import { describeTickReason } from './popup-view';
 
@@ -315,9 +315,7 @@ export function presetWhat(preset: SpeedPreset): string {
 export function speedView(report: CoverageReport): CoverageSpeedView {
   // Stored values are normalized by the model, but a report can also come from a newer runtime or an
   // unexpected caller. Only a preset this build knows can establish its risk level.
-  const current = Object.prototype.hasOwnProperty.call(SPEED_PLANS, report.preset)
-    ? report.preset
-    : DEFAULT_SPEED_PRESET;
+  const current = presetFrom(report.preset);
   return {
     current,
     options: SPEED_PRESET_ORDER.map((preset) => ({
