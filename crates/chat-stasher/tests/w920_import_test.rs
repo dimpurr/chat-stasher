@@ -294,6 +294,36 @@ fn import_calls_a_truncated_export_a_read_that_never_finished() {
     );
 }
 
+/// A file that was read in full and is not JSON is invalid input, not a
+/// read that stopped part-way: `2`, not `3`. A truncated file and a
+/// malformed one are different failures and must not answer with the
+/// same integer (invariant 2).
+#[test]
+fn import_calls_a_malformed_export_a_completed_read_of_invalid_input() {
+    let rig = Rig::new();
+    let path = rig.root().join("conversations.json");
+    // A trailing comma: complete bytes that are not a JSON document.
+    fs::write(&path, b"[{\"uuid\": \"x\",}]").expect("write malformed export");
+
+    let output = import_cmd(&rig, "claude", &path);
+    let shown = text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(WRONG_INPUT),
+        "read in full and not JSON is 2, not 3: {shown}"
+    );
+    assert!(
+        bundled_names(&rig.inbox()).is_empty(),
+        "a refused input writes nothing"
+    );
+    assert!(
+        !rig.stage().join(import::IMPORT_RAW_DIR).exists(),
+        "bytes that never parsed are not an export, so the byte-exact \
+         namespace holds exactly the files this producer imported — and \
+         nothing it refused"
+    );
+}
+
 /// An absent export is the same class of failure as a truncated one: it was
 /// never read. Not a usage error — the arguments were fine.
 #[test]

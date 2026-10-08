@@ -97,8 +97,9 @@ pub enum ImportError {
     /// command exits `3` and not a partial success counted as whole (ADR-014).
     ReadIncomplete(String),
     /// The file was read completely and is not something this build can import —
-    /// a manifest instead of a conversations file, JSON that is not an array, or
-    /// a platform with no parser. Nothing was written; exit `2`.
+    /// a manifest instead of a conversations file, JSON that is not an array
+    /// or not valid JSON at all, or a platform with no parser. Nothing was
+    /// written; exit `2`.
     WrongInput(String),
     /// Everything was read and understood, and a write still failed. Exit `1`.
     WriteFailed(String),
@@ -317,9 +318,23 @@ pub struct ParsedExport {
 /// `export_url` values are one-time-use credentials that must never be echoed.
 pub fn parse_claude_conversations(bytes: &[u8]) -> Result<ParsedExport, ImportError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
-        ImportError::ReadIncomplete(format!(
-            "export did not parse as JSON and was not read to the end: {e}"
-        ))
+        // One parse failure is two different answers (invariant 2), and
+        // serde_json names the difference: `Eof` means the input stopped
+        // part-way, so the export was never read to the end and nothing
+        // about its contents is proven — exit `3`. Every other category
+        // means the bytes were read in full and are not a JSON document:
+        // a completed read of invalid input — exit `2`. `Io` cannot occur
+        // while reading a byte slice, but it would also mean the read did
+        // not finish, so it stays on the `3` side.
+        if e.is_eof() || e.is_io() {
+            ImportError::ReadIncomplete(format!(
+                "export did not parse as JSON and was not read to the end: {e}"
+            ))
+        } else {
+            ImportError::WrongInput(format!(
+                "export was read in full but is not valid JSON: {e}"
+            ))
+        }
     })?;
 
     if let Some(files) = value.get("data_files") {
@@ -933,6 +948,23 @@ mod tests {
         let cut = &export[..export.len() - 20];
         let err = parse_claude_conversations(cut.as_bytes()).unwrap_err();
         assert!(matches!(err, ImportError::ReadIncomplete(_)), "{err}");
+    }
+
+    /// The other side of the same boundary: bytes that were read in
+    /// full and are not a JSON document. The read *finished*, so the
+    /// failure is about the input (exit `2`), not about how far the
+    /// read got (exit `3`). A trailing comma is malformed JSON that
+    /// serde_json classifies as syntax, not as an unexpected end.
+    #[test]
+    fn a_complete_but_malformed_export_is_wrong_input_not_an_incomplete_read() {
+        let err = parse_claude_conversations(b"[{\"uuid\": \"x\",}]").unwrap_err();
+        let ImportError::WrongInput(message) = err else {
+            panic!(
+                "a fully read malformed document is invalid input, not an \
+                 incomplete read: {err}"
+            );
+        };
+        assert!(message.contains("read in full"), "{message}");
     }
 
     #[test]
