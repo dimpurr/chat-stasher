@@ -93,7 +93,7 @@ by hand.
 ## The policy
 
 All of it is stated in one place,
-`crates/chat-stasher/src/store.rs:571-583`:
+`crates/chat-stasher/src/store.rs:572-584`:
 
 - **Comparison**: `ignore_ctime(true)` and `ignore_inode(true)`, so a file
   counts as changed on type, size and mtime alone.
@@ -107,7 +107,7 @@ mtime and atime but not ctime (`vendor/rustic_core/src/archiver/parent.rs:172-18
 `vendor/rustic_core/src/backend/local_destination.rs:290-304`). The diagnostic
 node diff does read archived nodes and serializes their fields for comparison,
 so it can still report a ctime present in an older snapshot
-(`crates/chat-stasher/src/store.rs:722-739`).
+(`crates/chat-stasher/src/store.rs:723-740`).
 
 `set_dir_times(TimeOption::No)`: a directory node stores no times at all, for
 the reason in the table above. What makes a directory part of the archive is the

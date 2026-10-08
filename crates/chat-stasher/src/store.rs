@@ -387,7 +387,8 @@ impl BackupStore {
         if self.cfg.repo_root.starts_with("opendal:") || self.cfg.repo_root.starts_with("rest:") {
             // Built by `StoreConfig::backend_options`, which is defined at the
             // end of this file so that introducing it moved no cited line; the
-            // values in it are the destination's, passed through untouched.
+            // destination values are preserved, with a connections default
+            // and filesystem atomic staging added when not explicitly supplied.
             opts = opts.options(self.cfg.backend_options());
         }
         let backends = opts.to_backends().context("build backend options")?;
@@ -2125,7 +2126,8 @@ fn hex_digest(bytes: &[u8]) -> String {
 // them. Nothing here needs to sit beside its siblings.
 impl StoreConfig {
     /// The option map handed to a remote backend: the connections cap plus the
-    /// destination's own options, values untouched.
+    /// destination's own options, values untouched, plus a default filesystem
+    /// atomic staging directory when the destination does not supply one.
     ///
     /// Split out of `Store::backends` so a test can assert what reaches the
     /// backend without opening anything. The credential switches are why that
@@ -2725,6 +2727,10 @@ impl StoreConfig {
     ) -> BTreeMap<String, String> {
         // OpenDAL fs otherwise exposes the final object before its bytes are written.
         // Stage under the repository root so publication uses a same-filesystem rename.
+        // Building the operator creates this directory, even for read-only opens:
+        // the root must be writable unless staging already exists. Users can set
+        // atomic_write_dir explicitly on the same filesystem. Crash debris stays
+        // there; this code does not inspect or remove another writer's temp files.
         if self.repo_root == "opendal:fs" {
             if let Some(root) = options.get("root") {
                 let staging = Path::new(root).join(".chat-stasher-tmp");

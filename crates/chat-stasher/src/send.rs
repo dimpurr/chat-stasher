@@ -1,5 +1,5 @@
 //! Keyless producer: only a public inbox recipient and a posting signing key.
-//! No configuration, archive key, or machine identity is resolved here.
+//! No archive configuration, archive key, or machine identity is resolved here.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
@@ -74,12 +74,26 @@ pub fn send_path(
     signing: &SigningKey,
     max_bytes: usize,
 ) -> anyhow::Result<String> {
+    let bundle = explicit_bundle(path, native_session_id, platform, key_id, max_bytes)?;
+    send_bundle(inbox, &bundle, key_id, recipient, signing)
+}
+
+fn explicit_bundle(
+    path: &std::path::Path,
+    native_session_id: &str,
+    platform: &str,
+    key_id: &str,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|_| anyhow::anyhow!("send input unreadable"))?;
+    let file = std::fs::File::open(path)?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "send input must be a regular file"
+    );
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("send input unreadable"))?;
+        .read_to_end(&mut bytes)?;
     anyhow::ensure!(bytes.len() <= max_bytes, "send input size limit");
     let name = path
         .file_name()
@@ -93,15 +107,12 @@ pub fn send_path(
             "byteEnd": bytes.len(), "sha256": sha256_hex(&bytes) },
         "raw": { "encoding": "base64", "data": STANDARD.encode(&bytes) },
         "fidelity": { "value": "unknown", "reason": "Explicit file without a verified platform recipe" },
+        "dimensions": { "surface": ["cloud"] },
         "producer": { "kind": "send", "version": env!("CARGO_PKG_VERSION"), "platform": platform, "sendKeyId": key_id }
     });
-    send_bundle(
-        inbox,
-        &serde_json::to_vec(&bundle)?,
-        key_id,
-        recipient,
-        signing,
-    )
+    let bytes = serde_json::to_vec(&bundle)?;
+    crate::inbox::check_bundle(&bytes).map_err(|_| anyhow::anyhow!("invalid send capture"))?;
+    Ok(bytes)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -109,4 +120,153 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Bounded diagnostics: backend paths, input bytes and posting secrets cannot
+/// enter this error. Incomplete reads/uploads carry exit 3; refusals carry 1.
+#[derive(Debug)]
+pub struct SendFailure {
+    pub reason: &'static str,
+    pub incomplete: bool,
+}
+impl SendFailure {
+    fn refused(reason: &'static str) -> Self {
+        Self {
+            reason,
+            incomplete: false,
+        }
+    }
+    fn incomplete(reason: &'static str) -> Self {
+        Self {
+            reason,
+            incomplete: true,
+        }
+    }
+}
+pub struct SendReport {
+    pub resumed: bool,
+    pub cursor_saved: bool,
+}
+
+/// Complete explicit-file producer path. Filesystem inboxes use the host's
+/// permissions; embedded provider credentials are not used for this backend.
+/// Other locators are deliberately refused until their option mapping is wired.
+/// The cursor is only a local upload receipt, never archive proof. Losing it
+/// causes a resend; a successful receipt does not say the bytes are archived.
+pub fn send_explicit(
+    path: &std::path::Path,
+    session: &str,
+    key: &crate::send_key::SendKey,
+    now: u64,
+    cursor_root: &std::path::Path,
+) -> Result<SendReport, SendFailure> {
+    if now >= key.expires_at || now < key.issued_at {
+        return Err(SendFailure::refused("posting key expired or not yet valid"));
+    }
+    let root = key
+        .locator
+        .strip_prefix("fs://")
+        .map(std::path::Path::new)
+        .filter(|root| root.is_absolute())
+        .ok_or_else(|| SendFailure::refused("only absolute fs:// inbox locators are wired"))?;
+    let bundle = explicit_bundle(path, session, &key.platform, &key.key_id, 4 * 1024 * 1024)
+        .map_err(|e| {
+            if e.downcast_ref::<std::io::Error>().is_some() {
+                SendFailure::incomplete("input unreadable")
+            } else {
+                SendFailure::refused("input size or capture contract invalid")
+            }
+        })?;
+    // Exclude capture time, but bind every other capture field and the inbox.
+    // Changes to bytes, scope, key, session, filename or producer version resend.
+    let mut fingerprint: serde_json::Value = serde_json::from_slice(&bundle)
+        .map_err(|_| SendFailure::refused("capture contract invalid"))?;
+    fingerprint
+        .as_object_mut()
+        .ok_or_else(|| SendFailure::refused("capture contract invalid"))?
+        .remove("capturedAt");
+    fingerprint["inboxLocator"] = key.locator.clone().into();
+    let digest = sha256_hex(
+        &serde_json::to_vec(&fingerprint)
+            .map_err(|_| SendFailure::refused("capture contract invalid"))?,
+    );
+    let receipt = format!("chat-stasher/send-cursor@1\n{digest}\n");
+    let cursor = cursor_root.join(&digest);
+    if valid_receipt(&cursor, receipt.as_bytes()) {
+        return Ok(SendReport {
+            resumed: true,
+            cursor_saved: true,
+        });
+    }
+    crate::test_identity_guard::refuse_fixture_write(&[session, &key.platform], root)
+        .map_err(|_| SendFailure::refused("fixture inbox write refused"))?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|_| SendFailure::incomplete("backend runtime unavailable"))?;
+    let entered = runtime.enter();
+    let staging = root.join(".chat-stasher-tmp");
+    let root_text = root
+        .to_str()
+        .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
+    let staging_text = staging
+        .to_str()
+        .ok_or_else(|| SendFailure::refused("invalid filesystem locator"))?;
+    // Same-filesystem rename keeps concurrent pullers from seeing partial objects.
+    let operator = opendal::Operator::new(
+        opendal::services::Fs::default()
+            .root(root_text)
+            .atomic_write_dir(staging_text),
+    )
+    .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?
+    .finish();
+    let operator = opendal::blocking::Operator::new(operator)
+        .map_err(|_| SendFailure::incomplete("inbox backend unavailable"))?;
+    drop(entered);
+    let inbox = crate::remote_inbox::RemoteInbox::new(operator, 10 * 1024 * 1024);
+    send_bundle(&inbox, &bundle, &key.key_id, &key.recipient, &key.signing)
+        .map_err(|_| SendFailure::incomplete("inbox upload unavailable"))?;
+    // Only a completed upload can advance the local best-effort receipt.
+    let cursor_saved = save_receipt(cursor_root, &cursor, receipt.as_bytes(), session).is_ok();
+    Ok(SendReport {
+        resumed: false,
+        cursor_saved,
+    })
+}
+fn valid_receipt(path: &std::path::Path, expected: &[u8]) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != expected.len() as u64
+    {
+        return false;
+    }
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    file.take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_ok()
+        && bytes == expected
+}
+fn save_receipt(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    bytes: &[u8],
+    session: &str,
+) -> anyhow::Result<()> {
+    crate::test_identity_guard::refuse_fixture_write(&[session], root)?;
+    std::fs::create_dir_all(root)?;
+    let metadata = std::fs::symlink_metadata(root)?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "unsafe cursor directory"
+    );
+    let mut file = tempfile::NamedTempFile::new_in(root)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
 }
