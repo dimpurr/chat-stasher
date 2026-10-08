@@ -21,6 +21,7 @@ pub mod id;
 pub mod identity;
 pub mod inbox;
 pub mod inbox_config;
+mod inbox_rate;
 pub mod json_out;
 pub mod keydecl;
 pub mod manifest;

@@ -144,6 +144,7 @@ fn cli_upload_reaches_the_existing_puller_and_sink_without_producer_identity() {
         &stage,
         "synthetic-puller",
         8,
+        &f.owner.root().join("synthetic-rates.sqlite3"),
         &NoArchive,
     )
     .unwrap();

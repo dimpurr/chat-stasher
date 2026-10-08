@@ -118,8 +118,8 @@ pub struct KeySummary {
     pub state: &'static str,
 }
 /// Limits are persisted on the trusted machine, never taken from a posting key.
-/// This slice retains the transport's per-pull rate bound; durable time-window
-/// accounting belongs to pull orchestration rather than key issuance.
+/// The object ceiling applies per pull and per rolling hour. Existing v1 policy
+/// records retain their ceiling when loaded; no posting-key field sets a quota.
 pub struct IssueOptions<'a> {
     pub platform: &'a str,
     pub label: &'a str,
