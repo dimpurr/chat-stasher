@@ -22,6 +22,15 @@ const QUERY_ID_BINDINGS: Partial<Record<string, { queryKey: string; path: string
   deepseek: { queryKey: 'chat_session_id', path: 'data.biz_data.chat_session.id' },
 };
 
+/**
+ * A body carrying `paths`, each leaf written as `leaf`.
+ *
+ * 🔴 W422 · The leaf is a parameter because the gate reads its two required lists
+ *    differently: a scalar satisfies `requiredPaths`, only an array satisfies
+ *    `requiredArrayPaths`. Writing `'x'` for every path would build a kimi minimum body
+ *    of `{}`, and `matchesResponseShape` would refuse it for the right reason while the
+ *    row's "accepts its declared shape" case went red — the opposite of a real drift.
+ */
 function bodyWithPaths(paths: readonly string[], leaf: unknown = 'x'): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   for (const path of paths) {
@@ -81,8 +90,19 @@ function minimumResponse(platform: ChatPlatform): string {
 function missingRequiredResponse(platform: ChatPlatform): string {
   const shape = platform.responseShape;
   if (shape.encoding === 'text') return 'x';
+  // 🔴 W422 · BOTH required lists are read, in declaration order, so the case drops a
+  //    required path whichever list the row declares: the first scalar when there is
+  //    one, otherwise the first array path. That is what a row declaring both lists
+  //    needs — DeepSeek declares both today, where `requiredPaths` alone built `{}` and
+  //    never exercised the array requirement. A one-array-path row (kimi, perplexity)
+  //    builds `{}` either way; every surviving array path keeps the `[]` above.
   const requiredPaths = shape.requiredPaths ?? [];
-  return JSON.stringify(bodyWithPaths(requiredPaths.slice(1)));
+  const requiredArrayPaths = shape.requiredArrayPaths ?? [];
+  const keptArrayPaths = requiredPaths.length > 0 ? requiredArrayPaths : requiredArrayPaths.slice(1);
+  return JSON.stringify({
+    ...bodyWithPaths(requiredPaths.slice(1)),
+    ...bodyWithPaths(keptArrayPaths, []),
+  });
 }
 
 function capture(platform: ChatPlatform, origin: string, path: string, method: string, text: string) {

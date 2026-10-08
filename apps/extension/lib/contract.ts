@@ -687,10 +687,10 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       // one of those is required here, because the gate's job is "is this the
       // messages envelope at all", and pinning a nested key would turn a
       // *message* shape change into a dropped conversation rather than a
-      // warning. Required (not "any of"): a body without `messages` is the drift
-      // case, so it must fail the shape gate and be warned about rather than
-      // pass through as an empty-looking capture.
-      requiredPaths: ['messages'],
+      // warning. Required as an ARRAY (not "any of" or presence-only `requiredPaths`):
+      // a body whose `messages` is absent or not an array is the drift case, so it must
+      // fail the shape gate and be warned about rather than pass as an empty-looking capture.
+      requiredArrayPaths: ['messages'],
     },
     // 🔴 Measured 2026-09-14: chat ids appear in `/chat/<id>`, and the ids seen
     // have more than one shape (one hex-like, one alphanumeric), so the character
@@ -1060,11 +1060,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 🔴 W28 · **Own properties only.** The `in` operator walks the prototype chain,
  * and an array inherits a method from `Array.prototype` for every name that
  * collides with one — `entries`, `keys`, `values`, `map`, `find`, `slice`, ...
- * So `'entries' in []` is TRUE and `[]['entries']` is a FUNCTION, which is not
- * null and therefore used to satisfy the shape gate. A top-level array would
- * then pass a `requiredPaths: ['entries']` gate and be captured as if it were
- * the content envelope — the "an unknown recorded as a known" failure this
- * gate exists to prevent, arriving through the one path nobody looks at.
+ * So `'entries' in []` is TRUE and `[]['entries']` is a FUNCTION: a presence
+ * gate read that inherited method as a named field, so a top-level array passed
+ * a `requiredPaths: ['entries']` gate and was captured as the envelope — "an
+ * unknown recorded as a known". Perplexity now pins `entries` with
+ * `requiredArrayPaths`, whose `Array.isArray` refuses the inherited function.
  * The gate asks "did the body NAME this field", so it must ask the object's own
  * keys. Kept in step with the copy in lib/page-hook.ts: the page hook posts a
  * payload iff its copy passes, and the bridge accepts it iff this one does.

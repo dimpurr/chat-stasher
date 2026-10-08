@@ -245,6 +245,11 @@ describe('W22-1 · the kimi row in the platform table', () => {
     expect(matchesResponseShape(row, feedPage([chatItem(ID)]))).toBe(false);
     // Drift: same route, same 200, the envelope moved under a different key.
     expect(matchesResponseShape(row, JSON.stringify({ data: { messages: [] } }))).toBe(false);
+    // 🔴 And the key present but not an array: the row declares `messages` under
+    //    `requiredArrayPaths`, so a present-but-wrong-typed container is drift too.
+    for (const wrongType of ['null', '""', '{}', '7']) {
+      expect(matchesResponseShape(row, `{"messages":${wrongType}}`)).toBe(false);
+    }
     expect(matchesResponseShape(row, 'not json')).toBe(false);
   });
 
@@ -898,17 +903,24 @@ describe('W22-7 · one conversation per body request', () => {
 
   it('a body that carries no messages is refused, and so is one where `messages` is not an array', async () => {
     const clock = fakeClock();
-    // `{messages: "text"}` PASSES the row's own shape gate (the key is present and non-null),
-    // so this is the plan's parser catching what the generic gate cannot.
     const be = backend(clock, {
       [KIMI_LIST_PATH]: feedPage([chatItem(ID)]),
       [KIMI_DETAIL_PATH]: JSON.stringify({ messages: 'not-an-array' }),
     });
     const report = await run(memoryStore(), be.http, 'w22-detail-shape', { clock });
+    // 🔴 W422 moved this one: `messages` is declared under `requiredArrayPaths`, so the
+    //    row's OWN gate now refuses a present-but-wrong-typed container and answers
+    //    before the plan's parser is reached. What this test pins is the outcome — the
+    //    debt stays pending, nothing is archived, the leg halts — and deliberately not
+    //    which of the two checks noticed.
     expect(report.stopped).toBe('halted');
     expect(report.halted?.reason).toBe('shape-changed');
     expect(report.state.pending).toEqual([ID]);
     expect(report.state.archived).toEqual([]);
+    // The plan's parser is an INDEPENDENT backstop, so it is asserted directly: with the
+    // gate answering first, a parser that stopped refusing a non-array would leave the
+    // assertions above green.
+    expect(parseKimiDetailPage(JSON.stringify({ messages: 'not-an-array' })).ok).toBe(false);
   });
 
   it('an empty messages array is delivered rather than refused — and that is a documented choice', async () => {
