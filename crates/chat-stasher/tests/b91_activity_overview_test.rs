@@ -669,6 +669,236 @@ fn activity_index_reads_no_grok_dimension_from_a_web_bundle() {
     );
 }
 
+/// One synthetic codex rollout `session_meta` record carrying whatever
+/// `payload` fields the caller spells in — the record that opens a
+/// codex session and states its own facts.
+fn codex_meta(payload: &str) -> String {
+    format!(
+        r#"{{"timestamp":"2025-01-15T12:34:56.789Z","type":"session_meta","payload":{{{payload}}}}}"#
+    )
+}
+
+/// One synthetic codex conversation line, so the session the metadata
+/// belongs to holds conversation content beside its session facts.
+fn codex_user(ts: &str) -> String {
+    format!(
+        r#"{{"timestamp":"{ts}","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"hi"}}]}}}}"#
+    )
+}
+
+/// TICKET-4D-03 · the facts a codex rollout states about its session
+/// reach the written index: the directory it ran in and the repository
+/// it belonged to.
+#[test]
+fn activity_index_records_the_dimensions_a_codex_rollout_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "codex.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            codex_meta(
+                r#""id":"s1","cwd":"/w/one","git":{"repository_url":"https://github.com/org/repo-fixture"}"#,
+            ),
+            codex_user("2025-01-15T12:34:56.789Z"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["https://github.com/org/repo-fixture"]),
+        "the repository URL the harness recorded is recorded as a container"
+    );
+    assert!(
+        row["dimensions"].get("tenant").is_none(),
+        "the rollout names no tenancy, and none is invented: {}",
+        row["dimensions"]
+    );
+}
+
+/// A codex rollout whose session ran outside any repository states no
+/// repository URL, so the first runtime workspace root — the workspace
+/// boundary the session was given — is the container.
+#[test]
+fn activity_index_records_the_codex_workspace_root_when_no_repository_is_stated() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "codex.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            codex_meta(
+                r#""id":"s1","cwd":"/w/one","runtime_workspace_roots":["/w/one","/w/other"]"#,
+            ),
+            codex_user("2025-01-15T12:34:56.789Z"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["/w/one"]),
+        "the first runtime workspace root is the container when no \
+         repository URL was stated"
+    );
+}
+
+/// A codex rollout whose session ran in a directory outside any
+/// repository states a `cwd` but no repository and no workspace
+/// root: the directory is recorded, and the container stays
+/// **unobserved** — a path is not a repository identity, so
+/// nothing becomes a container.
+#[test]
+fn activity_index_records_a_codex_cwd_without_a_container() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "codex.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            codex_meta(r#""id":"s1","cwd":"/w/one""#),
+            codex_user("2025-01-15T12:34:56.789Z"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert!(
+        row["dimensions"].get("container").is_none(),
+        "no repository URL and no workspace root was stated, and none \
+         is invented from the directory: {}",
+        row["dimensions"]
+    );
+}
+
+/// A codex rollout that states no directory and no repository leaves
+/// both dimensions **absent** from the index line — unobserved, not an
+/// empty string and not a placeholder the reader could mistake for a
+/// fact.
+#[test]
+fn activity_index_leaves_an_unrecorded_codex_dimension_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "codex.mbp-test.019bf00d-97b6-7eb2-9bf8-eacbacc09765";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[
+            codex_meta(r#""id":"s1""#),
+            codex_user("2025-01-15T12:34:56.789Z"),
+        ],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "no dimension was observed, so no dimension object is written: {}",
+        row
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]
