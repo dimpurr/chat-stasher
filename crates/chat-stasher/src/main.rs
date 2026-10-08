@@ -885,8 +885,9 @@ enum Command {
     /// pushes, never reads config, a destination or a machine identity, and never
     /// modifies or moves the export file.
     ///
-    /// Only Claude's `conversations.json` has a parser in this build; naming any
-    /// other platform is a refusal, not a guess. The archive comparison that would
+    /// Claude's `conversations.json` and Grok's `prod-grok-backend.json`
+    /// have parsers in this build; naming any other platform is a
+    /// refusal, not a guess. The archive comparison that would
     /// suppress a body already archived is behind a probe that this build ships
     /// unwired, so every conversation currently gets a body.
     ///
@@ -898,7 +899,8 @@ enum Command {
         /// Which platform's export this is.
         #[arg(value_enum)]
         platform: chat_stasher::import::TakeoutPlatform,
-        /// The export file, e.g. the unzipped Claude `conversations.json`.
+        /// The export file, e.g. the unzipped Claude `conversations.json` or
+        /// Grok `prod-grok-backend.json`.
         /// A manifest is refused: its download links are one-time-use credentials.
         export: PathBuf,
         /// Local inbox folder to write bundles into, for a later `ingest --inbox`.
