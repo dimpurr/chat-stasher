@@ -246,7 +246,7 @@ test('🔴 "Export now" really exports — it is the one escape hatch that must 
   const rec = stored['cs_outbox_last_export_v1'] as { filename?: string; bytes?: number };
   expect(rec.filename).toBeTruthy();
   // The file is JSONL: one line per entry, so the byte count is the payload bytes
-  // **plus one newline each** — `bytes += entry.bytes + 1` (lib/outbox.ts:606).
+  // **plus one newline each** — `bytes += entry.bytes + 1` (lib/outbox.ts:658).
   // 1024 + 2048 payload, + 2 newlines = 3074. Asserted exactly, because a count
   // that merely exceeded the payload would also pass if an entry were written twice.
   expect(rec.bytes).toBe(1024 + 2048 + 2);

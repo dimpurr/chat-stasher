@@ -814,7 +814,7 @@ const WRITE_OUTBOX = async (rows: unknown[]): Promise<void> => {
  * otherwise take a real capture (and a real platform page) to reach.
  *
  * 🔴 `bytes` on each entry is the product's own byte accounting and the only thing
- *    `summary()` reads (lib/outbox.ts:321 sums the rows' `bytes`), so a spec that
+ *    `summary()` reads (lib/outbox.ts:362 sums the rows' `bytes`), so a spec that
  *    wants "a spool that is 82% full" seeds that number rather than megabytes of
  *    payload. The payload only has to be well-formed enough for the code under
  *    test; nothing here is delivered, because no host is installed.
