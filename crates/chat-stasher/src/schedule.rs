@@ -125,6 +125,77 @@ pub struct ReclaimStageArgs {
     pub keep_ssh_masters: bool,
 }
 
+/// Scheduler identity for a named inbox. Its namespace is independent of
+/// archive and reclamation jobs, including when their names are identical.
+pub fn pull_label(name: &str) -> String {
+    format!(
+        "com.chat-stasher.inbox-pull.{}",
+        destination_component(name)
+    )
+}
+
+pub fn pull_timer(name: &str) -> String {
+    format!(
+        "chat-stasher-inbox-pull-{}.timer",
+        destination_component(name)
+    )
+}
+
+/// Render only the trusted pull command. No archive credentials, collection,
+/// push or reclamation slots belong to this execution path.
+#[allow(clippy::too_many_arguments)]
+pub fn render_pull(
+    format: Format,
+    binary: &Path,
+    stage: &Path,
+    interval: u64,
+    name: &str,
+    machine: Option<&str>,
+    shard_bucket_cap: Option<usize>,
+    home: &Path,
+) -> Vec<TemplateFile> {
+    let mut argv = vec![
+        binary.display().to_string(),
+        "inbox-pull".into(),
+        name.into(),
+        "--stage".into(),
+        stage.display().to_string(),
+    ];
+    if let Some(machine) = machine {
+        argv.extend(["--machine".into(), machine.into()]);
+    }
+    if let Some(cap) = shard_bucket_cap {
+        argv.extend(["--shard-bucket-cap".into(), cap.to_string()]);
+    }
+    match format {
+        Format::Launchd => {
+            let label = pull_label(name);
+            vec![TemplateFile {
+                name: format!("{label}.plist"),
+                content: render_launchd_job(&argv, interval, home, &label, &label),
+            }]
+        }
+        Format::Systemd => {
+            let timer = pull_timer(name);
+            let service = timer.replace(".timer", ".service");
+            vec![
+                TemplateFile {
+                    name: service.clone(),
+                    content: render_systemd_job(&argv, &service, "inbox pull"),
+                },
+                TemplateFile {
+                    name: timer,
+                    content: render_systemd_interval_timer(
+                        interval,
+                        &service,
+                        "Periodic chat-stasher inbox pull",
+                    ),
+                },
+            ]
+        }
+    }
+}
+
 /// Resolve the executable that a persistent scheduler may safely embed.
 /// Cargo's `target/` paths and `CARGO_TARGET_DIR` are disposable build products.
 /// An explicit installed path need not exist yet, so a package manager can
@@ -1563,11 +1634,30 @@ fn render_launchd(
     home: &Path,
     label: &str,
 ) -> String {
-    let argv = run_once_argv(binary, stage, args);
+    render_launchd_job(
+        &run_once_argv(binary, stage, args),
+        interval,
+        home,
+        label,
+        "run-once",
+    )
+}
 
+fn render_launchd_job(
+    argv: &[String],
+    interval: u64,
+    home: &Path,
+    label: &str,
+    log_name: &str,
+) -> String {
+    let success_note = if log_name == "run-once" {
+        "exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error."
+    } else {
+        "exit 0 is success; non-zero is refusal or incomplete work."
+    };
     let log_dir = home.join("Library/Logs/chat-stasher");
-    let stdout_log = log_dir.join("run-once.log");
-    let stderr_log = log_dir.join("run-once.err.log");
+    let stdout_log = log_dir.join(format!("{log_name}.log"));
+    let stderr_log = log_dir.join(format!("{log_name}.err.log"));
 
     // launchd opens StandardOutPath/StandardErrorPath with O_APPEND *before*
     // our process starts, and its fd follows the inode, not the path. Renaming
@@ -1600,7 +1690,7 @@ fn render_launchd(
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- chat-stasher is a one-shot process: exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error. -->
+  <!-- chat-stasher is a one-shot process: {success_note} -->
   <key>Label</key>
   <string>{label}</string>
   <key>ProgramArguments</key>
@@ -1721,7 +1811,19 @@ fn render_systemd_service(
     args: &RunOnceArgs,
     service_name: &str,
 ) -> String {
-    let argv = run_once_argv(binary, stage, args);
+    render_systemd_job(
+        &run_once_argv(binary, stage, args),
+        service_name,
+        "archive cycle",
+    )
+}
+
+fn render_systemd_job(argv: &[String], service_name: &str, description: &str) -> String {
+    let success_note = if description == "archive cycle" {
+        "# exit 0 = success: result=NOOP means no snapshot; result=COMPLETED means snapshot created.\n# Non-zero = error; read the result line in the journal."
+    } else {
+        "# exit 0 = success; non-zero = refusal or incomplete work.\n# Read the command report in the journal."
+    };
     let args = argv
         .iter()
         .map(|arg| systemd_quote_arg(arg))
@@ -1729,12 +1831,11 @@ fn render_systemd_service(
         .join(" ");
     format!(
         r#"[Unit]
-Description=Run one chat-stasher archive cycle ({service_name})
+Description=Run one chat-stasher {description} ({service_name})
 
 [Service]
 Type=oneshot
-# exit 0 = success: result=NOOP means no snapshot; result=COMPLETED means snapshot created.
-# Non-zero = error; read the result line in the journal.
+{success_note}
 ExecStart={args}
 SuccessExitStatus=0
 StandardOutput=journal
@@ -1744,9 +1845,13 @@ StandardError=journal
 }
 
 fn render_systemd_timer(interval: u64, service_name: &str) -> String {
+    render_systemd_interval_timer(interval, service_name, "Hourly chat-stasher archive cycle")
+}
+
+fn render_systemd_interval_timer(interval: u64, service_name: &str, description: &str) -> String {
     format!(
         r#"[Unit]
-Description=Hourly chat-stasher archive cycle
+Description={description}
 
 [Timer]
 OnBootSec={interval}s

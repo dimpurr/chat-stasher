@@ -310,13 +310,17 @@ enum Command {
     /// Task Scheduler steps instead: this build has no scheduler integration
     /// there.
     Schedule {
+        /// Schedule only inbox-pull for this initialized inbox, independently
+        /// of the archive cycle. run-once never pulls remote inboxes.
+        #[arg(long, global = true)]
+        pull: Option<String>,
         /// Optional action. Without it, only render the templates.
         #[command(subcommand)]
         action: Option<ScheduleAction>,
         /// Template format to render.
         #[arg(long, value_enum, default_value = "launchd", global = true)]
         format: schedule::Format,
-        /// Which scheduled job to render. `run-once` (default) is the hourly
+        /// Without --pull, which job to render. `run-once` (default) is the hourly
         /// archive cycle. `reclaim-stage` is the weekly stage reclamation that
         /// deletes staged shard bodies once every destination proves it holds
         /// them — unrelated to the ssh connection reaping that
@@ -359,10 +363,10 @@ enum Command {
         /// command.
         #[arg(long = "option", global = true)]
         options: Vec<String>,
-        /// Machine partition forwarded to `run-once`.
+        /// Storage partition forwarded to `run-once` or `inbox-pull`.
         #[arg(long, global = true)]
         machine: Option<String>,
-        /// Maximum sealed shards per bucket forwarded to `run-once`.
+        /// Maximum sealed shards per bucket forwarded to `run-once` or `inbox-pull`.
         #[arg(long, global = true)]
         shard_bucket_cap: Option<usize>,
         /// Add the cheap L1 verify pass after each archive cycle.
@@ -1743,6 +1747,7 @@ fn run() -> ExitCode {
             keep_ssh_masters,
         ),
         Command::Schedule {
+            pull,
             action,
             unit,
             format,
@@ -1759,6 +1764,7 @@ fn run() -> ExitCode {
             verify,
             keep_ssh_masters,
         } => cmd_schedule(
+            pull,
             action,
             unit,
             format,
@@ -7465,6 +7471,7 @@ fn apply_schedule_platform_refusal(os: &str) -> Option<ExitCode> {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_schedule(
+    pull: Option<String>,
     action: Option<ScheduleAction>,
     unit: schedule::Unit,
     format: schedule::Format,
@@ -7487,6 +7494,31 @@ fn cmd_schedule(
     // unusable there, so nothing else about the invocation matters.
     if let Some(code) = apply_schedule_platform_refusal(std::env::consts::OS) {
         return code;
+    }
+    if let Some(name) = pull {
+        if unit != schedule::Unit::RunOnce
+            || !destinations.is_empty()
+            || repo.is_some()
+            || key_file.is_some()
+            || connections.is_some()
+            || !options.is_empty()
+            || verify
+            || keep_ssh_masters
+        {
+            eprintln!("schedule: --pull accepts only --stage, --machine and --shard-bucket-cap command slots; archive-only options are invalid");
+            return ExitCode::from(2);
+        }
+        return cmd_schedule_pull(
+            &name,
+            action,
+            format,
+            stage,
+            output,
+            binary,
+            machine.as_deref(),
+            shard_bucket_cap,
+            quiet,
+        );
     }
     let config = match config_or_refuse("schedule") {
         Ok(config) => config,
@@ -7751,6 +7783,155 @@ fn cmd_schedule(
         println!("[schedule] you must execute this command yourself to install:");
         println!("{}", schedule::install_command(unit, format, &paths));
     }
+    ExitCode::SUCCESS
+}
+
+/// Pull schedules are explicit named jobs; destination selection and archive
+/// execution never enter this path. Teardown needs neither stage nor backend.
+#[allow(clippy::too_many_arguments)]
+fn cmd_schedule_pull(
+    name: &str,
+    action: Option<ScheduleAction>,
+    format: schedule::Format,
+    stage: Option<&Path>,
+    output: Option<PathBuf>,
+    binary: Option<PathBuf>,
+    machine: Option<&str>,
+    shard_bucket_cap: Option<usize>,
+    quiet: bool,
+) -> ExitCode {
+    use chat_stasher::inbox_config;
+    if inbox_config::validate(name, "memory://validation").is_err() {
+        eprintln!("schedule: invalid inbox name");
+        return ExitCode::from(2);
+    }
+    let home = config::home_dir();
+    let tool = scheduler_tool_path(format);
+    if matches!(action, Some(ScheduleAction::Uninstall)) {
+        let result = match format {
+            schedule::Format::Launchd => launchd_domain().and_then(|domain| {
+                schedule::uninstall_launchd_agents(
+                    &home,
+                    &[schedule::pull_label(name)],
+                    &tool,
+                    &domain,
+                )
+            }),
+            schedule::Format::Systemd => {
+                schedule::uninstall_systemd_units(&home, &[schedule::pull_timer(name)], &tool)
+            }
+        };
+        return match result {
+            Ok(removed) => {
+                if !quiet {
+                    println!("[schedule] removed pull unit files: {removed}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("schedule uninstall: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match inbox_config::load(&inbox_config::default_root(), name) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!("schedule: initialize this inbox first");
+            return ExitCode::from(2);
+        }
+        Err(_) => {
+            eprintln!("schedule incomplete: inbox configuration unavailable");
+            return ExitCode::from(3);
+        }
+    }
+    let config = match config_or_refuse("schedule") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let interval = match schedule::interval_secs(&config) {
+        Ok(interval) => interval,
+        Err(error) => {
+            eprintln!("schedule: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(stage) = stage else {
+        eprintln!("schedule: --stage is required for render and install");
+        return ExitCode::from(2);
+    };
+    let binary = match std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|current| schedule::resolve_binary(binary.as_deref(), &current, &home))
+    {
+        Ok(binary) => binary,
+        Err(error) => {
+            eprintln!("schedule: {error:#}");
+            return ExitCode::from(2);
+        }
+    };
+    let files = schedule::render_pull(
+        format,
+        &binary,
+        &absolute_path(stage),
+        interval,
+        name,
+        machine,
+        shard_bucket_cap,
+        &home,
+    );
+    if matches!(action, Some(ScheduleAction::Install)) {
+        let result = match format {
+            schedule::Format::Launchd => launchd_domain()
+                .and_then(|domain| schedule::install_launchd_agents(&home, &files, &tool, &domain)),
+            schedule::Format::Systemd => schedule::install_systemd_units(&home, &files, &tool),
+        };
+        return match result {
+            Ok(results) => {
+                if !quiet {
+                    let unchanged = results
+                        .iter()
+                        .filter(|r| **r == schedule::InstallResult::Unchanged)
+                        .count();
+                    println!(
+                        "[schedule] installed pull jobs: {} unchanged: {unchanged}",
+                        results.len() - unchanged
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("schedule install: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(output) = output {
+        match schedule::write_templates(format, &output, &files) {
+            Ok(paths) => {
+                for (path, file) in paths.iter().zip(&files) {
+                    println!(
+                        "[schedule] wrote template: {} (install as {})",
+                        path.display(),
+                        file.name
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("schedule: {error:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        for file in &files {
+            println!("===== {} =====", file.name);
+            print!("{}", file.content);
+        }
+    }
+    println!("[schedule] pull interval_secs: {interval}");
+    println!("[schedule] install is NOT automatic.");
+    println!("[schedule] save the templates under the user scheduler directory using their rendered names, then execute:");
+    println!("{}", schedule::install_command_for_files(format, &files));
     ExitCode::SUCCESS
 }
 
@@ -13837,6 +14018,7 @@ fn cmd_setup(
             None
         };
         let schedule_exit = cmd_schedule(
+            None,
             Some(action),
             schedule::Unit::RunOnce,
             setup_schedule_format(),
