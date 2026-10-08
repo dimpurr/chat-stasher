@@ -836,7 +836,7 @@ machine:
   (`crates/chat-stasher/src/sqlite_probe.rs:2078-2096`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2868-2916`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2908-2956`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:446,536-537`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by

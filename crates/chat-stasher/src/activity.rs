@@ -2680,12 +2680,21 @@ fn fold_openclaw_dimensions(
     dimensions: &mut crate::provenance::SessionProvenance,
     record: &serde_json::Value,
 ) {
+    // Only a line sealed under one of the two OpenClaw schemas vouches for
+    // what it states: everything the export writes is sealed, so a line
+    // carrying neither schema is a foreign or hand-written shape whose
+    // top-level `agent_id` is the same field with nothing behind it — the
+    // same rule the opencode fold applies to a line the exporter did not
+    // seal.
+    let schema = record.get("schema").and_then(serde_json::Value::as_str);
+    let archived = schema == Some(crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA);
+    if !archived && schema != Some(crate::sqlite_probe::OPENCLAW_SESSION_SCHEMA) {
+        return;
+    }
     if let Some(agent_id) = non_empty_str(record.get("agent_id")) {
         dimensions.insert_container(agent_id);
     }
-    if record.get("schema").and_then(serde_json::Value::as_str)
-        == Some(crate::sqlite_probe::OPENCLAW_ARCHIVE_SCHEMA)
-    {
+    if archived {
         dimensions.insert_status("archived");
     }
 }
@@ -3784,6 +3793,32 @@ mod tests {
             row.dimensions.container
         );
         assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn an_unsealed_or_foreign_schema_line_records_no_openclaw_dimensions() {
+        // Only a line sealed under one of the two OpenClaw schemas vouches
+        // for what it states: everything the export writes is sealed, so a
+        // line carrying neither schema — a foreign schema's line that
+        // happens to share a top-level `agent_id`, or an unsealed object —
+        // is the same shape with nobody behind it, exactly as the opencode
+        // fold treats a line the exporter did not seal.
+        let row = build_row(
+            "s",
+            "mbp",
+            "openclaw",
+            &[
+                r#"{"schema":"chat-stasher.opencode.session.v1","agent_id":"synthetic-agent"}"#,
+                r#"{"agent_id":"synthetic-agent"}"#,
+                r#"{"schema":"chat-stasher.openclaw.session.v0","agent_id":"synthetic-agent"}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "a line no OpenClaw schema sealed is nothing observed, never a container: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
     }
 
     #[test]

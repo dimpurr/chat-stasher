@@ -43,7 +43,7 @@ and the complete JSONL lines — the ones terminated by a newline — are
 preserved in the raw archive; a trailing line still missing its final newline
 is held as in progress rather than sealed, and the first pass after the source
 gains that newline re-decodes and seals that tail in full
-(`crates/chat-stasher/src/collect.rs:2329-2341`, `:2470-2484`, `:25-34`). The
+(`crates/chat-stasher/src/collect.rs:2384-2397`, `:2527-2541`, `:25-34`). The
 OpenClaw normalizer does not interpret that native line format, so those lines
 remain unrendered.
 
@@ -93,7 +93,7 @@ shard-directory creation as collect. Against the original code, a rotated cold
 filename triggers `File name too long` (macOS error 63). It also checks short-ID
 compatibility and distinct archive generations.
 
-Implementation: `crates/chat-stasher/src/sqlite_probe.rs:347-402`,
+Implementation: `crates/chat-stasher/src/sqlite_probe.rs:382-437`,
 `crates/chat-stasher/src/id.rs:239-298`,
 `crates/chat-stasher/src/inbox.rs:603-632`,
 `crates/chat-stasher/src/export.rs:962-979`, and
