@@ -27,8 +27,9 @@
 //!   verifier in `store`/`verify` walks `stage/sessions` and nothing else, so an
 //!   object outside it cannot be summed. It is **not** yet wired into `push` or
 //!   readback, so a raw export here is local until that lands.
-//! * **The export is read whole into memory.** A Claude `conversations.json` is
-//!   tens of megabytes and fits comfortably; the ChatGPT DSAR (3.53 GiB) does
+//! * **The export is read whole into memory.** A Claude `conversations.json`
+//!   is tens of megabytes and a Grok `prod-grok-backend.json` is 65 MB
+//!   measured — both fit comfortably; the ChatGPT DSAR (3.53 GiB) does
 //!   not, and its importer is a later slice that must stream. Nothing here
 //!   pretends to handle that file yet.
 //!
@@ -41,6 +42,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+mod grok;
+pub use grok::parse_grok_export;
 
 /// Stage namespace holding whole official-export files, byte-exact.
 ///
@@ -142,11 +146,26 @@ impl TakeoutPlatform {
         }
     }
 
-    /// Does this build parse this platform's export? Only `claude` does in this
-    /// slice; the order the rest land in is ADR-055 D10 (DeepSeek and ChatGPT
+    /// Does this build parse this platform's export? `claude` and `grok`
+    /// do; the order the rest land in is ADR-055 D10 (DeepSeek and ChatGPT
     /// are gated by their platform's own extension validation first).
     pub fn has_parser(self) -> bool {
-        matches!(self, Self::Claude)
+        parser_for(self).is_some()
+    }
+}
+
+/// The parser registered for a platform, or `None` where this build
+/// has none.
+///
+/// The registry is the one place that decides which platforms this
+/// build imports: [`TakeoutPlatform::has_parser`] derives from it and
+/// [`run`] dispatches through it, so a platform cannot be offered on
+/// the command line and unparseable at the same time.
+fn parser_for(platform: TakeoutPlatform) -> Option<fn(&[u8]) -> Result<ParsedExport, ImportError>> {
+    match platform {
+        TakeoutPlatform::Claude => Some(parse_claude_conversations),
+        TakeoutPlatform::Grok => Some(parse_grok_export),
+        TakeoutPlatform::DeepSeek | TakeoutPlatform::ChatGpt | TakeoutPlatform::Gemini => None,
     }
 }
 
@@ -685,12 +704,12 @@ pub fn run(
     archive: &dyn ArchivedLatest,
 ) -> Result<ImportReport, ImportError> {
     let slug = platform.slug();
-    if !platform.has_parser() {
-        return Err(ImportError::WrongInput(format!(
+    let parse = parser_for(platform).ok_or_else(|| {
+        ImportError::WrongInput(format!(
             "this build has no {slug} export parser: {slug} is named by `--platform`, \
              but its importer is a later slice"
-        )));
-    }
+        ))
+    })?;
 
     if !stage.is_dir() {
         return Err(ImportError::WrongInput(format!(
@@ -713,7 +732,7 @@ pub fn run(
     // whose `export_url` values are one-time-use credentials, and archiving it
     // first would write those tokens into the stage and then exit 2 as if nothing
     // had happened. So a run that ends `2` or `3` has written nothing anywhere.
-    let parsed = parse_claude_conversations(&bytes)?;
+    let parsed = parse(&bytes)?;
     let raw = archive_raw_export(stage, slug, &source_name, &bytes)?;
     publish_inbox_dir(inbox)?;
 
@@ -1199,7 +1218,6 @@ mod tests {
         for platform in [
             TakeoutPlatform::DeepSeek,
             TakeoutPlatform::ChatGpt,
-            TakeoutPlatform::Grok,
             TakeoutPlatform::Gemini,
         ] {
             let err = run(
