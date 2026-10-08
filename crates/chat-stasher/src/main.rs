@@ -18492,12 +18492,25 @@ fn cmd_inbox_pull_observed(
     // partition and current directory. Retain it across invocations; deleting
     // or relocating trusted inbox state can reset this machine's local quota.
     let rate_state = root.join(format!("{}.rates.sqlite3", args.name));
-    struct UnavailableArchive;
-    impl remote_inbox::ArchiveProof for UnavailableArchive {
-        fn holds(&self, _: &str, _: &chat_stasher::inbox::SealOutcome) -> anyhow::Result<bool> {
-            anyhow::bail!("archive proof unavailable")
+    let destinations: Vec<StoreConfig> = if config.destinations.is_empty() {
+        vec![store_config_from(&config, None, None, None, &[])]
+    } else {
+        let mut destinations = Vec::new();
+        for name in config.destinations.keys() {
+            match resolve_store_config_checked(&config, Some(name), None, None, None, &[]) {
+                Ok(cfg) => destinations.push(cfg),
+                Err(_) => {
+                    eprintln!("inbox-pull incomplete: destination configuration unavailable");
+                    return ExitCode::from(3);
+                }
+            }
         }
-    }
+        destinations
+    };
+    let archive = chat_stasher::remote_inbox_archive::DestinationArchive {
+        stage: &args.stage,
+        destinations: &destinations,
+    };
     let result = (|| -> anyhow::Result<remote_inbox::PullReport> {
         let runtime = tokio::runtime::Runtime::new()?;
         let entered = runtime.enter();
@@ -18518,9 +18531,12 @@ fn cmd_inbox_pull_observed(
             &machine,
             args.shard_bucket_cap,
             &rate_state,
-            &UnavailableArchive,
+            &archive,
         )
     })();
+    for destination in &destinations {
+        reap_remote(destination, false);
+    }
     match result {
         Ok(report) => {
             let exit_status = report.exit_status();

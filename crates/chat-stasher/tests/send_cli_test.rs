@@ -967,3 +967,290 @@ fn malformed_account_is_refused_without_echoing_or_uploading() {
     assert!(!f.inbox.exists());
     assert!(!f.cursor_root().exists());
 }
+
+fn declare_archives(f: &Fixture) -> Vec<chat_stasher::store::StoreConfig> {
+    let configs: Vec<_> = ["synthetic-a", "synthetic-b"]
+        .into_iter()
+        .map(|name| chat_stasher::store::StoreConfig {
+            repo_root: f.owner.root().join(name).to_string_lossy().into_owned(),
+            key_file: f.owner.root().join(format!("{name}.key")),
+            connections: 1,
+            cache_dir: Some(f.owner.root().join(format!("{name}-cache"))),
+            ..Default::default()
+        })
+        .collect();
+    let mut text = String::new();
+    for (name, cfg) in ["synthetic-a", "synthetic-b"].into_iter().zip(&configs) {
+        text.push_str(&format!(
+            "[destinations.{name}]\nrepo = {}\nkey_file = {}\ncache_dir = {}\n",
+            serde_json::to_string(&cfg.repo_root).unwrap(),
+            serde_json::to_string(&cfg.key_file.to_str().unwrap()).unwrap(),
+            serde_json::to_string(&cfg.cache_dir.as_ref().unwrap().to_str().unwrap()).unwrap(),
+        ));
+        let key = rustic_core::repofile::MasterKey::new();
+        chat_stasher::store::persist_key_file(cfg, &key).unwrap();
+        chat_stasher::store::BackupStore::new(cfg.clone(), "synthetic-puller".into())
+            .open_or_init(&key)
+            .unwrap();
+    }
+    std::fs::write(f.owner.config_home().join("chat-stasher/config.toml"), text).unwrap();
+    configs
+}
+
+fn push_archive(cfg: &chat_stasher::store::StoreConfig, stage: &std::path::Path) {
+    let key = chat_stasher::store::load_key_file(cfg).unwrap();
+    chat_stasher::store::BackupStore::new(cfg.clone(), "synthetic-puller".into())
+        .push(stage, &key)
+        .unwrap();
+}
+
+#[test]
+fn pull_cli_requires_readback_from_every_destination_and_survives_reclamation() {
+    let f = Fixture::new();
+    let configs = declare_archives(&f);
+    let stage = f.owner.root().join("synthetic-stage");
+    assert!(f.send().status.success());
+    let object = std::fs::read(&f.objects()[0]).unwrap();
+    let first = pull_cli(&f, &stage);
+    assert_eq!(
+        first.status.code(),
+        Some(1),
+        "readable empty archives are unproven"
+    );
+    assert!(String::from_utf8_lossy(&first.stderr).contains("Unproven"));
+    push_archive(&configs[0], &stage);
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(1));
+    assert_eq!(std::fs::read(&f.objects()[0]).unwrap(), object);
+    push_archive(&configs[1], &stage);
+    let proven = pull_cli(&f, &stage);
+    assert_eq!(proven.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&proven.stdout).contains("duplicates=1"));
+    assert!(f.objects().is_empty());
+    let expected = chat_stasher::verify::expected_manifest(&stage).unwrap();
+    for cfg in &configs {
+        let store = chat_stasher::store::BackupStore::new(cfg.clone(), "synthetic-puller".into());
+        let key = chat_stasher::store::load_key_file(cfg).unwrap();
+        assert!(store.reconcile_manifest(&key, &stage).unwrap().ok());
+        let (body, _) = store
+            .read_session_concat("synthetic-puller", &expected[0].session_id, &key)
+            .unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            chat_stasher::audit_store::record_body(&row).unwrap(),
+            b"{}\n"
+        );
+    }
+    let destinations: Vec<_> = configs
+        .iter()
+        .enumerate()
+        .map(|(i, cfg)| chat_stasher::stagereclaim::NamedStore {
+            name: format!("synthetic-{i}"),
+            cfg: cfg.clone(),
+        })
+        .collect();
+    assert!(
+        !chat_stasher::stagereclaim::reclaim_stage(&stage, &destinations, true)
+            .unwrap()
+            .blocked()
+    );
+    for cfg in &configs {
+        let store = chat_stasher::store::BackupStore::new(cfg.clone(), "synthetic-puller".into());
+        let key = chat_stasher::store::load_key_file(cfg).unwrap();
+        let report = store.reconcile_manifest(&key, &stage).unwrap();
+        assert!(report.ok());
+        assert_eq!(report.stored_basis_rows(), 1);
+    }
+    // An old destination copy cannot prove the newly sealed sequence after reclaim.
+    std::fs::write(f.inbox.join("a".repeat(64)), object).unwrap();
+    let resealed = pull_cli(&f, &stage);
+    assert_eq!(resealed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&resealed.stdout).contains("stored=1"));
+    for cfg in &configs {
+        push_archive(cfg, &stage);
+    }
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(0));
+    assert!(f.objects().is_empty());
+    for cfg in &configs {
+        let store = chat_stasher::store::BackupStore::new(cfg.clone(), "synthetic-puller".into());
+        let key = chat_stasher::store::load_key_file(cfg).unwrap();
+        let (body, hashes) = store
+            .read_session_concat("synthetic-puller", &expected[0].session_id, &key)
+            .unwrap();
+        assert_eq!(hashes.len(), 2);
+        for line in body.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+            let row: serde_json::Value = serde_json::from_slice(line).unwrap();
+            assert_eq!(
+                chat_stasher::audit_store::record_body(&row).unwrap(),
+                b"{}\n"
+            );
+        }
+        // L3 currently uses the on-disk suffix as its full baseline once a
+        // reclaimed session is appended. Preserve the precise detected gap;
+        // composing retained prefixes with new suffixes is separate work.
+        let report = store.reconcile_manifest(&key, &stage).unwrap();
+        assert!(!report.ok());
+        assert_eq!(
+            report.rows[0].outcome,
+            chat_stasher::verify::SessionOutcome::ShardCountMismatch {
+                expected: 1,
+                observed: 2,
+            }
+        );
+    }
+}
+
+#[test]
+fn pull_cli_unknown_destination_dominates_readable_absence() {
+    let f = Fixture::new();
+    let configs = declare_archives(&f);
+    assert!(f.send().status.success());
+    std::fs::remove_file(&configs[1].key_file).unwrap();
+    let stage = f.owner.root().join("synthetic-stage");
+    let result = pull_cli(&f, &stage);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("ArchiveRead"));
+    assert_eq!(f.objects().len(), 1);
+    assert!(!String::from_utf8_lossy(&result.stderr).contains(configs[1].repo_root.as_str()));
+}
+
+#[test]
+fn destination_proof_binds_partition_and_full_shard_bytes_without_body_cache() {
+    use chat_stasher::{inbox, remote_inbox_archive::DestinationArchive, store};
+    let f = Fixture::new();
+    let configs = declare_archives(&f);
+    let stage = f.owner.root().join("synthetic-stage");
+    assert!(f.send().status.success());
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(1));
+    let record = sealed_capture(&stage);
+    let id = record["id"].as_str().unwrap();
+    let path =
+        store::sealed_shard_entries(&store::session_shard_dir(&stage, "synthetic-puller", id))
+            .unwrap()[0]
+            .1
+            .clone();
+    let original = std::fs::read(&path).unwrap();
+    let outcome = inbox::SealOutcome::Duplicate(inbox::Duplicate {
+        source_file: "synthetic-object".into(),
+        id: id.into(),
+        file_sha256: record["file_sha256"].as_str().unwrap().into(),
+        matched_shard: path.file_name().unwrap().to_str().unwrap().into(),
+    });
+    assert!(!DestinationArchive {
+        stage: &stage,
+        destinations: &[]
+    }
+    .holds("synthetic-puller", &outcome)
+    .unwrap());
+    let other = f.owner.root().join("synthetic-other-stage");
+    std::fs::create_dir(&other).unwrap();
+    let mut other_record = record.clone();
+    other_record["machine"] = "synthetic-other-puller".into();
+    store::write_sealed_shard(
+        store::StageWriter::Collect,
+        &other,
+        "synthetic-other-puller",
+        id,
+        &[serde_json::to_string(&other_record).unwrap()],
+    )
+    .unwrap();
+    for cfg in &configs {
+        let key = store::load_key_file(cfg).unwrap();
+        store::BackupStore::new(cfg.clone(), "synthetic-other-puller".into())
+            .push(&other, &key)
+            .unwrap();
+    }
+    let proof = DestinationArchive {
+        stage: &stage,
+        destinations: &configs,
+    };
+    assert!(
+        !proof.holds("synthetic-puller", &outcome).unwrap(),
+        "another partition cannot prove this shard"
+    );
+    for cfg in &configs {
+        push_archive(cfg, &stage);
+    }
+    assert!(proof.holds("synthetic-puller", &outcome).unwrap());
+    let mut changed = record;
+    changed["captured_at"] = "2026-10-08T00:00:00Z".into();
+    std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(
+        !proof.holds("synthetic-puller", &outcome).unwrap(),
+        "a matching bundle digest alone is insufficient"
+    );
+    std::fs::write(&path, original).unwrap();
+    assert!(proof.holds("synthetic-puller", &outcome).unwrap());
+    // Metadata caching stays enabled. Destroy the actual packs after a good
+    // read: neither a previous proof nor cached metadata can stand in for bytes.
+    assert!(!configs[1].no_cache);
+    let mut pending = vec![std::path::Path::new(&configs[1].repo_root).join("data")];
+    let mut destroyed = 0;
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(path).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            std::fs::write(path, b"synthetic-corrupt-pack").unwrap();
+            destroyed += 1;
+        }
+    }
+    assert!(destroyed > 0);
+    assert!(proof.holds("synthetic-puller", &outcome).is_err());
+    let retry = pull_cli(&f, &stage);
+    assert_eq!(retry.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&retry.stderr).contains("ArchiveRead"));
+    assert_eq!(f.objects().len(), 1);
+}
+
+#[test]
+fn pull_cli_proves_resend_provenance_and_original_content_independently() {
+    let f = Fixture::new();
+    let configs = declare_archives(&f);
+    let stage = f.owner.root().join("synthetic-stage");
+    assert!(f.send().status.success());
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(1));
+    let renamed = f.producer.root().join("synthetic-renamed.jsonl");
+    std::fs::write(&renamed, b"{}\n").unwrap();
+    assert!(run(
+        &f.producer,
+        &[
+            "send",
+            "--path",
+            renamed.to_str().unwrap(),
+            "--session",
+            "synthetic-native"
+        ],
+        Some(&f.token)
+    )
+    .status
+    .success());
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(1));
+    let record = sealed_capture(&stage);
+    let dir = chat_stasher::store::session_shard_dir(
+        &stage,
+        "synthetic-puller",
+        record["id"].as_str().unwrap(),
+    );
+    let mut entries = chat_stasher::store::sealed_shard_entries(&dir).unwrap();
+    entries.sort_by_key(|(seq, _)| *seq);
+    assert_eq!(entries.len(), 2);
+    let resend: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&entries[1].1).unwrap()).unwrap();
+    assert_eq!(resend["kind"], "harness-resend");
+    assert!(resend.get("raw").is_none());
+    // Publish only provenance; the original body remains solely in stage.
+    let original = std::fs::read(&entries[0].1).unwrap();
+    std::fs::remove_file(&entries[0].1).unwrap();
+    for cfg in &configs {
+        push_archive(cfg, &stage);
+    }
+    std::fs::write(&entries[0].1, original).unwrap();
+    let missing_content = pull_cli(&f, &stage);
+    assert_eq!(missing_content.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing_content.stderr).contains("Unproven"));
+    assert_eq!(f.objects().len(), 2);
+    for cfg in &configs {
+        push_archive(cfg, &stage);
+    }
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(0));
+    assert!(f.objects().is_empty());
+}
