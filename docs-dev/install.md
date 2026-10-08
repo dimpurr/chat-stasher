@@ -319,11 +319,11 @@ What one install per profile means, once done:
   another's, and the popup's counts are that install's own.
 - Every install in every browser delivers into the **same stage**, so the
   archive stays one archive: the stage is a property of your config, not of an
-  install (`crates/chat-stasher/src/nativehost.rs:2124-2199`).
+  install (`crates/chat-stasher/src/nativehost.rs:2142-2217`).
 - The popup's one host line is therefore **not** this install's number: the
   host's `summary` counts the sessions in the stage directory it resolves from
   your config, wherever they came from
-  (`crates/chat-stasher/src/nativehost.rs:3655-3665`, `:3375`).
+  (`crates/chat-stasher/src/nativehost.rs:3673-3683`, `:3393`).
 
 ### 3.0 🔴 Copying a browser profile copies its identity
 
@@ -425,7 +425,7 @@ chat-stasher install-native-host --stage <your-stage>
 `--stage` must be an **absolute path to a directory that already exists**: the
 host never creates a stage, because a stage that appears because a host was
 pointed at it is a stage nothing pushes
-(`crates/chat-stasher/src/nativehost.rs:2187-2198`). The stage is the same staging
+(`crates/chat-stasher/src/nativehost.rs:2205-2216`). The stage is the same staging
 directory you use for `collect` / `seal` / `ingest`.
 
 The command is idempotent — run it twice and there is exactly one manifest per
@@ -450,7 +450,7 @@ sentence the surrounding documents have to get right:
   records this executable's absolute path, and the stage lives in your one config
   as `[native_host] stage`, which the host resolves on every launch
   (`crates/chat-stasher/src/main.rs:2244-2259`;
-  `crates/chat-stasher/src/nativehost.rs:2124-2199`). So several installs deliver
+  `crates/chat-stasher/src/nativehost.rs:2142-2217`). So several installs deliver
   into one stage, which is what keeps the archive one archive.
 - **The default browser set is "whatever is installed here", sampled now.** With
   no `--browser`, the command walks every browser it knows a path for and skips
@@ -538,7 +538,7 @@ The `--stage` you gave `install-native-host` (section 3.1) is the same directory
 `collect`, `seal` and `ingest` write sealed shards into. It is a real directory
 on your disk, and it must exist *before* you point the host at it: the host
 never creates a stage, and a stage that appears because a host was pointed at it
-is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:2187-2198`).
+is a stage nothing pushes (`crates/chat-stasher/src/nativehost.rs:2205-2216`).
 
 Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
@@ -551,11 +551,28 @@ Two properties of that directory, both from
   extension retries (`crates/chat-stasher/src/inbox.rs:66-84`, `:1248-1281`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a
-  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2132-2199`);
+  directory is `stage-unavailable` (`crates/chat-stasher/src/nativehost.rs:2150-2217`);
   if the seal itself fails, a lock-wait timeout is `stage-unavailable` and any
   other write error is `io`, and neither acknowledges anything
-  (`crates/chat-stasher/src/nativehost.rs:3158-3160`, `:3166-3168`). In every case
+  (`crates/chat-stasher/src/nativehost.rs:3234-3236`, `:3242-3244`). In every case
   the reason names the fix.
+
+**A delivery's waits on its own state database are bounded at the
+same budget.** A `deliver` records its identity inside one write
+transaction held across the whole seal, and its open applies the
+schema when the database is new; both waits are bounded at the
+extension's per-request budget (60 seconds), and the schema
+initialisation is retried explicitly because SQLite's busy handler
+does not retry `LOCKED` results from competing schema initialization
+— without that bound, a delivery that times out and re-sends the
+identical request answers `nack` `io` around half past the minute
+while a cold fill whose acknowledgement the re-send came to read is
+still running (`crates/chat-stasher/src/nativehost.rs:1658-1672`,
+`:1697-1740`; the delivery path's own open is at
+`crates/chat-stasher/src/nativehost.rs:3125-3131`). The bound and
+its reason are in
+[`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md)
+(§5).
 
 Put it somewhere you will not delete: these shards are the archive's input, and
 `push` is what moves them into the encrypted repository.
@@ -564,7 +581,7 @@ Put it somewhere you will not delete: these shards are the archive's input, and
 exactly as `ingest` does, and if there is none it refuses with a `config` `nack`
 that names the fix, rather than minting a second identity — which would silently
 put every delivered shard in a different machine's archive partition
-(`crates/chat-stasher/src/nativehost.rs:2204-2233`). Run any archiving command
+(`crates/chat-stasher/src/nativehost.rs:2222-2251`). Run any archiving command
 once from your shell before registering the host.
 
 ### 4.2 Run `chat-stasher init` once

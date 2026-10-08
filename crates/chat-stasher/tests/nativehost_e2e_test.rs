@@ -1132,6 +1132,96 @@ fn a_delivery_waits_out_a_held_state_transaction_and_answers_duplicate() {
     );
 }
 
+/// W930 · A re-send that arrives after the budget expired waits out
+/// the rest of the fill.
+///
+/// The measured cold fill (73.6 s) outlasts the extension's 60 s
+/// request budget (protocol §2), so the extension's first request is
+/// still running — still holding the stage lock — when its callback
+/// dies and the identical re-send arrives. The re-send's own budget
+/// is a fresh 60 s, and what it must wait out is what is left of the
+/// fill. A hold that merely exceeds the old 10 s bound does not
+/// model this: the review's case is a hold that **began before the
+/// budget expired and ends after it**, so the hold below runs from
+/// before the simulated expiry to 14 s into the re-send's own
+/// window — the measured fill's shape, 60 s + 14 s. Against a
+/// 10 s lock bound the re-send collected `stage-unavailable` around
+/// 70 s, exactly while the first request's acknowledgement was still
+/// in flight, and the debt stayed pending for the next tick, which
+/// re-fetches the conversation with a new `capturedAt` and seals a
+/// second shard the byte-level duplicate rule cannot recognise.
+#[test]
+fn a_delivery_that_arrives_after_the_budget_expired_waits_out_the_fill() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // ① The first request seals the bytes — the shard the re-send
+    //    is about to ask about.
+    let payload = identity_bundle(
+        "sess-long",
+        "hello long",
+        "install-w930-long",
+        "Chrome",
+        "Personal",
+    );
+    let first = fixture.chrome(&frame(&deliver_request(
+        "req-long",
+        "deepseek-sess-long.json",
+        &payload,
+    )));
+    assert_eq!(exit_code(&first), 0, "stderr: {}", stderr_of(&first));
+    assert_eq!(one_frame(&first.stdout)["type"], "ack");
+
+    // ② The cold fill the first request is still running when the
+    //    budget expires: the stage lock held from before the expiry
+    //    to 14 s into the re-send's own window.
+    const BUDGET_S: u64 = 60;
+    const FILL_S: u64 = 74;
+    let (held, release) = std::sync::mpsc::channel();
+    let holder = {
+        let stage = fixture.stage.clone();
+        thread::spawn(move || {
+            let lock = chat_stasher::inbox::lock_stage(&stage).expect("take the stage lock");
+            held.send(()).expect("announce the hold");
+            std::thread::sleep(std::time::Duration::from_secs(FILL_S));
+            drop(lock);
+        })
+    };
+    release
+        .recv()
+        .expect("the hold is in place before the expiry");
+
+    // ③ The extension's first request budget expires with the fill
+    //    still running; the identical request is sent again.
+    std::thread::sleep(std::time::Duration::from_secs(BUDGET_S));
+
+    // ④ The re-send arrives with the fill's tail still holding the
+    //    lock, inside its own fresh budget.
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-long",
+        "deepseek-sess-long.json",
+        &payload,
+    )));
+    holder.join().expect("the holder releases the lock");
+
+    // ⑤ The re-send waited out the rest of the fill and answered
+    //    from the stage.
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "ack");
+    assert_eq!(
+        response["status"], "duplicate",
+        "the re-send must read the answer the first send earned, not give up on the lock"
+    );
+    assert_eq!(
+        fixture.shard_names(&machine, "deepseek.sess-long"),
+        ["000001.jsonl"],
+        "the re-send must not seal a second shard"
+    );
+}
+
 // ------------------------------------------------------------------ §6.6 has
 
 /// A content fingerprint. The host compares it as an opaque string, so any 64

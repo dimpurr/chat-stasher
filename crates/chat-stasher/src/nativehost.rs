@@ -1681,6 +1681,19 @@ fn open_state_db_at(state_dir: &Path) -> anyhow::Result<rusqlite::Connection> {
 /// [`open_state_db_at`] with the wait the caller's own client budgets
 /// for the request it is about to make — see
 /// [`DELIVERY_STATE_DB_BUSY_TIMEOUT`] for the delivery path's value.
+///
+/// The bound governs both waits this open makes on a concurrent
+/// writer: the connection's busy timeout *and* the schema
+/// initialisation's own retry window ([`initialize_state_schema`]),
+/// which is the same value. A fixed window there would be a wait a
+/// `deliver` runs that the delivery budget does not bound, and the
+/// timeout re-send (W930) depends on every such wait being the
+/// budget: a cold fill holds the write transaction across the whole
+/// fill, so a re-send's open waits behind it, and a schema race
+/// that gave up after a fixed 10 s would answer `nack` `io` around
+/// half past the minute while a measured 73.6 s fill was still
+/// running — the re-send arriving at the budget's expiry and giving
+/// up 10 s later, exactly the failure the re-send exists to repair.
 fn open_state_db_with_busy_timeout(
     state_dir: &Path,
     busy_timeout: std::time::Duration,
@@ -1691,20 +1704,25 @@ fn open_state_db_with_busy_timeout(
         .context("open coordination state")?;
     conn.busy_timeout(busy_timeout)
         .context("set coordination state busy timeout")?;
-    initialize_state_schema(&conn).context("initialize coordination state")?;
+    initialize_state_schema(&conn, busy_timeout).context("initialize coordination state")?;
     Ok(conn)
 }
 
 /// Several native-host processes can arrive together before this database has
 /// its schema. SQLite's busy handler covers `BUSY`, but does not retry
 /// `LOCKED` results from competing schema initialization, so retry that narrow
-/// startup operation explicitly. The schema is idempotent, and the bound
-/// keeps a genuinely unavailable state database a visible error.
-fn initialize_state_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// startup operation explicitly, for exactly as long as the caller budgets
+/// for this database (`retry_window`, the same value as the connection's
+/// busy timeout — see [`open_state_db_with_busy_timeout`]). The schema is
+/// idempotent, and the bound keeps a genuinely unavailable state database
+/// a visible error.
+fn initialize_state_schema(
+    conn: &rusqlite::Connection,
+    retry_window: std::time::Duration,
+) -> rusqlite::Result<()> {
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
-    let deadline = std::time::Instant::now() + RETRY_WINDOW;
+    let deadline = std::time::Instant::now() + retry_window;
     loop {
         match conn.execute_batch(STATE_SCHEMA) {
             Ok(()) => return Ok(()),
@@ -4256,6 +4274,90 @@ mod tests {
                 )
                 .expect("query initialized schema");
             assert_eq!(tables, 1);
+        }
+    }
+
+    /// W930 · An open's patience is exactly the budget it was given.
+    ///
+    /// The schema initialisation's retry window is the same bound
+    /// as the connection's busy timeout, so the first wait a
+    /// timeout re-send can run behind a cold fill — its open of
+    /// the state database, whose schema batch writes when the
+    /// schema is not there yet — gives up inside its own budget
+    /// and never on a fixed window of its own. A fixed window
+    /// would wait the 500 ms hold out in the first case below
+    /// and succeed, which is the re-send answering `nack` `io`
+    /// at half past the minute while the fill whose
+    /// acknowledgement it came to read was still running. The
+    /// budgets are deliberately tiny and generous rather than
+    /// the real 5 s and 60 s: the bound is the same mechanism
+    /// at any value, and milliseconds keep the test fast. The
+    /// holders below write no schema of their own — the
+    /// contention this test models is the schema write itself.
+    #[test]
+    fn the_state_db_open_patience_is_the_budget_it_was_given() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // A budget far shorter than the hold: the open must
+        // give up inside the budget, not wait a fixed window
+        // of its own out.
+        {
+            let dir = tempfile::tempdir().expect("temp state dir");
+            let dir_path = dir.path();
+            let holder =
+                rusqlite::Connection::open(dir_path.join("extension-coordination.sqlite3"))
+                    .expect("open the holding connection");
+            holder
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect("take the write transaction");
+            let (attempting, waiting) = mpsc::channel();
+            let outcome: anyhow::Result<rusqlite::Connection> = std::thread::scope(|scope| {
+                let worker = scope.spawn(move || {
+                    attempting.send(()).expect("announce the attempt");
+                    open_state_db_with_busy_timeout(dir_path, Duration::from_millis(1))
+                });
+                waiting.recv().expect("the attempt announced itself");
+                // A scheduling margin, not a premise: the worker
+                // has to reach its wait. The hold outlasts any
+                // effective wait a 1 ms budget can produce, so
+                // only the bound decides the outcome.
+                std::thread::sleep(Duration::from_millis(500));
+                holder
+                    .execute_batch("COMMIT")
+                    .expect("release the write transaction");
+                worker.join().expect("the worker joins")
+            });
+            assert!(
+                outcome.is_err(),
+                "an open whose budget is shorter than the hold must give up inside that budget"
+            );
+        }
+
+        // A budget far longer than the hold: the same open waits it out.
+        {
+            let dir = tempfile::tempdir().expect("temp state dir");
+            let dir_path = dir.path();
+            let holder =
+                rusqlite::Connection::open(dir_path.join("extension-coordination.sqlite3"))
+                    .expect("open the holding connection");
+            holder
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect("take the write transaction");
+            let (attempting, waiting) = mpsc::channel();
+            let outcome: anyhow::Result<rusqlite::Connection> = std::thread::scope(|scope| {
+                let worker = scope.spawn(move || {
+                    attempting.send(()).expect("announce the attempt");
+                    open_state_db_with_busy_timeout(dir_path, Duration::from_secs(10))
+                });
+                waiting.recv().expect("the attempt announced itself");
+                std::thread::sleep(Duration::from_millis(250));
+                holder
+                    .execute_batch("COMMIT")
+                    .expect("release the write transaction");
+                worker.join().expect("the worker joins")
+            });
+            outcome.expect("a budget longer than the hold waits it out");
         }
     }
 

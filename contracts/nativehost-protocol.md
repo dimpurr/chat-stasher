@@ -87,6 +87,16 @@ and a delivery that times out and re-sends the identical request collects
 acknowledgement the re-send came to read; any longer, and the host answers a
 client that has already stopped listening.
 
+The same budget bounds every wait a `deliver` runs on the host's
+coordination-state database: the write transaction a delivery records its
+identity inside (held across the whole seal, so a concurrent writer waits for
+the seal to finish), and the schema initialisation its open applies when the
+database is new. SQLite's busy handler does not retry `LOCKED` results from
+competing schema initialization, so that startup write is retried explicitly —
+for the same budget, and for the same reason: any shorter, and a re-send
+behind a cold fill answers `nack` `io` around half past the minute while the
+acknowledgement it came to read is still being written.
+
 ## 6. Messages
 
 Every message carries `"protocol": 1` and a `"type"`.
