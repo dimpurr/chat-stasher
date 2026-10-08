@@ -393,3 +393,296 @@ fn pull_cli_unsafe_ledger_and_invalid_config_fail_closed() {
     assert!(!stage.exists());
     assert_eq!(std::fs::read(record).unwrap(), b"synthetic-invalid-config");
 }
+
+#[test]
+fn schedule_pull_renders_a_separate_executable_path_in_both_formats() {
+    let f = Fixture::new();
+    assert!(f.send().status.success());
+    let stage = f.owner.root().join("synthetic scheduled stage");
+    let binary = env!("CARGO_BIN_EXE_chat-stasher");
+    for format in ["launchd", "systemd"] {
+        let result = run(
+            &f.owner,
+            &[
+                "schedule",
+                "--pull",
+                "synthetic-inbox",
+                "--format",
+                format,
+                "--stage",
+                stage.to_str().unwrap(),
+                "--binary",
+                "/synthetic/bin/chat-stasher",
+                "--machine",
+                "synthetic-puller",
+                "--shard-bucket-cap",
+                "7",
+            ],
+            None,
+        );
+        if cfg!(target_os = "windows") {
+            // This build has no Windows scheduler integration. Assert its
+            // refusal instead of removing the platform from coverage.
+            assert_eq!(result.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&result.stderr).contains("Task Scheduler"));
+            return;
+        }
+        assert_eq!(result.status.code(), Some(0), "schedule pull must render");
+        let text = String::from_utf8(result.stdout).unwrap();
+        assert!(text.contains("inbox-pull"));
+        assert!(text.contains("synthetic-inbox"));
+        assert!(text.contains("synthetic-puller"));
+        assert!(text.contains("--shard-bucket-cap"));
+        assert!(!text.contains("run-once"));
+        assert!(!text.contains("synthetic-posting-secret"));
+        assert_eq!(f.objects().len(), 1);
+        assert!(!stage.exists());
+        // Execute the generated systemd argv, with only the installed binary
+        // placeholder replaced by the fixture binary. This is the actual
+        // scheduled path, rather than a separately constructed pull request.
+        if format == "systemd" {
+            let line = text.lines().find(|s| s.starts_with("ExecStart=")).unwrap();
+            let argv: Vec<String> =
+                serde_json::from_str(&format!("[{}]", line[10..].replace("\" \"", "\",\"")))
+                    .unwrap();
+            let mut command = Command::new(binary);
+            f.owner.apply(&mut command);
+            let pulled = command.args(&argv[1..]).output().unwrap();
+            assert_eq!(pulled.status.code(), Some(3));
+            assert!(String::from_utf8_lossy(&pulled.stdout).contains("waiting=1; stored=1"));
+            assert!(String::from_utf8_lossy(&pulled.stderr).contains("ArchiveRead"));
+            assert_eq!(f.objects().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn schedule_pull_rejects_archive_only_flags_and_unknown_inboxes() {
+    let f = Fixture::new();
+    let stage = f.owner.root().join("synthetic-stage");
+    for extra in [
+        vec!["--verify"],
+        vec!["--destination", "synthetic-destination"],
+        vec!["--repo", "synthetic-repo"],
+        vec!["--key-file", "synthetic-key"],
+        vec!["--connections", "2"],
+        vec!["--option", "synthetic=value"],
+        vec!["--keep-ssh-masters"],
+        vec!["--unit", "reclaim-stage"],
+    ] {
+        let mut args = vec![
+            "schedule",
+            "--pull",
+            "synthetic-inbox",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--binary",
+            "/synthetic/bin/chat-stasher",
+        ];
+        args.extend(extra);
+        assert_eq!(run(&f.owner, &args, None).status.code(), Some(2));
+    }
+    let unknown = run(
+        &f.owner,
+        &[
+            "schedule",
+            "--pull",
+            "synthetic-unknown",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--binary",
+            "/synthetic/bin/chat-stasher",
+        ],
+        None,
+    );
+    assert_eq!(unknown.status.code(), Some(2));
+    let expected = if cfg!(target_os = "windows") {
+        "Task Scheduler"
+    } else {
+        "initialize"
+    };
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains(expected));
+}
+
+#[test]
+fn run_once_does_not_consume_a_declared_remote_inbox() {
+    let f = Fixture::new();
+    assert!(f.send().status.success());
+    let before = std::fs::read(&f.objects()[0]).unwrap();
+    let stage = f.owner.root().join("synthetic-stage");
+    let repo = f.owner.root().join("synthetic-repo");
+    let key = f.owner.root().join("synthetic-masterkey.json");
+    let result = run(
+        &f.owner,
+        &[
+            "run-once",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "synthetic-puller",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--key-file",
+            key.to_str().unwrap(),
+            "--keep-ssh-masters",
+        ],
+        None,
+    );
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(f.objects().len(), 1);
+    assert_eq!(std::fs::read(&f.objects()[0]).unwrap(), before);
+    assert!(!stage.join("sessions/synthetic-puller").exists());
+    assert!(!f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.rates.sqlite3")
+        .exists());
+}
+
+// Native scheduler install helpers use executable POSIX shims here. Windows
+// has no scheduler integration; its refusal is asserted by the render test.
+#[cfg(unix)]
+#[test]
+fn schedule_pull_install_and_teardown_are_named_and_isolated() {
+    let f = Fixture::new();
+    let stage = f.owner.root().join("synthetic-stage");
+    let stub = f.owner.root().join("synthetic-scheduler");
+    let calls = f.owner.root().join("synthetic-calls");
+    test_support::plant_executable(&stub, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYNTHETIC_CALLS\"\ncase \"$*\" in\n *is-active*) exit 1;;\n print*) test -f \"$SYNTHETIC_LOADED\"; exit $?;;\n bootstrap*) touch \"$SYNTHETIC_LOADED\";;\n bootout*) rm -f \"$SYNTHETIC_LOADED\";;\nesac\nexit 0\n");
+    let invoke = |format: &str, action: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        f.owner.apply(&mut command);
+        command
+            .env("CHAT_STASHER_LAUNCHCTL", &stub)
+            .env("CHAT_STASHER_SYSTEMCTL", &stub)
+            .env("CHAT_STASHER_LAUNCHD_DOMAIN", "gui/12345")
+            .env("SYNTHETIC_CALLS", &calls)
+            .env("SYNTHETIC_LOADED", f.owner.root().join("synthetic-loaded"));
+        command.args([
+            "schedule",
+            action,
+            "--pull",
+            "synthetic-inbox",
+            "--format",
+            format,
+        ]);
+        if action == "install" {
+            command.args([
+                "--stage",
+                stage.to_str().unwrap(),
+                "--binary",
+                "/synthetic/bin/chat-stasher",
+            ]);
+        }
+        command.output().unwrap()
+    };
+    let launch_label = "com.chat-stasher.inbox-pull.synthetic-inbox";
+    let timer = "chat-stasher-inbox-pull-synthetic-inbox.timer";
+    let launch_dir = f.owner.home().join("Library/LaunchAgents");
+    let system_dir = f.owner.home().join(".config/systemd/user");
+    std::fs::create_dir_all(&launch_dir).unwrap();
+    std::fs::create_dir_all(&system_dir).unwrap();
+    let archive_plist = launch_dir.join("com.chat-stasher.run-once.plist");
+    let archive_timer = system_dir.join("chat-stasher-run-once.timer");
+    std::fs::write(&archive_plist, "synthetic-existing-archive").unwrap();
+    std::fs::write(&archive_timer, "synthetic-existing-archive").unwrap();
+    let failing = f.owner.root().join("synthetic-failing-scheduler");
+    test_support::plant_executable(
+        &failing,
+        "#!/bin/sh\ncase \"$*\" in\n *enable*) exit 1;;\nesac\nexit 0\n",
+    );
+    let mut failed = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    f.owner.apply(&mut failed);
+    let failed = failed
+        .env("CHAT_STASHER_SYSTEMCTL", &failing)
+        .args([
+            "schedule",
+            "install",
+            "--pull",
+            "synthetic-inbox",
+            "--format",
+            "systemd",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--binary",
+            "/synthetic/bin/chat-stasher",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(!system_dir.join(timer).exists());
+    assert!(!system_dir
+        .join(timer.replace(".timer", ".service"))
+        .exists());
+    for format in ["launchd", "systemd"] {
+        assert_eq!(invoke(format, "install").status.code(), Some(0));
+        assert!(!stage.exists());
+    }
+    assert!(launch_dir.join(format!("{launch_label}.plist")).is_file());
+    assert!(system_dir.join(timer).is_file());
+    // Teardown must still work after declaration loss and without --stage.
+    std::fs::remove_file(
+        f.owner
+            .config_home()
+            .join("chat-stasher/inboxes/synthetic-inbox.json"),
+    )
+    .unwrap();
+    for format in ["launchd", "systemd"] {
+        let removed = invoke(format, "uninstall");
+        assert_eq!(removed.status.code(), Some(0));
+        let count = if format == "systemd" { 2 } else { 1 };
+        assert_eq!(
+            String::from_utf8(removed.stdout).unwrap(),
+            format!("[schedule] removed pull unit files: {count}\n")
+        );
+        let again = invoke(format, "uninstall");
+        assert_eq!(again.status.code(), Some(0));
+        assert_eq!(again.stdout, b"[schedule] removed pull unit files: 0\n");
+    }
+    assert!(!launch_dir.join(format!("{launch_label}.plist")).exists());
+    assert!(!system_dir.join(timer).exists());
+    assert_eq!(
+        std::fs::read_to_string(archive_plist).unwrap(),
+        "synthetic-existing-archive"
+    );
+    assert_eq!(
+        std::fs::read_to_string(archive_timer).unwrap(),
+        "synthetic-existing-archive"
+    );
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert!(calls.contains("bootstrap gui/12345"));
+    assert!(calls.contains(&format!("bootout gui/12345 {launch_label}")));
+    assert!(calls.contains(&format!("enable --now {timer}")));
+    assert!(calls.contains(&format!("disable --now {timer}")));
+    assert!(!calls.contains("run-once"));
+}
+
+#[test]
+fn schedule_pull_configuration_failure_stays_incomplete() {
+    let f = Fixture::new();
+    let declaration = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.json");
+    std::fs::write(declaration, "synthetic-invalid").unwrap();
+    let result = run(
+        &f.owner,
+        &[
+            "schedule",
+            "--pull",
+            "synthetic-inbox",
+            "--stage",
+            "synthetic-stage",
+            "--binary",
+            "/synthetic/bin/chat-stasher",
+        ],
+        None,
+    );
+    if cfg!(target_os = "windows") {
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Task Scheduler"));
+    } else {
+        assert_eq!(result.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("configuration unavailable"));
+    }
+}
