@@ -458,7 +458,9 @@ changing the variable is what makes the difference visible.
 
 ### `cache`
 
-The body cache: encrypted copies of conversations you have opened, so the next read is fast. Nothing in it is decrypted, and deleting it only costs speed.
+The body cache: the destination's own encrypted bytes, retained from
+eligible single-session reads so the next read is fast. Nothing in it
+is decrypted, and deleting it only costs speed.
 
 | Form | Effect |
 |---|---|

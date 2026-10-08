@@ -15,7 +15,7 @@ chat-stasher reads one file: `~/.config/chat-stasher/config.toml` (or `$XDG_CONF
 | No silent substitution | A path that cannot be resolved stops the command and names the setting. It is never replaced with a default, and a folder named `~` is never created. |
 | Windows paths | Write them in single quotes (`'C:\Users\me\…'`), because `\` is an escape character inside double quotes. A path pasted into double quotes still loads, with a warning. |
 | Command line wins | A flag such as `--repo`, `--key-file` or `--connections` overrides the matching setting for that one command. |
-| Environment override for the metadata cache | `CHAT_STASHER_RUSTIC_CACHE_DIR` names the metadata cache root for this run and wins over the file's `rustic_cache_dir` (a destination's own `cache_dir` still wins over it). It exists for a run whose cache must not land in the user's cache directory — a CI job, or a sandbox with a read-only home — and it is the only spelling that works on Windows, where rustic's default root comes from the Known Folder API and no environment variable moves it. An empty value counts as unset. |
+| Environment override for the metadata cache | `CHAT_STASHER_RUSTIC_CACHE_DIR` names the metadata cache root for this run and wins over the file's `rustic_cache_dir` (a destination's own `cache_dir` still wins over it). It exists for a run whose cache must not land in the user's cache directory — a CI job, or a sandbox with a read-only home — and it is the only spelling that works on Windows, where rustic's default root comes from the Known Folder API and no environment variable moves it. An empty value counts as unset. This override affects only rustic's metadata cache; the body cache uses `[cache].dir` or its platform cache default. |
 
 ## Top-level settings
 
@@ -142,16 +142,16 @@ destination = "r2"
 
 ## `[cache]`
 
-This machine's **body cache**: conversations you have opened, kept as the destination's own encrypted bytes, so reading them again is fast. Nothing is decrypted to store it, and every entry is re-checked before use. One quota covers every destination.
+This machine's **body cache** may retain bodies fetched by eligible single-session reads as the destination's own encrypted bytes, so a repeat read can use the local copy. Nothing is decrypted to store it, and every entry is re-checked before use. One quota covers every destination.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `max_bytes` | `"2GiB"` | The quota. Plain bytes or a unit: `"50GB"` is 50 × 10⁹, `"50GiB"` is 50 × 2³⁰. `0` turns the cache off. |
-| `dir` | the platform cache folder (`~/Library/Caches/chat-stasher/body` on macOS) | Where entries live. |
+| `dir` | the platform cache folder (`~/Library/Caches/chat-stasher/body` on macOS; `$XDG_CACHE_HOME/chat-stasher/body` or `~/.cache/chat-stasher/body` on Linux; `%LOCALAPPDATA%\chat-stasher\body` on Windows) | Where entries live. The platform default follows the operating system's cache directory; set this key to choose another location. |
 
-- The least recently used entries are removed when the quota is reached.
+- The quota counts entry files and temporary files being written, not filesystem overhead. After a store, least recently used entries are evicted as needed to bring those counted bytes within quota — once they can be evicted safely: a temporary file still being written counts, but is left alone until it is stale, and a cache nothing can be evicted from (a read-only mount, a permission the cache cannot override) stays over quota, which `doctor` reports against the quota.
 - A session larger than a tenth of the quota is read without being stored.
-- `verify`, `export`, `dest-init`, `push` and `read --all-machines` never use the cache, in either direction.
+- Single-session reads (`read --session` and the dashboard's session load) may use the cache. `verify`, `export`, `dest-init`, `push`, `read --all-machines` and index rebuilds never use it, in either direction.
 - A `[cache]` section with an unreadable value turns the cache **off** instead of guessing, and `doctor` says why.
 - `chat-stasher cache` shows what it holds, and `chat-stasher cache clear` empties it.
 
