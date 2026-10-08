@@ -482,7 +482,13 @@ struct ShardRecord {
     /// not the same as a parsed envelope whose values are false/empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     parsed: Option<ParsedEnvelope>,
-    raw: BundleRaw,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw: Option<BundleRaw>,
+    /// A resend preserves its capture metadata and references the first content
+    /// record by bundle digest within this same session and partition. It never
+    /// substitutes an empty body for the referenced bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_ref: Option<String>,
     /// The `inbox@2` identity axis, preserved verbatim when the bundle carried
     /// one. Omitted entirely for `@1` bundles, so `@1` shard lines keep their
     /// existing bytes. It is *stored* but deliberately does NOT take part in
@@ -747,7 +753,7 @@ pub fn ingest_transport<T: crate::bundle_transport::BundleTransport>(
 /// export line.
 #[derive(Debug)]
 pub enum SealOutcome {
-    /// A new shard was sealed. The payload is durable before this is returned.
+    /// A new content or resend-provenance shard was sealed durably.
     Stored(Consumed),
     /// These exact bytes were already sealed; `matched_shard` names that shard.
     Duplicate(Duplicate),
@@ -878,6 +884,18 @@ pub fn seal_payload(
         }));
     }
 
+    // Only send-produced harness files use content deduplication. Legacy/web
+    // deliveries retain their exact-byte contract. The validated slice digest,
+    // role, parent and range bind content; metadata and encoding may change.
+    let content_ref = matching_send_content(&session_dir, &parsed).map_err(SealError::Other)?;
+    let raw =
+        if content_ref.is_some() {
+            None
+        } else {
+            Some(parsed.raw.ok_or_else(|| {
+                SealError::Other(anyhow::anyhow!("bundle raw envelope is missing"))
+            })?)
+        };
     let record = ShardRecord {
         schema: if parsed.v3.is_some() {
             SEALED_SCHEMA_V3
@@ -885,7 +903,9 @@ pub fn seal_payload(
             SCHEMA
         },
         kind: if parsed.v3.is_some() {
-            if matches!(parsed.raw, Some(BundleRaw::Slice(_))) {
+            if content_ref.is_some() {
+                "harness-resend"
+            } else if matches!(raw, Some(BundleRaw::Slice(_))) {
                 "harness-file"
             } else {
                 "web-capture"
@@ -902,9 +922,8 @@ pub fn seal_payload(
         file_bytes,
         captured_at: parsed.captured_at,
         parsed: parsed.parsed,
-        raw: parsed
-            .raw
-            .ok_or_else(|| SealError::Other(anyhow::anyhow!("bundle raw envelope is missing")))?,
+        raw,
+        content_ref,
         identity: parsed.identity,
         account: parsed.account,
         account_key: account_key.map(str::to_string),
@@ -1287,6 +1306,113 @@ fn existing_file_shas(session_dir: &Path) -> anyhow::Result<BTreeMap<String, Str
         }
     }
     Ok(out)
+}
+
+/// Stable slice identity excludes provenance, key id, capture time and path.
+/// Session/account and partition are already scoped by the directory scan.
+fn send_content_key(file: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!([
+        file["role"],
+        file["parentNativeSessionId"],
+        file["byteStart"].as_f64(),
+        file["byteEnd"].as_f64(),
+        file["sha256"]
+    ])
+}
+
+fn matching_send_content(dir: &Path, parsed: &ParseOutcome) -> anyhow::Result<Option<String>> {
+    let Some(metadata) = &parsed.v3 else {
+        return Ok(None);
+    };
+    if !matches!(parsed.raw, Some(BundleRaw::Slice(_)))
+        || !metadata
+            .producer
+            .as_ref()
+            .is_some_and(|p| p["kind"] == "send")
+    {
+        return Ok(None);
+    }
+    let file = metadata
+        .file
+        .as_ref()
+        .context("send slice metadata missing")?;
+    let key = send_content_key(file);
+    let mut entries = store::sealed_shard_entries(dir)?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    for (_, path) in entries {
+        let bytes = fs::read(path).context("send content record unreadable")?;
+        for line in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            let record: serde_json::Value =
+                serde_json::from_slice(line).context("send content record invalid")?;
+            if record["schema"] == SEALED_SCHEMA_V3
+                && record["kind"] == "harness-file"
+                && record["producer"]["kind"] == "send"
+                && send_content_key(&record["file"]) == key
+            {
+                // Re-check the actual held bytes, never trust a digest field
+                // without its body. Corrupt/unreadable content cannot dedup.
+                crate::audit_store::record_body(&record)?;
+                return Ok(Some(
+                    record["file_sha256"]
+                        .as_str()
+                        .context("send content bundle digest missing")?
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve a resend's original content for archive proof. Both records must be
+/// proven independently before retirement, including on an exact-byte retry.
+/// References are digests, never paths, and cannot cross session/partition scope.
+pub fn referenced_send_content(
+    stage: &Path,
+    machine: &str,
+    outcome: &SealOutcome,
+) -> anyhow::Result<Option<SealOutcome>> {
+    let (id, shard) = match outcome {
+        SealOutcome::Stored(row) => (&row.id, &row.shard),
+        SealOutcome::Duplicate(row) => (&row.id, &row.matched_shard),
+    };
+    let dir = store::session_shard_dir(stage, machine, id);
+    let entries = store::sealed_shard_entries(&dir)?;
+    let path = entries
+        .iter()
+        .find(|(_, p)| p.file_name().is_some_and(|n| n == shard.as_str()))
+        .context("send proof record missing")?;
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(&path.1)?)?;
+    if record["kind"] != "harness-resend" {
+        return Ok(None);
+    }
+    let reference = record["content_ref"]
+        .as_str()
+        .context("send content reference missing")?;
+    for (_, path) in entries {
+        let bytes = fs::read(&path)?;
+        for line in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            let original: serde_json::Value = serde_json::from_slice(line)?;
+            if original["kind"] == "harness-file" && original["file_sha256"] == reference {
+                anyhow::ensure!(
+                    send_content_key(&original["file"]) == send_content_key(&record["file"]),
+                    "send content reference mismatch"
+                );
+                crate::audit_store::record_body(&original)?;
+                return Ok(Some(SealOutcome::Duplicate(Duplicate {
+                    source_file: "(referenced-send-content)".into(),
+                    id: id.clone(),
+                    file_sha256: reference.into(),
+                    matched_shard: path
+                        .file_name()
+                        .context("send content shard name unavailable")?
+                        .to_string_lossy()
+                        .into_owned(),
+                })));
+            }
+        }
+    }
+    anyhow::bail!("referenced send content missing")
 }
 
 /// Write an inbox shard using the shared writer's durable inbox policy.

@@ -357,7 +357,7 @@ the extension still delivers normally and coordination falls back to the
 existing platform scope (`apps/extension/lib/outbox.ts:110-120`,
 `apps/extension/lib/native-host.ts:1099-1143`,
 `crates/chat-stasher/src/nativehost.rs:1272-1346`, `:1507-1522`, `:2881-3096`,
-`crates/chat-stasher/src/inbox.rs:513-523`, `:906-908`).
+`crates/chat-stasher/src/inbox.rs:519-529`, `:927-929`).
 
 The bundle also names the **install** that captured it: three fields — a random
 UUID minted once per extension install, the browser family read from this
@@ -370,13 +370,13 @@ this extension lives in — one user, several machines, several browsers, severa
 profiles per browser: the sealed shard record keeps them beside a `machine`
 name the host itself assigns, so your archive can say which install produced a
 conversation (`crates/chat-stasher/src/inbox.rs:448-453`,
-`:512-520`, `:907-910`). 🔴 A copied browser profile brings its copied
+`:518-526`, `:930-933`). 🔴 A copied browser profile brings its copied
 `install_id` along, and the stage can tell: a delivery whose identity names a
 different browser, or a different label the user actually named, while the same
 `install_id` was already sealed under another is refused — the capture stays in
 your outbox, listed there as rejected with the refusal's own instruction, and
 is never merged with the first install's record
-(`crates/chat-stasher/src/inbox.rs:837-847`, `:956-1017`;
+(`crates/chat-stasher/src/inbox.rs:843-853`, `:975-1036`;
 `crates/chat-stasher/src/nativehost.rs:3111-3115`;
 `apps/extension/lib/outbox.ts:503-548`). The label is a name you typed, and it
 is plaintext wherever the bundle is — the outbox record, the export file, the
@@ -439,7 +439,7 @@ already have, and exists so the export-import escape hatch keeps the archive
 able to answer "is this exact content already stored?" for a bundle that never
 reached the host live (`contracts/nativehost-protocol.md` §8, W213): the host
 records it beside the bytes on the sealed shard and compares it as a string
-(`crates/chat-stasher/src/inbox.rs:531-553`).
+(`crates/chat-stasher/src/inbox.rs:537-559`).
 
 A ChatGPT bundle also carries **project provenance**: the workspace the
 conversation was fetched under and the project it belongs to, as the capture leg

@@ -269,8 +269,11 @@ test('a record this build cannot read is left untouched, and the alarm tick says
   expect(Object.keys(all)).not.toContain(HEADER_KEY);
   // The unresolved-workspace refusal can create its own named header, but the
   // unreadable legacy default is not imported into that unrelated scope.
-  expect(await listDatabases(ext)).toContain(BACKFILL_DB_NAME);
+  // Refusal does not create a debt database. The concurrent capture may create
+  // one for another scope, so measure absence separately from an empty store.
+  const databases = await listDatabases(ext);
   const rows = await readDebtRows(ext);
+  if (!databases.includes(BACKFILL_DB_NAME)) expect(rows).toEqual([]);
   expect(rows.filter((row) => row.platform === PLATFORM && row.scope === SCOPE)).toEqual([]);
   expect(escaped).toEqual([]);
 });

@@ -207,9 +207,26 @@ pub fn project_shard(raw: &[u8], session: &str, key: &JoinPolicy) -> Result<Vec<
                     ),
                     "unsupported sealed record version"
                 );
-                record_projection(&v, session, key)
+                if v["kind"] == "harness-resend" {
+                    // Provenance is not another body. Malformed references are
+                    // an incomplete read, never a successful empty projection.
+                    ensure!(
+                        v.get("raw").is_none()
+                            && v["schema"] == "chat-stasher/inbox@3"
+                            && v["content_ref"].as_str().is_some_and(|sha| {
+                                sha.len() == 64
+                                    && sha
+                                        .bytes()
+                                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                            }),
+                        "invalid sealed resend reference"
+                    );
+                    return Ok(None);
+                }
+                record_projection(&v, session, key).map(Some)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()
+            .map(|rows| rows.into_iter().flatten().collect())
     } else {
         let harness = session.split('.').next().context("missing audit harness")?;
         Ok(vec![message_audit::project_body(

@@ -28,6 +28,21 @@ existing sealed bytes. New `inbox@3` records preserve their tagged capture kind,
 fidelity, producer metadata and encoded harness-file bytes. The sealed-record
 marker is independent of the incoming bundle version.
 
+Send-produced harness captures deduplicate validated content within the same
+session/account and puller partition. A change to capture metadata or send key
+appends a sealed `harness-resend` record: it retains the new capture facts and
+bundle digest, omits `raw`, and carries `content_ref`, the original content
+record's bundle digest. File role, parent session and byte range remain part of
+the content identity; path and encoding changes do not duplicate the held bytes.
+The original record stays unchanged. Exact retries reuse either record.
+
+A resend is provenance, not another body, so audit backfill does not project it
+as a new capture or an empty body. Read the referenced `harness-file` record in
+the same session and partition for the authoritative bytes. Remote retirement
+requires archive proof for both the resend record and its referenced content;
+missing or corrupt staged content refuses retirement. Destination integration
+and deduplication after stage reclamation are still separate work.
+
 Run the one historical backfill for each destination and the owning partition:
 
 ```sh
