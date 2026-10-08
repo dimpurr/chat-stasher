@@ -285,7 +285,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:12977-12985,12995-13018`).
+(`crates/chat-stasher/src/main.rs:12984-12992,13002-13025`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -588,7 +588,7 @@ can express them (`crates/chat-stasher/src/store.rs:1996-2003`).
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/main.rs:8232-8237`). A second
+destination's `key_file` (`crates/chat-stasher/src/main.rs:8239-8244`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -606,8 +606,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:14593-14600`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:14156-14170`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:14600-14607`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:14163-14177`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -639,11 +639,11 @@ by you rather than by whoever is on the network path.
 
 **This tool never answers it for you.** `--trust-host` is the only thing in the
 program that writes to `known_hosts`
-(`crates/chat-stasher/src/main.rs:6127-6142`); without it, an unattended
+(`crates/chat-stasher/src/main.rs:6134-6149`); without it, an unattended
 scheduled run that meets a new host stops instead of quietly trusting it.
 
 **What you see when it happens.** `dest-init` connects once, read-only, before
-it does anything else (`crates/chat-stasher/src/main.rs:6132-6157`). An
+it does anything else (`crates/chat-stasher/src/main.rs:6139-6164`). An
 untrusted host stops the command there with exit code `3` — "did not finish
 reading", which is *not* the same as "the destination is empty" — and prints
 which host is untrusted, the fingerprints it received, and the next step
@@ -675,10 +675,10 @@ chat-stasher dest-init --destination <name> --stage <your-stage> --trust-host
 ```
 
 It prints the fingerprints it found and each record it writes, then appends them
-to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:6141-6153`;
+to `~/.ssh/known_hosts` (`crates/chat-stasher/src/main.rs:6148-6160`;
 `crates/chat-stasher/src/remote_err.rs:514-547`). The flag is for remote
 destinations only: on a local path it is refused with exit code `2` rather than
-silently doing nothing (`crates/chat-stasher/src/main.rs:6132-6140`).
+silently doing nothing (`crates/chat-stasher/src/main.rs:6139-6147`).
 
 🔴 **Never do this for a host whose key has *changed*.** If a host you already
 trusted now presents a different key, OpenSSH prints `REMOTE HOST IDENTIFICATION
@@ -942,7 +942,7 @@ Windows every `schedule` action refuses with exit 2 before writing anything,
 and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
-sleeps (`crates/chat-stasher/src/main.rs:7297-7352`).
+sleeps (`crates/chat-stasher/src/main.rs:7304-7359`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:269-306`).
@@ -970,12 +970,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:17465-17467`). This is the
+does not (`crates/chat-stasher/src/main.rs:17618-17619`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
-Its output has two parts. **The first line** is the timer health conclusion,
+Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:17177-17205`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:17114-17115`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:287-335`):
 
 - No timer installed / never run successfully:
@@ -991,7 +991,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:287-335`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:17467-17600`):
+(`crates/chat-stasher/src/main.rs:17620-17688`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1004,21 +1004,35 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:17446-17451`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:17599-17604`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
 Its four exit codes are: `0` = the timer is judged healthy · `1` = the scan
 finished, but the timer is judged unhealthy (including **never having run**) ·
-`3` = the scan did not complete at all (the registry could not be read, for
-example; in that case it has no conclusion about your machine) · `2` = usage
+`3` = a read did not complete (the scan, a declared remote inbox observation,
+or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:17124-17158`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:17138-17172`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
 the JSON report is on stdout.
+
+For each initialized remote inbox, `status` and `doctor` also show current
+waiting objects, the oldest object's age from backend modification time, and
+persisted pull history. Their `--json` reports expose the same section as
+`remote_inboxes`. An unreachable or unwired backend has an unknown waiting
+count; a readable empty inbox has zero waiting objects and no oldest object.
+History reports the last fully successful pull and the latest attempt's refusal
+counts by reason, plus `missing_account` for validated captures without a
+platform account identity. These are per-attempt capture counts, including
+resends, not unique archived-session counts. A sealed stage alone does not
+establish a successful pull. An unreadable history remains unknown and is
+preserved for recovery. This section is absent from human output until an inbox
+is initialized; it does not contact network backends
+([inbox observation and history](../crates/chat-stasher/src/inbox_status.rs)).
 
 There is also a related command: `doctor`. It answers a different question —
 **whether any tool is silently deleting your history**. Its report contains

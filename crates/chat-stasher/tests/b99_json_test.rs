@@ -288,10 +288,15 @@ fn status_json_top_level_schema_is_stable() {
             "healthy",
             "keys",
             "local",
+            "remote_inboxes",
             "run_state",
             "scanner",
             "schema_version",
         ]
+    );
+    assert_eq!(
+        v["remote_inboxes"],
+        serde_json::json!({"state": "known", "inboxes": []})
     );
     // The scanner's aggregate counts are tri-state objects, never bare numbers.
     let scanner = v["scanner"].as_object().unwrap();

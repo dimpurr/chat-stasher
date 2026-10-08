@@ -113,7 +113,9 @@ pub struct KeyPolicy {
     /// Maximum authenticated attempts per invocation and rolling hour.
     pub max_objects_per_pull: usize,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Refusal {
     Envelope,
     UnknownKey,
@@ -139,6 +141,8 @@ pub struct PullReport {
     pub waiting: usize,
     pub stored: usize,
     pub duplicates: usize,
+    /// Validated captures lacking a platform account, including duplicate pulls.
+    pub missing_account: usize,
     pub refused: Vec<Refusal>,
 }
 
@@ -149,7 +153,7 @@ fn open(
     now: u64,
     used: &mut BTreeMap<String, usize>,
     rate_state: &Path,
-) -> Result<(Vec<u8>, Vec<String>), Refusal> {
+) -> Result<(Vec<u8>, Vec<String>, bool), Refusal> {
     let envelope: crate::send::Envelope =
         serde_json::from_slice(bytes).map_err(|_| Refusal::Envelope)?;
     if envelope.schema != crate::send::ENVELOPE_SCHEMA {
@@ -228,7 +232,8 @@ fn open(
     .filter_map(|v| v.as_str())
     .map(str::to_owned)
     .collect();
-    Ok((bundle, axes))
+    let missing_account = matches!(value["identity"]["level"].as_str(), None | Some("default"));
+    Ok((bundle, axes, missing_account))
 }
 /// Trusted archive-machine read-back, independent of the stage and any cursor.
 /// Implementations must consult every declared destination and compare its
@@ -268,7 +273,9 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
     for item in listing.items {
         let result = (|| {
             let bytes = transport.fetch(&item.item).map_err(|_| Refusal::Fetch)?;
-            let (bundle, axes) = open(&bytes, identity, keys, now, &mut used, rate_state)?;
+            let (bundle, axes, missing_account) =
+                open(&bytes, identity, keys, now, &mut used, rate_state)?;
+            report.missing_account += usize::from(missing_account);
             let mut identities: Vec<&str> = axes.iter().map(String::as_str).collect();
             identities.push(machine);
             crate::test_identity_guard::refuse_fixture_write(&identities, stage)
