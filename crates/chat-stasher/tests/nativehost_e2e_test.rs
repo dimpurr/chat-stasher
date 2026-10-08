@@ -941,6 +941,197 @@ fn a_sealed_install_is_indexed_and_the_index_is_never_the_authority() {
     );
 }
 
+/// W930 · The timeout re-send waits out a held stage lock.
+///
+/// A `deliver` holds the stage lock across its whole seal, and a
+/// seal can be the one-time cold fill of the install-provenance
+/// index — measured 73.6 s on a 12 GB stage, past the extension's
+/// 60 s request budget. The extension answers that timeout by
+/// re-sending the *identical* request, so the re-send arrives while
+/// the first request still holds the lock. Its own lock wait has to
+/// outlast what is left of the fill inside its own budget, or it
+/// collects `stage-unavailable` while the first request's
+/// acknowledgement is still being written — and the debt stays
+/// pending for the next tick, which re-fetches the conversation with
+/// a new `capturedAt` and seals a second shard the byte-level
+/// duplicate rule cannot recognise.
+///
+/// The hold below is longer than the wait used to be (10 s) with
+/// margin for the spawn's own startup, and far inside what it
+/// now is (the extension's 60 s budget), so this test was red
+/// against the old bound: the re-send gave up at 10 s and
+/// answered `stage-unavailable`, while the shard count
+/// assertion below would still have held — the point is the
+/// *answer*, not the count.
+#[test]
+fn a_delivery_waits_out_a_held_stage_lock_and_answers_duplicate() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // ① The first request seals the bytes — the shard the re-send
+    //    is about to ask about.
+    let payload = identity_bundle(
+        "sess-lock",
+        "hello lock",
+        "install-w930-lock",
+        "Chrome",
+        "Personal",
+    );
+    let first = fixture.chrome(&frame(&deliver_request(
+        "req-lock",
+        "deepseek-sess-lock.json",
+        &payload,
+    )));
+    assert_eq!(exit_code(&first), 0, "stderr: {}", stderr_of(&first));
+    assert_eq!(one_frame(&first.stdout)["type"], "ack");
+
+    // ② Another process holds the stage lock for longer than the
+    //    wait used to be: the cold fill the first request would still
+    //    be running.
+    let (held, release) = std::sync::mpsc::channel();
+    let holder = {
+        let stage = fixture.stage.clone();
+        thread::spawn(move || {
+            let lock = chat_stasher::inbox::lock_stage(&stage).expect("take the stage lock");
+            held.send(()).expect("announce the hold");
+            // Past the old 10-second bound with room for the
+            // spawn's own startup, inside the new 60-second one.
+            std::thread::sleep(std::time::Duration::from_secs(13));
+            drop(lock);
+        })
+    };
+    release
+        .recv()
+        .expect("the hold is in place before the re-send");
+
+    // ③ The re-send arrives while the lock is held.
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-lock",
+        "deepseek-sess-lock.json",
+        &payload,
+    )));
+    holder.join().expect("the holder releases the lock");
+
+    // ④ The re-send waited the hold out and answered from the stage.
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "ack");
+    assert_eq!(
+        response["status"], "duplicate",
+        "the re-send must read the answer the first send earned, not give up on the lock"
+    );
+    assert_eq!(
+        fixture.shard_names(&machine, "deepseek.sess-lock"),
+        ["000001.jsonl"],
+        "the re-send must not seal a second shard"
+    );
+}
+
+/// W930 · The timeout re-send waits out a held coordination-state
+/// transaction.
+///
+/// The stage lock is not the only lock a re-send waits behind: a
+/// `deliver` holds the coordination state database's write
+/// transaction (`BEGIN IMMEDIATE`) across its whole seal, so the
+/// re-send arrives while the first request still holds it — and
+/// even the re-send's *open* of that database waits, because
+/// applying the schema writes. That wait has to outlast what is
+/// left of the cold fill inside the re-send's own budget too, or
+/// the re-send answers `nack` `io` and the first request's
+/// acknowledgement is lost exactly as surely as a `stage-unavailable`
+/// would lose it.
+///
+/// The old wait was a 5-second busy timeout inside a 10-second
+/// retry window, so its total patience was ~10 s from the open —
+/// measured against the unfixed code, a re-send behind a held
+/// transaction answered `nack` `io` at half past ten. The hold
+/// below is past that with margin for the spawn's own startup,
+/// and far inside what the delivery path now asks for (60
+/// seconds, the extension's per-request budget), so this test
+/// was red against the old bound: the re-send's open gave up
+/// and the response was a `nack`, not an `ack`.
+#[test]
+fn a_delivery_waits_out_a_held_state_transaction_and_answers_duplicate() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+
+    // ① The first request seals the bytes — and opens the state
+    //    database, so the schema exists and the hold below is the
+    //    only lock on it.
+    let payload = identity_bundle(
+        "sess-db",
+        "hello db",
+        "install-w930-db",
+        "Chrome",
+        "Personal",
+    );
+    let first = fixture.chrome(&frame(&deliver_request(
+        "req-db",
+        "deepseek-sess-db.json",
+        &payload,
+    )));
+    assert_eq!(exit_code(&first), 0, "stderr: {}", stderr_of(&first));
+    assert_eq!(one_frame(&first.stdout)["type"], "ack");
+
+    // ② Another process holds the state database's write transaction
+    //    for longer than the wait used to be: the cold fill the
+    //    first request would still be running inside its transaction.
+    //    The path mirrors `collect::default_state_dir()` under the
+    //    fixture's `XDG_DATA_HOME`.
+    let state_db = fixture
+        .home
+        .join("data")
+        .join("chat-stasher")
+        .join("state")
+        .join("extension-coordination.sqlite3");
+    let (held, release) = std::sync::mpsc::channel();
+    let holder = {
+        let state_db = state_db.clone();
+        thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&state_db).expect("open the state database");
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .expect("take the write transaction");
+            held.send(()).expect("announce the hold");
+            // Past the old total patience (~10 s from the
+            // open: a 5 s busy timeout, a retry, a second
+            // 5 s attempt) with room for the spawn's own
+            // startup, inside the new 60-second one.
+            std::thread::sleep(std::time::Duration::from_secs(13));
+            conn.execute_batch("ROLLBACK")
+                .expect("release the write transaction");
+        })
+    };
+    release
+        .recv()
+        .expect("the hold is in place before the re-send");
+
+    // ③ The re-send arrives while the transaction is held.
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-db",
+        "deepseek-sess-db.json",
+        &payload,
+    )));
+    holder.join().expect("the holder releases the transaction");
+
+    // ④ The re-send waited the hold out and answered from the stage.
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    let response = one_frame(&output.stdout);
+    assert_matches_schema(&response);
+    assert_eq!(response["type"], "ack");
+    assert_eq!(
+        response["status"], "duplicate",
+        "the re-send must read the answer the first send earned, not give up on the state database"
+    );
+    assert_eq!(
+        fixture.shard_names(&machine, "deepseek.sess-db"),
+        ["000001.jsonl"],
+        "the re-send must not seal a second shard"
+    );
+}
+
 // ------------------------------------------------------------------ §6.6 has
 
 /// A content fingerprint. The host compares it as an opaque string, so any 64

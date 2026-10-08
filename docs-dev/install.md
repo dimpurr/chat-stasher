@@ -544,9 +544,10 @@ Two properties of that directory, both from
 [`contracts/nativehost-protocol.md`](../contracts/nativehost-protocol.md):
 
 - **The host and `ingest` take an exclusive lock on `<stage>/.ingest.lock`
-  before they allocate a shard sequence number**, so two browsers, two profiles,
-  or a host racing a manual `ingest` cannot pick the same number. The wait is
-  bounded at 10 seconds, and a timeout comes back as a `stage-unavailable` the
+  before they allocate a shard sequence number**, so two browsers, two
+  profiles, or a host racing a manual `ingest` cannot pick the same
+  number. The wait is bounded at the extension's per-request budget
+  (60 seconds), and a timeout comes back as a `stage-unavailable` the
   extension retries (`crates/chat-stasher/src/inbox.rs:66-68`, `:1232-1260`).
 - **A stage the host cannot use is reported, not replaced.** A missing or
   relative `[native_host] stage` is a `config` refusal, and a path that is not a

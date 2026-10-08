@@ -77,8 +77,15 @@ manual testing. `chat-stasher native-host --self-test` is unchanged.
 The host and `ingest` both hold an exclusive lock on `<stage>/.ingest.lock`
 while they allocate a shard sequence number and seal the shard. Two browsers,
 two profiles or a host racing a manual `ingest` therefore cannot pick the same
-sequence number. The wait is bounded (10 seconds); on timeout the answer is
-`nack` `stage-unavailable` with `retryable: true`.
+sequence number. The wait is bounded at the extension's per-request budget
+(§2, 60 seconds); on timeout the answer is `nack` `stage-unavailable` with
+`retryable: true`. The budget is the bound because a delivery holds the lock
+across its whole seal, and a seal can be the one-time cold fill of the
+install-provenance index (measured 73.6 s on a 12 GB stage): any shorter,
+and a delivery that times out and re-sends the identical request collects
+`stage-unavailable` while the first request is still writing the
+acknowledgement the re-send came to read; any longer, and the host answers a
+client that has already stopped listening.
 
 ## 6. Messages
 

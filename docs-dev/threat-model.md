@@ -609,8 +609,10 @@ The properties that bound this boundary:
   (`crates/chat-stasher/src/nativehost.rs:2094-2161`, `:2166-2195`).
 - **Concurrent writers are serialised.** The host and `ingest` both hold an
   exclusive lock on `<stage>/.ingest.lock` while they allocate a shard sequence
-  number and seal the shard, with a bounded 10-second wait
-  (`crates/chat-stasher/src/inbox.rs:66-68`, `:1232-1260`). Two browsers, two
+  number and seal the shard, with a wait bounded at the extension's
+  per-request budget, 60 seconds — the bound a delivery's timeout
+  re-send depends on to outlast a first request still filling the
+  install-provenance index once (`crates/chat-stasher/src/inbox.rs:66-68`, `:1232-1260`). Two browsers, two
   profiles, or a host racing a manual `ingest` therefore cannot pick the same
   sequence number.
 - **A delivery is confirmed twice over.** The host recomputes SHA-256 over the

@@ -108,8 +108,17 @@ toml = "0.8"
 # `dirs::cache_dir()`). Asking rustic for it would mean opening a repository,
 # which is exactly what the test must not do outside a temp directory (W289), so
 # the test calls the same `dirs` instead. Same version `rustic_core` pins, so
-# this adds no package to the build graph — only the direct dev edge.
+# this adds no new package to the build graph — only the direct dev edge.
 dirs = "6"
+# `tests/nativehost_e2e_test.rs` holds the coordination state database's
+# write transaction open from outside the host process, to model what the
+# first request of a cold install-provenance fill holds across its seal
+# (W930): the timeout re-send arrives behind exactly that transaction, and
+# the test has to hold it from the other side of the process boundary the
+# e2e suite exists to keep. Same pinned version and feature set as the
+# normal dependency, so this adds no new package to the build graph —
+# only the direct dev edge.
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
 # `tests/setup_interactive_test.rs` drives the setup wizard through the real
 # interactive path, which demands a terminal (`is_terminal()` on both stdin
 # and stdout) — a pipe is not one on any platform, so the suite allocates a

@@ -293,7 +293,9 @@ fn walk(stage: &Path) -> Result<Vec<Observation>> {
 /// stage (13,030 shards in 8,845 sessions), against the ~17 s reading the
 /// same bytes costs and the 196–205 s parsing them did. It runs inside the
 /// stage lock, so it is also the bound on what a concurrent delivery waits
-/// for: well inside the 10-second `stage-unavailable` budget.
+/// for: well inside the 60-second `stage-unavailable` budget, which is
+/// the extension's per-request budget and therefore the wait a delivery
+/// may make on the lock (W930).
 ///
 /// This is the index's invalidation signal. Every write this tool makes to
 /// the session tree is a shard write, and every shard write is followed —

@@ -64,8 +64,24 @@ pub const EXPORT_SUFFIX: &str = ".jsonl";
 /// the shard tree — `verify`, `push`, `stagereclaim`, the audit scans — can
 /// mistake it for shard content.
 pub const STAGE_LOCK_FILE: &str = ".ingest.lock";
-/// How long a writer waits for the stage lock before giving up (protocol §5).
-pub const STAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a writer waits for the stage lock before giving up
+/// (protocol §5).
+///
+/// The bound is the extension's per-request budget (protocol §2), and
+/// the reason is the delivery timeout re-send (W930): a `deliver`
+/// holds this lock across its whole seal, and a seal can be the
+/// one-time cold fill of the install-provenance index — measured
+/// 73.6 s on this machine's 12 GB stage, against the 60 s a request
+/// may run. The re-send the extension makes when that budget expires
+/// arrives while the fill is still holding the lock, and it can only
+/// read the `ack` the first send earned if its own lock wait can
+/// outlast what is left of the fill inside its own budget: a wait any
+/// shorter gives up while the answer is still being written (the
+/// re-send collected `stage-unavailable` at half past the minute
+/// while the first request's acknowledgement was still in flight),
+/// and a wait any longer would answer a client that has stopped
+/// listening. The budget itself is therefore the bound.
+pub const STAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Poll interval while waiting for the lock. `try_lock` is the only form with
 /// a deadline — the blocking `lock` has none — so the wait is a poll loop, and
 /// this is how coarse that poll is.
@@ -1256,10 +1272,15 @@ fn open_stage_lock(stage: &Path) -> anyhow::Result<fs::File> {
 
 /// Take the stage write lock, waiting at most [`STAGE_LOCK_TIMEOUT`].
 ///
-/// Bounded on purpose: an unbounded wait inside a browser-spawned host would
-/// hold the extension's 60 s request timeout open and answer nothing, and
-/// "nothing" is the one answer the protocol cannot recover from. A timeout is
-/// a `nack` the extension can retry.
+/// Bounded at the extension's per-request budget, on purpose: an
+/// unbounded wait inside a browser-spawned host would hold a request
+/// open forever and answer nothing, and "nothing" is the one answer
+/// the protocol cannot recover from. A timeout is a `nack` the
+/// extension retries — and a wait as long as the budget is what lets
+/// a timeout re-send (W930) outlast a first request that is still
+/// filling the install-provenance index once, instead of collecting
+/// `stage-unavailable` while that request's acknowledgement is still
+/// being written.
 pub fn lock_stage(stage: &Path) -> anyhow::Result<StageLock> {
     let path = stage.join(STAGE_LOCK_FILE);
     let file = open_stage_lock(stage)?;

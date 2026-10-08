@@ -1643,15 +1643,53 @@ fn open_state_db() -> anyhow::Result<rusqlite::Connection> {
     open_state_db_at(&crate::collect::default_state_dir())
 }
 
+/// How long a host process waits for the state database's write lock
+/// behind another process's transaction.
+///
+/// Five seconds is longer than every transaction this database holds
+/// except one: a `deliver` seal, which holds `BEGIN IMMEDIATE`
+/// across its whole critical section by design (see [`deliver`]).
+/// Every other writer — coordination, a status report — keeps this
+/// short wait, because its client budgets a request whose failure is
+/// a retry, not a lost acknowledgement. The delivery path asks for
+/// [`DELIVERY_STATE_DB_BUSY_TIMEOUT`] instead.
+const STATE_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The delivery path's wait for the state database's write lock: the
+/// extension's per-request budget (protocol §2), and the bound the
+/// delivery timeout re-send depends on (W930).
+///
+/// A `deliver` holds `BEGIN IMMEDIATE` across its seal, and a seal
+/// can be the one-time cold fill of the install-provenance index —
+/// measured 73.6 s on this machine's 12 GB stage, against the 60 s
+/// a request may run. The re-send the extension makes when that
+/// budget expires arrives while the first request still holds the
+/// transaction, and even its *open* of this database waits behind it
+/// (applying the schema writes), so the re-send can only read the
+/// `ack` the first send earned if this wait can outlast what is left
+/// of the fill inside its own budget — the same bound, and the same
+/// reasoning, as [`inbox::STAGE_LOCK_TIMEOUT`].
+const DELIVERY_STATE_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// [`open_state_db`] against a named directory, so a test can open two
-/// connections to **one** database and watch what one transaction can see of the
-/// other's uncommitted work.
+/// connections to **one** database and watch what one transaction can see of
+/// the other's uncommitted work.
 fn open_state_db_at(state_dir: &Path) -> anyhow::Result<rusqlite::Connection> {
+    open_state_db_with_busy_timeout(state_dir, STATE_DB_BUSY_TIMEOUT)
+}
+
+/// [`open_state_db_at`] with the wait the caller's own client budgets
+/// for the request it is about to make — see
+/// [`DELIVERY_STATE_DB_BUSY_TIMEOUT`] for the delivery path's value.
+fn open_state_db_with_busy_timeout(
+    state_dir: &Path,
+    busy_timeout: std::time::Duration,
+) -> anyhow::Result<rusqlite::Connection> {
     fs::create_dir_all(state_dir)
         .with_context(|| format!("prepare coordination state in {}", state_dir.display()))?;
     let conn = rusqlite::Connection::open(state_dir.join("extension-coordination.sqlite3"))
         .context("open coordination state")?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(busy_timeout)
         .context("set coordination state busy timeout")?;
     initialize_state_schema(&conn).context("initialize coordination state")?;
     Ok(conn)
@@ -3056,7 +3094,19 @@ fn deliver(request: serde_json::Value, request_id: Option<String>) -> serde_json
     //    observation is real whatever the stage did with the bytes, and a
     //    conflict that was just detected must not be rolled back. Only a
     //    database-level failure rolls back, and then nothing is sealed either.
-    let conn = match open_state_db() {
+    //
+    //    The wait this transaction makes on a concurrent writer is the
+    //    delivery path's own budget (`DELIVERY_STATE_DB_BUSY_TIMEOUT`),
+    //    not the default: a seal can be the one-time cold fill of the
+    //    install-provenance index, and the timeout re-send (W930) arrives
+    //    while that fill is still holding the transaction — this open is
+    //    the first of the re-send's waits, and it has to outlast the fill
+    //    inside the re-send's own budget for the first send's `ack` to
+    //    still be readable.
+    let conn = match open_state_db_with_busy_timeout(
+        &crate::collect::default_state_dir(),
+        DELIVERY_STATE_DB_BUSY_TIMEOUT,
+    ) {
         Ok(conn) => conn,
         Err(e) => {
             return nack(
