@@ -446,7 +446,9 @@ mod tests {
         ] {
             let path = backend.join(name);
             std::fs::write(&path, b"synthetic-ciphertext").unwrap();
-            std::fs::File::open(path)
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
                 .unwrap()
                 .set_times(
                     std::fs::FileTimes::new().set_modified(
