@@ -103,6 +103,7 @@ pub(crate) fn write_shard(
         }
         fs::rename(active, &path)
             .with_context(|| format!("seal rename {} -> {}", active.display(), path.display()))?;
+        note_install_provenance(stage, machine, raw);
         return Ok(ShardWrite::Allocated(seq));
     }
     let inbox = matches!(source, ShardSource::Inbox(_));
@@ -159,7 +160,30 @@ pub(crate) fn write_shard(
     } else {
         renamed?;
     }
+    note_install_provenance(stage, machine, raw);
     Ok(ShardWrite::Allocated(seq))
+}
+
+/// Keep the install-provenance index ahead of the tree this shard write just
+/// changed (W930).
+///
+/// Every producer funnels through [`write_shard`] — the host's `deliver`,
+/// `ingest`, `import`, the collectors' active-file sealing, restore included —
+/// and that is the property the index's mtime gate rests on: a session tree
+/// entry newer than the index can only be a write that did not come from this
+/// tool, which is exactly the out-of-band change the gate re-reads the stage
+/// for. A collector's record carries no install identity, so its note is a
+/// renewal of the index's mtime (the content already describes the tree);
+/// an identity the index does not hold is appended, and one it already holds
+/// renews the mtime as well — an index left behind on the second delivery of
+/// one install was the bug that turned every delivery into a full-stage
+/// read on a 12 GB stage.
+///
+/// Best-effort by contract and never a reason to fail a durable shard write:
+/// the stage is the archive and the index is derived from it, so a lost note
+/// costs the next question one re-read, never a shard.
+fn note_install_provenance(stage: &Path, machine: &str, raw: &[u8]) {
+    crate::install_provenance::note_shard_written(stage, machine, raw);
 }
 
 /// Remove shard temp stubs left by an interrupted seal.

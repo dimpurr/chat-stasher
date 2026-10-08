@@ -23,8 +23,9 @@
 //!
 //! So the evidence is written where it is produced:
 //! `<stage>/meta/<machine>/install-provenance-v1.jsonl`, one line per sealed
-//! observation, appended in the same stage lock the seal already holds. The
-//! check reads that file. The stage itself is read **only** when the index
+//! observation the stage holds, written by the one funnel every shard write
+//! passes through (`shard_writer::write_shard` → [`note_shard_written`]).
+//! The check reads that file. The stage itself is read **only** when the index
 //! cannot answer — no index at all (a stage sealed before this index
 //! existed), an index with no line for the install being asked about, an
 //! index the session tree has outgrown, or an index that is damaged — and
@@ -35,19 +36,30 @@
 //! (invariant 1).
 //!
 //! The index is trusted only while the session tree stands still. Every
-//! write this tool makes to the tree is a shard write followed, inside the
-//! same stage lock, by the index write that records it, so the index's own
-//! mtime is never older than the tree it was written from. An entry of the
-//! tree newer than the index therefore means the tree changed without this
-//! tool — a restored or merged stage, the hazard above — and the index is
-//! not trusted to answer for an install it has a line for: the stage is
-//! read again. The check is a **stat walk** over the tree (every entry is
-//! listed and stat'ed, no file is read), which is what keeps the answer
-//! inside the budget while still failing closed. Two limits are named, not
-//! hidden: a mutation that preserves the mtime of every entry it touches is
-//! invisible to any mtime-based check, and so is a mutation that lands
-//! while the walk is running. Both are written down in
-//! `docs-dev/threat-model.md` next to D4.
+//! write this tool makes to the tree is a shard write through
+//! `shard_writer::write_shard` — the host's `deliver`, `ingest`, `import`,
+//! the collectors' sealing, restore included — and every such write, inside
+//! that one funnel, is followed by the note that keeps the index current: a
+//! line when the record carries an install identity the index does not hold,
+//! and a renewal of the file's own modification time when it does not (an
+//! already-held identity, or a collector record that cannot carry one at
+//! all). The index's own mtime is therefore never older than the tree it was
+//! written from — not only under the host's stage lock, but for the
+//! collectors too, which write continuously and hold no stage lock (the
+//! incident machine sealed 23 harness shards in the window's 35 minutes; an
+//! index that ignored their writes was an index no delivery ever trusted).
+//! An entry of the tree newer than the index therefore means the tree
+//! changed without this tool — a restored or merged stage, the hazard
+//! above — and the index is not trusted to answer for an install it has a
+//! line for: the stage is read again. The check is a **stat walk** over the
+//! tree (every entry is listed and stat'ed, no file is read), which is what
+//! keeps the answer inside the budget while still failing closed. Three
+//! limits are named, not hidden: a mutation that preserves the mtime of
+//! every entry it touches is invisible to any mtime-based check, and so is
+//! a mutation that lands while the walk is running, and a collector write
+//! whose note failed (reported on stderr, best-effort by contract) leaves
+//! the gate open until the next seal renews it. All three are written down
+//! in `docs-dev/threat-model.md` next to D4.
 //!
 //! The index only ever *caches* an answer the shards already hold, and that is
 //! what makes it safe to keep: the shard is written first and durably, the index
@@ -228,6 +240,40 @@ fn rewrite(stage: &Path, machine: &str, observations: &[Observation]) -> Result<
 /// one install must not leave another install's answer stale behind a fresh
 /// index mtime — the interleaving a hand-merged stage makes possible, and the
 /// one direction that must not fail.
+/// Every install identity one shard's raw bytes carry, as sealed records say
+/// them — the same extraction [`walk`] performs, shared so the two cannot
+/// diverge.
+///
+/// Returns the identities in the order they appear, without deduplication:
+/// sealing the same identity twice in one stage says one thing about it, and
+/// the readers deduplicate by value.
+fn observations_from(raw: &[u8]) -> Vec<Observation> {
+    let mut out = Vec::new();
+    for line in raw.split(|byte| *byte == b'\n') {
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(install_id) = record.get("install_id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if install_id.is_empty() {
+            continue;
+        }
+        out.push(Observation {
+            install_id: install_id.to_string(),
+            browser: record
+                .get("browser")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            profile_label: record
+                .get("profile_label")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        });
+    }
+    out
+}
+
 fn walk(stage: &Path) -> Result<Vec<Observation>> {
     let mut out: Vec<Observation> = Vec::new();
     let sessions = stage.join(store::SESSIONS_DIR);
@@ -252,29 +298,7 @@ fn walk(stage: &Path) -> Result<Vec<Observation>> {
                 if memchr::memmem::find(&raw, INSTALL_ID_FIELD).is_none() {
                     continue;
                 }
-                for line in raw.split(|byte| *byte == b'\n') {
-                    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
-                        continue;
-                    };
-                    let Some(install_id) =
-                        record.get("install_id").and_then(|value| value.as_str())
-                    else {
-                        continue;
-                    };
-                    if install_id.is_empty() {
-                        continue;
-                    }
-                    let observation = Observation {
-                        install_id: install_id.to_string(),
-                        browser: record
-                            .get("browser")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        profile_label: record
-                            .get("profile_label")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                    };
+                for observation in observations_from(&raw) {
                     if !out.contains(&observation) {
                         out.push(observation);
                     }
@@ -298,13 +322,13 @@ fn walk(stage: &Path) -> Result<Vec<Observation>> {
 /// may make on the lock (W930).
 ///
 /// This is the index's invalidation signal. Every write this tool makes to
-/// the session tree is a shard write, and every shard write is followed —
-/// inside the same stage lock — by the index write that records it, so the
-/// index's own mtime is never older than the tree it was written from. An
-/// entry newer than the index therefore means the tree changed without this
-/// tool: a restored or merged stage, the hazard the module header names. The
-/// index is then not trusted to answer for an install it has a line for, and
-/// the stage is read again.
+/// the session tree is a shard write through the one funnel, and every such
+/// write is followed by the note that keeps the index current — a line or a
+/// renewal — so the index's own mtime is never older than the tree it was
+/// written from. An entry newer than the index therefore means the tree
+/// changed without this tool: a restored or merged stage, the hazard the
+/// module header names. The index is then not trusted to answer for an
+/// install it has a line for, and the stage is read again.
 ///
 /// One limit, stated: a mutation that preserves the mtime of every entry it
 /// touches (a restore with `--preserve`, say) is invisible to this walk, as
@@ -431,31 +455,112 @@ pub fn sealed_observations_for(
         .collect())
 }
 
-/// Record one observation at seal time, so the next question about this install
-/// is answered without reading the stage. Best-effort, same contract.
+/// Record one observation, so the next question about this install is answered
+/// without reading the stage, and — the half that keeps the gate honest — so
+/// the index never falls behind the tree a shard write just changed.
 ///
-/// Idempotent: an observation the index already holds is not written again. A
-/// delivery appends here every time it seals, and a file that grew one line per
+/// The observation the index already holds is **not** appended a second time:
+/// a delivery appends here on every seal, and a file that grew one line per
 /// delivery would be a record of how many times something was delivered rather
 /// than of what the stage holds — and every read of it would grow with that
-/// count. An index that is absent or damaged is appended to anyway: a repeated
-/// line costs a reader nothing, and a missing one costs a re-read of the stage.
+/// count. The held case renews the index's modification time instead: the
+/// content describes the current tree already (the write was a shard carrying
+/// an identity the index has on the same terms), and the mtime is the one part
+/// of the file that must move ahead of the shard, or the next delivery's gate
+/// reads the tool's own write as an out-of-band change and re-reads the whole
+/// stage (W930).
 ///
-/// The append is also what keeps the fast path's mtime gate honest for the
-/// seal it belongs to: the shard is written first, this line second, so the
-/// index's mtime is never older than the tree it was written from.
+/// An index that is absent or damaged is appended to anyway: a repeated line
+/// costs a reader nothing, and a missing one costs a re-read of the stage.
+///
+/// Best-effort in its callers, same contract as the rest of this module: a
+/// failure is reported on stderr and does not fail the seal.
+fn record_observation(stage: &Path, machine: &str, observation: &Observation) -> Result<()> {
+    match read_index(stage, machine)? {
+        Index::Complete(ref held) if held.contains(observation) => {
+            renew_index_mtime_if_present(stage, machine)
+        }
+        Index::Complete(_) | Index::Absent | Index::Damaged(_) => {
+            append(stage, machine, observation)
+        }
+    }
+}
+
+/// Renew the index's modification time, or do nothing when there is no index.
+///
+/// Renewal states one fact: everything the tool has written into the session
+/// tree so far is described by the content that is already here. It is what a
+/// shard write that carries no install identity does to the index (the
+/// collector's shape — harness records — can never have changed an install
+/// identity), and what a seal of an already-held identity does, and it is why
+/// those writes leave the gate closed instead of opening it.
+///
+/// Absence is deliberately not a renewal: creating an empty index would assert
+/// "this stage has sealed nothing under any install", and that is a claim only
+/// a read of the stage can back (invariant 1). A stage with no index is
+/// filled on its first question.
+fn renew_index_mtime_if_present(stage: &Path, machine: &str) -> Result<()> {
+    let path = index_path(stage, machine);
+    let file = match fs::File::options().write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("renew install provenance {}", path.display()))
+        }
+    };
+    file.set_modified(std::time::SystemTime::now())
+        .with_context(|| format!("renew install provenance {}", path.display()))?;
+    Ok(())
+}
+
+/// Note what one shard write just made true, so the index stays ahead of the
+/// tree this tool writes — whatever producer wrote it.
+///
+/// This is the funnel: every sealed shard in a stage goes through
+/// `shard_writer::write_shard` (the host's `deliver`, `ingest`, `import`, the
+/// collectors, restore included), and that write is the one place every
+/// producer shares, which is what makes the module's claim true in practice:
+/// a tree entry newer than the index can only be a write that did not come
+/// from this tool — the restored or hand-merged stage the gate exists for.
+/// The note runs after the shard's own write is complete, so an index line
+/// may never describe a shard that is not there.
+///
+/// A record that carries no install identity renews the index's mtime only
+/// ([`renew_index_mtime_if_present`]); one that carries identities records
+/// each identity, appending what is not held and renewing what is.
+///
+/// Best-effort, same contract: a failure is reported on stderr by the caller
+/// and never fails the shard write — the stage is the archive and the index
+/// is derived from it, so a lost note costs one re-read, never a shard.
+pub fn note_shard_written(stage: &Path, machine: &str, raw: &[u8]) {
+    let result = if memchr::memmem::find(raw, INSTALL_ID_FIELD).is_none() {
+        renew_index_mtime_if_present(stage, machine)
+    } else {
+        (|| {
+            for observation in observations_from(raw) {
+                record_observation(stage, machine, &observation)?;
+            }
+            Ok(())
+        })()
+    };
+    if let Err(error) = result {
+        eprintln!("native-host: install provenance index could not be written: {error:#}");
+    }
+}
+
+/// Record one observation at seal time, from its parts rather than from the
+/// sealed bytes — the unit-level face of [`note_shard_written`], for the tests
+/// that state a seal's bookkeeping directly.
+///
+/// Idempotent, and the held case renews the mtime — see [`record_observation`].
 pub fn record_sealed(stage: &Path, machine: &str, install_id: &str, browser: &str, label: &str) {
     let observation = Observation {
         install_id: install_id.to_string(),
         browser: Some(browser.to_string()),
         profile_label: Some(label.to_string()),
     };
-    if let Ok(Index::Complete(observations)) = read_index(stage, machine) {
-        if observations.contains(&observation) {
-            return;
-        }
-    }
-    if let Err(error) = append(stage, machine, &observation) {
+    if let Err(error) = record_observation(stage, machine, &observation) {
         eprintln!("native-host: install provenance index could not be written: {error:#}");
     }
 }
@@ -511,6 +616,67 @@ mod tests {
             .expect("open to stamp")
             .set_modified(when)
             .expect("set the modification time");
+    }
+
+    /// Whether the gate the next question runs would trust the index — the
+    /// property every seal has to leave behind it.
+    fn the_index_answers_for_the_gate(stage: &Path, machine: &str) -> bool {
+        !session_tree_changed_since(stage, &index_path(stage, machine)).expect("read the gate")
+    }
+
+    /// 🔴 W930 · A seal that adds no new line must still leave the index
+    /// current: the *normal* shape is one install delivering many
+    /// conversations, so from the second delivery on the observation is
+    /// already held, and an index write that takes the early exit skips only
+    /// the line — its file must still move ahead of the shard that delivery
+    /// just wrote. Measured live against the branch's first cut (the
+    /// `record_sealed` early return): the index never moved, every later
+    /// delivery saw a tree newer than the index, and the 12 GB stage was
+    /// re-read **on every single delivery** — the very cost the index exists
+    /// to remove, paid minus one walk for the whole run (38–205 s a time).
+    #[test]
+    fn a_repeated_seal_keeps_the_index_current_for_the_gate() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        // The exact observation the second delivery will be asked to record —
+        // held already, so the write it makes is the one that adds no line.
+        let held = Observation {
+            install_id: INSTALL.to_string(),
+            browser: Some("Chrome".to_string()),
+            profile_label: Some("Personal".to_string()),
+        };
+        append(stage, MACHINE, &held).expect("seed the index");
+        // Old index: the first cut's append, before this delivery's shard.
+        stamp(
+            &index_path(stage, MACHINE),
+            SystemTime::now() - std::time::Duration::from_secs(7200),
+        );
+        // The shard the second delivery just sealed: same install, same
+        // browser — the observation the index already holds. Newer than the
+        // index, stated on the clock rather than raced (see `stamp`).
+        let shard = plant_shard(
+            stage,
+            "deepseek.abc",
+            r#"{"install_id":"w9300000-0000-4000-8000-000000000000","browser":"Chrome"}"#,
+        );
+        stamp(
+            &shard,
+            SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        assert!(
+            !the_index_answers_for_the_gate(stage, MACHINE),
+            "precondition: the shard the delivery sealed is newer than the index"
+        );
+
+        // The index write that delivery makes: the observation is held, so no
+        // line is added — and the index must still come out *ahead* of the
+        // shard, or the next delivery re-reads the whole stage.
+        record_sealed(stage, MACHINE, INSTALL, "Chrome", "Personal");
+
+        assert!(
+            the_index_answers_for_the_gate(stage, MACHINE),
+            "the index is still behind the shard the seal just wrote: the next delivery re-reads the stage"
+        );
     }
 
     /// The index answers, and the stage is **not** read to answer it: a shard
@@ -826,6 +992,107 @@ mod tests {
             index_lines(stage).lines().count(),
             2,
             "a different label is a different observation"
+        );
+    }
+
+    /// 🔴 W930 · The funnel's no-provenance half: a shard write that carries no
+    /// install identity — the collector's shape, harness records sealed into
+    /// the same session tree continuously — renews the index's mtime and adds
+    /// no line. An index left behind by such a write opened the gate for the
+    /// next `deliver`, and the collectors that sealed 23 shards in the
+    /// incident's 35-minute window would have kept it open for every tick.
+    #[test]
+    fn a_shard_with_no_provenance_renews_the_index_instead_of_losing_it() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        append(stage, MACHINE, &observation("Chrome")).expect("seed the index");
+        stamp(
+            &index_path(stage, MACHINE),
+            SystemTime::now() - std::time::Duration::from_secs(7200),
+        );
+        // The harness shard the collector just sealed, newer than the index.
+        let shard = plant_shard(
+            stage,
+            "claude-code.xyz",
+            r#"{"captured_at":"2026-10-08T00:00:00Z","kind":"harness"}"#,
+        );
+        stamp(
+            &shard,
+            SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        assert!(
+            !the_index_answers_for_the_gate(stage, MACHINE),
+            "precondition: the collector's shard is newer than the index"
+        );
+
+        note_shard_written(
+            stage,
+            MACHINE,
+            b"{\"captured_at\":\"2026-10-08T00:00:00Z\",\"kind\":\"harness\"}\n",
+        );
+
+        assert!(
+            the_index_answers_for_the_gate(stage, MACHINE),
+            "a provenance-free shard write left the index behind for the next delivery"
+        );
+        assert_eq!(
+            index_lines(stage),
+            format!(
+                "{}\n",
+                serde_json::to_string(&observation("Chrome")).expect("line")
+            ),
+            "no line was added: the write carried no identity"
+        );
+    }
+
+    /// A write that carries no provenance must not *create* an index either: an
+    /// empty index would answer every question with "this stage has sealed
+    /// nothing under any install", and that is a claim only a read of the
+    /// stage can back (invariant 1).
+    #[test]
+    fn a_note_with_no_provenance_creates_no_empty_index() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        note_shard_written(
+            stage,
+            MACHINE,
+            b"{\"captured_at\":\"2026-10-08T00:00:00Z\",\"kind\":\"harness\"}\n",
+        );
+        assert!(
+            !index_path(stage, MACHINE).exists(),
+            "a collector write on a fresh stage must not assert an empty stage"
+        );
+    }
+
+    /// The funnel records every identity one shard carries — a restored shard
+    /// with several records is one write — and records nothing for an install
+    /// id that appears inside a captured body, the same distinction
+    /// [`walk`] makes.
+    #[test]
+    fn a_note_records_every_identity_a_shard_carries() {
+        let stage = tempfile::tempdir().expect("stage");
+        let stage = stage.path();
+        note_shard_written(
+            stage,
+            MACHINE,
+            format!(
+                "{{\"install_id\":\"{INSTALL}\",\"browser\":\"Chrome\",\"profile_label\":\"Personal\",\"raw\":{{\"text\":\"the capture body quotes \\\"w9300000-0000-4000-8000-00000000beef\\\" inside it\"}}}}\n\
+                 {{\"install_id\":\"another-930-install\",\"browser\":\"Firefox\"}}\n"
+            )
+            .as_bytes(),
+        );
+        let lines = index_lines(stage);
+        assert!(
+            lines.contains(INSTALL),
+            "the named identity is recorded: {lines}"
+        );
+        assert!(
+            lines.contains("another-930-install"),
+            "both identities are recorded: {lines}"
+        );
+        assert!(
+            !lines.contains("beef"),
+            "a mention inside a body is not provenance: {lines}"
         );
     }
 }

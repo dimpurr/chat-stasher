@@ -754,29 +754,40 @@ words with different consequences:
   fix lives in the browser profile and not in the host: retrying the same bytes
   could never succeed. The capture stays in the outbox, listed rejected with that
   instruction, and is never merged with the first install's record
-  (`crates/chat-stasher/src/inbox.rs:774-782`, `:853-863`, `:1007-1039`;
-  `crates/chat-stasher/src/install_provenance.rs:209-287`;
+  (`crates/chat-stasher/src/inbox.rs:774-782`, `:853-863`, `:1024-1058`;
+  `crates/chat-stasher/src/install_provenance.rs:250-323`;
   `crates/chat-stasher/src/nativehost.rs:1129-1134`, `:1181`). An unnamed label is
   deliberately *not* evidence of a conflict, and neither is the same browser under
   the same label — that case is invisible here, by construction.
-- 🔴 **The refusal is answered from an index, and the index is invalidated by a
-  stat walk.** Reading every shard on every delivery measured 196–205 s on a
-  12 GB stage — past the extension's 60 s request budget, so every delivery
-  answered too late and no `ack` was ever read. The provenance is now written
-  down when the seal happens (`meta/<machine>/install-provenance-v1.jsonl`),
-  and the stage is read only when the index cannot answer
-  (`crates/chat-stasher/src/install_provenance.rs:363-447`). The index is
+- 🔴 **The refusal is answered from an index, and the index is kept current by
+  the one funnel every shard write passes through.** Reading every shard on
+  every delivery measured 196–205 s on a 12 GB stage — past the extension's
+  60 s request budget, so every delivery answered too late and no `ack` was
+  ever read. The provenance is now written down as shards are sealed
+  (`meta/<machine>/install-provenance-v1.jsonl`), and the stage is read only
+  when the index cannot answer
+  (`crates/chat-stasher/src/install_provenance.rs:420-475`). The index is
   trusted only while the session tree holds no entry newer than the index
-  itself: every write this tool makes is a shard write followed, inside the
-  same stage lock, by the index write that records it, so a newer tree entry
-  means the tree changed without this tool — a restored or merged stage — and
-  the stage is read again, whole, healing the index for every install at once
-  (`crates/chat-stasher/src/install_provenance.rs:289-395`). Two limits are
+  itself: every write this tool makes — the host's `deliver`, `ingest`,
+  `import`, the collectors' sealing, restore included — goes through one
+  shard-writer funnel, and that funnel notes the index as part of the write:
+  a line for an identity the index does not hold, and a renewal of the
+  file's own modification time otherwise, so the collectors' continuous
+  harness writes — which hold no stage lock — nevertheless keep the index
+  ahead of the tree (`crates/chat-stasher/src/shard_writer.rs:185-201`;
+  `crates/chat-stasher/src/install_provenance.rs:478-570`). A newer tree
+  entry therefore means the tree changed without this tool — a restored or
+  merged stage — and the stage is read again, whole, healing the index for
+  every install at once
+  (`crates/chat-stasher/src/install_provenance.rs:337-395`). Three limits are
   named rather than hidden: a mutation that preserves the mtime of every entry
   it touches (a restore with `--preserve`, say) is invisible to any mtime-based
-  check, and a mutation that lands while the read is running can be missed the
-  way it always could be. The first is the price of not re-reading 12 GB per
-  delivery; the second is not new.
+  check; a mutation that lands while the read is running can be missed the way
+  it always could be; and an index note that fails — the note is best-effort,
+  reported on stderr, and never fails the shard write — leaves the gate open
+  until some later write renews it, which costs a re-read and never a wrong
+  answer. The first is the price of not re-reading 12 GB per delivery; the
+  others are not new.
 - 🔴 **`identity-conflict`** (EXT-13) — one `report_seq` reached the host twice
   under two different nonces. Unlike the refusal above, this one is **retryable**
   and the bytes are not wrong, only unattributable, so the captures stay queued

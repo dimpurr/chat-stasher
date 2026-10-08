@@ -965,26 +965,10 @@ pub fn seal_payload(
     )
     .map_err(SealError::Other)?;
 
-    // W930 · Write down what this seal just made true, so the next `deliver` for
-    // this install is answered without reading the stage (see
-    // `crate::install_provenance`). 🔴 **After** the shard, always: an index line
-    // may never describe a shard that is not there, and a line that is lost
-    // costs one re-read of the shards, never a shard. The failure is reported on
-    // stderr and does not fail the seal — the stage is the archive and the index
-    // is derived from it.
-    if let (Some(install_id), Some(browser), Some(profile_label)) = (
-        record.install_id.as_deref(),
-        record.browser.as_deref(),
-        record.profile_label.as_deref(),
-    ) {
-        crate::install_provenance::record_sealed(
-            stage,
-            machine,
-            install_id,
-            browser,
-            profile_label,
-        );
-    }
+    // W930 · The install-provenance note this seal owes the index happens
+    // inside `write_shard_atomic` itself, in the one funnel every shard
+    // write shares (`shard_writer::write_shard`): see
+    // `crate::install_provenance::note_shard_written`.
 
     if let Some(key) = &audit_key {
         crate::audit_store::record_shard(stage, machine, &parsed.id, line.as_bytes(), key, true)

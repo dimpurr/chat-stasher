@@ -941,6 +941,139 @@ fn a_sealed_install_is_indexed_and_the_index_is_never_the_authority() {
     );
 }
 
+/// The newest modification time anywhere under `dir` — the same walk the
+/// install-provenance gate runs over the whole session tree, narrowed to one
+/// conversation.
+fn newest_mtime_under(dir: &Path) -> std::time::SystemTime {
+    let mut newest = fs::metadata(dir)
+        .expect("session dir metadata")
+        .modified()
+        .expect("session dir mtime");
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).expect("read a bucket") {
+            let entry = entry.expect("a shard entry");
+            let path = entry.path();
+            let modified = fs::metadata(&path)
+                .expect("entry metadata")
+                .modified()
+                .expect("entry mtime");
+            if modified > newest {
+                newest = modified;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    newest
+}
+
+/// W930 · A repeated seal of a held identity still leaves the index
+/// current (the index's mtime is the gate the next delivery runs).
+///
+/// One install delivering many conversations is the *normal* shape, and
+/// from the second delivery on the observation is already held. The first
+/// cut of the index took the early exit there: no line meant no write, so
+/// the shard each delivery sealed left the index's mtime behind it, and
+/// every delivery after the first arrived at a gate that said "the tree
+/// changed without this tool" and re-read the whole stage — on this
+/// machine's 12 GB stage that is the 60 s budget spent on every single
+/// delivery, the very loop this branch exists to close. The property
+/// below is the one that broke it: after the second delivery, the index
+/// is at least as new as everything the delivery wrote.
+#[test]
+fn a_second_delivery_keeps_the_index_current() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let index = fixture
+        .stage
+        .join("meta")
+        .join(&machine)
+        .join("install-provenance-v1.jsonl");
+
+    for (session, text) in [("sess-1", "hello one"), ("sess-2", "hello two")] {
+        let payload = identity_bundle(session, text, "install-w930-repeat", "Chrome", "Personal");
+        let output = fixture.chrome(&frame(&deliver_request(
+            "req-repeat",
+            &format!("deepseek-{session}.json"),
+            &payload,
+        )));
+        assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+        assert_eq!(one_frame(&output.stdout)["type"], "ack", "{session}");
+    }
+
+    let after_two = fs::metadata(&index)
+        .expect("the index exists after the first delivery")
+        .modified()
+        .expect("the index mtime");
+    let newest_written = newest_mtime_under(&fixture.session_dir(&machine, "deepseek.sess-2"));
+    assert!(
+        after_two >= newest_written,
+        "the index ({after_two:?}) is behind what the second delivery wrote ({newest_written:?}): \
+         the next delivery re-reads the whole stage"
+    );
+}
+
+/// W930 · A shard write that carries no install provenance — the collector's
+/// shape, which seals harness shards into the same session tree without an
+/// identity in the record — renews the index too, or the extension's next
+/// delivery distrusts the index for a write that can never have changed an
+/// install identity.
+///
+/// The collectors run continuously (the incident window sealed 23 harness
+/// shards in 35 minutes), so a write that leaves the index behind is not an
+/// edge case between two deliveries: it is the state the next `deliver`
+/// arrives in, every tick. The seal below is the same write the collector
+/// makes — one shard, no install fields — verified through the wire.
+#[test]
+fn a_shard_written_without_provenance_keeps_the_index_current() {
+    let fixture = Fixture::new();
+    fixture.configure_stage();
+    let machine = first_machine(&fixture);
+    let index = fixture
+        .stage
+        .join("meta")
+        .join(&machine)
+        .join("install-provenance-v1.jsonl");
+
+    let identity = identity_bundle(
+        "sess-1",
+        "hello identity",
+        "install-w930-plain",
+        "Chrome",
+        "Personal",
+    );
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-plain-1",
+        "deepseek-sess-1.json",
+        &identity,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    assert_eq!(one_frame(&output.stdout)["type"], "ack");
+
+    let plain = bundle("sess-plain", "hello plain");
+    let output = fixture.chrome(&frame(&deliver_request(
+        "req-plain-2",
+        "deepseek-sess-plain.json",
+        &plain,
+    )));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr_of(&output));
+    assert_eq!(one_frame(&output.stdout)["type"], "ack");
+
+    let after_plain = fs::metadata(&index)
+        .expect("the index exists after the identity delivery")
+        .modified()
+        .expect("the index mtime");
+    let newest_written = newest_mtime_under(&fixture.session_dir(&machine, "deepseek.sess-plain"));
+    assert!(
+        after_plain >= newest_written,
+        "the index ({after_plain:?}) is behind the provenance-free shard ({newest_written:?}): \
+         a collector write opened the gate for the next delivery"
+    );
+}
+
 /// W930 · The timeout re-send waits out a held stage lock.
 ///
 /// A `deliver` holds the stage lock across its whole seal, and a
