@@ -450,7 +450,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2627-2676`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2671-2720`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -504,7 +504,7 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2346-2481`,
+(`crates/chat-stasher/src/activity.rs:2347-2490`,
 `crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
@@ -532,6 +532,17 @@ moment, not a computed state: a session the source marked archived is indexed
 which no source states. The sealed export itself did not gain a byte; what is
 new is that these three fields now also sit on the index line beside it, as
 plaintext session metadata like the paths and ids above.
+
+A Grok CLI session states one fact of its own, read the same way. Its
+`session_docs` row — which travels whole inside the sealed shard the archive has
+always held — names the directory the session ran in, and that directory now
+sits on the index line beside the row as `cwd`, under the same path rule and the
+same "each place it ran, not only the last" rule. The row names no tenancy, no
+project and no lifecycle state, and none is inferred from the harness name: a
+directory is never promoted to a container, and the browser-extension bundle
+that shares the `grok` name is a web payload rather than a `session_docs` row
+and states nothing. The sealed export itself did not gain a byte; what is new is
+that this path now also sits on the index line beside it.
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,

@@ -2336,12 +2336,13 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Three
+/// opposed to what the collection path or the registry already recorded. Four
 /// harnesses have a reader today — `claude-code` (its working directory and
-/// owning tenancy), `gemini-cli` (its `projectHash`), and `opencode` (its
-/// directory, project, and archive fact); every other harness answers
-/// with the empty set, which is the honest answer for a dimension
-/// nothing was read from — and never a value inferred from the harness name.
+/// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
+/// directory, project and archive fact) and `grok` (its CLI `session_docs`
+/// row's `cwd`); every other harness answers with the empty set, which is the
+/// honest answer for a dimension nothing was read from — and never a value
+/// inferred from the harness name.
 ///
 /// A record that does not parse is skipped, exactly as it is everywhere else in
 /// this module: an unreadable line is not evidence about a dimension.
@@ -2393,6 +2394,14 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                         fold_gemini_cli_dimensions(&mut dimensions, document);
                     }
                 }
+            }
+        }
+        "grok" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_grok_dimensions(&mut dimensions, &record);
             }
         }
         _ => {}
@@ -2513,6 +2522,41 @@ fn fold_opencode_dimensions(
         .is_some_and(serde_json::Value::is_i64)
     {
         dimensions.insert_status("archived");
+    }
+}
+
+/// `grok` is two harnesses sharing one name: the browser-extension bundle,
+/// whose payload is a web conversation, and the CLI, whose archived line is one
+/// `session_docs` SQLite row exported by `sqlite_probe.rs` under the
+/// `chat-stasher.sqlite.session.v1` schema. Only the CLI row states a
+/// dimension, and the one it states is `cwd`: the directory the session ran
+/// in, a path rather than a repository identity under the same rule as Claude
+/// Code's. Every distinct directory is kept, because a session resumed and
+/// re-exported states each place it ran.
+///
+/// The row names no tenant, no project and no lifecycle state, and none is
+/// inferred from the harness name — the directory alone is never promoted to a
+/// `container`. The browser-extension bundle carries no `session_docs` row at
+/// all and contributes nothing.
+///
+/// The guard is the exporter's own envelope, the schema string *and* the
+/// `session_docs` table, the same pair [`grok_cli_title`] requires, so a value
+/// from an unrelated object is never attributed to this session.
+fn fold_grok_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        != Some("chat-stasher.sqlite.session.v1")
+        || record.get("table").and_then(serde_json::Value::as_str) != Some("session_docs")
+    {
+        return;
+    }
+    let Some(session) = record.get("session") else {
+        return;
+    };
+    if let Some(cwd) = non_empty_str(session.get("cwd")) {
+        dimensions.insert_cwd(cwd);
     }
 }
 
@@ -3187,6 +3231,109 @@ mod tests {
         );
         assert!(json.contains(r#""status":["archived"]"#), "line: {json}");
         assert!(!json.contains("\"tenant\""), "line: {json}");
+    }
+
+    /// One Grok CLI export envelope carrying whatever `session` fields the
+    /// caller spells in, so each case states exactly which fields it is about.
+    fn grok_with(fields: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{{{fields}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_grok_cli_session_docs_row_states_its_cwd() {
+        let line = grok_with(r#""session_id":"s1","cwd":"/w/one","updated_at":1789384914"#);
+        let row = build_row("s", "mbp", "grok", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "a path is not a repository identity, so nothing becomes a container: {:?}",
+            row.dimensions.container
+        );
+    }
+
+    #[test]
+    fn a_grok_cli_row_without_a_usable_cwd_records_none() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "grok",
+            &[
+                "not json at all",
+                grok_with(r#""session_id":"s1","cwd":"","updated_at":1789384914"#).as_str(),
+                grok_with(r#""session_id":"s1","updated_at":1789384914"#).as_str(),
+                grok_with(r#""session_id":"s1","cwd":null,"updated_at":1789384914"#).as_str(),
+                grok_with(r#""session_id":"s1","cwd":7,"updated_at":1789384914"#).as_str(),
+                grok_with(r#""session_id":"s1","cwd":{"path":"/w/one"},"updated_at":1789384914"#)
+                    .as_str(),
+                // A `session_docs`-looking object the exporter did not seal under
+                // its schema is a record nothing vouches for.
+                r#"{"table":"session_docs","session":{"cwd":"/w/one"}}"#,
+                // And neither is the export schema over a different table.
+                r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"cwd":"/w/one"}}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an absent, empty, or mistyped cwd is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn every_directory_a_grok_session_ran_in_is_kept_as_one_sorted_set() {
+        // A session resumed and re-exported states each place it ran; the last
+        // line alone would report where the conversation *ended* as where it ran.
+        let first = grok_with(r#""session_id":"s1","cwd":"/w/one/apps","updated_at":1789384914"#);
+        let second = grok_with(r#""session_id":"s1","cwd":"/w/one","updated_at":1789384915"#);
+        let third = grok_with(r#""session_id":"s1","cwd":"/w/one","updated_at":1789384916"#);
+        let row = build_row(
+            "s",
+            "mbp",
+            "grok",
+            &[first.as_str(), second.as_str(), third.as_str()],
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one", "/w/one/apps"]);
+    }
+
+    #[test]
+    fn the_grok_web_bundle_states_no_cwd() {
+        // The browser-extension bundle shares the `grok` name but is a web
+        // payload, not a `session_docs` row; it must not be read as one.
+        let body = serde_json::json!({
+            "responses": [ { "createTime": RFC_T1 } ],
+        })
+        .to_string();
+        let line = web_line("grok", &body);
+        let row = build_row("s", "mbp", "grok", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "a web bundle states no working directory, and none is invented: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_grok_dimensions() {
+        let line = grok_with(r#""session_id":"s1","cwd":"/w/one","updated_at":1789384914"#);
+        let row = build_row("s", "mbp", "claude-code", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "dimensions are answered per harness, not read from whatever an \
+             archived line happens to carry: {:?}",
+            row.dimensions
+        );
+    }
+
+    #[test]
+    fn the_grok_cwd_travels_in_the_index_line() {
+        let line = grok_with(r#""session_id":"s1","cwd":"/w/one","updated_at":1789384914"#);
+        let json = to_jsonl(&build_row("s", "mbp", "grok", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(!json.contains("\"tenant\""), "line: {json}");
+        assert!(!json.contains("\"container\""), "line: {json}");
     }
 
     // ------------------------------------------------- W219 · account keys
