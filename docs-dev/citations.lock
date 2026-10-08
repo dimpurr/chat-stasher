@@ -813,37 +813,37 @@ crates/chat-stasher/src/main.rs:6149-6161  db6c2c11f11b  lines=13
   <- docs-dev/install.md:678  :: report.errors.len()
 crates/chat-stasher/src/main.rs:6247-6255  7e0922e04646  lines=9
   <- docs-dev/threat-model.md:877  :: repo,
-crates/chat-stasher/src/main.rs:7305-7360  04a55860791d  lines=56
+crates/chat-stasher/src/main.rs:7308-7363  04a55860791d  lines=56
   <- docs-dev/install.md:945  :: options,
-crates/chat-stasher/src/main.rs:8052-8057  5b9fd7be3e3b  lines=6
+crates/chat-stasher/src/main.rs:8055-8060  5b9fd7be3e3b  lines=6
   <- docs-dev/privacy.md:1101  :: } else if cell.source.trim().is_empty() {
-crates/chat-stasher/src/main.rs:8170-8175  18367e922613  lines=6
+crates/chat-stasher/src/main.rs:8173-8178  18367e922613  lines=6
   <- docs-dev/privacy.md:746  :: "[ingest] note             : no consumed bundle carried an …
-crates/chat-stasher/src/main.rs:8240-8245  1ce8b6ceb58d  lines=6
+crates/chat-stasher/src/main.rs:8243-8248  1ce8b6ceb58d  lines=6
   <- docs-dev/install.md:591  :: /// Resolve which destination a command operates on.
-crates/chat-stasher/src/main.rs:8455-8462  454d0f5149cc  lines=8
+crates/chat-stasher/src/main.rs:8458-8465  454d0f5149cc  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:866  :: "cannot read masterkey file {}: {error:#}; do not delete th…
-crates/chat-stasher/src/main.rs:8482-8486  00f057b3a3c6  lines=5
+crates/chat-stasher/src/main.rs:8485-8489  00f057b3a3c6  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:864  :: /// Reap the ssh ControlPersist masters left behind for the…
-crates/chat-stasher/src/main.rs:8978-9138  751a2dc4af0e  lines=161
+crates/chat-stasher/src/main.rs:8981-9141  751a2dc4af0e  lines=161
   <- docs-dev/threat-model.md:924  :: destination,
-crates/chat-stasher/src/main.rs:12985-12993  349b3720c900  lines=9
+crates/chat-stasher/src/main.rs:12988-12996  349b3720c900  lines=9
   <- docs-dev/install.md:288  :: assert_eq!(
-crates/chat-stasher/src/main.rs:13003-13026  3dbbd770c8c4  lines=24
+crates/chat-stasher/src/main.rs:13006-13029  3dbbd770c8c4  lines=24
   <- docs-dev/install.md:288  :: )
-crates/chat-stasher/src/main.rs:14164-14178  ad90470d4ec9  lines=15
+crates/chat-stasher/src/main.rs:14167-14181  ad90470d4ec9  lines=15
   <- docs-dev/install.md:610  :: Some(&local),
-crates/chat-stasher/src/main.rs:14601-14608  baea337344f2  lines=8
+crates/chat-stasher/src/main.rs:14604-14611  baea337344f2  lines=8
   <- docs-dev/install.md:609  :: #[derive(Debug)]
-crates/chat-stasher/src/main.rs:17115-17116  f1874a8a7735  lines=2
+crates/chat-stasher/src/main.rs:17118-17119  f1874a8a7735  lines=2
   <- docs-dev/install.md:978  :: let info = run_state_info(&config);
-crates/chat-stasher/src/main.rs:17139-17173  2fc5d83ae823  lines=35
+crates/chat-stasher/src/main.rs:17142-17176  2fc5d83ae823  lines=35
   <- docs-dev/install.md:1017  :: //     store this build cannot decode reports the same coun…
-crates/chat-stasher/src/main.rs:17600-17605  06cce2937f25  lines=6
+crates/chat-stasher/src/main.rs:17603-17608  06cce2937f25  lines=6
   <- docs-dev/install.md:1007  :: fn status_exit_semantics(code: u8) -> &'static str {
-crates/chat-stasher/src/main.rs:17619-17620  15fe28d563a0  lines=2
+crates/chat-stasher/src/main.rs:17622-17623  15fe28d563a0  lines=2
   <- docs-dev/install.md:973  :: /// Only ids, paths, sizes, mtimes and flags ever reach std…
-crates/chat-stasher/src/main.rs:17621-17689  7a63fc3829fa  lines=69
+crates/chat-stasher/src/main.rs:17624-17692  7a63fc3829fa  lines=69
   <- docs-dev/install.md:994  :: fn render_status(report: &scanner::ScanReport, sessions: bo…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:428, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -973,9 +973,9 @@ crates/chat-stasher/src/remote_err.rs:514-547  c531f63130e8  lines=34
   <- docs-dev/install.md:679  :: pub fn trust_host(cfg: &StoreConfig, known_hosts: &Path) ->…
 crates/chat-stasher/src/runstate.rs:1-11  04391d8ccc80  lines=11
   <- docs-dev/install.md:1271  :: //! Timer-visibility state: what happened on the last `run-…
-crates/chat-stasher/src/runstate.rs:287-335  036d69fcbd03  lines=49
+crates/chat-stasher/src/runstate.rs:306-354  036d69fcbd03  lines=49
   <- docs-dev/install.md:979  :: /// false → `status` must exit non-zero.
-crates/chat-stasher/src/runstate.rs:289-295  525f5b894e82  lines=7
+crates/chat-stasher/src/runstate.rs:308-316  109067636f30  lines=9
   <- docs-dev/install.md:1274  :: }
 crates/chat-stasher/src/scanner.rs:1901-2010  a0af3dfb37e8  lines=110
   <- docs-dev/privacy.md:1042  :: /// Additional raw usage files stored under
