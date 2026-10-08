@@ -115,7 +115,7 @@ fn plant_rows(user_dir: &Path, rows: &[(&str, Option<&str>)]) {
 /// slots so the fixture takes the same code path on every OS.
 fn write_cursor_registry(base: &Path) -> PathBuf {
     let cursor = r#"{ "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
-                      "env_override": "CURSOR_USER_DIR", "format": "sqlite",
+                      "env_override": "CURSOR_USER_DIR", "env_override_layer": "Cursor/User/", "format": "sqlite",
                       "confidence": "measured-locally", "source": "B78 test fixture",
                       "sql_table": "cursorDiskKV", "sql_id_column": "key",
                       "sql_required_columns": ["key", "value"],

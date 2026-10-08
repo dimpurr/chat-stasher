@@ -371,6 +371,23 @@ pub struct RegistryCell {
     /// directory. When set, scanner resolution uses it before the template.
     #[serde(default)]
     pub env_override: Option<String>,
+    /// Template substring naming the layer `env_override` replaces — the
+    /// harness's own directory inside its default location.
+    ///
+    /// The variable names that layer, not the store: `CODEX_HOME` is the
+    /// `.codex` directory, `DSH_HOME` the `.dsh` directory, `CURSOR_USER_DIR`
+    /// the `User` directory inside Cursor's app data. The resolver therefore has
+    /// to know which part of `template` the override stands for, so it can keep
+    /// the constant tail below it (`<CODEX_HOME>/sessions/`). Declaring the
+    /// layer here, in the cell that already declares the variable, is what makes
+    /// a harness added to the registry alone resolve: there is no second table
+    /// to keep in step, so a layer this build never heard of is no longer a
+    /// silent fall-back to the template. An `env_override` with no declared
+    /// layer is not honoured — the template decides — and
+    /// `every_env_override_cell_declares_the_layer_it_replaces` makes that red
+    /// for the shipped registry instead of leaving it silent.
+    #[serde(default)]
+    pub env_override_layer: Option<String>,
     #[serde(default)]
     pub format: String,
     /// Optional basename glob, e.g. `session-*`. This is required for
@@ -1815,10 +1832,15 @@ fn path_kind(md: &fs::Metadata) -> &'static str {
 }
 
 /// Resolve an env override as the base directory represented by the registry
-/// template. The current cells use stable harness markers: Cursor's override
-/// is its `User` directory, Codex's is its `.codex` directory, Gemini's is its
-/// `.gemini` directory, and opencode's `OPENCODE_DB` is a database filename
-/// (absolute values stay absolute; relative values live below XDG data).
+/// template. The layer the variable replaces is declared by the cell itself
+/// ([`RegistryCell::env_override_layer`]), so a harness whose layer this build
+/// has never heard of still resolves — there is no second table here to keep in
+/// step. The current cells name stable harness markers: Cursor's override is its
+/// `User` directory, Codex's is its `.codex` directory, Gemini's is its
+/// `.gemini` directory, Kimi Code's is its `.kimi-code` directory, and
+/// DeepSeek Harness's is its `.dsh` directory. Opencode is the one override that
+/// is not a layer: `OPENCODE_DB` is a database filename (absolute values stay
+/// absolute; relative values live below XDG data).
 fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
     let variable = cell.env_override.as_deref()?;
     let value = env::var_os(variable).filter(|value| !value.is_empty())?;
@@ -1836,29 +1858,16 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
             true,
         ));
     }
+    // The cell names the layer its own variable stands for. Without that
+    // declaration the override is not honoured and the template decides, the
+    // same outcome as an override this build cannot place; the empty string is
+    // refused too, or it would make the whole template the suffix.
+    let layer = cell
+        .env_override_layer
+        .as_deref()
+        .filter(|layer| !layer.is_empty())?;
     let template = cell.template.replace('\\', "/");
-    let marker = if template.contains("Cursor/User/") {
-        "Cursor/User/"
-    } else if template.contains(".codex/") {
-        ".codex/"
-    } else if template.contains(".gemini/") {
-        ".gemini/"
-    } else if template.contains(".kimi-code/") {
-        // `KIMI_CODE_HOME` is Kimi Code's data directory, i.e. the `.kimi-code`
-        // layer itself; what hangs below it is the constant `sessions/`.
-        ".kimi-code/"
-    } else if template.contains(".dsh/") {
-        // `DSH_HOME` is DeepSeek Harness's home directory, i.e. the `.dsh`
-        // layer itself; `sessions/` hangs below it. A cell that declares an
-        // env override this table does not know would resolve to the template
-        // instead, silently reading the default location while the registry
-        // claims the override works — which is what happened here until the
-        // real binary was run against a moved home.
-        ".dsh/"
-    } else {
-        return None;
-    };
-    let suffix = template.split_once(marker)?.1;
+    let suffix = template.split_once(layer)?.1;
     let static_suffix = suffix.split('<').next()?.trim_end_matches('/');
     if static_suffix.is_empty() {
         return Some((PathBuf::from(value), false));
@@ -4082,6 +4091,7 @@ mod tests {
         let cell: RegistryCell = serde_json::from_value(serde_json::json!({
             "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
             "env_override": "CURSOR_USER_DIR",
+            "env_override_layer": "Cursor/User/",
             "format": "sqlite"
         }))
         .unwrap();
@@ -4089,6 +4099,95 @@ mod tests {
         assert_eq!(root, dir.path().join("globalStorage/state.vscdb"));
         assert!(is_file);
         env::remove_var("CURSOR_USER_DIR");
+    }
+
+    /// The layer an override replaces is registry data, not a second table in
+    /// this file: a cell naming a layer this build has never heard of resolves,
+    /// and a cell naming none is not honoured. The first half is the regression
+    /// the board asked for — removing the `.dsh/` arm from the old hardcoded
+    /// table made a real harness stop resolving, and no table here can be
+    /// forgotten any more.
+    #[test]
+    fn registry_env_override_honours_a_declared_layer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        env::set_var("W942_SYNTHETIC_HOME", dir.path());
+        let cell: RegistryCell = serde_json::from_value(serde_json::json!({
+            "template": "~/.w942-synthetic/sessions/<id>/",
+            "env_override": "W942_SYNTHETIC_HOME",
+            "env_override_layer": ".w942-synthetic/",
+            "format": "jsonl"
+        }))
+        .unwrap();
+        let (root, is_file) = root_from_env_override(&cell).unwrap();
+        assert_eq!(root, dir.path().join("sessions"));
+        assert!(!is_file);
+        env::remove_var("W942_SYNTHETIC_HOME");
+
+        // Without the declaration the override is not honoured — the template
+        // decides — which is the outcome a silent second table used to hide.
+        let undeclared: RegistryCell = serde_json::from_value(serde_json::json!({
+            "template": "~/.w942-synthetic/sessions/<id>/",
+            "env_override": "W942_SYNTHETIC_HOME",
+            "format": "jsonl"
+        }))
+        .unwrap();
+        env::set_var("W942_SYNTHETIC_HOME", dir.path());
+        assert!(root_from_env_override(&undeclared).is_none());
+        env::remove_var("W942_SYNTHETIC_HOME");
+        let _ = dir;
+    }
+
+    /// Every shipped harness that declares an override still resolves to
+    /// exactly the root it resolved to before the layer moved into the
+    /// registry. Pin the `PathBuf`s, not just `Some`: a layer re-spelled in the
+    /// data file would keep resolving and quietly read the wrong tree.
+    #[test]
+    fn shipped_env_override_roots_are_byte_identical() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        env::remove_var(REGISTRY_ENV);
+        let registry = load_registry_from_repo().expect("shipped registry must load");
+        // (harness id, the variable it exports, the constant tail below the
+        //  declared layer, whether that tail names a file)
+        let expected: &[(&str, &str, &str, bool)] = &[
+            ("codex", "CODEX_HOME", "sessions", false),
+            ("gemini-cli", "GEMINI_CLI_HOME", "tmp", false),
+            (
+                "cursor",
+                "CURSOR_USER_DIR",
+                "globalStorage/state.vscdb",
+                true,
+            ),
+            ("kimi-code", "KIMI_CODE_HOME", "sessions", false),
+            ("deepseek-harness", "DSH_HOME", "sessions", false),
+        ];
+        for (id, variable, tail, is_file) in expected {
+            let harness = registry
+                .harnesses
+                .iter()
+                .find(|h| h.id == *id)
+                .unwrap_or_else(|| panic!("shipped registry must carry {id}"));
+            for platform in ["macos", "linux", "windows"] {
+                let cell = harness
+                    .paths
+                    .cell_for(platform)
+                    .unwrap_or_else(|| panic!("{id}.{platform} must exist"));
+                assert_eq!(
+                    cell.env_override.as_deref(),
+                    Some(*variable),
+                    "{id}.{platform} must export {variable}"
+                );
+                let base = dir.path().join(format!("{id}-{platform}"));
+                env::set_var(variable, &base);
+                let (root, got_is_file) = root_from_env_override(cell)
+                    .unwrap_or_else(|| panic!("{id}.{platform} must honour its declared layer"));
+                assert_eq!(root, base.join(tail), "{id}.{platform}");
+                assert_eq!(got_is_file, *is_file, "{id}.{platform}");
+                env::remove_var(variable);
+            }
+        }
+        let _ = dir;
     }
 
     #[test]

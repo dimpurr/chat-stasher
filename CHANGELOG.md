@@ -270,6 +270,19 @@ under its own heading below.
   canonical shape — one archive id on two machines — printed "2 conversation(s)"
   and listed the same short id twice, which is the per-machine double count the
   change exists to remove, restated in the sentence that names it.
+- **A harness cell declares the home layer its environment override replaces.**
+  The scanner placed an exported `CODEX_HOME` (or `GEMINI_CLI_HOME`,
+  `CURSOR_USER_DIR`, `KIMI_CODE_HOME`, `DSH_HOME`) by matching the template
+  against a hardcoded list of layers and returning "cannot place" for anything
+  else — a second registry, kept in step by hand. A cell whose override fell
+  outside that list therefore never honoured it while the registry said it did,
+  which is the shape that made every Codex session invisible on Linux and
+  Windows until W285. Each cell now names its layer in `env_override_layer`
+  beside `env_override`, so a harness added to the registry alone resolves —
+  including one whose layer this build has never heard of — and a layer the
+  build cannot look up is no longer silently the template's. Every harness the
+  registry ships resolves to the same root it did before; only `opencode`'s
+  `OPENCODE_DB`, which names a database file rather than a layer, is unchanged.
 
 #### Fixed
 

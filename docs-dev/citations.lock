@@ -977,9 +977,9 @@ crates/chat-stasher/src/runstate.rs:287-335  036d69fcbd03  lines=49
   <- docs-dev/install.md:979  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:289-295  525f5b894e82  lines=7
   <- docs-dev/install.md:1274  :: }
-crates/chat-stasher/src/scanner.rs:1901-2010  a0af3dfb37e8  lines=110
+crates/chat-stasher/src/scanner.rs:1910-2019  a0af3dfb37e8  lines=110
   <- docs-dev/privacy.md:1042  :: /// Additional raw usage files stored under
-crates/chat-stasher/src/scanner.rs:2316-2325  f09925927335  lines=10
+crates/chat-stasher/src/scanner.rs:2325-2334  f09925927335  lines=10
   <- docs-dev/openclaw-scanner.md:32  :: }
 crates/chat-stasher/src/schedule.rs:199-234  31cde3d34520  lines=36
   <- docs-dev/install.md:923  :: /// Resolve the executable that a persistent scheduler may …

@@ -16,6 +16,7 @@ fn write_registry(sandbox: &Path, template: &str) -> PathBuf {
         r#"{{
             "template": "{template}",
             "env_override": "CODEX_HOME",
+            "env_override_layer": ".codex/",
             "format": "jsonl / jsonl.zst",
             "confidence": "source-confirmed",
             "source": "B69 synthetic fixture"

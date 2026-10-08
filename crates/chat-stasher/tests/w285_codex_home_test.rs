@@ -96,7 +96,7 @@ fn plant_codex_registry(home: &Path, template: &str) -> PathBuf {
     let escaped = template.replace('\\', "\\\\").replace('"', "\\\"");
     let cell = format!(
         r#"{{ "template": "{escaped}",
-              "env_override": "CODEX_HOME", "format": "jsonl / jsonl.zst",
+              "env_override": "CODEX_HOME", "env_override_layer": ".codex/", "format": "jsonl / jsonl.zst",
               "confidence": "source-confirmed", "source": "W285 test: the shipped registry's codex cell" }}"#
     );
     let path = home.join("registry.json");

@@ -23,6 +23,7 @@ fn cell() -> serde_json::Value {
     serde_json::json!({
         "template": "~/.dsh/sessions/",
         "env_override": "DSH_HOME",
+        "env_override_layer": ".dsh/",
         "format": "jsonl.zstd",
         "confidence": "measured-locally",
         "session_dir": {"pattern": "*/*", "file": "session.v4.jsonl.zstd"}

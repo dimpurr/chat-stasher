@@ -57,6 +57,7 @@
         "macos": {
           "template": "~/.codex/sessions/",
           "env_override": "CODEX_HOME",
+          "env_override_layer": ".codex/",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
           "source": "known fact (measured on macOS)"
@@ -64,6 +65,7 @@
         "linux": {
           "template": "$HOME/.codex/sessions/",
           "env_override": "CODEX_HOME",
+          "env_override_layer": ".codex/",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
           "source": "codex-rs/utils/home-dir/src/lib.rs find_codex_home()(dirs::home_dir().push(\".codex\"))+ codex-rs/core/src/config/mod.rs:842-844 + session_index.rs:235",
@@ -72,6 +74,7 @@
         "windows": {
           "template": "%USERPROFILE%\\.codex\\sessions\\",
           "env_override": "CODEX_HOME",
+          "env_override_layer": ".codex/",
           "format": "jsonl / jsonl.zst",
           "confidence": "source-confirmed",
           "source": "same as above(dirs::home_dir() on Windows returns %USERPROFILE%, no platform branch)",
@@ -104,6 +107,7 @@
         "macos": {
           "template": "~/.gemini/tmp/<projectId>/chats/",
           "env_override": "GEMINI_CLI_HOME",
+          "env_override_layer": ".gemini/",
           "format": "json / jsonl",
           "session_pattern": "session-*",
           "confidence": "source-confirmed",
@@ -112,6 +116,7 @@
         "linux": {
           "template": "$HOME/.gemini/tmp/<projectId>/chats/",
           "env_override": "GEMINI_CLI_HOME",
+          "env_override_layer": ".gemini/",
           "format": "json / jsonl",
           "session_pattern": "session-*",
           "confidence": "source-confirmed",
@@ -120,6 +125,7 @@
         "windows": {
           "template": "%USERPROFILE%\\.gemini\\tmp\\<projectId>\\chats\\",
           "env_override": "GEMINI_CLI_HOME",
+          "env_override_layer": ".gemini/",
           "format": "json / jsonl",
           "session_pattern": "session-*",
           "confidence": "source-confirmed",
@@ -427,6 +433,7 @@
         "macos": {
           "template": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
           "env_override": "CURSOR_USER_DIR",
+          "env_override_layer": "Cursor/User/",
           "format": "sqlite",
           "confidence": "measured-locally",
           "source": "measured locally (B27 2026-08-17): state.vscdb opened read-only, cursorDiskKV table exists, key LIKE 'composerData:%' count=19, value total bytes 28,291; path source: cursaves community docs(Cursor source not read)",
@@ -445,6 +452,7 @@
         "linux": {
           "template": "$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb",
           "env_override": "CURSOR_USER_DIR",
+          "env_override_layer": "Cursor/User/",
           "format": "sqlite",
           "confidence": "community-claim-unverified",
           "source": "github.com/Callum-Ward/cursaves/docs/how-cursor-stores-chats.md + forum.cursor.com/t/77295"
@@ -452,6 +460,7 @@
         "windows": {
           "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
           "env_override": "CURSOR_USER_DIR",
+          "env_override_layer": "Cursor/User/",
           "format": "sqlite",
           "confidence": "community-claim-unverified",
           "source": "same as above + Electron userData convention(%APPDATA%\\<name>)"
@@ -773,6 +782,7 @@
         "macos": {
           "template": "~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",
           "env_override": "KIMI_CODE_HOME",
+          "env_override_layer": ".kimi-code/",
           "format": "jsonl",
           "session_dir": {
             "pattern": "**/session_*",
@@ -784,6 +794,7 @@
         "linux": {
           "template": "$HOME/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl",
           "env_override": "KIMI_CODE_HOME",
+          "env_override_layer": ".kimi-code/",
           "format": "jsonl",
           "session_dir": {
             "pattern": "**/session_*",
@@ -795,6 +806,7 @@
         "windows": {
           "template": "%USERPROFILE%\\.kimi-code\\sessions\\<workspaceId>\\<sessionId>\\agents\\main\\wire.jsonl",
           "env_override": "KIMI_CODE_HOME",
+          "env_override_layer": ".kimi-code/",
           "format": "jsonl",
           "session_dir": {
             "pattern": "**/session_*",
@@ -840,6 +852,7 @@
         "macos": {
           "template": "~/.dsh/sessions/",
           "env_override": "DSH_HOME",
+          "env_override_layer": ".dsh/",
           "format": "jsonl.zstd",
           "session_dir": {
             "pattern": "*/*",
@@ -851,6 +864,7 @@
         "linux": {
           "template": "$HOME/.dsh/sessions/",
           "env_override": "DSH_HOME",
+          "env_override_layer": ".dsh/",
           "format": "jsonl.zstd",
           "session_dir": {
             "pattern": "*/*",
@@ -862,6 +876,7 @@
         "windows": {
           "template": "%USERPROFILE%\\.dsh\\sessions\\",
           "env_override": "DSH_HOME",
+          "env_override_layer": ".dsh/",
           "format": "jsonl.zstd",
           "session_dir": {
             "pattern": "*/*",

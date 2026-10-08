@@ -99,7 +99,7 @@ fn plant_registry(home: &Path, template: &str) -> PathBuf {
     let escaped = template.replace('\\', "\\\\").replace('"', "\\\"");
     let cell = format!(
         r#"{{ "template": "{escaped}",
-              "env_override": "CURSOR_USER_DIR", "format": "sqlite",
+              "env_override": "CURSOR_USER_DIR", "env_override_layer": "Cursor/User/", "format": "sqlite",
               "confidence": "community-claim-unverified", "source": "B59 test: the shipped registry's cursor cell",
               "sql_table": "cursorDiskKV", "sql_id_column": "key",
               "sql_required_columns": ["key", "value"],

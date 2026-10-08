@@ -243,7 +243,7 @@ fn unread_difference_source_exits_three() {
 fn local_collect_error_exits_one() {
     let root = tempfile::tempdir().unwrap();
     let registry = root.path().join("registry.json");
-    let cell = r#"{"template":"$B75_SOURCE/.codex/sessions/<date>","env_override":"B75_SOURCE","format":"jsonl.zst","confidence":"source-confirmed","source":"B75 synthetic"}"#;
+    let cell = r#"{"template":"$B75_SOURCE/.codex/sessions/<date>","env_override":"B75_SOURCE","env_override_layer":".codex/","format":"jsonl.zst","confidence":"source-confirmed","source":"B75 synthetic"}"#;
     fs::write(
         &registry,
         format!(

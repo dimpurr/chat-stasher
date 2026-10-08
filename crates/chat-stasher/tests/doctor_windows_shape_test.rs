@@ -87,7 +87,7 @@ fn isolate_home(home: &Path) {
 /// the config, which is precisely what this test is about.
 fn write_windows_shaped_registry(home: &Path) -> PathBuf {
     let cursor = r#"{ "template": "%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
-                      "env_override": "CURSOR_USER_DIR", "format": "sqlite",
+                      "env_override": "CURSOR_USER_DIR", "env_override_layer": "Cursor/User/", "format": "sqlite",
                       "confidence": "community-claim-unverified", "source": "B58 test: cursor.windows cell of shipped registry",
                       "sql_table": "cursorDiskKV", "sql_id_column": "key",
                       "sql_required_columns": ["key", "value"],
