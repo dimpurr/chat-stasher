@@ -22,6 +22,14 @@
  *      not take is still not answered from, even though its `fetch` half is.
  *  (d) the fallback that *is* blocked (append succeeds, execution does not) is the
  *      case that must warn rather than pass for working.
+ *
+ * 🔴 All fixtures are synthetic: not one line touches a real platform endpoint,
+ *    no request is sent to deepseek.com, there is no logged-in state and no real
+ *    conversation body or account, and nothing leaves the machine. This file
+ *    injects no http port: `https://chat.deepseek.com` is only the origin string
+ *    of a fake page whose `window` and `document` are built in-process, and no
+ *    conversation body appears here at all — the handshake reads a marker, not a
+ *    response.
  */
 
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
