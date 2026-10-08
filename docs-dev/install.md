@@ -98,7 +98,7 @@ that platform."** The extension has two legs; please read them separately:
   on this platform the route already carries the thread's own id in the path, so a
   body value was never evidence of *which* conversation arrived; reading one would
   file a conversation under a name the route never claimed
-  (`apps/extension/lib/contract.ts:1460-1539`,
+  (`apps/extension/lib/contract.ts:1479-1558`,
   `apps/extension/entrypoints/background.ts:277-310`).
   🔴 Refusing the **name** is not the same as finding no identity, and the two are
   kept apart on purpose: the account-identity guard still reads what the body
