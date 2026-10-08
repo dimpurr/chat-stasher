@@ -252,6 +252,29 @@ under its own heading below.
   repeat. No command stages one yet: this is the archiving half of the takeout
   work, and the command that reads a takeout into the archive is the ticket
   built on top of it.
+- **An official export is read into bundles, and the file itself is kept.**
+  `import <platform> <export> --stage <dir> --inbox <dir>` writes one ordinary
+  `chat-stasher/inbox@3` `web-capture` bundle per conversation into the named
+  inbox, for a later `ingest --inbox` to seal, and stores the whole takeout file
+  byte-exact under `<stage>/import-raw/<platform>/<sha256>` — its own namespace,
+  a sibling of `sessions/`, so it enters no session count. It never seals, never
+  pushes and never reads the config, a destination or a machine identity, and it
+  never moves or rewrites the export, so importing from the same file again is
+  safe. Both `--stage` and `--inbox` are required and neither has a default: the
+  destination is always named on the command line, which is what keeps an import
+  out of a stage nobody pointed it at, and a stage that is not there is refused
+  rather than created. Every platform this build knows is offered by
+  `--platform`, so a platform whose importer is a later slice is a refusal that
+  names it, and nothing is written; only Claude's `conversations.json` has a
+  parser yet. The exit code keeps the kinds of "no" apart: `3` the file was never
+  read to the end, `2` it was read and is not importable (a manifest, invalid
+  JSON, a platform with no parser), `1` it was read and then a conversation or a
+  write failed — a read that was refused is not a zero-conversation success. Two
+  limits are stated rather than hidden: unlike the `export-files/` object above,
+  this namespace is local for now, not yet wired into `push` or readback, and the
+  archive probe that would suppress a body the archive already holds is not wired
+  either, so every conversation currently gets a body and the run prints the
+  probe's own answer.
 
 #### Changed
 
