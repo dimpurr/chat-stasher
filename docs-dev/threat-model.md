@@ -23,7 +23,7 @@ trust the code and treat the sentence as unverified.
 Understanding the roles below requires knowing the path the content takes.
 
 1. A browser extension hooks `fetch` on a fixed list of chat origins and keeps
-   the raw response text (`apps/extension/lib/contract.ts:305-350`, `:880-915`;
+   the raw response text (`apps/extension/lib/contract.ts:305-350`, `:899-934`;
    the `fetch` wrap at `apps/extension/lib/page-hook.ts:880-921`, the
    `response.clone().text()` read at `:880`, and the capture decision at
    `:448-520`).
@@ -354,7 +354,7 @@ looking like success.
 
 Note also that the extension attempts to extract an account identity (user id,
 email, or handle) from response bodies in order to deduplicate across machines
-(`apps/extension/lib/contract.ts:1556-1559`, `:1609-1625`). That value is written
+(`apps/extension/lib/contract.ts:1575-1578`, `:1628-1644`). That value is written
 into the bundle and therefore into your archive
 (`apps/extension/entrypoints/background.ts:257-259`). It never leaves your
 machine, but it means your archive contains your account identifier.
@@ -371,8 +371,8 @@ away the only way to notice the same account twice.
 
 | Value | Where it is written | Comparable across two installs, or two machines? |
 |---|---|---|
-| **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1229-1234`; `crates/chat-stasher/src/inbox.rs:492-497`, `:560-565`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:492-497`) |
-| **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:498-516`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1363-1367`) |
+| **The account id** — the platform's own identifier, extracted from a response body (`identity.level` / `identity.value`) | The sealed shard record in your archive, **verbatim** (`apps/extension/entrypoints/background.ts:257-259`; `apps/extension/lib/contract.ts:1248-1253`; `crates/chat-stasher/src/inbox.rs:492-497`, `:560-565`) | **Yes, and in the clear.** It is the platform's own string — a user id, an email address or a handle — not a digest, so anyone who can read the shard can read it. It is stored but deliberately excluded from the shard's id and dedup key, which stay `platform.sessionId` / `file_sha256` (`crates/chat-stasher/src/inbox.rs:492-497`) |
+| **The install-local account fingerprint** (`account`) | The same sealed shard record, verbatim (`crates/chat-stasher/src/inbox.rs:498-516`) | **No.** Its salt is generated once per install and never leaves that profile, so two installs mint two incomparable digests for one account (`apps/extension/lib/account-fingerprint.ts:156-191`; `apps/extension/lib/contract.ts:1382-1386`) |
 | **The masterkey-derived account key** (`account_key`) | Sealed-shard **metadata** — never the payload bytes — and the host's local coordination database (`crates/chat-stasher/src/inbox.rs:520`, `:929`; `crates/chat-stasher/src/nativehost.rs:1608-1611`) | **Yes — the one value deliberately comparable across every install and every machine of one person**, and the only one that is. Derived from the archive masterkey, so it is comparable exactly where that key is, and nowhere else (below) |
 | **The session id** (`platform.sessionId` / `session_id`) | The shard's identity axis: the id and the dedup key | Not account-scoped at all. No account and no instance take part in it, and the same session seen by two installs is the same key by construction (`crates/chat-stasher/src/inbox.rs:1512-1520`) |
 
@@ -412,10 +412,10 @@ the host discards it after deriving the cross-install key, and the sidecar is
 not part of the payload or export. Because the fingerprint salt is per install,
 fingerprints from two installs or two profiles are
 **incomparable** — a mismatch there is not evidence of a switch
-(`apps/extension/lib/contract.ts:1363-1367`). When no account id is visible the
+(`apps/extension/lib/contract.ts:1382-1386`). When no account id is visible the
 bundle carries an explicit `unknown` with a named reason instead of a value, so
 "we could not tell" is never recorded as a fingerprint
-(`apps/extension/lib/contract.ts:1334-1343`). It is therefore the archive's
+(`apps/extension/lib/contract.ts:1353-1362`). It is therefore the archive's
 answer to "same account?" **inside one install**, and only there: across installs
 and across machines that answer comes from the masterkey-derived key above, and
 substituting one for the other would turn an install boundary into an account
@@ -427,7 +427,7 @@ or Enterprise workspace). A digest of the organization is therefore *equal* for 
 accounts: recording it would not be an unknown but a positive, false assertion that a
 conversation captured under one came from the other — the mis-attribution this mechanism
 exists to make visible. Those bundles carry `organization-is-not-an-account`
-(`apps/extension/lib/contract.ts:1305-1313`) and no salt is created to key a value that is
+(`apps/extension/lib/contract.ts:1324-1332`) and no salt is created to key a value that is
 not produced. The organization remains a fact on the record in the bundle's own `url` and
 as the scope the backfill progress is filed under; what changes is only that it is not
 presented as an account identity. And no lease is taken over an organization for the same
@@ -442,7 +442,7 @@ worker deletes the transient id before a bundle, outbox entry, export, log or na
 message can be made. The fingerprint source records which endpoint supplied it. A
 completed lookup with no id stays `no-account-id-in-capture`; a failed or unreadable
 lookup stays `account-id-unreadable`. When no user id is available, the bundle carries
-an unknown account result (`apps/extension/lib/contract.ts:1302-1313`) rather than
+an unknown account result (`apps/extension/lib/contract.ts:1321-1332`) rather than
 hashing the shared organization.
 
 🔴 W299 · **On ChatGPT the id that is hashed is the `ChatGPT-Account-Id` value on the
@@ -568,8 +568,8 @@ questions we did **not** answer, and which a reader should not assume are safe:
   extensions.
 
 The message contract does carry a token check on the hook's ready message
-(`apps/extension/lib/contract.ts:1205-1215`), and payloads are shape-validated
-before reaching extension APIs (`apps/extension/lib/contract.ts:1114-1193`). Those
+(`apps/extension/lib/contract.ts:1224-1234`), and payloads are shape-validated
+before reaching extension APIs (`apps/extension/lib/contract.ts:1133-1212`). Those
 are input-validation measures against a malicious *page*; **we have not
 established** that they constitute a defence against a malicious *extension*,
 and we do not claim they do.
@@ -699,7 +699,7 @@ random source is unusable; the `browser` name is read from this browser's own
 navigator, and the profile label is the name you typed, with the literal
 `Unnamed profile` standing in until you do
 (`apps/extension/lib/install-identity.ts:1-5`, `:13-23`, `:39-69`, `:114-127`;
-`apps/extension/lib/contract.ts:1394-1397`). The third is not the extension's:
+`apps/extension/lib/contract.ts:1413-1416`). The third is not the extension's:
 `machine` is assigned by the host as it seals a shard, so a bundle cannot claim
 to come from a machine it is not on (`crates/chat-stasher/src/inbox.rs:529`).
 
