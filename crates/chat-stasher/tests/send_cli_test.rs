@@ -759,3 +759,211 @@ fn schedule_pull_configuration_failure_stays_incomplete() {
         assert!(String::from_utf8_lossy(&result.stderr).contains("configuration unavailable"));
     }
 }
+
+fn sealed_capture(stage: &std::path::Path) -> serde_json::Value {
+    let mut pending = vec![stage.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(path).unwrap().map(|e| e.unwrap().path()));
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
+            let bytes = std::fs::read_to_string(path).unwrap();
+            for line in bytes.lines() {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value["kind"] == "harness-file" {
+                    return value;
+                }
+            }
+        }
+    }
+    panic!("synthetic capture missing");
+}
+
+#[test]
+fn explicit_harness_capture_preserves_known_and_unknown_account_at_the_sink() {
+    for account in [Some("synthetic-account"), None, Some("")] {
+        let f = Fixture::new();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        f.producer.apply(&mut command);
+        command
+            .env("CHAT_STASHER_SEND_KEY", &f.token)
+            .env_remove("SYNTHETIC_ACCOUNT")
+            .args([
+                "send",
+                "--path",
+                f.input.to_str().unwrap(),
+                "--session",
+                "synthetic-native",
+                "--harness",
+                "claude-code",
+                "--account-env",
+                "SYNTHETIC_ACCOUNT",
+            ]);
+        if let Some(account) = account {
+            command.env("SYNTHETIC_ACCOUNT", account);
+        }
+        let result = command.output().unwrap();
+        assert_eq!(result.status.code(), Some(0));
+        let known = account.is_some_and(|s| !s.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).contains("account axis unknown"),
+            !known
+        );
+        let stage = f.owner.root().join("synthetic-stage");
+        assert_eq!(pull_cli(&f, &stage).status.code(), Some(3));
+        let record = sealed_capture(&stage);
+        assert_eq!(
+            record["id"],
+            if known {
+                "claude-code.synthetic-account.synthetic-native"
+            } else {
+                "claude-code.synthetic-native"
+            }
+        );
+        assert_eq!(record["fidelity"]["value"], "unknown");
+        assert_eq!(
+            record["dimensions"],
+            serde_json::json!({"surface": ["cloud"]})
+        );
+        assert_eq!(record["producer"]["platform"], "synthetic-cloud");
+        assert_eq!(
+            record["producer"]["sendKeyId"],
+            SendKey::parse(&f.token).unwrap().key_id
+        );
+        if known {
+            assert_eq!(
+                record["identity"],
+                serde_json::json!({"level":"platform_uid", "value":"synthetic-account"})
+            );
+        } else {
+            assert!(record.get("identity").is_none());
+        }
+        assert_eq!(
+            inbox_view(&f, "status")["last_pull"]["missing_account"],
+            usize::from(!known)
+        );
+        assert!(!f.producer.data_home().exists());
+    }
+}
+
+#[test]
+fn harness_selection_refuses_unknown_names_and_unreadable_registry_without_upload() {
+    let f = Fixture::new();
+    for harness in ["synthetic-unregistered", "unknown"] {
+        let result = run(
+            &f.producer,
+            &[
+                "send",
+                "--path",
+                f.input.to_str().unwrap(),
+                "--session",
+                "synthetic-native",
+                "--harness",
+                harness,
+            ],
+            Some(&f.token),
+        );
+        assert_eq!(result.status.code(), Some(1));
+        assert!(!f.inbox.exists());
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    f.producer.apply(&mut command);
+    let result = command
+        .env("CHAT_STASHER_SEND_KEY", &f.token)
+        .env(
+            "CHAT_STASHER_REGISTRY",
+            f.producer.root().join("synthetic-missing-registry"),
+        )
+        .args([
+            "send",
+            "--path",
+            f.input.to_str().unwrap(),
+            "--session",
+            "synthetic-native",
+            "--harness",
+            "claude-code",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    assert!(!f.inbox.exists());
+    assert!(!f.cursor_root().exists());
+}
+
+#[test]
+fn account_selection_requires_harness_and_account_changes_invalidate_resume() {
+    let f = Fixture::new();
+    assert_eq!(
+        run(
+            &f.producer,
+            &[
+                "send",
+                "--path",
+                f.input.to_str().unwrap(),
+                "--session",
+                "synthetic-native",
+                "--account-env",
+                "SYNTHETIC_ACCOUNT"
+            ],
+            Some(&f.token)
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    for (account, expected) in [
+        ("synthetic-account-a", 1),
+        ("synthetic-account-a", 1),
+        ("synthetic-account-b", 2),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        f.producer.apply(&mut command);
+        let result = command
+            .env("CHAT_STASHER_SEND_KEY", &f.token)
+            .env("SYNTHETIC_ACCOUNT", account)
+            .args([
+                "send",
+                "--path",
+                f.input.to_str().unwrap(),
+                "--session",
+                "synthetic-native",
+                "--harness",
+                "claude-code",
+                "--account-env",
+                "SYNTHETIC_ACCOUNT",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(0));
+        assert_eq!(f.objects().len(), expected);
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(account));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(account));
+    }
+}
+
+#[test]
+fn malformed_account_is_refused_without_echoing_or_uploading() {
+    let f = Fixture::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+    f.producer.apply(&mut command);
+    let account = "synthetic.account/private";
+    let result = command
+        .env("CHAT_STASHER_SEND_KEY", &f.token)
+        .env("SYNTHETIC_ACCOUNT", account)
+        .args([
+            "send",
+            "--path",
+            f.input.to_str().unwrap(),
+            "--session",
+            "synthetic-native",
+            "--harness",
+            "claude-code",
+            "--account-env",
+            "SYNTHETIC_ACCOUNT",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains(account));
+    assert!(!f.inbox.exists());
+    assert!(!f.cursor_root().exists());
+}

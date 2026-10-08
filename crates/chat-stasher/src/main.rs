@@ -18309,6 +18309,13 @@ struct SendArgs {
     /// Native session id supplied by the producer; no machine id is inferred.
     #[arg(long)]
     session: String,
+    /// Registry harness id for this explicit file; omitted means unknown.
+    #[arg(long)]
+    harness: Option<String>,
+    /// Environment variable holding a stable platform account UID. Absent or
+    /// empty values leave the account axis unknown; requires --harness.
+    #[arg(long, requires = "harness")]
+    account_env: Option<String>,
     /// Name of the environment variable holding the posting secret.
     #[arg(long, default_value = "CHAT_STASHER_SEND_KEY")]
     key_env: String,
@@ -18336,8 +18343,30 @@ fn cmd_send(args: SendArgs) -> ExitCode {
         }
     };
     let cursor_root = scanner::xdg_state_home().join("chat-stasher/send-cursors");
-    match chat_stasher::send::send_explicit(&args.path, &args.session, &key, now, &cursor_root) {
+    let account = match args.account_env.as_deref().map(std::env::var) {
+        Some(Ok(value)) if !value.is_empty() => Some(value),
+        Some(Err(std::env::VarError::NotUnicode(_))) => {
+            eprintln!("send refused: account environment value invalid");
+            return ExitCode::from(1);
+        }
+        // Missing or empty account data cannot establish a platform UID.
+        _ => None,
+    };
+    let identity = args
+        .harness
+        .map(|harness| chat_stasher::send::CaptureIdentity { harness, account });
+    match chat_stasher::send::send_explicit_identified(
+        &args.path,
+        &args.session,
+        &key,
+        now,
+        &cursor_root,
+        identity.as_ref(),
+    ) {
         Ok(report) => {
+            if report.missing_account {
+                eprintln!("send warning: account axis unknown; capture uses a two-part session id");
+            }
             if !report.cursor_saved {
                 eprintln!("send warning: resume cursor unavailable; retry may resend");
             }
