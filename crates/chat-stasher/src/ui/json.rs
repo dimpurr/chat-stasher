@@ -77,6 +77,7 @@ pub(super) fn json_overview(data: &UiData) -> String {
             "time_unknown": in_view.iter().filter(|s| !s.has_known_time() && !s.time_source.is_no_conversation_content()).count(),
         },
         "machines": machines,
+        "remote_inboxes": super::remote_inboxes::json(&data.remote_inboxes),
         "machines_without_activity_index": data.machines_without_index,
         // R10: which copies this one dashboard was merged from, and the two
         // readings of "how many sessions" that a merged view has to keep

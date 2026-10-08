@@ -861,9 +861,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:8481-8485`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:8482-8486`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:8454-8461`).
+  (`crates/chat-stasher/src/main.rs:8455-8462`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -874,7 +874,7 @@ Two enforcement points exist in the code:
   that "no repository at that location" has two opposite causes and the
   filesystem cannot distinguish them
   (`crates/chat-stasher/src/destinit.rs:57-72`). The user-facing text says so in
-  as many words (`crates/chat-stasher/src/main.rs:6246-6254`).
+  as many words (`crates/chat-stasher/src/main.rs:6247-6255`).
 
 This is an integrity property, not a confidentiality one. It does not protect
 your data from anyone; it protects you from believing you have a backup you do
@@ -921,7 +921,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:478-481,8977-9137`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:478-481,8978-9138`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:739-825`) — see exposure 5

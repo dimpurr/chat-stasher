@@ -60,6 +60,11 @@ content-type: application/json; charset=utf-8
     "m-3"
   ],
   "payload_loaded": false,
+  "remote_inboxes": {
+    "complete": false,
+    "inboxes": [],
+    "state": "unknown"
+  },
   "schema_version": 1,
   "sessions_distinct": 4,
   "sessions_raw": 4,

@@ -304,6 +304,10 @@ impl ContentSource for Body {
 
 fn data_for(harness: &str) -> UiData {
     UiData {
+        remote_inboxes: chat_stasher::inbox_status::Report {
+            state: "unknown",
+            inboxes: Vec::new(),
+        },
         destination_label: "w190-destination".into(),
         // One destination, read in full: the shape every page in this file is
         // about. The merged fields carry their single-destination values, which
