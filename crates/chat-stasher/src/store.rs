@@ -529,7 +529,13 @@ impl BackupStore {
         // newest snapshot per machine, an empty snapshot made the machine look as if it
         // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
         // only when the stage holds neither sealed shards nor machine metadata (ADR-022).
-        if stage_shards == 0 && !crate::metahash::has_meta_files(stage_root, &self.machine)? {
+        // A machine-log generation counts as content too (ADR-053 D4): a
+        // machine whose only captured product is its harness input log is not
+        // an empty stage, and refusing here would silently drop it.
+        if stage_shards == 0
+            && !crate::metahash::has_meta_files(stage_root, &self.machine)?
+            && !crate::metahash::has_machine_log_files(stage_root, &self.machine)?
+        {
             anyhow::bail!(
                 "refusing empty snapshot: stage contains no sealed shards; collect or restore the stage first"
             );
@@ -1205,8 +1211,15 @@ pub fn concat_shards(
     machine: &str,
     session_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    let mut entries = sealed_shard_entries(&dir)?;
+    concat_shards_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// Concatenated bytes of every sealed shard in one shard directory (seq
+/// order). The directory is supplied rather than derived, so a shard set that
+/// does not live under `sessions/` — a machine log (ADR-053 D4) — is read by
+/// exactly the same code as a session.
+pub fn concat_shards_in_dir(dir: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut entries = sealed_shard_entries(dir)?;
     entries.sort_by_key(|(seq, _)| *seq);
     let mut all = Vec::new();
     for (_, path) in entries {
@@ -1226,6 +1239,45 @@ fn concat_sha_of(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::
 /// `<stage>/sessions/<machine>/<session_id>` — the partitioned directory.
 pub fn session_shard_dir(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
     stage_root.join(SESSIONS_DIR).join(machine).join(session_id)
+}
+
+/// Stage namespace of the per-machine harness logs (ADR-053 D4). A sibling of
+/// `sessions/` and `ext-status/`, never inside either: the session tree is
+/// walked by session readers and counters, and `ext-status/` is documented as
+/// metadata-only while a machine log is body-tier (ADR-053 D5).
+pub const MACHINE_LOGS_DIR: &str = "machine-logs";
+
+/// `<stage>/machine-logs/<machine>/<harness>/<log_id>` — the directory that
+/// holds one machine log's sealed generations.
+///
+/// `<harness>` is the registry harness id and `<log_id>` the log's declared id
+/// (`claude-code` / `history`), both validated by the scanner before they get
+/// here: they are path components, so an id carrying a separator would place
+/// the write outside this namespace.
+pub fn machine_log_shard_dir(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+) -> PathBuf {
+    stage_root
+        .join(MACHINE_LOGS_DIR)
+        .join(machine)
+        .join(harness)
+        .join(log_id)
+}
+
+/// Sealed generations of one machine log, oldest first.
+pub fn machine_log_shard_entries(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+) -> anyhow::Result<Vec<(u64, PathBuf)>> {
+    let mut entries =
+        sealed_shard_entries(&machine_log_shard_dir(stage_root, machine, harness, log_id))?;
+    entries.sort_by_key(|(seq, _)| *seq);
+    Ok(entries)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1275,21 +1327,29 @@ pub fn stage_file_sha256s(stage_root: &Path) -> anyhow::Result<BTreeSet<String>>
 /// Machine values are represented by full SHA-256 digests in the diagnostic,
 /// never by hostnames.
 pub fn validate_stage_machines(stage_root: &Path, expected: &str) -> anyhow::Result<()> {
-    let sessions_root = stage_root.join(SESSIONS_DIR);
-    let machines = match fs::read_dir(&sessions_root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
-    };
     let mut unexpected = Vec::new();
-    for entry in machines {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name != expected {
-            unexpected.push(name);
+    // Both machine-keyed namespaces are checked: the session tree and the
+    // machine-log tree (ADR-053 D4). A machine log carries what the user typed,
+    // so pushing a stage that holds another machine's machine logs would
+    // archive that machine's prompts under this snapshot — the same failure
+    // this guard already refuses for sessions.
+    for root in [SESSIONS_DIR, MACHINE_LOGS_DIR] {
+        let machines = match fs::read_dir(stage_root.join(root)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", stage_root.join(root).display()))
+            }
+        };
+        for entry in machines {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != expected {
+                unexpected.push(name);
+            }
         }
     }
     if unexpected.is_empty() {
@@ -1358,8 +1418,16 @@ pub fn shard_path_with_cap(
     seq: u64,
     bucket_cap: usize,
 ) -> PathBuf {
-    session_shard_dir(stage_root, machine, session_id)
-        .join(shard_bucket_name(seq, bucket_cap))
+    shard_path_in_dir(
+        &session_shard_dir(stage_root, machine, session_id),
+        seq,
+        bucket_cap,
+    )
+}
+
+/// Absolute path of shard `seq` inside an already-resolved shard directory.
+pub fn shard_path_in_dir(dir: &Path, seq: u64, bucket_cap: usize) -> PathBuf {
+    dir.join(shard_bucket_name(seq, bucket_cap))
         .join(shard_filename(seq))
 }
 
@@ -1423,7 +1491,12 @@ impl ShardSeqError {
 
 /// Path of the shard sequence counter for one (machine, session).
 pub fn shard_seq_file(stage_root: &Path, machine: &str, session_id: &str) -> PathBuf {
-    session_shard_dir(stage_root, machine, session_id).join(SHARD_SEQ_FILE)
+    shard_seq_file_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// Path of the shard sequence counter of an already-resolved shard directory.
+pub fn shard_seq_file_in_dir(dir: &Path) -> PathBuf {
+    dir.join(SHARD_SEQ_FILE)
 }
 
 /// Decide whether a `NotFound` from reading the shard sequence file really
@@ -1472,7 +1545,13 @@ fn confirm_shard_seq_absence(path: &Path) -> Result<(), std::io::Error> {
 /// file, which Windows folds into the same error code — is `Unusable` and must
 /// be repaired, not treated as zero.
 pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) -> ShardSeqState {
-    let path = shard_seq_file(stage_root, machine, session_id);
+    load_shard_seq_state_in_dir(&shard_seq_file(stage_root, machine, session_id))
+}
+
+/// [`load_shard_seq_state`] for an already-resolved counter path. The counter
+/// and the shards it numbers always live in one directory, so a shard set
+/// outside `sessions/` reads its counter through the same classification.
+pub fn load_shard_seq_state_in_dir(path: &Path) -> ShardSeqState {
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1509,17 +1588,16 @@ pub fn load_shard_seq_state(stage_root: &Path, machine: &str, session_id: &str) 
     }
 }
 
-/// Highest shard sequence already present in the session dir (0 when none).
+/// Highest shard sequence already present in one shard directory (0 when none).
 ///
 /// Seeds the counter on first run so a pre-existing stage migrates seamlessly:
 /// an existing stage already has shards, so the counter must never start at 0.
-fn derive_shard_high_water(
-    stage_root: &Path,
-    machine: &str,
-    session_id: &str,
-) -> anyhow::Result<u64> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    Ok(sealed_shard_entries(&dir)?
+/// The directory is supplied rather than derived, so a machine log's
+/// generations (ADR-053 D4) are numbered by exactly the session rule: its own
+/// directory, its own counter, and a stage reclaim that removed already
+/// archived generations must not reset the next sequence (ADR-020 Phase 2).
+pub fn derive_shard_high_water_in_dir(dir: &Path) -> anyhow::Result<u64> {
+    Ok(sealed_shard_entries(dir)?
         .into_iter()
         .map(|(seq, _)| seq)
         .max()
@@ -1536,13 +1614,7 @@ fn derive_shard_high_water(
 /// high-watermark is never behind the shard set it governs — a stage reclaim
 /// that deletes shard files can therefore never reset the next sequence
 /// (ADR-020 Phase 2).
-fn persist_shard_seq(
-    stage_root: &Path,
-    machine: &str,
-    session_id: &str,
-    seq: u64,
-) -> anyhow::Result<()> {
-    let path = shard_seq_file(stage_root, machine, session_id);
+fn persist_shard_seq_in_dir(path: &Path, seq: u64) -> anyhow::Result<()> {
     let parent = path.parent().expect("shard seq file has a parent");
     fs::create_dir_all(parent)
         .with_context(|| format!("create shard seq directory {}", parent.display()))?;
@@ -1577,13 +1649,20 @@ fn persist_shard_seq(
 /// On first run the counter does not exist yet, so the initial high-watermark
 /// is derived from the shards already on disk (seamless migration — never 0).
 pub fn next_shard_seq(stage_root: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
-    let high_water = match load_shard_seq_state(stage_root, machine, session_id) {
-        ShardSeqState::Missing => derive_shard_high_water(stage_root, machine, session_id)?,
+    next_shard_seq_in_dir(&session_shard_dir(stage_root, machine, session_id))
+}
+
+/// [`next_shard_seq`] for an already-resolved shard directory, so a machine
+/// log's generations share the session rule exactly.
+pub fn next_shard_seq_in_dir(dir: &Path) -> anyhow::Result<u64> {
+    let counter = shard_seq_file_in_dir(dir);
+    let high_water = match load_shard_seq_state_in_dir(&counter) {
+        ShardSeqState::Missing => derive_shard_high_water_in_dir(dir)?,
         ShardSeqState::Loaded(seq) => seq,
         ShardSeqState::Unusable(error) => return Err(error.into_anyhow()),
     };
     let next = high_water + 1;
-    persist_shard_seq(stage_root, machine, session_id, next)?;
+    persist_shard_seq_in_dir(&counter, next)?;
     Ok(next)
 }
 
@@ -1663,11 +1742,7 @@ fn write_sealed_shard_bytes_with_repeat_policy(
     bucket_cap: usize,
     allow_exact_repeat: bool,
 ) -> anyhow::Result<String> {
-    let mut raw = Vec::new();
-    for line in lines {
-        raw.extend_from_slice(line);
-        raw.push(b'\n');
-    }
+    let raw = seal_framed_lines(lines);
     write_sealed_shard_raw_with_policy(
         writer,
         stage_root,
@@ -1677,6 +1752,59 @@ fn write_sealed_shard_bytes_with_repeat_policy(
         bucket_cap,
         allow_exact_repeat,
     )
+}
+
+/// Frame lines the way every sealed shard frames them: each item followed by
+/// exactly one newline.
+fn seal_framed_lines(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for line in lines {
+        raw.extend_from_slice(line);
+        raw.push(b'\n');
+    }
+    raw
+}
+
+/// Seal one machine log's newly captured lines under the machine-log namespace
+/// (ADR-053 D2/D4).
+///
+/// The same writer, the same bucket cap and the same per-directory sequence
+/// counter as a session shard — the directory is the only difference, which is
+/// what "sealed with the existing shard writer" means. `allow_exact_repeat`
+/// carries the JSONL meaning it has for sessions: bytes appended after a
+/// validated prefix hash may legitimately repeat earlier bytes, and they are
+/// still sealed rather than collapsed.
+///
+/// Deliberately **not** routed through `audit_store::record_collected_shard`:
+/// that join projects a session's *messages* into the audit sidecar, and a
+/// machine log has no assistant side to project — only what the user typed
+/// (ADR-053 D1/D6). Fidelity for these captures is stamped next to the shard
+/// by the collector (`machine-log@1`, `source: captured`, `value: raw`), which
+/// is ADR-051's capture-time stamp, not a declared default.
+pub fn write_sealed_machine_log_shard(
+    stage_root: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+    lines: &[Vec<u8>],
+    bucket_cap: usize,
+    allow_exact_repeat: bool,
+) -> anyhow::Result<String> {
+    assert_stage_writer_audited(StageWriter::Collect)?;
+    let raw = seal_framed_lines(lines);
+    let dir = machine_log_shard_dir(stage_root, machine, harness, log_id);
+    let written = crate::shard_writer::write_shard_in_dir(
+        &dir,
+        bucket_cap,
+        crate::shard_writer::ShardSource::Store {
+            raw: &raw,
+            writer: StageWriter::Collect,
+            allow_exact_repeat,
+        },
+        &[harness, log_id],
+        stage_root,
+    )?;
+    Ok(written.filename())
 }
 
 /// Install `raw` verbatim as the next sealed shard — no line framing is added.
@@ -1737,8 +1865,15 @@ pub fn find_duplicate_shard(
     session_id: &str,
     raw: &[u8],
 ) -> anyhow::Result<Option<String>> {
-    let dir = session_shard_dir(stage_root, machine, session_id);
-    let mut existing = sealed_shard_entries(&dir)?;
+    find_duplicate_shard_in_dir(&session_shard_dir(stage_root, machine, session_id), raw)
+}
+
+/// [`find_duplicate_shard`] inside an already-resolved shard directory. A
+/// machine log's captured bytes are deduplicated by the same rule: a capture
+/// that repeats an earlier generation byte-for-byte is only idempotent for
+/// callers that say so (see `allow_exact_repeat` in the writer).
+pub fn find_duplicate_shard_in_dir(dir: &Path, raw: &[u8]) -> anyhow::Result<Option<String>> {
+    let mut existing = sealed_shard_entries(dir)?;
     existing.sort_by_key(|(seq, _)| *seq);
     let wanted_hash = Sha256::digest(raw);
     for (seq, path) in existing {

@@ -31,6 +31,34 @@
           "source": "https://code.claude.com/docs/en/claude-directory(original text: ~/.claude -> %USERPROFILE%\\.claude)+ anthropics/claude-code#80683 #84354"
         }
       },
+      "machine_logs": [
+        {
+          "id": "history",
+          "role": "machine-log",
+          "paths": {
+            "macos": {
+              "template": "~/.claude/history.jsonl",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "measured 2026-10-06 (m1max, m3; counts only): per-typed-line JSON {display, pastedContents, timestamp ms, project, sessionId}"
+            },
+            "linux": {
+              "template": "$HOME/.claude/history.jsonl",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "unverified: no Linux install measured"
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.claude\\history.jsonl",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "unverified: no Windows install measured"
+            }
+          },
+          "env_override": "CLAUDE_CONFIG_DIR",
+          "notes": "A per-machine input log, NOT sessions: captured raw and incrementally by the JSONL prefix-hash arm; stored under machine-logs/<machine>/<harness>/<log-id>/, outside session lists, counts and coverage; the read side derives a user-prompts-only view for transcript-less sessionIds (ADR-053). rotation/truncation unverified; head rewrites keep prior sealed generations and are recorded as an observation (ADR-053 D3). cleanupPeriodDays sweeps it only when the HIPAA configuration applies, `claude purge` rewrites matching lines (deletes the file outright with --all) and CLAUDE_CODE_SKIP_PROMPT_HISTORY suppresses writes (official directory docs, checked 2026-10-08), so a head rewrite is reachable and is handled by D3. dimensions: none (not a session; no 4D projection)."
+        }
+      ],
       "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days.",
       "seal_policy": "rename",
       "seal_source": "A9 measured(macOS): 201 sample points across real write windows(172210->194561 B, 11 size changes)all lsof=0 => reopens by path each time, rename seal is safe",

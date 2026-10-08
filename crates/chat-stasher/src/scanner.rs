@@ -277,6 +277,14 @@ pub struct RegistryHarness {
     pub product_group: Option<String>,
     #[serde(default)]
     pub paths: RegistryPaths,
+    /// Per-machine input logs this harness's own local app keeps (ADR-053 D1):
+    /// "what the user typed on this machine", which is a different product
+    /// kind from a session transcript. Declared on the same entry, so the
+    /// registry stays the single source of truth (ADR-048 D2) and there is no
+    /// new harness id and no second registry. Missing key deserializes to an
+    /// empty list: a harness that declares no machine log has none.
+    #[serde(default)]
+    pub machine_logs: Vec<RegistryMachineLog>,
     /// Additional compatibility roots scanned alongside the primary source.
     /// Hermes uses this for its pre-database session files.
     #[serde(default)]
@@ -305,6 +313,40 @@ pub struct RegistryHarness {
     /// so an uncredited harness can never be rename-sealed.
     #[serde(default)]
     pub seal_source: String,
+}
+
+/// One declared machine log: an append-only per-machine file a harness's local
+/// app writes, with no native session id and no session id ever minted for it
+/// (ADR-053 D1). `role` is `machine-log` for every entry of the kind and exists
+/// so the vocabulary is declared in the data rather than implied by the key
+/// name; consumers split a harness entry into its session products (`paths`,
+/// `source_roots`) and its machine logs (`machine_logs`), and only sessions
+/// feed session machinery (ADR-053 D4/D7).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryMachineLog {
+    /// Stable log id, unique inside one harness entry — `history` for Claude
+    /// Code. It is a path component of the stage namespace
+    /// (`machine-logs/<machine>/<harness>/<log-id>/`), so it is validated
+    /// before use: an id with a separator or a `..` would place the write
+    /// outside the namespace.
+    pub id: String,
+    /// Product role. `machine-log` today; anything else is not a machine log
+    /// this build collects.
+    #[serde(default)]
+    pub role: String,
+    /// Per-platform cell of the log file itself. Unlike a session cell this
+    /// names one **file**, not a directory tree.
+    #[serde(default)]
+    pub paths: RegistryPaths,
+    /// Environment variable that relocates the harness's config base, and with
+    /// it this file (ADR-053 D7 / F14 / OQ3). For Claude Code's
+    /// `CLAUDE_CONFIG_DIR` the official directory page states that every
+    /// `~/.claude` path lives under the named directory instead; the log is
+    /// then `<value>/<file name of the platform template>`.
+    #[serde(default)]
+    pub env_override: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -653,6 +695,48 @@ pub struct ScanReport {
     pub indeterminate_roots: Vec<PathBuf>,
     /// Per-harness fate, in registry order.
     pub probes: Vec<HarnessProbe>,
+    /// Declared machine logs that exist on this machine (ADR-053 D1/D7), in
+    /// registry order. A **separate** vector from [`Self::records`] on purpose:
+    /// a machine log is not a session, so it never enters session lists,
+    /// session counts, coverage or `machine_recall` (D4/D6), and no session
+    /// walker can trip over it by construction. Discovery is home-keyed and
+    /// never matches a session path template.
+    pub machine_logs: Vec<MachineLogRecord>,
+    /// Machine logs the registry declares that this pass never looked at —
+    /// no cell for this platform, a cell whose confidence is `unascertained`,
+    /// or a template that does not resolve. B82's rule: a declared source that
+    /// was not looked at is an unknown, never an empty one.
+    pub machine_logs_unlooked: usize,
+    /// Machine logs that were looked at but whose shape could not be
+    /// established (permission/I/O error, or a directory where the registry
+    /// declares a file). Distinct from [`Self::machine_logs_unlooked`] for the
+    /// same reason `indeterminate_roots` is distinct from `missing_roots`.
+    pub machine_logs_indeterminate: usize,
+    /// Why each [`Self::machine_logs_unlooked`] log was not looked at, in the
+    /// scanner's own fixed vocabulary (never a path, never a hostname). The
+    /// reasons are a closed set of registry facts — an `unascertained` cell, no
+    /// cell for this platform, an unresolvable template — so a reader can tell
+    /// a policy decision from an oversight.
+    pub machine_logs_unlooked_reasons: Vec<&'static str>,
+}
+
+/// One declared machine log file that exists on this machine.
+///
+/// It carries no session id by construction: the canonical
+/// `<source>.<machine>.<native-id>` grammar stays reserved for sessions
+/// (ADR-002), so what identifies a machine log is the `(machine, harness,
+/// log_id)` triple — which is exactly the stage namespace it is sealed under
+/// (ADR-053 D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLogRecord {
+    /// Registry harness id that declares the log (`claude-code`).
+    pub harness: String,
+    /// The log's own declared id (`history`).
+    pub log_id: String,
+    /// Absolute path of the log file, as resolved on this machine.
+    pub absolute_path: PathBuf,
+    /// File size in bytes at scan time.
+    pub byte_size: u64,
 }
 
 /// A harness probe recognised sessions, but the scanner produced fewer
@@ -978,7 +1062,139 @@ pub fn scan_with_registry_and_machine(
         }
         report.probes.push(probe);
     }
+
+    // Machine logs are discovered last and kept out of `records` entirely
+    // (ADR-053 D4): what is scanned here is the harness's per-machine input
+    // log, a different product kind from a session transcript. The session
+    // loop above never sees it, so no session count, coverage number or
+    // `machine_recall` bucket can move because a machine log exists.
+    let (machine_logs, unlooked, indeterminate) = scan_machine_logs(registry, platform);
+    report.machine_logs_unlooked = unlooked.len();
+    report.machine_logs_unlooked_reasons = unlooked;
+    report.machine_logs = machine_logs;
+    report.machine_logs_indeterminate = indeterminate;
     Ok(report)
+}
+
+/// Where a declared machine log resolves to, or why it was not looked at.
+enum MachineLogResolution {
+    /// The declared file path on this platform.
+    Path(PathBuf),
+    /// Not looked at, with the fixed metadata reason (never a path).
+    Unlooked(&'static str),
+}
+
+/// Resolve one declared machine log for `platform`.
+///
+/// The three reasons a declared log is *not* looked at are the scanner's
+/// existing rules applied to a file source: no cell for this platform, a cell
+/// whose confidence is `unascertained` (the registry's own "nobody has
+/// measured this" marker), and a template that does not resolve to a concrete
+/// file. A machine log is one file, so a template that carries a placeholder
+/// (`<…>`) or names a directory is not a machine log and is not guessed at.
+fn resolve_machine_log(entry: &RegistryMachineLog, platform: &str) -> MachineLogResolution {
+    if entry.role != "machine-log" {
+        return MachineLogResolution::Unlooked("role is not machine-log");
+    }
+    if !safe_log_component(&entry.id) {
+        return MachineLogResolution::Unlooked("log id is not a usable path component");
+    }
+    let Some(cell) = entry.paths.cell_for(platform) else {
+        return MachineLogResolution::Unlooked("no registry cell for this platform");
+    };
+    if cell.confidence == "unascertained" {
+        return MachineLogResolution::Unlooked("registry cell confidence is unascertained");
+    }
+    // The env override names the harness's config base, which the platform
+    // template's own leading directory stands for (`~/.claude`). The file name
+    // is what the template contributes inside it.
+    let override_variable = cell
+        .env_override
+        .as_deref()
+        .or(entry.env_override.as_deref());
+    if let Some(variable) = override_variable {
+        if let Some(value) = env::var_os(variable).filter(|value| !value.is_empty()) {
+            let Some(name) = template_file_name(&cell.template) else {
+                return MachineLogResolution::Unlooked(
+                    "template does not name a file to place under the override",
+                );
+            };
+            return MachineLogResolution::Path(PathBuf::from(value).join(name));
+        }
+    }
+    match static_prefix_root(&cell.template) {
+        Some((path, true)) => MachineLogResolution::Path(path),
+        Some((_, false)) => {
+            MachineLogResolution::Unlooked("template names a directory, not a file")
+        }
+        None => MachineLogResolution::Unlooked("template is not resolvable on this platform"),
+    }
+}
+
+/// Last component of a platform template, i.e. the file's own name. `None`
+/// for a template that ends in a separator or carries a placeholder.
+fn template_file_name(template: &str) -> Option<String> {
+    if template.contains('<') {
+        return None;
+    }
+    let name = template
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()?;
+    if name.is_empty() || name.starts_with('.') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// A log id is used as one path component of the stage namespace, so anything
+/// that could address a different component (a separator, `..`, an empty
+/// name) is refused rather than sanitized — a sanitized id would silently
+/// seal a different log's content into a directory that already means
+/// something else.
+fn safe_log_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Walk every declared machine log and hand back the ones that exist, plus the
+/// two "not read" tallies. Nothing here reads a byte of any file.
+fn scan_machine_logs(
+    registry: &HarnessRegistry,
+    platform: &str,
+) -> (Vec<MachineLogRecord>, Vec<&'static str>, usize) {
+    let mut records = Vec::new();
+    let mut unlooked: Vec<&'static str> = Vec::new();
+    let mut indeterminate = 0usize;
+    for harness in &registry.harnesses {
+        for entry in &harness.machine_logs {
+            let path = match resolve_machine_log(entry, platform) {
+                MachineLogResolution::Path(path) => path,
+                MachineLogResolution::Unlooked(reason) => {
+                    unlooked.push(reason);
+                    continue;
+                }
+            };
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => records.push(MachineLogRecord {
+                    harness: harness.id.clone(),
+                    log_id: entry.id.clone(),
+                    absolute_path: path,
+                    byte_size: metadata.len(),
+                }),
+                // Measured absence: the declared file is genuinely not here.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // A directory where a file is declared, or a stat we could not
+                // take: the log may hold anything, so this is not "absent".
+                Ok(_) | Err(_) => indeterminate += 1,
+            }
+        }
+    }
+    (records, unlooked, indeterminate)
 }
 
 fn scan_hermes_legacy(

@@ -75,6 +75,14 @@ that document is the honest one.
   window. See [Known weaknesses](#known-weaknesses). Separately, `export --out`
   writes archived sessions back out decrypted into a directory you name; that
   copy is yours to delete and nothing of ours moves it on (section 9).
+- **The CLI also reads the harness's own prompt-history file.** Claude Code keeps
+  `~/.claude/history.jsonl` (relocated by `CLAUDE_CONFIG_DIR`) — what you typed
+  on this machine, with a timestamp, the project path and any pasted text — and
+  `collect` seals it into the same encrypted archive as a session, under
+  `machine-logs/<machine>/claude-code/history/`. It is captured whole
+  (slash-command lines such as `/usage` included) and it is **body tier**: your
+  words, not metadata. It is never counted as a session and never enters the
+  session counts a `status` line or a coverage page prints. See section 3.
 - **Contact: `work@team.iopho.com`.**
 
 ## Contents
@@ -493,7 +501,7 @@ The activity index carries these fields into the archive, and `search --json`
 returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
-`crates/chat-stasher/src/collect.rs:1253-1266`,
+`crates/chat-stasher/src/collect.rs:1439-1452`,
 `crates/chat-stasher/src/main.rs:2807-2815,2891-2899`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
@@ -532,6 +540,57 @@ moment, not a computed state: a session the source marked archived is indexed
 which no source states. The sealed export itself did not gain a byte; what is
 new is that these three fields now also sit on the index line beside it, as
 plaintext session metadata like the paths and ids above.
+
+### A harness's own prompt-history file (`machine-logs/`)
+
+Besides session transcripts, `collect` reads one file the harness keeps for
+itself: Claude Code's `~/.claude/history.jsonl` (relocated by
+`CLAUDE_CONFIG_DIR`, which the official `.claude`-directory documentation says
+moves every `~/.claude` path). It is declared in the path registry as a
+**machine log** — a per-machine input log, not a session: it has no native
+session id, no session id is minted for it, and it is stored in a namespace of
+its own, `<stage>/machine-logs/<machine>/<harness>/<log-id>/`, beside
+`sessions/` and `ext-status/` rather than inside either
+(`crates/chat-stasher/data/harness-registry-v1.json`;
+`crates/chat-stasher/src/scanner.rs`; `crates/chat-stasher/src/collect.rs`;
+`crates/chat-stasher/src/store.rs`).
+
+**What it holds, and what tier it is.** One JSON object per line you typed, with
+the text you typed, any pasted content, a millisecond timestamp, the working
+directory and the session id. That is **your prose**: the capture is body tier,
+exactly like a session transcript. It is sealed into the encrypted archive like
+any other capture, and its plaintext copies are the same ones disclosed above —
+the local stage, a triggered `export --out`, and the destination-scoped index
+cache — plus the harness's own file, which we only read
+(`crates/chat-stasher/src/collect.rs`). Nothing is filtered out at capture, so
+the slash-command lines (the `/usage` a usage poller wrote 10,000+ times on one
+machine) are sealed too; hiding them is a read-side default, and the raw copy
+keeps them (`crates/chat-stasher/src/collect.rs`).
+
+**What is *not* in the metadata-only tier.** No prompt text and no pasted text
+reach an activity-index row, an `ext-status` file, the snapshot cache, stage
+metadata or the machine-log counters. The only machine-log facts allowed outside
+the sealed bodies are counts and fixed flags — lines, generations, bytes, and
+whether a pass started a new base — and the capture stamp written next to the
+sealed generations holds digests, counts, timestamps and an enum value, never a
+prompt (`crates/chat-stasher/src/collect.rs`; the metadata-only statement about
+`ext-status/<machine>/<install_id>.json` above is unaffected, which is why the
+machine logs are a sibling namespace and not a subdirectory of it). A machine
+log is **never** reported as an archived session: it appears in no session list,
+no session count, no coverage number and no `machine_recall` bucket, and a
+`doctor` or `run-once` line reports it separately
+(`crates/chat-stasher/src/metahash.rs`; `crates/chat-stasher/src/doctor.rs`;
+`crates/chat-stasher/src/main.rs`).
+
+**What happens when the file changes underneath us.** We never rename, move or
+truncate it, and the read is incremental against a stored prefix hash. If the
+harness rewrites or truncates it — `claude purge` filters matching lines, and
+Claude Code does not sweep this file by age unless the HIPAA configuration
+applies — the next pass re-reads the whole current file as a new generation and
+records that it did, while **every previously sealed generation stays in the
+archive, byte-identical and still extractable**. The only deletion mechanism in
+this project remains the user-initiated purge, which this feature does not
+special-case (`crates/chat-stasher/src/collect.rs`).
 
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
@@ -743,7 +802,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:326-427,1954-1956,1996-2006`; `crates/chat-stasher/src/main.rs:8170-8175`).
+kept on your machine (`crates/chat-stasher/src/store.rs:326-427,2089-2091,2131-2141`; `crates/chat-stasher/src/main.rs:8217-8222`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1039,7 +1098,7 @@ Retention on **your** machine is under your control:
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:735-821`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1901-2010`; `crates/chat-stasher/src/collect.rs:2156-2196`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:195-1423`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:2117-2226`; `crates/chat-stasher/src/collect.rs:2894-2934`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:195-1423`). Selective per-conversation deletion inside an archive is not implemented. |
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
 lives, so uninstalling also deletes the captures *that install* had not been
@@ -1081,16 +1140,18 @@ profile on an encrypted volume.
 running as you can read the plaintext bundles in the extension's outbox, the
 staged shards, your config, and — with your archive — decrypt everything. On a
 single-user desktop this is the normal situation; on a shared machine it is the
-dominant risk.
+dominant risk. This includes the harness's own prompt-history file described in
+section 3: it was already readable by anything running as you, and the sealed
+copy `collect` makes of it is plaintext in the stage exactly like a session's.
 
 **3. A master key file is the only key to the repository it opens, and losing it
 is unrecoverable.** There is
 no escrow, no recovery code, no maintainer-held copy, and no password reset — by
 design, because any of those would mean someone other than you could open your
-archive (`crates/chat-stasher/src/store.rs:1954-1956`). The key file
+archive (`crates/chat-stasher/src/store.rs:2089-2091`). The key file
 is written owner-only (`0600`) on Unix; on platforms without Unix modes it
 inherits whatever the filesystem gives it
-(`crates/chat-stasher/src/store.rs:1996-2066`).
+(`crates/chat-stasher/src/store.rs:2131-2201`).
 
 There is one key file per repository — `rustic_key_file` for the local archive,
 `key_file` per destination, defaulting to
@@ -1098,7 +1159,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:8052-8057`).
+(`crates/chat-stasher/src/main.rs:8099-8104`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin

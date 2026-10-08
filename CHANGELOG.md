@@ -253,6 +253,29 @@ under its own heading below.
   work, and the command that reads a takeout into the archive is the ticket
   built on top of it.
 
+- **Per-machine harness logs: Claude Code's prompt history is captured, and it
+  is not counted as sessions.** `collect` reads the harness's own
+  `~/.claude/history.jsonl` (relocated by `CLAUDE_CONFIG_DIR`, which the
+  official `.claude`-directory documentation says moves every `~/.claude`
+  path) — what you typed on this machine, with its timestamp, project path and
+  pasted text — and seals it with the same incremental JSONL prefix-hash arm a
+  session transcript uses, into a namespace of its own,
+  `machine-logs/<machine>/<harness>/<log-id>/`. It is declared in the path
+  registry as a `machine_logs` role on the `claude-code` entry, so the registry
+  stays the single source of truth, and the entry's session path cells are
+  untouched. The capture is **body tier**: nothing is filtered (slash-command
+  lines such as `/usage` are sealed too) and prompt text never reaches a
+  metadata-only artifact — a capture record beside the sealed generations
+  carries counts, digests and a `raw` capture-time fidelity stamp. A machine log
+  is not a session: it appears in no session list, session count, coverage
+  number or `machine_recall` bucket, and `run-once`/`doctor` report it on a line
+  of its own. If the harness rewrites or truncates the file, the next pass
+  re-reads the current snapshot as a new generation and records why, while every
+  generation already sealed stays in the archive, byte-identical and still
+  extractable; a stage whose only new content is a machine-log generation
+  pushes instead of being refused as empty. The read-side "user prompts only"
+  view is the next phase, not this one.
+
 #### Changed
 
 - **Conversation counts count conversations.** A conversation archived on a

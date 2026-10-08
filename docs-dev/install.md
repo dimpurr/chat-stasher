@@ -285,14 +285,14 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:12985-12993,13003-13026`).
+(`crates/chat-stasher/src/main.rs:13040-13048,13058-13081`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
 destination declared" is never printed as a finding about a config nobody read.
 When the error is an unexpandable `rustic_cache_dir`, it also names that cache
 path check as unavailable and says to fix the value and run doctor again
-(`crates/chat-stasher/src/doctor.rs:1522-1558`). And an **absent** config file is a
+(`crates/chat-stasher/src/doctor.rs:1567-1608`). And an **absent** config file is a
 different state altogether, not an error: that is the normal first run, and it
 does use the defaults (`crates/chat-stasher/src/config.rs:382-391`). If you want
 the defaults back, move the file aside rather than leaving a broken one in place.
@@ -580,15 +580,15 @@ read the repository and key file you select in config or arguments
 🔴 **A key file is the only key to the repository it opens. Lose it and that
 repository can never be read again; there is no way to recover it.** The
 source's own words are "The masterkey is the repository's only key — losing it
-means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:1954-1956`).
+means the repo is unreadable forever" (`crates/chat-stasher/src/store.rs:2089-2091`).
 The key file is written with owner-only-readable permissions, on platforms that
-can express them (`crates/chat-stasher/src/store.rs:1996-2003`).
+can express them (`crates/chat-stasher/src/store.rs:2131-2138`).
 
 🔴 **And there is one key file per repository, not one per machine.** The local
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/main.rs:8240-8245`). A second
+destination's `key_file` (`crates/chat-stasher/src/main.rs:8287-8292`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -606,8 +606,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:14601-14608`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:14164-14178`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:14656-14663`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:14219-14233`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -627,7 +627,7 @@ that destination's own key — a second machine reads that copy with
 Skip this if your archive lives on a local path. It applies when `repo` names a
 remote backend such as `opendal:sftp` — the options you write under
 `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:167-170`, `:387-392`, `:2142-2147`; the config
+(`crates/chat-stasher/src/store.rs:167-170`, `:387-392`, `:2277-2282`; the config
 field itself is `crates/chat-stasher/src/config.rs:283-284`).
 
 **Why this step exists.** A remote destination is reached by running the system
@@ -717,7 +717,7 @@ warning is about.
 Skip this if your destination is a local path or an SSH host (§4.4). It applies
 when `repo` names an S3 backend, spelled `opendal:s3`. The options you write
 under `[destinations.<name>.options]` are forwarded verbatim to the backend
-(`crates/chat-stasher/src/store.rs:167-170`, `:2142-2147`; the field itself is
+(`crates/chat-stasher/src/store.rs:167-170`, `:2277-2282`; the field itself is
 `crates/chat-stasher/src/config.rs:283-284`), so the option names below belong
 to the backend, not to this tool.
 
@@ -942,7 +942,7 @@ Windows every `schedule` action refuses with exit 2 before writing anything,
 and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
-sleeps (`crates/chat-stasher/src/main.rs:7305-7360`).
+sleeps (`crates/chat-stasher/src/main.rs:7352-7407`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:269-306`).
@@ -970,12 +970,12 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:17619-17620`). This is the
+does not (`crates/chat-stasher/src/main.rs:17674-17675`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:17115-17116`). These are the conclusions defined
+(`crates/chat-stasher/src/main.rs:17170-17171`). These are the conclusions defined
 verbatim in the source (`crates/chat-stasher/src/runstate.rs:287-335`):
 
 - No timer installed / never run successfully:
@@ -991,7 +991,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:287-335`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:17621-17689`):
+(`crates/chat-stasher/src/main.rs:17676-17744`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1004,7 +1004,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:17600-17605`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:17655-17660`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1014,7 +1014,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:17139-17173`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:17194-17228`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -1044,16 +1044,16 @@ reports what came back in three separate states rather than two: reached (and
 whether a repository is there), not reached (with the classifier's verdict
 attached), and not configured at all — a destination with no `repo` was never
 dialled, and calling it "unreachable" would put a config mistake and a dead
-network in one bucket (`crates/chat-stasher/src/doctor.rs:1005-1015,1143-1164,1296-1349`).
+network in one bucket (`crates/chat-stasher/src/doctor.rs:1050-1060,1188-1209,1341-1394`).
 When the repository is there it also reads each machine's `writer.json` and
 reports the machines whose archived activity index was written by an older
 `chat-stasher`, with the exact command that rebuilds each one
-(`crates/chat-stasher/src/doctor.rs:1033-1140`).
+(`crates/chat-stasher/src/doctor.rs:1078-1185`).
 It creates nothing, so a destination it reports as "not there yet" is still not
 created by running `doctor`. D10 also checks each destination's local FTS index
-without connecting to it (`crates/chat-stasher/src/doctor.rs:1847-1848,2376-2438`).
+without connecting to it (`crates/chat-stasher/src/doctor.rs:1990-1991,2522-2584`).
 The destination probes are the one check that touches the network; see section
-4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1005-1015,1143-1164,1296-1349`).
+4.4 if it reports a host it cannot trust (`crates/chat-stasher/src/doctor.rs:1050-1060,1188-1209,1341-1394`).
 
 ### 5.1 Exporting a day
 
@@ -1112,7 +1112,7 @@ confirmed in the code, not a temporary disclaimer.
   opens.** There is no recovery process, no recovery code, no customer service.
   There is one file per repository, so losing one loses that copy and no other;
   back up every one of them (section 4.3). The source's own
-  words are in section 4.3 (`crates/chat-stasher/src/store.rs:1954-1956`).
+  words are in section 4.3 (`crates/chat-stasher/src/store.rs:2089-2091`).
 
 - **History backfill takes days, not minutes, and never runs on a fixed beat.**
   Content is fetched under a **daily cap drawn once per local day**, and the cap

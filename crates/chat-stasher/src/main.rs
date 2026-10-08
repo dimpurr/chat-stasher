@@ -6172,7 +6172,7 @@ fn destination_view<'a>(
     cfg: &'a StoreConfig,
     machine: &'a str,
 ) -> chat_stasher::collect::DestinationView<'a> {
-    chat_stasher::collect::DestinationView::new(
+    chat_stasher::collect::DestinationView::with_machine_logs(
         chat_stasher::collect::destination_id(&cfg.repo_root),
         move |wanted| {
             let store = BackupStore::new(cfg.clone(), machine.to_string());
@@ -6182,6 +6182,22 @@ fn destination_view<'a>(
             let mk = store::load_key_file(cfg)?;
             let observation = store.read_cumulative_sessions(&mk, Some(wanted))?;
             Ok(chat_stasher::collect::archive_facts_from_readback(
+                &observation,
+            ))
+        },
+        move || {
+            // ADR-053 C1: the same archive, asked about its machine-log
+            // generations. No session is wanted here — this read exists only
+            // for a machine-log cursor that could not prove itself locally, and
+            // the machine-log generations are reported whichever session set
+            // the read was asked with.
+            let store = BackupStore::new(cfg.clone(), machine.to_string());
+            if !store.repository_exists()? {
+                anyhow::bail!("destination repository is not initialised");
+            }
+            let mk = store::load_key_file(cfg)?;
+            let observation = store.read_cumulative_sessions(&mk, Some(&BTreeSet::new()))?;
+            Ok(chat_stasher::collect::machine_log_facts_from_readback(
                 &observation,
             ))
         },
@@ -6954,6 +6970,35 @@ fn print_collect_report(
             outcome.compressed,
         );
     }
+    // ADR-053 D4: a machine log's own counters, on its own line — never summed
+    // into the session counters above. One line per declared log that exists on
+    // this machine, so `run-once` narrates it the way it narrates a session.
+    for outcome in &report.machine_logs {
+        println!(
+            "[collect] machine log      : {} {} lines={} generations={} read_bytes={} prefix_bytes={} sealed={} reset={} unproven={}",
+            outcome.harness,
+            outcome.log_id,
+            outcome.sealed_lines,
+            outcome.generations,
+            outcome.bytes_read,
+            outcome.prefix_bytes_validated,
+            outcome.shard.as_deref().unwrap_or("none"),
+            outcome.reset,
+            outcome.unproven.unwrap_or("none"),
+        );
+    }
+    if report.machine_logs_unlooked > 0
+        || report.machine_logs_indeterminate > 0
+        || report.machine_logs_errors > 0
+    {
+        // A declared log that was not looked at, that could not be established,
+        // or that failed to read is an unknown — never a log that was found
+        // empty.
+        println!(
+            "[collect] machine logs     : unlooked={} indeterminate={} errors={} source_not_collected=true",
+            report.machine_logs_unlooked, report.machine_logs_indeterminate, report.machine_logs_errors
+        );
+    }
     if !report.errors.is_empty() {
         println!("[collect] errors          : {}", report.errors.len());
         for error in &report.errors {
@@ -7263,7 +7308,9 @@ fn run_once_pass(
         &machine_name,
         &state_dir,
         stage_shards,
-        report.changed_records > 0 || report.shards_written > 0,
+        report.changed_records > 0
+            || report.shards_written > 0
+            || report.machine_log_generations_written > 0,
     ) {
         Ok(pair) => pair,
         Err(e) => {
@@ -12346,6 +12393,10 @@ mod decision_surface_tests {
             records: Vec::new(),
             missing_roots: Vec::new(),
             indeterminate_roots: Vec::new(),
+            machine_logs: Vec::new(),
+            machine_logs_unlooked: 0,
+            machine_logs_indeterminate: 0,
+            machine_logs_unlooked_reasons: Vec::new(),
             probes: vec![scanner::HarnessProbe {
                 id: "opencode".to_string(),
                 display_name: "fixture harness".to_string(),
@@ -12404,6 +12455,10 @@ mod decision_surface_tests {
                 .collect(),
             missing_roots: Vec::new(),
             indeterminate_roots: Vec::new(),
+            machine_logs: Vec::new(),
+            machine_logs_unlooked: 0,
+            machine_logs_indeterminate: 0,
+            machine_logs_unlooked_reasons: Vec::new(),
             probes: Vec::new(),
         }
     }

@@ -258,6 +258,52 @@ pub fn destination_has_record(state_dir: &Path, destination_id: &str) -> bool {
 /// `(machine, session_id)`.
 pub type ArchiveFacts = BTreeMap<(String, String), ShardFact>;
 
+/// What a destination's archive can be shown to hold for machine logs, keyed
+/// by `(machine, harness, log_id)` — the machine-log identity (ADR-053 D1/D4).
+/// A separate map from [`ArchiveFacts`] so nothing that walks session facts can
+/// see a machine log, and vice versa.
+pub type MachineLogFacts = BTreeMap<(String, String, String), ShardFact>;
+
+/// Fold a cross-machine read-back into the machine-log facts a stored cursor
+/// can be checked against. Same reshaping rule as
+/// [`archive_facts_from_readback`], including its exactness condition: per-shard
+/// identities are kept only when every generation has a canonical sequence
+/// number, so a legacy/ambiguous name degrades to an aggregate comparison
+/// rather than to an invented sequence.
+pub fn machine_log_facts_from_readback(report: &crate::readback::ReadAllReport) -> MachineLogFacts {
+    report
+        .machine_logs
+        .iter()
+        .map(|log| {
+            (
+                (log.machine.clone(), log.harness.clone(), log.log_id.clone()),
+                ShardFact {
+                    shard_count: log.shard_count,
+                    concat_bytes: log.concat_bytes,
+                    concat_sha256: log.sha256.clone(),
+                    shard_identities: if log.shard_sequences.len() == log.shard_sha256.len()
+                        && log.shard_sequences.len() == log.shard_bytes.len()
+                        && log.shard_sequences.iter().all(Option::is_some)
+                    {
+                        log.shard_sequences
+                            .iter()
+                            .zip(&log.shard_bytes)
+                            .zip(&log.shard_sha256)
+                            .map(|((sequence, bytes), sha256)| ShardFingerprint {
+                                sequence: sequence.expect("checked above"),
+                                bytes: *bytes,
+                                sha256: sha256.clone(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
 /// Privacy-safe destination identity. The repository location can be a real
 /// path or a real host, so only its digest is ever stored or printed.
 pub fn destination_id(repo_root: &str) -> String {
@@ -316,6 +362,16 @@ pub struct DestinationView<'a> {
     id: String,
     probe: Box<dyn Fn(&BTreeSet<(String, String)>) -> anyhow::Result<ArchiveFacts> + 'a>,
     cache: OnceCell<Option<ArchiveFacts>>,
+    /// A **second**, machine-log-shaped question for the same archive
+    /// (ADR-053 D4). It is separate because the two facts are keyed
+    /// differently — a session by `(machine, session id)`, a machine log by
+    /// `(machine, harness, log id)` — and because the session probe's answer is
+    /// scoped by the session `wanted` set while a machine-log answer never is.
+    /// A view built without one (every fixture, and every destination that
+    /// cannot answer) simply has no machine-log facts: its machine-log cursors
+    /// then fall back to the local proof, and an unproved cursor is reread.
+    machine_log_probe: Option<Box<dyn Fn() -> anyhow::Result<MachineLogFacts> + 'a>>,
+    machine_log_cache: OnceCell<Option<MachineLogFacts>>,
 }
 
 impl<'a> DestinationView<'a> {
@@ -327,6 +383,25 @@ impl<'a> DestinationView<'a> {
             id: id.into(),
             probe: Box::new(probe),
             cache: OnceCell::new(),
+            machine_log_probe: None,
+            machine_log_cache: OnceCell::new(),
+        }
+    }
+
+    /// A destination whose archive can also be asked for its machine-log
+    /// generations. The machine-log probe takes no argument: the read reports
+    /// every generation it sees, so there is no wanted-set to go stale.
+    pub fn with_machine_logs(
+        id: impl Into<String>,
+        probe: impl Fn(&BTreeSet<(String, String)>) -> anyhow::Result<ArchiveFacts> + 'a,
+        machine_log_probe: impl Fn() -> anyhow::Result<MachineLogFacts> + 'a,
+    ) -> Self {
+        DestinationView {
+            id: id.into(),
+            probe: Box::new(probe),
+            cache: OnceCell::new(),
+            machine_log_probe: Some(Box::new(machine_log_probe)),
+            machine_log_cache: OnceCell::new(),
         }
     }
 
@@ -352,6 +427,17 @@ impl<'a> DestinationView<'a> {
         self.cache
             .get_or_init(|| (self.probe)(wanted).ok())
             .as_ref()
+    }
+
+    /// Machine-log shard sets the destination's archive holds, or `None` when
+    /// this destination cannot answer that question.
+    ///
+    /// Asked only for the logs whose stored cursor could not be proved locally,
+    /// and cached for the life of the view: a pass whose machine logs are all
+    /// still owed on the stage never opens the archive a second time.
+    pub fn machine_log_facts(&self) -> Option<&MachineLogFacts> {
+        let probe = self.machine_log_probe.as_ref()?;
+        self.machine_log_cache.get_or_init(|| probe().ok()).as_ref()
     }
 }
 
@@ -605,44 +691,8 @@ fn stage_prefix_entry(
     }
 
     if is_jsonl_path(&record.absolute_path) {
-        // The stage may hold duplicated lines in a different arrangement than
-        // the source. Derive its cursor from a contiguous run of complete
-        // source lines, so duplicate arrangements are recognized without
-        // treating reordered or missing repeated lines as covered.
-        // `read_jsonl_delta` re-reads and hashes the claimed source
-        // prefix before it accepts this cursor.
         let sealed = sealed_shards.iter().flatten().copied().collect::<Vec<_>>();
-        let source_len = fs::metadata(&record.absolute_path)
-            .with_context(|| format!("stat source ({})", path_digest(&record.absolute_path)))?
-            .len();
-        // W880: one source file stat'ed.
-        counters.files_statted += 1;
-        // No covered prefix can be longer than the stage body, so cap this
-        // probe there instead of reading an arbitrarily larger source.
-        let source = read_range(
-            &record.absolute_path,
-            0,
-            source_len.min(sealed.len() as u64),
-        )
-        .with_context(|| {
-            format!(
-                "read source prefix ({})",
-                path_digest(&record.absolute_path)
-            )
-        })?;
-        let offset = covered_source_prefix(&sealed, &source);
-        if offset == 0 {
-            return Ok(None);
-        }
-        return Ok(Some(OffsetEntry {
-            offset,
-            prefix_len: offset,
-            prefix_sha256: sha256_hex(&source[..offset as usize]),
-            compressed: false,
-            opencode: None,
-            store_fingerprint: None,
-            grok_bot_row_digests: None,
-        }));
+        return jsonl_prefix_entry_from_shards(&record.absolute_path, &sealed, counters);
     }
 
     // Whole-file sources have no incremental model: `process_whole_file` seals
@@ -674,13 +724,84 @@ fn stage_prefix_entry(
     }))
 }
 
+/// Derive a destination's starting cursor for a plain JSONL source from the
+/// shard bodies a stage already holds.
+///
+/// The stage may hold duplicated lines in a different arrangement than the
+/// source. The cursor is therefore derived from a contiguous run of complete
+/// source lines, so duplicate arrangements are recognized without treating
+/// reordered or missing repeated lines as covered. `read_jsonl_delta` re-reads
+/// and hashes the claimed source prefix before it accepts this cursor.
+///
+/// Shared by a session transcript and a machine log: both are plain JSONL with
+/// a byte-offset cursor, and both ask this question when a destination has no
+/// stored cursor of its own.
+fn jsonl_prefix_entry_from_shards(
+    path: &Path,
+    sealed: &[u8],
+    counters: &mut CollectCounters,
+) -> anyhow::Result<Option<OffsetEntry>> {
+    let source_len = fs::metadata(path)
+        .with_context(|| format!("stat source ({})", path_digest(path)))?
+        .len();
+    // W880: one source file stat'ed.
+    counters.files_statted += 1;
+    // No covered prefix can be longer than the stage body, so cap this probe
+    // there instead of reading an arbitrarily larger source.
+    let source = read_range(path, 0, source_len.min(sealed.len() as u64))
+        .with_context(|| format!("read source prefix ({})", path_digest(path)))?;
+    let offset = covered_source_prefix(sealed, &source);
+    if offset == 0 {
+        return Ok(None);
+    }
+    Ok(Some(OffsetEntry {
+        offset,
+        prefix_len: offset,
+        prefix_sha256: sha256_hex(&source[..offset as usize]),
+        compressed: false,
+        opencode: None,
+        store_fingerprint: None,
+        grok_bot_row_digests: None,
+    }))
+}
+
+/// [`jsonl_prefix_entry_from_shards`] against a shard directory: what a
+/// destination with no stored cursor starts from when the stage already holds
+/// this source's generations. Used for machine logs, whose directory is not a
+/// session's.
+fn jsonl_stage_prefix_entry(
+    path: &Path,
+    dir: &Path,
+    counters: &mut CollectCounters,
+) -> anyhow::Result<Option<OffsetEntry>> {
+    let mut entries = store::sealed_shard_entries(dir)?;
+    entries.sort_by_key(|(sequence, _)| *sequence);
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut sealed = Vec::new();
+    for (_, path) in entries {
+        sealed.extend_from_slice(&fs::read(path)?);
+    }
+    jsonl_prefix_entry_from_shards(path, &sealed, counters)
+}
+
 /// Observe what the stage currently holds for one session.
 fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
-    let dir = store::session_shard_dir(stage, machine, session_id);
-    let mut entries = store::sealed_shard_entries(&dir)?;
+    shard_fact_in_dir(&store::session_shard_dir(stage, machine, session_id))
+}
+
+/// Observe what the stage currently holds in one shard directory.
+///
+/// A machine log's generations are observed by exactly this function
+/// (ADR-053 D4): its directory is the only difference from a session, so its
+/// cursor is accountable for the same `(shard_count, concat_bytes,
+/// concat_sha256)` triple, with the same per-shard fingerprints.
+fn shard_fact_in_dir(dir: &Path) -> anyhow::Result<ShardFact> {
+    let mut entries = store::sealed_shard_entries(dir)?;
     entries.sort_by_key(|(sequence, _)| *sequence);
     let shard_count = entries.len();
-    let concat = store::concat_shards(stage, machine, session_id)?;
+    let concat = store::concat_shards_in_dir(dir)?;
     Ok(ShardFact {
         shard_count,
         concat_bytes: concat.len() as u64,
@@ -742,11 +863,16 @@ fn stage_covers(
     session_id: &str,
     fact: &ShardFact,
 ) -> anyhow::Result<bool> {
-    let dir = store::session_shard_dir(stage, machine, session_id);
-    if store::sealed_shard_entries(&dir)?.len() < fact.shard_count {
+    dir_covers(&store::session_shard_dir(stage, machine, session_id), fact)
+}
+
+/// [`stage_covers`] for an already-resolved shard directory, so a machine log's
+/// cursor is proved by the same prefix test a session's is.
+fn dir_covers(dir: &Path, fact: &ShardFact) -> anyhow::Result<bool> {
+    if store::sealed_shard_entries(dir)?.len() < fact.shard_count {
         return Ok(false);
     }
-    let concat = store::concat_shards(stage, machine, session_id)?;
+    let concat = store::concat_shards_in_dir(dir)?;
     let Ok(covered) = usize::try_from(fact.concat_bytes) else {
         return Ok(false);
     };
@@ -903,6 +1029,44 @@ pub struct CollectOutcome {
     pub compressed: bool,
 }
 
+/// Metadata-only result of collecting one **machine log** (ADR-053 D1/D4).
+///
+/// Never a session id, never a source path and never a line of prompt text:
+/// what leaves this struct is the harness, the log's own id, counts and
+/// booleans. Deliberately not a [`CollectOutcome`] — that type is a *session*
+/// outcome, and reusing it would put machine-log activity into every session
+/// counter that reads one (ADR-053 D4: counts split, never summed).
+#[derive(Debug, Clone)]
+pub struct MachineLogOutcome {
+    /// Registry harness id that declares the log (`claude-code`).
+    pub harness: String,
+    /// The log's own declared id (`history`).
+    pub log_id: String,
+    /// File size of the source at read time.
+    pub source_bytes: u64,
+    /// Bytes read this pass (delta, or the whole snapshot on a base read).
+    pub bytes_read: u64,
+    /// Committed-prefix bytes re-read and re-hashed as the integrity check.
+    pub prefix_bytes_validated: u64,
+    /// Complete lines sealed by this pass.
+    pub lines_written: usize,
+    /// Sealed generations of this log on the stage after the pass.
+    pub generations: usize,
+    /// Lines sealed across every generation of this log on the stage.
+    pub sealed_lines: u64,
+    /// The generation file name this pass sealed, when it sealed one.
+    pub shard: Option<String>,
+    /// This pass started a new base: the committed prefix no longer matched the
+    /// source, so the whole current snapshot was re-read. Every previously
+    /// sealed generation stays (ADR-053 D3).
+    pub reset: bool,
+    /// Why a stored cursor could not be proved and was therefore reread. Fixed
+    /// metadata; `None` when the cursor was proved, locally or against the
+    /// archive. A reset caused by a real source rewrite reports `None` here —
+    /// the two are different facts and are never merged into one word.
+    pub unproven: Option<&'static str>,
+}
+
 /// A source that could not be collected. Its path is represented only by a
 /// digest; the command prints counts and this digest, never the source path.
 #[derive(Debug, Clone)]
@@ -961,6 +1125,28 @@ pub struct CollectReport {
     pub delta_bytes_read: u64,
     pub prefix_bytes_validated: u64,
     pub outcomes: Vec<CollectOutcome>,
+    /// Machine-log outcomes, one per declared log that exists on this machine
+    /// (ADR-053 D4). Separate from `outcomes` on purpose: these are not
+    /// sessions, and no session counter reads this vector.
+    pub machine_logs: Vec<MachineLogOutcome>,
+    /// Declared machine logs this pass never looked at (no registry cell for
+    /// this platform, an `unascertained` cell, an unresolvable template). A
+    /// declared source that was not looked at is an unknown, never an empty one.
+    pub machine_logs_unlooked: usize,
+    /// Declared machine logs that were looked at but whose shape could not be
+    /// established (I/O error, or a directory where a file is declared).
+    pub machine_logs_indeterminate: usize,
+    /// Machine logs whose read **failed** this pass (the source could not be
+    /// read at all). Distinct from `machine_logs_indeterminate`, which is a
+    /// scan-time question about the source's shape; neither is a log that was
+    /// found empty.
+    pub machine_logs_errors: usize,
+    /// Machine-log generations sealed into the stage by this pass. Counted
+    /// separately from `shards_written`, which stays a session number.
+    pub machine_log_generations_written: usize,
+    /// Complete machine-log lines sealed by this pass. Separate from
+    /// `lines_written` for the same reason.
+    pub machine_log_lines_written: usize,
     pub errors: Vec<CollectError>,
     pub reconciliations: Vec<ReconcileNotice>,
     /// W880: registry scan wall time, in milliseconds. Measured by
@@ -1366,6 +1552,18 @@ pub fn collect_scan_report(
     }
     report.files_statted = counters.files_statted;
     report.sqlite_sessions_queried = counters.sqlite_sessions_queried;
+    // Machine logs are collected after every session, and into their own
+    // report fields: a machine log is never a session outcome, never a session
+    // shard, and never a session line (ADR-053 D4).
+    collect_machine_logs(
+        scan,
+        stage,
+        machine,
+        state_dir,
+        bucket_cap,
+        destination,
+        &mut report,
+    )?;
     Ok(report)
 }
 
@@ -2141,6 +2339,546 @@ fn process_jsonl(
             compressed: false,
         },
     })
+}
+
+// -------------------------------------------------------------- machine logs
+//
+// ADR-053 C1. A *machine log* is a declared per-machine input log: what the
+// user typed into a harness on this machine, in the harness's own append-only
+// file. It is **not** a session and no session id is ever minted for it (D1):
+// it lives in its own stage namespace
+// (`machine-logs/<machine>/<harness>/<log-id>/`), contributes to no session
+// list, count, coverage number or `machine_recall` bucket (D4/D6), and is
+// sealed by the same JSONL prefix-hash read path a session transcript uses
+// (D2) — `read_jsonl_delta`, `complete_lines` and the shared shard writer.
+//
+// What it *does* share with a session is the debt discipline (ADR-012/013): the
+// cursor is a cache that must prove itself against the stage or against the
+// destination's archive, and anything unprovable is reread. The two products
+// keep separate state files and separate counters because they have separate
+// identities; a single file would let machine-log bookkeeping rewrite session
+// debt, and vice versa.
+
+/// Durable machine-log cursors, per destination. Its own file: see the module
+/// note above.
+const MACHINE_LOG_STATE_FILE: &str = "machine-logs-v1.json";
+const MACHINE_LOG_STATE_VERSION: u32 = 1;
+/// Capture stamps and reset observations of one machine log, one JSON object
+/// per line, next to the sealed generations they describe (D2/D3/D8). Holds
+/// digests, counts and fixed enum values — never prompt text.
+const MACHINE_LOG_CAPTURE_FILE: &str = "capture-v1.jsonl";
+pub const MACHINE_LOG_CAPTURE_SCHEMA: &str = "chat-stasher/machine-log@1";
+
+/// Cursor and accountability for one machine log, for one destination — the
+/// same shape a session [`DebtEntry`] has, in a namespace of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MachineLogEntry {
+    /// Machine partition the generations were sealed under. A cursor written
+    /// for a different partition proves nothing here.
+    machine: String,
+    /// Registry harness id that declares the log.
+    harness: String,
+    /// The log's own declared id.
+    log_id: String,
+    /// Read position that produced the generation set below.
+    cursor: OffsetEntry,
+    /// What the cursor claims it handed over. Verified before reuse.
+    shards: ShardFact,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MachineLogState {
+    version: u32,
+    /// Keyed by [`destination_id`], then by `"<harness>/<log_id>"`.
+    destinations: BTreeMap<String, BTreeMap<String, MachineLogEntry>>,
+}
+
+/// One capture stamp / reset observation row. Written at capture, never
+/// inferred later: `fidelity` is ADR-051's capture-time stamp (`source:
+/// captured`, `value: raw` — a byte-faithful copy of the harness's own
+/// persisted log), and `reason` is what this pass actually did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MachineLogCapture {
+    schema: String,
+    kind: &'static str,
+    machine: String,
+    harness: String,
+    log_id: String,
+    /// Global sequence of the generation this pass sealed.
+    generation: u64,
+    /// Bytes of that generation.
+    bytes: u64,
+    /// sha256 of that generation.
+    sha256: String,
+    /// The destination-shaped cursor after this pass: the committed prefix of
+    /// the source, which is what the next pass validates (ADR-012/013).
+    cursor_offset: u64,
+    /// Source file size at capture.
+    source_bytes: u64,
+    /// What this pass did: `base` (no cursor existed), `append` (validated
+    /// delta) or `reset` (a cursor existed and the whole current snapshot was
+    /// re-read).
+    reason: &'static str,
+    /// For a `reset`, why: `cursor_unproven` (the stored cursor could not be
+    /// proved against the stage or the archive) or `committed_prefix_changed`
+    /// (the source's committed prefix no longer matches the recorded hash).
+    /// `None` otherwise. Observation, not inference: the first is a fact about
+    /// our own bookkeeping, the second a fact about the source bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_cause: Option<&'static str>,
+    /// Every generation sealed before this one, still in the archive
+    /// (ADR-053 D3: a rewrite never deletes what was already observed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prior_generations: Vec<ShardFingerprint>,
+    /// ADR-051 capture-time fidelity. Flattened, so the row reads
+    /// `"fidelity":{"source":"captured","value":"raw"}`.
+    fidelity: crate::message_audit::FidelityMetadata,
+    captured_at_unix: u64,
+}
+
+/// One machine log's pass result, below the report's reach: the same
+/// [`Processed`] shape a session read produces, minus the session identity.
+#[derive(Debug)]
+struct ProcessedMachineLog {
+    cursor: OffsetEntry,
+    reset: bool,
+    bytes_read: u64,
+    prefix_bytes_validated: u64,
+    source_bytes: u64,
+    lines_written: usize,
+    shard: Option<String>,
+    /// Sequence number of the generation sealed by this pass, when it sealed
+    /// one.
+    generation: Option<u64>,
+}
+
+fn machine_log_state_key(harness: &str, log_id: &str) -> String {
+    format!("{harness}/{log_id}")
+}
+
+/// Load the machine-log state. Like the session debt set, a state file that
+/// cannot be parsed or that carries a version this build does not write is
+/// discarded rather than migrated: it can prove nothing, so every machine log
+/// becomes unread and is reread in full — the conservative direction.
+fn load_machine_log_state(path: &Path) -> anyhow::Result<MachineLogState> {
+    let empty = MachineLogState {
+        version: MACHINE_LOG_STATE_VERSION,
+        destinations: BTreeMap::new(),
+    };
+    match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<MachineLogState>(&bytes) {
+            Ok(state) if state.version == MACHINE_LOG_STATE_VERSION => Ok(state),
+            _ => Ok(empty),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty),
+        Err(e) => Err(e).with_context(|| format!("read machine-log state {}", path.display())),
+    }
+}
+
+/// Persist one destination's machine-log cursors, leaving every other
+/// destination's slice byte-for-byte as it was loaded.
+fn save_machine_log_state(
+    path: &Path,
+    state: &MachineLogState,
+    destination_id: &str,
+    logs: &BTreeMap<String, MachineLogEntry>,
+) -> anyhow::Result<()> {
+    let mut out = state.clone();
+    out.version = MACHINE_LOG_STATE_VERSION;
+    out.destinations
+        .insert(destination_id.to_string(), logs.clone());
+    let tmp = path.with_file_name(format!(".{MACHINE_LOG_STATE_FILE}.tmp"));
+    let bytes = serde_json::to_vec_pretty(&out).context("serialise machine-log state")?;
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Discharge a stored machine-log cursor against the authorities that can speak
+/// for this destination — never against the cursor itself. The verdicts are the
+/// session ones, because the question is the same question.
+fn verify_machine_log_debt(
+    entry: &MachineLogEntry,
+    machine: &str,
+    stage: &Path,
+    remote: Option<&MachineLogFacts>,
+) -> anyhow::Result<DebtVerdict> {
+    if entry.machine != machine {
+        return Ok(DebtVerdict::Unverifiable(
+            "machine-log cursor was written for a different machine partition",
+        ));
+    }
+    let dir = store::machine_log_shard_dir(stage, machine, &entry.harness, &entry.log_id);
+    if dir_covers(&dir, &entry.shards)? {
+        return Ok(DebtVerdict::OwedOnStage);
+    }
+    let Some(facts) = remote else {
+        return Ok(DebtVerdict::Unverifiable(
+            "machine-log generations left the stage and the destination archive cannot be consulted",
+        ));
+    };
+    let key = (
+        machine.to_string(),
+        entry.harness.clone(),
+        entry.log_id.clone(),
+    );
+    match facts.get(&key) {
+        Some(observed)
+            if entry.shards.shard_identities.is_empty()
+                && same_shard_payload(observed, &entry.shards) =>
+        {
+            Ok(DebtVerdict::SettledInArchive)
+        }
+        Some(observed) if archive_contains_shards(observed, &entry.shards) => {
+            Ok(DebtVerdict::SettledInArchive)
+        }
+        Some(_) => Ok(DebtVerdict::Unverifiable(
+            "destination archive holds a different generation set than the machine-log cursor claims",
+        )),
+        None => Ok(DebtVerdict::Unverifiable(
+            "destination archive does not hold the generation set the machine-log cursor claims",
+        )),
+    }
+}
+
+/// (generations, sealed lines) of one machine log as the stage holds it now.
+/// Every sealed shard is newline-framed, so the line count is exact.
+fn machine_log_stage_state(
+    stage: &Path,
+    machine: &str,
+    harness: &str,
+    log_id: &str,
+) -> anyhow::Result<(usize, u64)> {
+    let dir = store::machine_log_shard_dir(stage, machine, harness, log_id);
+    let generations = store::sealed_shard_entries(&dir)?.len();
+    let concat = store::concat_shards_in_dir(&dir)?;
+    Ok((
+        generations,
+        concat.iter().filter(|byte| **byte == b'\n').count() as u64,
+    ))
+}
+
+/// Append one capture stamp. Existing rows are never rewritten, so the file is
+/// the append-only record of what each pass observed — and a generation is
+/// stamped exactly once: a pass that found the generation already sealed (a
+/// second destination's first read of a stage that already holds it) writes no
+/// second row, because nothing was captured by it that was not captured
+/// before.
+fn append_machine_log_capture(
+    stage: &Path,
+    machine: &str,
+    capture: &MachineLogCapture,
+) -> anyhow::Result<()> {
+    let dir = store::machine_log_shard_dir(stage, machine, &capture.harness, &capture.log_id);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(MACHINE_LOG_CAPTURE_FILE);
+    if let Ok(existing) = fs::read_to_string(&path) {
+        for line in existing.lines() {
+            let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if row.get("generation").and_then(serde_json::Value::as_u64) == Some(capture.generation)
+                && row.get("sha256").and_then(serde_json::Value::as_str)
+                    == Some(capture.sha256.as_str())
+            {
+                return Ok(());
+            }
+        }
+    }
+    let mut line = serde_json::to_vec(capture).context("serialise machine-log capture stamp")?;
+    line.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {} for append", path.display()))?;
+    file.write_all(&line)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// One machine-log pass: same JSONL increment rules as a session transcript,
+/// pointed at the machine-log namespace (ADR-053 D2).
+fn process_machine_log(
+    record: &scanner::MachineLogRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+    counters: &mut CollectCounters,
+) -> anyhow::Result<ProcessedMachineLog> {
+    let data = read_jsonl_delta(&record.absolute_path, old, force_reset, counters)?;
+    let (lines, committed_delta) = complete_lines(&data.bytes);
+    let new_offset = data.base_offset + committed_delta as u64;
+    let cursor = if lines.is_empty() && !data.reset {
+        old.cloned().unwrap_or_else(empty_cursor)
+    } else {
+        plain_state(&record.absolute_path, new_offset)?
+    };
+    let shard = if lines.is_empty() {
+        None
+    } else {
+        // A validated non-zero cursor proves these are newly appended source
+        // bytes, and they may be byte-identical to an earlier generation
+        // (`/usage\n` twice) without being a replay of it. A base read has no
+        // such proof, so it keeps the idempotent default: a byte-identical
+        // rewrite is an honest no-op of content rather than a second copy of
+        // bytes the archive already holds.
+        let allow_exact_repeat = !data.reset && data.base_offset > 0;
+        Some(store::write_sealed_machine_log_shard(
+            stage,
+            machine,
+            &record.harness,
+            &record.log_id,
+            &lines,
+            bucket_cap,
+            allow_exact_repeat,
+        )?)
+    };
+    let generation = match shard.as_deref() {
+        Some(name) => store::parse_shard_seq(name),
+        None => None,
+    };
+    Ok(ProcessedMachineLog {
+        cursor,
+        reset: data.reset,
+        bytes_read: data.bytes_read,
+        prefix_bytes_validated: data.prefix_bytes_validated,
+        source_bytes: data.source_len,
+        lines_written: lines.len(),
+        shard,
+        generation,
+    })
+}
+
+fn empty_cursor() -> OffsetEntry {
+    OffsetEntry {
+        offset: 0,
+        prefix_len: 0,
+        prefix_sha256: sha256_hex(&[]),
+        compressed: false,
+        opencode: None,
+        store_fingerprint: None,
+        grok_bot_row_digests: None,
+    }
+}
+
+/// Collect every declared machine log that exists on this machine.
+///
+/// Writes into `report.machine_logs` and the two machine-log tallies, and
+/// touches nothing else in the report: the session counters a caller reads are
+/// exactly what they would be without a machine log (ADR-053 test 6).
+fn collect_machine_logs(
+    scan: &scanner::ScanReport,
+    stage: &Path,
+    machine: &str,
+    state_dir: &Path,
+    bucket_cap: usize,
+    destination: &DestinationView<'_>,
+    report: &mut CollectReport,
+) -> anyhow::Result<()> {
+    report.machine_logs_unlooked = scan.machine_logs_unlooked;
+    report.machine_logs_indeterminate = scan.machine_logs_indeterminate;
+    if scan.machine_logs.is_empty() {
+        return Ok(());
+    }
+    let state_path = state_dir.join(MACHINE_LOG_STATE_FILE);
+    let state = load_machine_log_state(&state_path)?;
+    let destination_id = report.destination_id.clone();
+    let mut logs = state
+        .destinations
+        .get(&destination_id)
+        .cloned()
+        // reason: a destination with no machine-log record has never been read
+        // for, so no machine-log cursor exists to reuse
+        .unwrap_or_default();
+
+    let mut records = scan.machine_logs.clone();
+    records.sort_by(|a, b| a.absolute_path.cmp(&b.absolute_path));
+
+    // Ask the archive only when a stored cursor cannot be proved locally. A
+    // pass whose generations are all still owed on the stage never opens it a
+    // second time — the session pass owns the ordinary read.
+    let mut remote_needed = false;
+    for record in &records {
+        let Some(entry) = logs.get(&machine_log_state_key(&record.harness, &record.log_id)) else {
+            continue;
+        };
+        if entry.machine != machine {
+            remote_needed = true;
+            continue;
+        }
+        let dir = store::machine_log_shard_dir(stage, machine, &record.harness, &record.log_id);
+        if !dir_covers(&dir, &entry.shards)? {
+            remote_needed = true;
+        }
+    }
+    let remote = if remote_needed {
+        destination.machine_log_facts()
+    } else {
+        None
+    };
+
+    let mut counters = CollectCounters::default();
+    for record in &records {
+        let record_started = std::time::Instant::now();
+        let key = machine_log_state_key(&record.harness, &record.log_id);
+        let stored = logs.get(&key).cloned();
+        // A stored cursor is a claim, not a fact. It is reused only once it has
+        // discharged itself against the stage, the local generations, or this
+        // destination's own archive.
+        let verdict = match stored.as_ref() {
+            Some(entry) => verify_machine_log_debt(entry, machine, stage, remote)?,
+            None => DebtVerdict::OwedOnStage,
+        };
+        let unproven = match verdict {
+            DebtVerdict::Unverifiable(reason) => Some(reason),
+            _ => None,
+        };
+        let dir = store::machine_log_shard_dir(stage, machine, &record.harness, &record.log_id);
+        // A destination with no stored cursor has never been read for. The
+        // stage may still already hold this log's generations from another
+        // destination's pass; what it holds — verified against the source by
+        // the ordinary read path — is then the position this destination starts
+        // from.
+        let old = match stored.as_ref() {
+            Some(entry) => Some(entry.cursor.clone()),
+            None => jsonl_stage_prefix_entry(&record.absolute_path, &dir, &mut counters)?,
+        };
+        let processed = match process_machine_log(
+            record,
+            old.as_ref(),
+            unproven.is_some(),
+            stage,
+            machine,
+            bucket_cap,
+            &mut counters,
+        ) {
+            Ok(processed) => processed,
+            Err(_) => {
+                report.machine_logs_errors += 1;
+                continue;
+            }
+        };
+        let (generations, sealed_lines) =
+            machine_log_stage_state(stage, machine, &record.harness, &record.log_id)?;
+        if processed.shard.is_some() {
+            report.machine_log_generations_written += 1;
+        }
+        report.machine_log_lines_written += processed.lines_written;
+
+        let fact = shard_fact_in_dir(&dir)?;
+        if let (Some(shard_name), Some(generation)) =
+            (processed.shard.as_deref(), processed.generation)
+        {
+            let path =
+                store::machine_log_shard_dir(stage, machine, &record.harness, &record.log_id)
+                    .join(store::shard_bucket_name(generation, bucket_cap))
+                    .join(shard_name);
+            let bytes = fs::read(&path)?;
+            // What this pass did, not what we guess the harness did: `base` is
+            // a whole-snapshot read with no position to start from, `append` a
+            // read that started from a validated position, `reset` a
+            // whole-snapshot read while a position existed.
+            let reason = if processed.reset {
+                "reset"
+            } else if old.is_some() {
+                "append"
+            } else {
+                "base"
+            };
+            let reset_cause = if processed.reset {
+                Some(if unproven.is_some() {
+                    "cursor_unproven"
+                } else {
+                    "committed_prefix_changed"
+                })
+            } else {
+                None
+            };
+            // The generations this destination's cursor already accounted for
+            // before this one. A reset implies a cursor existed: a cursor
+            // derived from the stage is validated against the source before it
+            // is reused, so it can never fail its own prefix check.
+            let prior_generations = stored
+                .as_ref()
+                .map(|entry| entry.shards.shard_identities.clone())
+                // reason: with no stored cursor there are no generations this
+                //         destination had accounted for, so the honest prior
+                //         set is empty — and a reset, the only row that uses
+                //         this field, cannot reach here without a cursor
+                .unwrap_or_default();
+            let capture = MachineLogCapture {
+                schema: MACHINE_LOG_CAPTURE_SCHEMA.to_string(),
+                kind: "machine-log-generation",
+                machine: machine.to_string(),
+                harness: record.harness.clone(),
+                log_id: record.log_id.clone(),
+                generation,
+                bytes: bytes.len() as u64,
+                sha256: sha256_hex(&bytes),
+                cursor_offset: processed.cursor.offset,
+                source_bytes: processed.source_bytes,
+                reason,
+                reset_cause,
+                prior_generations: if processed.reset {
+                    prior_generations
+                } else {
+                    Vec::new()
+                },
+                fidelity: crate::message_audit::FidelityMetadata {
+                    source: crate::message_audit::MetadataSource::Captured,
+                    fidelity: crate::message_audit::Fidelity::Raw,
+                },
+                captured_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    // reason: a clock before the epoch cannot date this capture;
+                    // the stamp is metadata and 0 is the honest "unknown time"
+                    // rather than a fabricated one
+                    .unwrap_or(0),
+            };
+            append_machine_log_capture(stage, machine, &capture)?;
+        }
+
+        let entry = MachineLogEntry {
+            machine: machine.to_string(),
+            harness: record.harness.clone(),
+            log_id: record.log_id.clone(),
+            cursor: processed.cursor,
+            shards: fact,
+        };
+        if stored.as_ref() != Some(&entry) {
+            logs.insert(key, entry);
+            save_machine_log_state(&state_path, &state, &destination_id, &logs)?;
+            report.state_saves += 1;
+        }
+        report.machine_logs.push(MachineLogOutcome {
+            harness: record.harness.clone(),
+            log_id: record.log_id.clone(),
+            source_bytes: processed.source_bytes,
+            bytes_read: processed.bytes_read,
+            prefix_bytes_validated: processed.prefix_bytes_validated,
+            lines_written: processed.lines_written,
+            generations,
+            sealed_lines,
+            shard: processed.shard,
+            reset: processed.reset,
+            unproven,
+        });
+        // W880: this machine log's wall time joins its harness's bucket, the
+        // same way a session's does. Counts only.
+        *report
+            .collect_harness_ms
+            .entry(record.harness.clone())
+            .or_default() += record_started.elapsed().as_millis() as u64;
+    }
+    report.files_statted += counters.files_statted;
+    Ok(())
 }
 
 fn process_opencode(

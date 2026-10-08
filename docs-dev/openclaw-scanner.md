@@ -29,7 +29,7 @@ continue to be scanned.
 
 Cold files under `sessions/` are considered when the file name's extension is
 `.zst`; a `.jsonl` name component is not required
-(`crates/chat-stasher/src/scanner.rs:2316-2325`). The part of the name before
+(`crates/chat-stasher/src/scanner.rs:2532-2541`). The part of the name before
 the first `.jsonl` supplies the session ID — the whole file name when the name
 contains no `.jsonl` — and a file whose part before `.jsonl` is empty is
 skipped. A file is also skipped when an identifiable SQLite archive row for the
@@ -43,7 +43,7 @@ and the complete JSONL lines — the ones terminated by a newline — are
 preserved in the raw archive; a trailing line still missing its final newline
 is held as in progress rather than sealed, and the first pass after the source
 gains that newline re-decodes and seals that tail in full
-(`crates/chat-stasher/src/collect.rs:2329-2341`, `:2470-2484`, `:25-34`). The
+(`crates/chat-stasher/src/collect.rs:3067-3079`, `:3208-3222`, `:25-34`). The
 OpenClaw normalizer does not interpret that native line format, so those lines
 remain unrendered.
 
@@ -97,4 +97,4 @@ Implementation: `crates/chat-stasher/src/sqlite_probe.rs:347-402`,
 `crates/chat-stasher/src/id.rs:239-298`,
 `crates/chat-stasher/src/inbox.rs:603-632`,
 `crates/chat-stasher/src/export.rs:962-979`, and
-`crates/chat-stasher/src/store.rs:1226-1229`.
+`crates/chat-stasher/src/store.rs:1239-1242`.

@@ -932,6 +932,47 @@ fn build_risks(
 // The main `doctor` entry point
 // ---------------------------------------------------------------------------
 
+/// One machine-log row in `doctor` (ADR-053 D4): a declared per-machine input
+/// log, its fate, and — when the configured stage can be read — how much of it
+/// is sealed. Counts only; never a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLogFootprint {
+    /// Registry harness id that declares the log.
+    pub harness: String,
+    /// The log's own declared id.
+    pub log_id: String,
+    /// The declared file exists on this machine.
+    pub present: bool,
+    /// Sealed generations on the configured stage. `None` is "not measured" —
+    /// no stage configured or readable, or no machine identity to key the
+    /// namespace with — and must never be printed as `0`.
+    pub generations: Option<usize>,
+    /// Lines sealed across those generations, same `None` rule.
+    pub lines: Option<u64>,
+}
+
+/// The machine-log half of a `doctor` report (ADR-053 D4).
+///
+/// Machine logs are **not** sessions: they are their own product kind, so they
+/// get their own rows and their own tallies. Nothing here is summed into the
+/// session footprints above, and a log that was not looked at is reported as
+/// such rather than as a log that was found empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineLogRows {
+    /// One row per declared log that exists on this machine.
+    pub present: Vec<MachineLogFootprint>,
+    /// Declared logs this machine never looked at (no registry cell for this
+    /// platform, an `unascertained` cell, an unresolvable template).
+    pub unlooked: usize,
+    /// Declared logs that were looked at but whose shape could not be
+    /// established.
+    pub indeterminate: usize,
+    /// Why each unlooked log was not looked at, in the scanner's fixed
+    /// vocabulary — so a reader can tell a policy decision (an `unascertained`
+    /// registry cell, this platform has no cell) from an oversight.
+    pub unlooked_reasons: Vec<&'static str>,
+}
+
 /// Result of one full `doctor` run.
 #[derive(Debug)]
 pub struct DoctorReport {
@@ -970,6 +1011,10 @@ pub struct DoctorReport {
     /// Registry-recognised sessions that are not represented by a
     /// `SessionRecord` and therefore cannot be consumed by `collect`.
     pub archive_gaps: Vec<scanner::ArchiveGap>,
+    /// Declared machine logs and how much is sealed (ADR-053 D4). Separate
+    /// from `footprints`, which counts sessions: a machine log that appeared in
+    /// a session table would falsify that table's every number.
+    pub machine_logs: MachineLogRows,
     /// True when the registry-driven scan failed (registry missing/unparseable)
     /// — the coverage numbers are then *unknown*, never faked zeros.
     pub scan_failed: bool,
@@ -1548,6 +1593,10 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // True as well: the scan is one of the checks that did not run, and this
         // is the field a consumer that predates `config_error` already reads.
         scan_failed: true,
+        // Nothing was looked at, and the stage path itself comes from the
+        // config that could not be read: no rows, no tallies — not zeros that
+        // would read as "there are none".
+        machine_logs: MachineLogRows::default(),
         destinations: Vec::new(),
         stage_duplicate_shards: None,
         native_host: None,
@@ -1555,6 +1604,100 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // override and each destination's), so an unreadable config means the
         // inventory was not computed — `None`, not an empty list.
         keys: None,
+    }
+}
+
+/// Measure the machine-log rows of a doctor report (ADR-053 D4).
+///
+/// Read-only, counts only. It takes the declared files the scan already found
+/// and — only when the configured stage is a readable directory *and* a machine
+/// identity exists, since the namespace is machine-keyed — counts that
+/// machine's sealed generations and the lines in them. Prompt text is never
+/// read: the "lines" number counts newline bytes in the sealed shards, which
+/// are the harness's own complete lines (ADR-053 D2).
+fn machine_log_rows(config: &Config, scan: &scanner::ScanReport) -> MachineLogRows {
+    let stage = config
+        .native_host
+        .as_ref()
+        .and_then(|native| native.stage.as_deref())
+        .map(expand_tilde)
+        .filter(|root| root.is_dir());
+    let machine = crate::id::machine_id();
+    let mut rows = MachineLogRows {
+        present: Vec::new(),
+        unlooked: scan.machine_logs_unlooked,
+        indeterminate: scan.machine_logs_indeterminate,
+        unlooked_reasons: scan.machine_logs_unlooked_reasons.clone(),
+    };
+    for record in &scan.machine_logs {
+        // An unmeasured stage is `None`, never 0: the namespace is machine-keyed
+        // and the stage path comes from the config, so a report that could not
+        // read either has no answer rather than an empty one.
+        let measured = match (stage.as_deref(), machine.as_deref()) {
+            (Some(stage), Some(machine)) => {
+                let dir = crate::store::machine_log_shard_dir(
+                    stage,
+                    machine,
+                    &record.harness,
+                    &record.log_id,
+                );
+                crate::store::sealed_shard_entries(&dir)
+                    .ok()
+                    .and_then(|entries| {
+                        crate::store::concat_shards_in_dir(&dir).ok().map(|sealed| {
+                            (
+                                entries.len(),
+                                sealed.iter().filter(|byte| **byte == b'\n').count() as u64,
+                            )
+                        })
+                    })
+            }
+            _ => None,
+        };
+        rows.present.push(MachineLogFootprint {
+            harness: record.harness.clone(),
+            log_id: record.log_id.clone(),
+            present: true,
+            generations: measured.map(|(generations, _)| generations),
+            lines: measured.map(|(_, lines)| lines),
+        });
+    }
+    rows
+}
+
+/// The machine-log row of one log, for both channels.
+fn machine_log_footprint_line(log: &MachineLogFootprint) -> String {
+    match (log.generations, log.lines) {
+        (Some(generations), Some(lines)) => format!(
+            "{} {}: {lines} lines sealed in {generations} generation(s)",
+            log.harness, log.log_id
+        ),
+        _ => format!(
+            "{} {}: not measured (no readable stage or no machine identity)",
+            log.harness, log.log_id
+        ),
+    }
+}
+
+fn print_machine_logs(rows: &MachineLogRows) {
+    if rows.present.is_empty() && rows.unlooked == 0 && rows.indeterminate == 0 {
+        return;
+    }
+    eprintln!(
+        "  machine logs (per-machine input logs, ADR-053 — not sessions, never counted in the table above):"
+    );
+    for log in &rows.present {
+        eprintln!("    {}", machine_log_footprint_line(log));
+    }
+    if rows.unlooked > 0 || rows.indeterminate > 0 {
+        eprintln!(
+            "    declared but not looked at: {unlooked} unlooked, {indeterminate} indeterminate",
+            unlooked = rows.unlooked,
+            indeterminate = rows.indeterminate
+        );
+        for reason in &rows.unlooked_reasons {
+            eprintln!("      {reason}");
+        }
     }
 }
 
@@ -1858,6 +2001,8 @@ pub fn run() -> DoctorReport {
         crate::nativehost::machine_root(crate::nativehost::Platform::current(), &home);
     let native_host = inspect_native_host(&config, &native_host_root);
 
+    // ADR-053 D4 — measured read-only, and reported in its own rows.
+    let machine_logs = machine_log_rows(&config, &scan);
     let probes = scan.probes;
     DoctorReport {
         config_source: config.source,
@@ -1873,6 +2018,7 @@ pub fn run() -> DoctorReport {
         fts_indexes,
         probes,
         archive_gaps,
+        machine_logs,
         scan_failed,
         // Filled in by the CLI: connecting to a destination is a real network
         // action and this entry point is called directly by the test suite.
@@ -3014,6 +3160,10 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "claude": claude_json(&r.claude),
         "gemini": gemini_json(&r.gemini),
         "footprints": r.footprints.iter().map(footprint_json).collect::<Vec<_>>(),
+        // ADR-053 D4: machine logs are a product of their own, so they get
+        // their own object rather than a row in `footprints`. A count that was
+        // not measured is a tri-state, never a 0.
+        "machine_logs": machine_logs_json(&r.machine_logs),
         "other_present": r.other_present.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "risks": r.risks.iter().map(|text| risk_json(text)).collect::<Vec<_>>(),
         "reclaim": match &r.reclaim {
@@ -3073,6 +3223,36 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             // Not the same as "there is no registration": this run did not look.
             None => serde_json::json!({"checked": false}),
         },
+    })
+}
+
+/// The `machine_logs` object of `doctor --json` (ADR-053 D4).
+///
+/// `present` rows carry counts only — never a prompt, never a source path.
+/// `generations` and `lines` are [`CountState`]s: a stage that could not be
+/// read makes them `unknown`, not `0`.
+fn machine_logs_json(rows: &MachineLogRows) -> serde_json::Value {
+    serde_json::json!({
+        "present": rows
+            .present
+            .iter()
+            .map(|log| serde_json::json!({
+                "harness": log.harness,
+                "log_id": log.log_id,
+                "present": log.present,
+                "generations": match log.generations {
+                    Some(generations) => CountState::known(generations as u64),
+                    None => CountState::unknown("the configured stage could not be measured"),
+                },
+                "lines": match log.lines {
+                    Some(lines) => CountState::known(lines),
+                    None => CountState::unknown("the configured stage could not be measured"),
+                },
+            }))
+            .collect::<Vec<_>>(),
+        "unlooked": CountState::known(rows.unlooked as u64),
+        "indeterminate": CountState::known(rows.indeterminate as u64),
+        "unlooked_reasons": rows.unlooked_reasons,
     })
 }
 
@@ -3549,6 +3729,7 @@ pub fn print_report(r: &DoctorReport) {
             eprintln!("             ({})", f.note);
         }
     }
+    print_machine_logs(&r.machine_logs);
     if !r.other_present.is_empty() {
         #[allow(
             clippy::unwrap_used,
@@ -4624,6 +4805,7 @@ mod json_tests {
             fts_indexes: Some(Vec::new()),
             probes: vec![probe()],
             archive_gaps: Vec::new(),
+            machine_logs: MachineLogRows::default(),
             scan_failed: false,
             destinations: Vec::new(),
             native_host: None,
@@ -4674,6 +4856,7 @@ mod json_tests {
                 "fts_indexes",
                 "gemini",
                 "keys",
+                "machine_logs",
                 "native_host",
                 "not_checked",
                 "other_present",
@@ -5039,6 +5222,7 @@ mod report_to_json_shape_tests {
             fts_indexes: None,
             probes: Vec::new(),
             archive_gaps: Vec::new(),
+            machine_logs: MachineLogRows::default(),
             scan_failed: false,
             destinations: Vec::new(),
             stage_duplicate_shards: None,
