@@ -438,7 +438,7 @@ class _Scanner:
 
             # -- struct / enum keyword (opens a clap type block when pending)
             if c.isalpha():
-                m = re.match(r"\b(struct|enum)\b", t[i:])
+                m = re.match(r"\b(struct|enum)\b", t[i : i + 16])
                 if m:
                     if clap_pending and not in_test:
                         expect_clap_brace = True
@@ -449,7 +449,7 @@ class _Scanner:
             # -- macro calls / method-context calls
             if c.isalpha() or c == ".":
                 if c == ".":
-                    mm = re.match(r"\.(with_context|context)\s*\(", t[i:])
+                    mm = re.match(r"\.(with_context|context)\s*\(", t[i : i + 32])
                     if mm:
                         open_pos = i + mm.end() - 1
                         close = self._find_matching_paren(open_pos)
@@ -464,7 +464,7 @@ class _Scanner:
                     mm = re.match(
                         r"(?:anyhow::)?(println|print|eprintln|eprint|write|writeln|say|"
                         r"bail|anyhow|panic|unreachable|todo|unimplemented)!\s*\(",
-                        t[i:],
+                        t[i : i + 80],
                     )
                     if mm:
                         open_pos = i + mm.end() - 1
