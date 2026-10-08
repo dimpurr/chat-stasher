@@ -53,7 +53,15 @@ fn pull<T: BundleTransport>(
             .tempdir()?,
     };
     chat_stasher::remote_inbox::pull(
-        transport, identity, keys, now, stage, machine, cap, &archive,
+        transport,
+        identity,
+        keys,
+        now,
+        stage,
+        machine,
+        cap,
+        &archive.root.path().join("synthetic-rates.sqlite3"),
+        &archive,
     )
 }
 
@@ -512,6 +520,7 @@ fn durable_stage_without_archive_proof_never_retires() {
             stage.path(),
             "synthetic-puller",
             100,
+            &stage.path().join("synthetic-rates.sqlite3"),
             &UnprovenArchive { unreadable },
         )
         .unwrap();
@@ -531,4 +540,159 @@ fn durable_stage_without_archive_proof_never_retires() {
         assert_eq!(retry.duplicates, 1);
         assert!(remote.list().unwrap().items.is_empty());
     }
+}
+
+#[test]
+fn rolling_rate_survives_pull_restarts_and_expires_at_the_boundary() {
+    let (_runtime, remote) = transport();
+    let (identity, signing, mut policies) = keys();
+    let policy = policies.get_mut("synthetic-key").unwrap();
+    policy.max_objects_per_pull = 1;
+    policy.expires_at = 10000;
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join("synthetic-stage");
+    let archive = UnprovenArchive { unreadable: false };
+    send_bundle(
+        &remote,
+        BUNDLE,
+        "synthetic-key",
+        &identity.to_public(),
+        &signing,
+    )
+    .unwrap();
+    let first = chat_stasher::remote_inbox::pull(
+        &remote,
+        &identity,
+        &policies,
+        50,
+        &stage,
+        "synthetic-puller",
+        100,
+        &root.path().join("synthetic-rates.sqlite3"),
+        &archive,
+    )
+    .unwrap();
+    assert_eq!(first.refused, [Refusal::Unproven]);
+    for now in [50, 51, 3649] {
+        let retry = chat_stasher::remote_inbox::pull(
+            &remote,
+            &identity,
+            &policies,
+            now,
+            &stage,
+            "synthetic-puller",
+            100,
+            &root.path().join("synthetic-rates.sqlite3"),
+            &archive,
+        )
+        .unwrap();
+        assert_eq!(retry.refused, [Refusal::RateLimit]);
+        assert_eq!(retry.stored + retry.duplicates, 0);
+        assert_eq!(remote.list().unwrap().items.len(), 1);
+    }
+    let boundary = chat_stasher::remote_inbox::pull(
+        &remote,
+        &identity,
+        &policies,
+        3650,
+        &stage,
+        "synthetic-puller",
+        100,
+        &root.path().join("synthetic-rates.sqlite3"),
+        &archive,
+    )
+    .unwrap();
+    assert_eq!(boundary.duplicates, 1);
+    assert_eq!(boundary.refused, [Refusal::Unproven]);
+}
+
+#[test]
+fn unavailable_rate_accounting_keeps_objects_and_never_seals() {
+    let (_runtime, remote) = transport();
+    let (identity, signing, policies) = keys();
+    send_bundle(
+        &remote,
+        BUNDLE,
+        "synthetic-key",
+        &identity.to_public(),
+        &signing,
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join("synthetic-stage");
+    let state = root.path().join("synthetic-rates.sqlite3");
+    std::fs::write(&state, b"synthetic-corruption").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let result = chat_stasher::remote_inbox::pull(
+        &remote,
+        &identity,
+        &policies,
+        50,
+        &stage,
+        "synthetic-puller",
+        100,
+        &state,
+        &UnprovenArchive { unreadable: false },
+    )
+    .unwrap();
+    assert_eq!(result.refused, [Refusal::RateAccounting]);
+    assert_eq!(result.stored + result.duplicates, 0);
+    assert!(!stage.exists());
+    assert_eq!(remote.list().unwrap().items.len(), 1);
+    assert_eq!(std::fs::read(&state).unwrap(), b"synthetic-corruption");
+}
+
+#[test]
+fn invalid_signature_cannot_consume_another_keys_quota() {
+    let (_runtime, remote) = transport();
+    let (identity, signing, mut policies) = keys();
+    policies
+        .get_mut("synthetic-key")
+        .unwrap()
+        .max_objects_per_pull = 1;
+    send_bundle(
+        &remote,
+        BUNDLE,
+        "synthetic-key",
+        &identity.to_public(),
+        &signing,
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stage = root.path().join("synthetic-stage");
+    let state = root.path().join("synthetic-rates.sqlite3");
+    let archive = UnprovenArchive { unreadable: false };
+    let invalid = chat_stasher::remote_inbox::pull(
+        &Tampered(&remote),
+        &identity,
+        &policies,
+        50,
+        &stage,
+        "synthetic-puller",
+        100,
+        &state,
+        &archive,
+    )
+    .unwrap();
+    assert_eq!(invalid.refused, [Refusal::Signature]);
+    assert!(!state.exists());
+    assert!(!stage.exists());
+    let valid = chat_stasher::remote_inbox::pull(
+        &remote,
+        &identity,
+        &policies,
+        50,
+        &stage,
+        "synthetic-puller",
+        100,
+        &state,
+        &archive,
+    )
+    .unwrap();
+    assert_eq!(valid.stored, 1);
+    assert_eq!(valid.refused, [Refusal::Unproven]);
 }

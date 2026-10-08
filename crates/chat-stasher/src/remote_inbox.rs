@@ -100,7 +100,8 @@ impl BundleTransport for RemoteInbox {
 }
 
 /// Trusted pull-time state, supplied by the archive machine; never by a sender.
-/// The rate bound is per invocation, not a persistent wall-clock quota.
+/// The object ceiling applies both per invocation and over a rolling hour.
+/// The caller must retain one rate-state file per inbox across invocations.
 #[derive(Clone)]
 pub struct KeyPolicy {
     pub public_key: VerifyingKey,
@@ -109,6 +110,7 @@ pub struct KeyPolicy {
     pub expires_at: u64,
     pub revoked: bool,
     pub max_bundle_bytes: usize,
+    /// Maximum authenticated attempts per invocation and rolling hour.
     pub max_objects_per_pull: usize,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,8 @@ pub enum Refusal {
     ExpiredKey,
     SizeLimit,
     RateLimit,
+    /// Accounting unavailable or clock regression; allowance is unknown.
+    RateAccounting,
     Signature,
     Decrypt,
     Contract,
@@ -142,6 +146,7 @@ fn open(
     keys: &BTreeMap<String, KeyPolicy>,
     now: u64,
     used: &mut BTreeMap<String, usize>,
+    rate_state: &Path,
 ) -> Result<(Vec<u8>, Vec<String>), Refusal> {
     let envelope: crate::send::Envelope =
         serde_json::from_slice(bytes).map_err(|_| Refusal::Envelope)?;
@@ -173,6 +178,16 @@ fn open(
         .map_err(|_| Refusal::Signature)?;
     let count = used.entry(envelope.key_id.clone()).or_default();
     if *count >= policy.max_objects_per_pull {
+        return Err(Refusal::RateLimit);
+    }
+    if !crate::inbox_rate::reserve(
+        rate_state,
+        &envelope.key_id,
+        now,
+        policy.max_objects_per_pull,
+    )
+    .map_err(|_| Refusal::RateAccounting)?
+    {
         return Err(Refusal::RateLimit);
     }
     *count += 1;
@@ -223,7 +238,11 @@ pub trait ArchiveProof {
 
 /// Listing failure is an error (unknown), never a successful zero-object pass.
 /// Per-object failures are bounded, named reasons, with no backend/body errors.
-/// `now` is Unix seconds from the trusted puller clock.
+/// `now` is Unix seconds from the trusted puller clock. `rate_state` is a
+/// trusted, owner-only SQLite file with an existing parent, separate from stage.
+/// Keep the same file for this inbox on every invocation. Authenticated attempts
+/// consume quota even if decryption, sealing, proof or retirement later fails.
+/// Invalid signatures consume no quota; unavailable accounting fails closed.
 pub fn pull<T: BundleTransport, P: ArchiveProof>(
     transport: &T,
     identity: &age::x25519::Identity,
@@ -232,6 +251,7 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
     stage: &Path,
     machine: &str,
     bucket_cap: usize,
+    rate_state: &Path,
     archive: &P,
 ) -> anyhow::Result<PullReport> {
     let listing = transport.list()?;
@@ -246,7 +266,7 @@ pub fn pull<T: BundleTransport, P: ArchiveProof>(
     for item in listing.items {
         let result = (|| {
             let bytes = transport.fetch(&item.item).map_err(|_| Refusal::Fetch)?;
-            let (bundle, axes) = open(&bytes, identity, keys, now, &mut used)?;
+            let (bundle, axes) = open(&bytes, identity, keys, now, &mut used, rate_state)?;
             let mut identities: Vec<&str> = axes.iter().map(String::as_str).collect();
             identities.push(machine);
             crate::test_identity_guard::refuse_fixture_write(&identities, stage)

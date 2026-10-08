@@ -17985,7 +17985,7 @@ struct SendKeyArgs {
     /// Maximum decrypted bundle bytes; defaults to 10 MiB.
     #[arg(long, requires = "platform")]
     max_bundle_bytes: Option<usize>,
-    /// Maximum objects accepted per pull; defaults to 100. This is not a time-window quota.
+    /// Maximum authenticated attempts per pull and rolling hour; defaults to 100.
     #[arg(long, requires = "platform")]
     max_objects_per_pull: Option<usize>,
     /// Print public metadata and active, expired or revoked state as JSON.

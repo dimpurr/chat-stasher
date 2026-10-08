@@ -293,6 +293,7 @@ fn reloaded_posting_key_and_trusted_policy_enforce_crypto_scope_expiry_and_revoc
         &stage,
         "synthetic-puller",
         1024 * 1024,
+        &s.root().join("synthetic-rates.sqlite3"),
         &NoArchive,
     )
     .unwrap();
@@ -306,6 +307,7 @@ fn reloaded_posting_key_and_trusted_policy_enforce_crypto_scope_expiry_and_revoc
         &stage,
         "synthetic-puller",
         1024 * 1024,
+        &s.root().join("synthetic-rates.sqlite3"),
         &NoArchive,
     )
     .unwrap();
@@ -321,6 +323,7 @@ fn reloaded_posting_key_and_trusted_policy_enforce_crypto_scope_expiry_and_revoc
         &stage,
         "synthetic-puller",
         1024 * 1024,
+        &s.root().join("synthetic-rates.sqlite3"),
         &NoArchive,
     )
     .unwrap();
@@ -335,6 +338,7 @@ fn reloaded_posting_key_and_trusted_policy_enforce_crypto_scope_expiry_and_revoc
         &stage,
         "synthetic-puller",
         1024 * 1024,
+        &s.root().join("synthetic-rates.sqlite3"),
         &NoArchive,
     )
     .unwrap();
