@@ -80,8 +80,8 @@ implemented but not yet observed completing in a real browser
 - **The historical gap closes by importing the official export** — the
   same `prod-grok-backend.json` the oracle measured against. The
   import seam already names Grok as a platform
-  (`crates/chat-stasher/src/import.rs:127`, `:139`); the parser that
-  makes `has_parser()` true for it (`import.rs:147-149`) lands on
+  (`crates/chat-stasher/src/import.rs:128`, `:140`); the parser that
+  makes `has_parser()` true for it (`import.rs:148-150`) lands on
   branch `w934-tko2-grok-export-parser`, not yet merged. Until it
   merges, `chat-stasher import --platform grok` is a named refusal,
   and the 251 are recoverable only by that merge or by a completed
