@@ -2285,7 +2285,7 @@ anyhow       crates/chat-stasher/src/remote_inbox.rs:88  "inbox fetch unavailabl
 anyhow       crates/chat-stasher/src/remote_inbox.rs:97  "inbox retirement unavailable"
 with_context crates/chat-stasher/src/runstate.rs:242  "create state dir {}"
 context      crates/chat-stasher/src/runstate.rs:245  "serialise run state"
-eprintln     crates/chat-stasher/src/scanner.rs:2788  "warning: cannot expand path `{p}`: {e}"
+eprintln     crates/chat-stasher/src/scanner.rs:2798  "warning: cannot expand path `{p}`: {e}"
 bail         crates/chat-stasher/src/schedule.rs:208  "binary path must be an installed path outside Cargo build directories: {}"
 anyhow       crates/chat-stasher/src/schedule.rs:230  "current executable is a build artifact at {}; pass --binary with an installed path or install chat-stasher under ~/.local/bin or Homebrew"
 bail         crates/chat-stasher/src/schedule.rs:273  "backup_interval_secs must be greater than zero"

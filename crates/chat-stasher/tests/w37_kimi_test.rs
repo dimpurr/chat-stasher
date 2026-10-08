@@ -251,6 +251,33 @@ fn fixture_store(home: &Path) -> PathBuf {
     root
 }
 
+/// Replace the home-level `session_index.jsonl` with one that carries
+/// real index lines: a JSON object per session, with the `sessionId`,
+/// `sessionDir` and `workDir` columns the implementation writes. Only
+/// `sessionId` and `workDir` are read by the scanner; `sessionDir` is
+/// written so the fixture matches the real line's shape.
+///
+/// An entry whose session is not in the fixture store is included on
+/// purpose: an index line for an unknown session must observe nothing.
+fn write_session_index(home: &Path, entries: &[(&str, &str)]) {
+    let mut bytes = Vec::new();
+    for (session, work_dir) in entries {
+        let line = serde_json::json!({
+            "sessionId": session,
+            "sessionDir": format!("sessions/fixture-workspace/{session}"),
+            "workDir": work_dir,
+        });
+        let encoded = serde_json::to_string(&line).expect("index line is JSON");
+        bytes.extend_from_slice(encoded.as_bytes());
+        bytes.push(b'\n');
+    }
+    write_file(
+        &home.join(".kimi-code").join("session_index.jsonl"),
+        &bytes,
+        UNIX_EPOCH,
+    );
+}
+
 /// Run the registry-driven scan with the isolated HOME in place. The fixture
 /// store lives under the isolated HOME's `.kimi-code`, so the scanner is given
 /// that exact location as an explicit kimi-code root.
@@ -542,6 +569,170 @@ fn a_nested_session_directory_owns_its_transcript_under_its_own_id() {
         "the record must point at the transcript inside the session directory it named"
     );
     assert_eq!(nested.byte_size, 70);
+}
+
+/// The 4D container of a Kimi Code session is the `<workspaceId>`
+/// segment the session directory sits under: the measured layout is
+/// `sessions/<workspaceId>/<sessionId>`, so the parent segment of
+/// the session directory is its workspace. Two sessions in one
+/// workspace share that container; a session in another workspace
+/// carries the other one.
+#[test]
+fn the_workspace_segment_above_the_session_directory_is_the_container() {
+    let _scan = ScanEnv::acquire();
+    let home = isolated_home();
+    fixture_store(home.path());
+
+    let report = scan_fixture(home.path());
+
+    let container_of = |session: &str| -> Vec<String> {
+        report
+            .records
+            .iter()
+            .find(|r| r.id == expected_id(session))
+            .map(|r| r.provenance.container.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        container_of(SESSION_A),
+        [WS_A],
+        "a session's container is the workspace directory above it"
+    );
+    assert_eq!(container_of(SESSION_B), [WS_A]);
+    assert_eq!(container_of(SESSION_C), [WS_B]);
+
+    // The fixture's index line carries no sessionId or workDir, so
+    // no cwd is observed from it: an index that observes nothing
+    // observes nothing, and the container stays the only dimension.
+    let cwd_of = |session: &str| -> Vec<String> {
+        report
+            .records
+            .iter()
+            .find(|r| r.id == expected_id(session))
+            .map(|r| r.provenance.cwd.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        cwd_of(SESSION_A).is_empty(),
+        "a malformed index line must not become a cwd: {:?}",
+        cwd_of(SESSION_A)
+    );
+}
+
+/// The `workDir` column of `session_index.jsonl` is the working
+/// directory the source itself recorded, so it is the session's
+/// observed cwd — alongside, not instead of, the container the
+/// directory hierarchy carries. A session the index holds no line
+/// for observes no cwd.
+#[test]
+fn the_index_work_dir_is_the_observed_cwd() {
+    let _scan = ScanEnv::acquire();
+    let home = isolated_home();
+    fixture_store(home.path());
+    write_session_index(
+        home.path(),
+        &[
+            (SESSION_A, "/w/fixture-a"),
+            (SESSION_B, "/w/fixture-b"),
+            (
+                "session_00000000-0000-4000-8000-0000000000ff",
+                "/w/elsewhere",
+            ),
+        ],
+    );
+
+    let report = scan_fixture(home.path());
+
+    let dimension_of = |session: &str| -> (Vec<String>, Vec<String>) {
+        report
+            .records
+            .iter()
+            .find(|r| r.id == expected_id(session))
+            .map(|r| (r.provenance.container.clone(), r.provenance.cwd.clone()))
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        dimension_of(SESSION_A),
+        (vec![WS_A.to_string()], vec!["/w/fixture-a".to_string()]),
+        "the index workDir is the cwd, and the workspace segment stays the container"
+    );
+    assert_eq!(
+        dimension_of(SESSION_B),
+        (vec![WS_A.to_string()], vec!["/w/fixture-b".to_string()])
+    );
+    // SESSION_C has no index line: the cwd dimension stays
+    // unobserved — an empty vector is "nothing observed", never
+    // "this session ran nowhere" — while the container its own
+    // directory hierarchy carried stays observed.
+    assert_eq!(
+        dimension_of(SESSION_C),
+        (vec![WS_B.to_string()], Vec::<String>::new()),
+        "a session without an index line observes no cwd"
+    );
+}
+
+/// The recursive rule also matches a session directory that sits
+/// *directly* under the sessions root. That hierarchy has no
+/// workspace segment above the session directory, so the container
+/// stays unobserved — not empty-string, not the root itself.
+#[test]
+fn a_session_directly_under_the_sessions_root_leaves_the_container_unobserved() {
+    let _scan = ScanEnv::acquire();
+    let home = isolated_home();
+    let root = fixture_store(home.path());
+    write_file(
+        &root.join("session_loose").join("agents/main/wire.jsonl"),
+        &body(40),
+        UNIX_EPOCH + Duration::from_secs(1_800_000_088),
+    );
+
+    let report = scan_fixture(home.path());
+
+    let loose = report
+        .records
+        .iter()
+        .find(|r| r.id == expected_id("session_loose"))
+        .expect("a depth-one session directory still matches the recursive rule");
+    assert_eq!(
+        loose.provenance.container,
+        Vec::<String>::new(),
+        "a session directly under the sessions root has no workspace segment"
+    );
+}
+
+/// A session directory nested below another matching directory owns
+/// its transcript under its own id (see the test above), but the
+/// segment immediately above it is an implementation directory, not
+/// a workspace — so the container stays unobserved.
+#[test]
+fn a_nested_session_directory_leaves_the_container_unobserved() {
+    let _scan = ScanEnv::acquire();
+    let home = isolated_home();
+    let root = fixture_store(home.path());
+    const OUTER: &str = "session_00000000-0000-4000-8000-00000000000d";
+    const INNER: &str = "session_00000000-0000-4000-8000-00000000000e";
+    write_file(
+        &root
+            .join(WS_B)
+            .join(OUTER)
+            .join(INNER)
+            .join("agents/main/wire.jsonl"),
+        &body(70),
+        UNIX_EPOCH + Duration::from_secs(1_800_000_066),
+    );
+
+    let report = scan_fixture(home.path());
+
+    let nested = report
+        .records
+        .iter()
+        .find(|r| r.id == expected_id(INNER))
+        .expect("the nested session directory owns its transcript");
+    assert_eq!(
+        nested.provenance.container,
+        Vec::<String>::new(),
+        "the segment above a nested session directory is not a workspace"
+    );
 }
 
 /// `KIMI_CODE_HOME` moves the whole store, and the cell declares it. A

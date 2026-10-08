@@ -558,6 +558,34 @@ mod tests {
     }
 
     #[test]
+    fn a_container_is_an_observation_and_empty_is_not_a_value() {
+        let mut observed = SessionProvenance::default();
+        assert!(observed.is_empty(), "nothing read yet is nothing observed");
+        observed.insert_container("workspace-fixture");
+        observed.insert_container("workspace-fixture");
+        observed.insert_container("other-workspace-fixture");
+        assert_eq!(
+            observed.container,
+            ["other-workspace-fixture", "workspace-fixture"],
+            "a session seen in two workspaces keeps both, and a \
+             re-observation of one workspace is that workspace"
+        );
+        assert!(
+            !observed.is_empty(),
+            "a container is a recorded fact even when it is the only one"
+        );
+        assert!(observed.is_valid());
+
+        let mut refused = SessionProvenance::default();
+        refused.insert_container("");
+        assert!(
+            refused.is_empty(),
+            "a caller must not be able to slip an empty container past \
+             the guard that reads the vector: {refused:?}"
+        );
+    }
+
+    #[test]
     fn a_cwd_survives_the_index_line_it_travels_in_and_omits_itself_when_empty() {
         let mut observed = SessionProvenance::default();
         observed.insert_cwd("/w/one");

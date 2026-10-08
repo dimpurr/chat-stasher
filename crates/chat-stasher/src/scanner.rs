@@ -27,8 +27,13 @@
 //! embedded copy would make a user believe their edited registry was active.
 //!
 //! Hard guarantees:
-//!   * read-only — nothing is opened for writing and file bodies are never
-//!     read, so no session content can ever leak into a log or report,
+//!   * read-only — nothing is opened for writing, and no session transcript is
+//!     ever read: a scan reads directory names and file sizes only, so no
+//!     session content can leak into a log or report. The one document a scan
+//!     does parse is Kimi Code's `session_index.jsonl`, a per-session index of
+//!     ids and working directories; it is opened for reading, is not a
+//!     transcript, and only contributes the cwd dimension to a record's
+//!     provenance,
 //!   * `.jsonl.zst` files are *recognised and listed* (compressed flag set);
 //!     decompression is a later spike but silently skipping them is not an
 //!     option,
@@ -43,7 +48,7 @@ use crate::sqlite_probe::{
     CursorLegacySessionRow, SqliteSessionProbe, SqliteSessionRow,
 };
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -1112,7 +1117,12 @@ fn probe_harness(
         let mut local = ScanReport::default();
         let probe = probe_harness_single(&root_config, &one, platform, machine, &mut local);
         for record in &mut local.records {
-            record.provenance = root.provenance.clone();
+            // The cell's declared observation joins whatever the record's own
+            // discovery already observed — a Kimi Code session's workspace
+            // segment and indexed working directory — instead of replacing
+            // it: every dimension here is a distinct observation of one
+            // session, not a single authoritative answer.
+            crate::provenance::merge(&mut record.provenance, &root.provenance);
         }
         total.records.extend(local.records);
         total.missing_roots.extend(local.missing_roots);
@@ -2820,10 +2830,26 @@ struct DirectoryScan {
 enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
-    /// The current matching session-directory ancestor: its path and name —
-    /// the native id. Ordinary rules keep the first scope; recursive rules
-    /// replace it when a nested directory matches.
-    In { dir: PathBuf, id: String },
+    /// The current matching session-directory ancestor: its path and
+    /// name — the native id. Ordinary rules keep the first scope;
+    /// recursive rules replace it when a nested directory matches.
+    ///
+    /// `container` is the segment immediately above the session
+    /// directory when that segment is a workspace identity: Kimi
+    /// Code's measured layout is `sessions/<workspaceId>/<sessionId>`,
+    /// so the parent segment of a session directory is its workspace.
+    /// It is observed only at that exact depth — a session directly
+    /// under the root has no workspace segment, and a nested one
+    /// carries an implementation directory above it, neither of which
+    /// is a workspace — and only for the harness whose layout gives
+    /// that segment a workspace meaning. Unrecognized hierarchies
+    /// leave it `None`, and a `None` container is *not observed*,
+    /// never "no workspace".
+    In {
+        dir: PathBuf,
+        id: String,
+        container: Option<String>,
+    },
 }
 
 /// The scope a child directory inherits: unchanged, or replaced when the
@@ -2833,6 +2859,7 @@ fn descend_scope(
     dir: &Path,
     root: &Path,
     rule: Option<&SessionDirRule>,
+    source: HarnessSource,
 ) -> SessionScope {
     let Some(rule) = rule else {
         return parent.clone();
@@ -2882,9 +2909,27 @@ fn descend_scope(
     let Some(name) = components.last().cloned() else {
         return parent.clone();
     };
+    // Kimi Code's measured layout is `<root>/<workspaceId>/<sessionId>`:
+    // the segment immediately above the session directory is a workspace
+    // identity, and only at that exact depth. One level (a session directly
+    // under the root) has no workspace segment above it, and a deeper
+    // match carries an implementation directory above the session, which is
+    // not a workspace; both leave the container unobserved rather than
+    // recording a non-workspace segment as one. The other harness that
+    // declares a two-level rule (DeepSeek Harness) names its segment by a
+    // lossy cwd slug, which is a path derivative and never a container
+    // identity (`cwd ≠ repo identity`), so only Kimi Code reads the parent
+    // segment as a workspace. The depth is counted from the walked root,
+    // so the segment is a workspace identity only when that root is the
+    // harness's own sessions directory — the same anchoring the
+    // per-session index (`kimi_work_dirs`) is held to for the cwd it
+    // reads.
+    let container =
+        (source == HarnessSource::KimiCode && components.len() == 2).then(|| components[0].clone());
     SessionScope::In {
         dir: dir.to_path_buf(),
         id: name,
+        container,
     }
 }
 
@@ -2911,6 +2956,26 @@ fn collect_records(
     session_pattern: Option<&str>,
     session_dir: Option<&SessionDirRule>,
 ) -> DirectoryScan {
+    // Kimi Code keeps a one-line-per-session index at
+    // `<home>/session_index.jsonl` (`sessionId`, `sessionDir`,
+    // `workDir`); the sessions root it is walked through is
+    // `<home>/sessions`, so the index sits one level above it. Its
+    // `workDir` column is the working directory the source itself
+    // recorded for a session, which makes it the session's observed
+    // cwd. An absent, unreadable or malformed index observes
+    // nothing, and so does a session the index holds no line for.
+    // Both Kimi dimensions are anchored to that root being the
+    // harness's own sessions directory: the index is looked up at the
+    // root's parent, and the workspace segment is the one exactly two
+    // levels below the root. A scan root that is not that directory —
+    // a `harness_roots` override pointing at `<home>` itself or at a
+    // session directory — leaves the container and the indexed cwd
+    // unobserved, never mislabeled.
+    let session_index = if source == HarnessSource::KimiCode {
+        kimi_work_dirs(root)
+    } else {
+        BTreeMap::new()
+    };
     let mut records = Vec::new();
     let mut unreadable_count = 0;
     let mut unreadable_entry_count = 0;
@@ -2940,7 +3005,7 @@ fn collect_records(
                 }
             };
             if file_type.is_dir() {
-                let child = descend_scope(&scope, &path, root, session_dir);
+                let child = descend_scope(&scope, &path, root, session_dir, source);
                 stack.push((path, child));
                 continue;
             }
@@ -2955,6 +3020,7 @@ fn collect_records(
                 session_pattern,
                 &scope,
                 session_dir,
+                &session_index,
             ) {
                 RecordBuild::Record(record) => records.push(record),
                 RecordBuild::Unreadable => unreadable_count += 1,
@@ -2967,6 +3033,45 @@ fn collect_records(
         unreadable_count,
         unreadable_entry_count,
     }
+}
+
+/// Kimi Code's per-session index, as a `sessionId` → `workDir` map.
+///
+/// The index lives beside the sessions root (`<home>/sessions`), so
+/// it is `<root>`'s parent directory's `session_index.jsonl`. Each
+/// line is a JSON object; a line that is not JSON, or that carries
+/// no `sessionId` or no non-empty `workDir`, contributes nothing —
+/// absence is not an empty working directory.
+///
+/// "Beside the sessions root" is the anchoring contract: a walk root
+/// that is not the harness's `sessions` directory itself — a
+/// `harness_roots` override pointed at `<home>` or at a session
+/// directory — looks the index up under the wrong parent and observes
+/// no working directory, the same outcome as a session the index
+/// holds no line for.
+fn kimi_work_dirs(root: &Path) -> BTreeMap<String, String> {
+    let Some(index) = root.parent().map(|home| home.join("session_index.jsonl")) else {
+        return BTreeMap::new();
+    };
+    let Ok(bytes) = fs::read_to_string(&index) else {
+        return BTreeMap::new();
+    };
+    let mut work_dirs = BTreeMap::new();
+    for line in bytes.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(session) = value.get("sessionId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(work_dir) = value.get("workDir").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !session.is_empty() && !work_dir.is_empty() {
+            work_dirs.insert(session.to_string(), work_dir.to_string());
+        }
+    }
+    work_dirs
 }
 
 /// Return the suffixes declared by a registry `format` cell.
@@ -3056,6 +3161,7 @@ enum RecordBuild {
     Record(SessionRecord),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record(
     path: &Path,
     expected: HarnessSource,
@@ -3064,6 +3170,7 @@ fn build_record(
     session_pattern: Option<&str>,
     scope: &SessionScope,
     session_dir: Option<&SessionDirRule>,
+    session_index: &BTreeMap<String, String>,
 ) -> RecordBuild {
     let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
         return RecordBuild::NotSession;
@@ -3087,16 +3194,20 @@ fn build_record(
     // no such directory above it, or one that is not that session's declared
     // transcript, is simply not a session of this harness — it is never
     // silently labelled with the constant filename stem, which is what would
-    // merge every session into one slot.
-    let native_id = match (session_dir, scope) {
-        (Some(rule), SessionScope::In { dir, id }) => {
+    // merge every session into one slot. The same scope carries the workspace
+    // segment above the session directory (its container, when the layout
+    // gives that segment a workspace meaning) and, for a harness that keeps
+    // a per-session index, the working directory the index recorded.
+    let (native_id, container, indexed_cwd) = match (session_dir, scope) {
+        (Some(rule), SessionScope::In { dir, id, container }) => {
             if !relpath_matches(dir, path, &rule.file) {
                 return RecordBuild::NotSession;
             }
-            id.clone()
+            let cwd = session_index.get(id.as_str()).cloned();
+            (id.clone(), container.clone(), cwd)
         }
         (Some(_), SessionScope::Outside) => return RecordBuild::NotSession,
-        (None, _) => stem,
+        (None, _) => (stem, None, None),
     };
 
     let source = detect_source(path).unwrap_or(expected);
@@ -3119,6 +3230,19 @@ fn build_record(
         native_id,
     };
 
+    // The 4D dimensions this record's own discovery observed: the
+    // workspace segment above the session directory (container) and
+    // the working directory the source's index recorded (cwd). Both
+    // stay unobserved when the layout or the index provides neither,
+    // and neither is ever inferred from the harness name.
+    let mut provenance = crate::provenance::SessionProvenance::default();
+    if let Some(container) = container {
+        provenance.insert_container(container);
+    }
+    if let Some(work_dir) = indexed_cwd {
+        provenance.insert_cwd(work_dir);
+    }
+
     RecordBuild::Record(SessionRecord {
         id: ident.id(),
         absolute_path: absolutize(path),
@@ -3127,7 +3251,7 @@ fn build_record(
         source,
         compressed,
         sqlite_layout: None,
-        provenance: Default::default(),
+        provenance,
     })
 }
 
@@ -4204,7 +4328,13 @@ mod tests {
                 .join("project")
                 .join("session_two-prefix"),
         ] {
-            let scope = descend_scope(&SessionScope::Outside, &path, root, Some(&rule));
+            let scope = descend_scope(
+                &SessionScope::Outside,
+                &path,
+                root,
+                Some(&rule),
+                HarnessSource::KimiCode,
+            );
             assert_eq!(id(&scope), path.file_name().and_then(|name| name.to_str()));
         }
     }
@@ -4224,15 +4354,33 @@ mod tests {
             file: "agents/main/wire.jsonl".to_string(),
         };
         let outer_path = root.join("workspace").join("session_outer");
-        let outer = descend_scope(&SessionScope::Outside, &outer_path, root, Some(&rule));
+        let outer = descend_scope(
+            &SessionScope::Outside,
+            &outer_path,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
         assert_eq!(id(&outer), Some("session_outer"));
 
         let implementation = outer_path.join("agents");
-        let still_outer = descend_scope(&outer, &implementation, root, Some(&rule));
+        let still_outer = descend_scope(
+            &outer,
+            &implementation,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
         assert_eq!(id(&still_outer), Some("session_outer"));
 
         let inner_path = outer_path.join("session_inner");
-        let inner = descend_scope(&outer, &inner_path, root, Some(&rule));
+        let inner = descend_scope(
+            &outer,
+            &inner_path,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
         assert_eq!(id(&inner), Some("session_inner"));
     }
 
@@ -4251,15 +4399,33 @@ mod tests {
             file: "transcript.jsonl".to_string(),
         };
         let root_session = root.join("workspace").join("session_one");
-        let scope = descend_scope(&SessionScope::Outside, &root_session, root, Some(&rule));
+        let scope = descend_scope(
+            &SessionScope::Outside,
+            &root_session,
+            root,
+            Some(&rule),
+            HarnessSource::GoogleAntigravity,
+        );
         assert_eq!(id(&scope), Some("session_one"));
 
         let implementation = root_session.join("implementation").join("session_false");
-        let preserved = descend_scope(&scope, &implementation, root, Some(&rule));
+        let preserved = descend_scope(
+            &scope,
+            &implementation,
+            root,
+            Some(&rule),
+            HarnessSource::GoogleAntigravity,
+        );
         assert_eq!(id(&preserved), Some("session_one"));
 
         let too_deep = root.join("workspace").join("project").join("session_two");
-        let rejected = descend_scope(&SessionScope::Outside, &too_deep, root, Some(&rule));
+        let rejected = descend_scope(
+            &SessionScope::Outside,
+            &too_deep,
+            root,
+            Some(&rule),
+            HarnessSource::GoogleAntigravity,
+        );
         assert_eq!(id(&rejected), None);
     }
 
@@ -4289,11 +4455,93 @@ mod tests {
                 pattern: pattern.to_string(),
                 file: "agents/main/wire.jsonl".to_string(),
             };
-            let matched = descend_scope(&SessionScope::Outside, &matching, root, Some(&rule));
+            let matched = descend_scope(
+                &SessionScope::Outside,
+                &matching,
+                root,
+                Some(&rule),
+                HarnessSource::KimiCode,
+            );
             assert_eq!(id(&matched), Some("session_one"), "pattern: {pattern}");
-            let rejected = descend_scope(&SessionScope::Outside, &too_deep, root, Some(&rule));
+            let rejected = descend_scope(
+                &SessionScope::Outside,
+                &too_deep,
+                root,
+                Some(&rule),
+                HarnessSource::KimiCode,
+            );
             assert_eq!(id(&rejected), None, "pattern: {pattern}");
         }
+    }
+
+    #[test]
+    fn kimi_workspace_segment_is_the_container_only_at_the_measured_depth() {
+        fn container(scope: &SessionScope) -> Option<&str> {
+            match scope {
+                SessionScope::Outside => None,
+                SessionScope::In {
+                    container: Some(value),
+                    ..
+                } => Some(value),
+                SessionScope::In {
+                    container: None, ..
+                } => None,
+            }
+        }
+
+        let root = Path::new("/fixture/sessions");
+        let rule = SessionDirRule {
+            pattern: "**/session_*".to_string(),
+            file: "agents/main/wire.jsonl".to_string(),
+        };
+
+        // The measured layout: <root>/<workspaceId>/<sessionId>.
+        let measured = root.join("workspace_id").join("session_one");
+        let scope = descend_scope(
+            &SessionScope::Outside,
+            &measured,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
+        assert_eq!(container(&scope), Some("workspace_id"));
+
+        // A session directly under the root has no workspace segment
+        // above it, so no container is observed — never an empty one.
+        let direct = root.join("session_one");
+        let scope = descend_scope(
+            &SessionScope::Outside,
+            &direct,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
+        assert_eq!(container(&scope), None);
+
+        // A session nested below another directory carries an
+        // implementation directory above it, which is not a workspace.
+        let nested = root.join("workspace_id").join("agents").join("session_two");
+        let scope = descend_scope(
+            &SessionScope::Outside,
+            &nested,
+            root,
+            Some(&rule),
+            HarnessSource::KimiCode,
+        );
+        assert_eq!(container(&scope), None);
+
+        // DeepSeek Harness's two-level layout names its segment by a
+        // lossy cwd slug: a path derivative, never a container
+        // identity, so the parent segment stays unobserved for it.
+        let slug = root.join("cwd-slug").join("session_three");
+        let scope = descend_scope(
+            &SessionScope::Outside,
+            &slug,
+            root,
+            Some(&rule),
+            HarnessSource::DeepSeekHarness,
+        );
+        assert_eq!(container(&scope), None);
     }
 
     #[test]
