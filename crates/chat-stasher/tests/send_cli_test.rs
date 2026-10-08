@@ -23,6 +23,9 @@ fn run(s: &Sandbox, args: &[&str], token: Option<&str>) -> std::process::Output 
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_limit(512)
+    }
+    fn with_limit(limit: usize) -> Self {
         let owner = Sandbox::new();
         let producer = Sandbox::new();
         let inbox = owner.root().join("synthetic-inbox");
@@ -45,6 +48,8 @@ impl Fixture {
                 "synthetic-cloud",
                 "--credential-file",
                 credential.to_str().unwrap(),
+                "--max-objects-per-pull",
+                &limit.to_string(),
             ],
             None,
         );
@@ -268,4 +273,123 @@ fn oversized_input_is_a_completed_refusal_without_upload() {
     assert_eq!(f.send().status.code(), Some(1));
     assert!(!f.inbox.exists());
     assert!(!f.cursor_root().exists());
+}
+
+fn pull_cli(f: &Fixture, stage: &std::path::Path) -> std::process::Output {
+    run(
+        &f.owner,
+        &[
+            "inbox-pull",
+            "synthetic-inbox",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            "synthetic-puller",
+        ],
+        None,
+    )
+}
+#[test]
+fn pull_cli_seals_but_preserves_objects_without_archive_proof_and_retains_hourly_quota() {
+    let f = Fixture::with_limit(1);
+    assert!(f.send().status.success());
+    let stage = f.owner.root().join("synthetic-stage");
+    let first = pull_cli(&f, &stage);
+    assert_eq!(first.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&first.stdout).contains("stored=1"));
+    assert!(String::from_utf8_lossy(&first.stderr).contains("ArchiveRead"));
+    assert_eq!(f.objects().len(), 1);
+    let ledger = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.rates.sqlite3");
+    assert!(ledger.is_file());
+    // Changing stage must not change the retained per-inbox accounting identity.
+    let other = f.owner.root().join("synthetic-other-stage");
+    let second = pull_cli(&f, &other);
+    assert_eq!(second.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&second.stderr).contains("RateLimit"));
+    assert!(!other.exists());
+    assert_eq!(f.objects().len(), 1);
+}
+#[test]
+fn pull_cli_corrupt_accounting_is_unknown_and_preserves_queued_bytes() {
+    let f = Fixture::new();
+    assert!(f.send().status.success());
+    let ledger = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.rates.sqlite3");
+    std::fs::write(&ledger, b"synthetic-corrupt-accounting").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    // On non-Unix systems the file inherits the fixture directory ACL.
+    let stage = f.owner.root().join("synthetic-stage");
+    let result = pull_cli(&f, &stage);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("RateAccounting"));
+    assert!(!stage.exists());
+    assert_eq!(f.objects().len(), 1);
+    assert_eq!(
+        std::fs::read(ledger).unwrap(),
+        b"synthetic-corrupt-accounting"
+    );
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic-posting-secret"));
+}
+#[test]
+fn pull_cli_missing_backend_is_unknown_not_an_empty_inbox() {
+    let f = Fixture::new();
+    let stage = f.owner.root().join("synthetic-stage");
+    let missing = pull_cli(&f, &stage);
+    assert_eq!(missing.status.code(), Some(3));
+    assert!(!f.inbox.exists());
+    assert!(!stage.exists());
+    assert!(!String::from_utf8_lossy(&missing.stdout).contains("waiting=0"));
+    std::fs::create_dir(&f.inbox).unwrap();
+    let empty = pull_cli(&f, &stage);
+    assert_eq!(empty.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("waiting=0"));
+    assert!(!stage.exists());
+}
+#[test]
+fn pull_cli_usage_and_completed_refusals_remain_distinct() {
+    let f = Fixture::new();
+    assert_eq!(run(&f.owner, &["inbox-pull"], None).status.code(), Some(2));
+    let stage = f.owner.root().join("synthetic-stage");
+    std::fs::create_dir(&f.inbox).unwrap();
+    std::fs::write(f.inbox.join("a".repeat(64)), b"{}").unwrap();
+    let result = pull_cli(&f, &stage);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Envelope"));
+    assert!(!stage.exists());
+    assert_eq!(f.objects().len(), 1);
+}
+
+#[test]
+fn pull_cli_unsafe_ledger_and_invalid_config_fail_closed() {
+    let f = Fixture::new();
+    assert!(f.send().status.success());
+    let ledger = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.rates.sqlite3");
+    std::fs::create_dir(&ledger).unwrap();
+    let stage = f.owner.root().join("synthetic-stage");
+    let result = pull_cli(&f, &stage);
+    assert_eq!(result.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("RateAccounting"));
+    assert!(!stage.exists());
+    assert_eq!(f.objects().len(), 1);
+    let record = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.json");
+    std::fs::write(&record, b"synthetic-invalid-config").unwrap();
+    let invalid = pull_cli(&f, &stage);
+    assert_eq!(invalid.status.code(), Some(3));
+    assert!(!stage.exists());
+    assert_eq!(std::fs::read(record).unwrap(), b"synthetic-invalid-config");
 }
