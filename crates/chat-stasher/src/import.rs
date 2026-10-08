@@ -35,6 +35,13 @@
 //! Read-only on the source (ADR-011): the export file is opened for reading and
 //! never moved, renamed, rewritten or deleted.
 
+/// The per-platform export parsers, behind the producer above: each turns one
+/// platform's export bytes into conversation-level records behind a pure
+/// function, writes nothing and is wired to no command, which is what lets one be
+/// run over a copy of a real export while the archive under measurement stays
+/// untouched (ADR-055 D4/D10). [`chatgpt`] is the ChatGPT arm.
+pub mod chatgpt;
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -142,9 +149,11 @@ impl TakeoutPlatform {
         }
     }
 
-    /// Does this build parse this platform's export? Only `claude` does in this
-    /// slice; the order the rest land in is ADR-055 D10 (DeepSeek and ChatGPT
-    /// are gated by their platform's own extension validation first).
+    /// Whether [`run`] parses this platform's export in this build. Only
+    /// `claude` is wired into [`run`]; `chatgpt` has a parser ([`chatgpt`]) that
+    /// no command calls yet, so it is still refused here — the order the rest land
+    /// in is ADR-055 D10 (DeepSeek and ChatGPT are gated by their platform's own
+    /// extension validation first).
     pub fn has_parser(self) -> bool {
         matches!(self, Self::Claude)
     }
