@@ -121,7 +121,8 @@ the sentence.
    (`apps/extension/lib/platform-auth.ts:47`, `:92-107`). The token is held only
    in the page's content-script memory: it is never written to storage, never
    logged, never sent to the `chat-stasher` host, and never attached to any
-   other request (`apps/extension/lib/platform-auth.ts:61-71`, `:113-165`).
+   other request (`apps/extension/lib/platform-auth.ts:11-16`, `:61-71`,
+   `:113-165`).
    **A second token, on Kimi, and it is read from the page rather than requested.**
    Backfill's two Kimi requests — the conversation list and one conversation's
    body — need the session's bearer token, and a request carrying only cookies is
@@ -134,8 +135,8 @@ the sentence.
    kimi.com; after a 401 it is re-read once and the request retried once, and if
    there is no token the request goes out **without** one so that the platform's
    own refusal is what the leg sees — a refusal is never recorded as “you have no
-   conversations” (`apps/extension/lib/platform-auth.ts:303-357`,
-  `apps/extension/entrypoints/dw-bridge.content.ts:507-513`).
+   conversations” (`apps/extension/lib/platform-auth.ts:217`, `:327-361`;
+   `apps/extension/entrypoints/dw-bridge.content.ts:495-513`).
 2. **Queue on your machine.** The extension writes that text, as a JSON bundle,
    into its **own IndexedDB outbox** — extension-local storage on your disk,
    keyed by the SHA-256 of the bundle (`apps/extension/lib/outbox.ts:35-38`,

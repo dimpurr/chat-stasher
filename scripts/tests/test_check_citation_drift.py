@@ -17,6 +17,45 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
 
+def run_binding(doc: str, markers: tuple[str, ...], text: str,
+                files: dict[str, str], *, keep_all: bool = False) -> list[str]:
+    """The problems for the bindings whose claim lives at `markers` in `doc`.
+
+    The document is keyed under the binding's own name because
+    semantic_binding_problems looks the claim up by that name; a fixture
+    filed under a synthetic key would silently match no binding at all and
+    every assertion built on it would pass for the wrong reason. The filter
+    keeps each fixture honest when SEMANTIC_BINDINGS grows: a new binding
+    matching the same document must fail or pass on its own legs, not on
+    this file's assertions about some other binding.
+
+    `keep_all` returns the unfiltered problems, which is what an assertion
+    about ambiguity needs: a claim found in two paragraphs is reported once
+    for the binding and its own markers, and filtering by the markers this
+    file believes the binding uses would hide the failure it is asserting.
+    """
+    basenames = {os.path.basename(path): path for path in files}
+    citations, parse_problems = checker.parse_text(
+        doc,
+        text.splitlines(),
+        basenames,
+        exists=lambda path: path in files,
+    )
+    assert parse_problems == [], parse_problems
+    problems = checker.semantic_binding_problems(
+        citations,
+        {doc: text},
+        lambda path: files[path].splitlines() if path in files else [],
+    )
+    if keep_all:
+        return problems
+    return [
+        problem
+        for problem in problems
+        if all(repr(marker) in problem for marker in markers)
+    ]
+
+
 class SessionTokenCitationTests(unittest.TestCase):
     DOC = "docs-dev/threat-model.md"
     TARGET = "apps/extension/lib/platform-auth.ts"
@@ -159,33 +198,7 @@ class AuditedClaimBindingTests(unittest.TestCase):
     pass just as well with no binding at all.
     """
 
-    def run_binding(self, doc: str, markers: tuple[str, ...], text: str,
-                    files: dict[str, str]) -> list[str]:
-        """The problems for the one binding that owns `doc` and `markers`.
-
-        The document is keyed under the binding's own name because
-        semantic_binding_problems looks the claim up by that name; a fixture
-        filed under a synthetic key would silently match no binding at all and
-        every assertion here would pass for the wrong reason.
-        """
-        basenames = {os.path.basename(path): path for path in files}
-        citations, parse_problems = checker.parse_text(
-            doc,
-            text.splitlines(),
-            basenames,
-            exists=lambda path: path in files,
-        )
-        self.assertEqual(parse_problems, [])
-        problems = checker.semantic_binding_problems(
-            citations,
-            {doc: text},
-            lambda path: files[path].splitlines() if path in files else [],
-        )
-        return [
-            problem
-            for problem in problems
-            if all(repr(marker) in problem for marker in markers)
-        ]
+    run_binding = staticmethod(run_binding)
 
     def test_sqlite_read_only_claim_needs_the_flag_and_both_uri_spellings(self) -> None:
         doc = "docs-dev/threat-model.md"
@@ -372,6 +385,325 @@ class AuditedClaimBindingTests(unittest.TestCase):
         self.assertIn("resolveClaudeOrg", partial[0])
         self.assertIn("CLAUDE_RESOLVE_PATH", partial[0])
         self.assertNotIn("CLAUDE_ORG_COOKIE", partial[0].split("in each of:")[1].split(";")[0])
+
+
+class W820SemanticBindingTests(unittest.TestCase):
+    """The W820 audit bindings: prose→anchor extensions of the W600 guard.
+
+    Each binding below was added because the audit found a claim whose
+    anchors held true bytes without saying the thing the sentence asserts —
+    or, for the never-anchored legs, nothing at all. Every case replays the
+    anchor the prose carried before the fix, expects red naming the leg that
+    was missing, then plays the range that really carries the mechanism and
+    expects green. A case that only ever saw green would pass with the
+    binding deleted, so the red half is the test.
+    """
+
+    run_binding = staticmethod(run_binding)
+
+    KIMI_SOURCE = (
+        "export const KIMI_ACCESS_TOKEN_STORAGE_KEY = 'access_token';\n"     # 1
+        "\n"                                                                 # 2
+        "export function needsKimiBearer(url, pageOrigin) {\n"              # 3
+        "  return false;\n"                                                  # 4
+        "}\n"                                                                # 5
+        "export function createKimiAuthorizedFetch(pageOrigin, rawFetch, options) {\n"  # 6
+        "  const send = async (url, init, token) => {\n"                      # 7
+        "    return rawFetch(url, { ...init, headers: { authorization: `Bearer ${token}` } });\n"  # 8
+        "  };\n"                                                             # 9
+        "  return async (url, init) => {\n"                                  # 10
+        "    if (!needsKimiBearer(url, pageOrigin)) return rawFetch(url, init);\n"  # 11
+        "    const token = usableHeaderToken(options.readToken());\n"        # 12
+        "    const first = await send(url, init, token);\n"                   # 13
+        "    if (first.status !== 401 || token === null) return first;\n"    # 14
+        "    return send(url, init, usableHeaderToken(options.readToken()));\n"  # 15
+        "  };\n"                                                             # 16
+        "}\n"                                                                # 17
+    )
+    KIMI_READER = (
+        "function readKimiAccessToken(): string | null {\n"                  # 1
+        "  try {\n"                                                          # 2
+        "    return window.localStorage.getItem(KIMI_ACCESS_TOKEN_STORAGE_KEY);\n"  # 3
+        "  } catch {\n"                                                      # 4
+        "    return null;\n"                                                 # 5
+        "  }\n"                                                              # 6
+        "}\n"                                                                # 7
+    )
+
+    def test_outbound_port_claim_needs_both_defaults(self) -> None:
+        doc = "docs-dev/threat-model.md"
+        claim = (
+            "The extension's only outbound HTTP port defaults to a function that\n"
+            "refuses to send, and when it is wired every request goes through\n"
+            "`checkBackfillRequest`, which refuses anything that is not same-origin.\n"
+        )
+        files = {
+            "apps/extension/lib/backfill/engine.ts": (
+                "async function sendVia(http, url, init) {\n"                  # 1
+                "  return http(url, init);\n"                                  # 2
+                "}\n"                                                          # 3
+                "\n"                                                           # 4
+                "/** The default port: it blows up on purpose. */\n"           # 5
+                "export const notWiredHttp = async (url: string) => {\n"       # 6
+                "  throw new Error(`refused to fetch ${url}`);\n"              # 7
+                "};\n"                                                         # 8
+            ),
+            "apps/extension/lib/backfill/tab-port.ts": (
+                "/** Page JS cannot reach this. */\n"                          # 1
+                "export function checkBackfillRequest(\n"                     # 2
+                "  spec: BackfillRequestSpec,\n"                               # 3
+                "  pageOrigin: string,\n"                                      # 4
+                "  lookup: PlanLookup = backfillPlanFor,\n"                    # 5
+                "): RequestVerdict {\n"                                        # 6
+                "  const u: URL = new URL(spec.url);\n"                        # 7
+                "  if (u.origin !== pageOrigin) {\n"                            # 8
+                "    return refuseUrl('url is not same-origin with the page');\n"  # 9
+                "  }\n"                                                        # 10
+                "  const row = getPlatformByOrigin(u.origin);\n"               # 11
+                "  if (!row) {\n"                                              # 12
+                "    return refuseUrl('origin is not in the platform table');\n"  # 13
+                "  }\n"                                                       # 14
+                "}\n"                                                         # 15
+            ),
+        }
+        markers = ("only outbound HTTP port", "checkBackfillRequest")
+
+        # The function above the refusing default: neither mechanism is named.
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/backfill/engine.ts:1-3`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("notWiredHttp", stale[0])
+        self.assertIn("url is not same-origin with the page", stale[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/backfill/engine.ts:5-8`;\n"
+              "`apps/extension/lib/backfill/tab-port.ts:2-15`).\n", files,
+        )
+        self.assertEqual(fixed, [])
+
+    def test_dashboard_loopback_claim_needs_the_address_not_the_signature(self) -> None:
+        doc = "docs-dev/threat-model.md"
+        claim = (
+            "Any program running as you can connect to the dashboard's port,\n"
+            "because it listens on `127.0.0.1`. Loopback is not a security\n"
+            "boundary. Without the token, nothing: every accepted GET route checks\n"
+            "it with a constant-time comparison, and any method other than GET is\n"
+            "refused.\n"
+        )
+        source = (
+            "pub fn bind_ephemeral() -> std::io::Result<TcpListener> {\n"      # 1
+            "    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));\n"  # 2
+            "    TcpListener::bind(addr)\n"                                    # 3
+            "}\n"                                                              # 4
+            "fn ct_eq(a: &str, b: &str) -> bool {\n"                           # 5
+            "    a.as_bytes() == b.as_bytes()\n"                               # 6
+            "}\n"                                                              # 7
+            "fn gate(method: &str, token: &str) -> Response {\n"               # 8
+            "    if method != \"GET\" {\n"                                     # 9
+            "        return Response::text(405, \"Method Not Allowed\", \"only GET\");\n"  # 10
+            "    }\n"                                                          # 11
+            "    if ct_eq(token, token) { succeed(); }\n"                       # 12
+            "}\n"                                                              # 13
+        )
+        files = {"crates/chat-stasher/src/view.rs": source}
+        markers = ("Loopback is not a security boundary", "constant-time comparison")
+
+        # The anchor the prose carried: the signature line alone. The address
+        # is the line below it, so the loopback leg fails its own claim.
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/view.rs:1`, `:8-13`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("Ipv4Addr::LOCALHOST", stale[0])
+        self.assertNotIn("ct_eq", stale[0])
+
+        # The gate leg is pinned too: a gate range without the compare fails.
+        gateless = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/view.rs:1-4`, `:8-11`).\n", files,
+        )
+        self.assertEqual(len(gateless), 1)
+        self.assertIn("ct_eq", gateless[0])
+        self.assertNotIn("Ipv4Addr::LOCALHOST", gateless[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/view.rs:1-4`, `:8-13`).\n", files,
+        )
+        self.assertEqual(fixed, [])
+
+    def test_master_key_modes_need_a_bounded_anchor(self) -> None:
+        doc = "docs-dev/threat-model.md"
+        claim = (
+            "The master key file. It is written as plaintext JSON. On Unix it is\n"
+            "created `0600` — the mode is set when the file is created, not\n"
+            "afterwards — inside a parent directory tightened to `0700`; on\n"
+            "platforms without Unix modes it inherits whatever the filesystem\n"
+            "gives it.\n"
+        )
+        filler = "\n".join(f"    let filler_{i:02d} = {i};" for i in range(40))
+        source = "\n".join([
+            "/// The mode is set *when the file is created*, not afterwards: a `write` then",  # 1
+            "/// `set_permissions` pair leaves a window in which the only key to the",        # 2
+            "/// archive is world-readable.",                                                 # 3
+            "pub fn persist_key_file(cfg: &StoreConfig, mk: &MasterKey) -> anyhow::Result<()> {",  # 4
+            filler,                                                                          # 5-44
+            "    let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o700));",  # 45
+            "    let mut options = fs::OpenOptions::new();",                                 # 46
+            "    options.mode(0o600);",                                                      # 47
+            "    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;",            # 48
+            "    Ok(())",                                                                     # 49
+            "}",                                                                              # 50
+            "",
+        ])
+        files = {"crates/chat-stasher/src/store.rs": source}
+        markers = ("plaintext JSON", "parent directory tightened")
+
+        # The old anchor: one span holding the rationale and the whole write
+        # path — 50 lines, which no bounded range can prove.
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/store.rs:1-50`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("options.mode(0o600)", stale[0])
+        self.assertIn("The mode is set *when the file is created*", stale[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/store.rs:1-3`, `:45-48`).\n", files,
+        )
+        self.assertEqual(fixed, [])
+
+        # A second paragraph repeating the mode value must not make the claim
+        # ambiguous. Keyed on `0700` this document has two matching paragraphs —
+        # the exposure above and the confirmed weakness that restates it — and a
+        # binding cannot tell the claim from its own restatement. Unfiltered:
+        # the ambiguity is reported for the binding's markers, not this file's.
+        doubled = self.run_binding(
+            doc, markers,
+            claim + "(`crates/chat-stasher/src/store.rs:1-3`, `:45-48`).\n\n"
+            "The master key is plaintext JSON again in a `0700` parent.\n",
+            files, keep_all=True,
+        )
+        self.assertEqual(doubled, [])
+
+    def test_threat_model_kimi_claim_needs_a_range_that_names_the_source(self) -> None:
+        doc = "docs-dev/threat-model.md"
+        claim = (
+            "Kimi reads the page origin's own `localStorage.access_token` at\n"
+            "request time, sends it to Kimi's two backfill paths and nothing else,\n"
+            "and holds no copy.\n"
+        )
+        files = {
+            "apps/extension/lib/platform-auth.ts": self.KIMI_SOURCE,
+            "apps/extension/entrypoints/dw-bridge.content.ts": self.KIMI_READER,
+        }
+        markers = ("localStorage.access_token", "holds no copy")
+
+        # The wrapper alone: cited for a token *source* its range never names.
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:6-17`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("KIMI_ACCESS_TOKEN_STORAGE_KEY", stale[0])
+        self.assertIn("dw-bridge.content.ts", stale[0])
+        self.assertNotIn("needsKimiBearer", stale[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:1`, `:6-17`;\n"
+              "`apps/extension/entrypoints/dw-bridge.content.ts:1-7`).\n", files,
+        )
+        self.assertEqual(fixed, [])
+
+    def test_privacy_session_token_needs_the_rules_it_quotes(self) -> None:
+        doc = "docs-dev/privacy.md"
+        claim = (
+            "That request carries your session's access token, which the\n"
+            "extension reads from ChatGPT's own `/api/auth/session` on the same\n"
+            "origin. The token is held only in the page's content-script memory:\n"
+            "it is never written to storage, never logged, never sent to the\n"
+            "`chat-stasher` host, and never attached to any other request.\n"
+        )
+        source = (
+            "/**\n"                                                            # 1
+            " * Rules for the token, all enforced in this file:\n"              # 2
+            " * · it lives in this module's memory only — never storage, IndexedDB, logs, or\n"  # 3
+            " *   anything sent to the native host;\n"                         # 4
+            " */\n"                                                            # 5
+            "export const CHATGPT_SESSION_PATH = '/api/auth/session';\n"       # 6
+            "export function needsChatgptBearer(url, pageOrigin) {\n"          # 7
+            "  return parsed.pathname === CHATGPT_LIST_PATH\n"                 # 8
+            "    || parsed.pathname.startsWith(CHATGPT_DETAIL_PATH);\n"        # 9
+            "}\n"                                                              # 10
+            "async function readSessionToken(pageOrigin, rawFetch) {\n"       # 11
+            "  const res = await rawFetch(`${pageOrigin}${CHATGPT_SESSION_PATH}`);\n"  # 12
+            "  const token = body.accessToken;\n"                             # 13
+            "  return token;\n"                                                # 14
+            "}\n"                                                              # 15
+            "export function createAuthorizedFetch(pageOrigin, rawFetch) {\n"  # 16
+            "  let token: string | null = null;\n"                             # 17
+            "}\n"                                                              # 18
+        )
+        files = {"apps/extension/lib/platform-auth.ts": source}
+        markers = ("access token", "/api/auth/session")
+
+        # What the doc carried before the audit: the path constant, the
+        # reader, the gate and the wrapper — every range true bytes, none of
+        # them saying "never storage, logs, or the native host".
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:6`, `:7-10`, `:11-15`, `:16-18`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("Rules for the token", stale[0])
+        self.assertIn("never storage, IndexedDB, logs", stale[0])
+        self.assertNotIn("readSessionToken", stale[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:1-5`, `:6`, `:7-10`,\n"
+              "`:11-15`, `:16-18`).\n", files,
+        )
+        self.assertEqual(fixed, [])
+
+    def test_privacy_kimi_token_needs_the_key_it_names_and_the_reader(self) -> None:
+        doc = "docs-dev/privacy.md"
+        claim = (
+            "Kimi keeps that token in the page origin's own `localStorage`, under\n"
+            "`access_token`; the extension reads it there at the moment of each\n"
+            "request. It is attached to those two endpoints and to no other\n"
+            "request; after a 401 it is re-read once and the request retried once.\n"
+        )
+        files = {
+            "apps/extension/lib/platform-auth.ts": self.KIMI_SOURCE,
+            "apps/extension/entrypoints/dw-bridge.content.ts": self.KIMI_READER,
+        }
+        markers = ("Kimi", "access_token", "localStorage")
+
+        # The wrapper range the prose used to carry: it stops above the retry,
+        # and neither the storage key nor the reader is cited at all.
+        stale = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:6-13`).\n", files,
+        )
+        self.assertEqual(len(stale), 1)
+        self.assertIn("'access_token'", stale[0])
+        self.assertIn("first.status !== 401", stale[0])
+        self.assertIn("dw-bridge.content.ts", stale[0])
+
+        fixed = self.run_binding(
+            doc, markers,
+            claim + "(`apps/extension/lib/platform-auth.ts:1`, `:10-16`;\n"
+              "`apps/extension/entrypoints/dw-bridge.content.ts:1-7`).\n", files,
+        )
+        self.assertEqual(fixed, [])
 
 
 if __name__ == "__main__":
