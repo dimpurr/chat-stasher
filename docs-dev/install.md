@@ -920,9 +920,9 @@ Linux; `schedule uninstall` stops and removes the matching job. Both operations
 are idempotent. Installation targets every configured destination by default;
 repeating `--destination` selects a subset. The embedded binary must be an
 installed path outside `target/` and the configured `CARGO_TARGET_DIR`
-(`crates/chat-stasher/src/schedule.rs:199-234`).
+(`crates/chat-stasher/src/schedule.rs:208-243`).
 The generated template wraps a `run-once` command
-(`crates/chat-stasher/src/schedule.rs:278-382`).
+(`crates/chat-stasher/src/schedule.rs:287-391`).
 
 The scheduler steps run only after the unit files are written (that is the
 only order a manager can accept), so a manager that refuses — WSL with
@@ -930,12 +930,12 @@ only order a manager can accept), so a manager that refuses — WSL with
 disk, and `status` then reported an installed timer that was armed nowhere —
 must be the install's problem, not the user's. A failed install rolls itself
 back: it stops the timers it had got enabled, removes the files it created and
-restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:589-1010`),
+restores the ones it replaced (`crates/chat-stasher/src/schedule.rs:598-1019`),
 and `status` asks the manager rather than trusting the disk — `installed` needs
 every timer file *and* the manager confirming the job is loaded, `systemctl
 --user is-active` per timer on systemd and `launchctl print` per agent on macOS,
 and units the manager did not confirm are reported `unconfirmed`
-(`crates/chat-stasher/src/schedule.rs:1063-1233`). Both formats were measured
+(`crates/chat-stasher/src/schedule.rs:1072-1242`). Both formats were measured
 wrong in the same way: W282 on systemd and Windows, W287 on launchd, where a
 failed `bootstrap` left the plist behind and `status` called it installed. On
 Windows every `schedule` action refuses with exit 2 before writing anything,
@@ -1233,7 +1233,7 @@ confirmed in the code, not a temporary disclaimer.
 - **`schedule` render-only mode does not install the timer**; use the explicit
   `schedule install` action to load a launchd agent on macOS or enable the
   systemd user timer on Linux. `schedule uninstall` stops and removes the
-  matching job (`crates/chat-stasher/src/schedule.rs:589-1010`).
+  matching job (`crates/chat-stasher/src/schedule.rs:598-1019`).
 
 ---
 
