@@ -133,6 +133,7 @@ fn remote_round_trip_and_resend_prove_bytes_before_retirement() {
         assert!(report.refused.is_empty());
         assert_eq!(report.stored, usize::from(!duplicate));
         assert_eq!(report.duplicates, usize::from(duplicate));
+        assert_eq!(report.missing_account, 0);
         assert!(remote.list().unwrap().items.is_empty());
     }
     let shard = chat_stasher::store::shard_path_with_cap(
@@ -385,6 +386,7 @@ fn explicit_binary_path_records_unknown_fidelity_without_local_identity() {
     .unwrap();
     assert!(report.refused.is_empty(), "{:?}", report.refused);
     assert_eq!(report.stored, 1);
+    assert_eq!(report.missing_account, 1);
     let row: serde_json::Value = serde_json::from_slice(
         &std::fs::read(chat_stasher::store::shard_path_with_cap(
             &stage,
@@ -738,5 +740,46 @@ fn pull_exit_codes_preserve_unknown_in_mixed_passes() {
             ..PullReport::default()
         };
         assert_eq!(report.exit_status(), 3, "{reason:?}");
+    }
+}
+
+#[test]
+fn missing_account_report_follows_every_admitted_identity_level() {
+    for level in ["platform_uid", "email", "handle", "default"] {
+        let (_runtime, remote) = transport();
+        let (identity, signing, policies) = keys();
+        let mut bundle: serde_json::Value = serde_json::from_slice(BUNDLE).unwrap();
+        bundle["identity"]["level"] = level.into();
+        bundle["identity"]["value"] = if level == "default" {
+            ""
+        } else {
+            "synthetic-account"
+        }
+        .into();
+        send_bundle(
+            &remote,
+            &serde_json::to_vec(&bundle).unwrap(),
+            "synthetic-key",
+            &identity.to_public(),
+            &signing,
+        )
+        .unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let report = pull(
+            &remote,
+            &identity,
+            &policies,
+            50,
+            stage.path(),
+            "synthetic-puller",
+            100,
+        )
+        .unwrap();
+        assert!(report.refused.is_empty());
+        assert_eq!(
+            report.missing_account,
+            usize::from(level == "default"),
+            "{level}"
+        );
     }
 }

@@ -289,6 +289,79 @@ fn pull_cli(f: &Fixture, stage: &std::path::Path) -> std::process::Output {
         None,
     )
 }
+
+fn inbox_view(f: &Fixture, command: &str) -> serde_json::Value {
+    let output = run(&f.owner, &[command, "--json"], None);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["remote_inboxes"]["inboxes"].is_array());
+    value["remote_inboxes"]["inboxes"][0].clone()
+}
+
+#[test]
+fn inbox_visibility_persists_success_refusals_and_missing_account_without_claiming_archive() {
+    let f = Fixture::new();
+    let stage = f.owner.root().join("synthetic-stage");
+    let before = inbox_view(&f, "status");
+    assert!(before["waiting"].is_null());
+    assert!(before["last_successful_pull"].is_null());
+    assert_eq!(before["history_state"], "not_recorded");
+    std::fs::create_dir(&f.inbox).unwrap();
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(0));
+    let empty = inbox_view(&f, "status");
+    assert_eq!(empty["waiting"], 0);
+    assert!(empty["oldest_age_secs"].is_null());
+    assert!(empty["last_successful_pull"].is_u64());
+    assert!(f.send().status.success());
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(3));
+    for command in ["status", "doctor"] {
+        let view = inbox_view(&f, command);
+        assert_eq!(view["waiting"], 1);
+        assert!(view["oldest_age_secs"].is_u64());
+        assert_eq!(view["last_successful_pull"], empty["last_successful_pull"]);
+        assert_eq!(view["last_pull"]["refused"]["ArchiveRead"], 1);
+        assert_eq!(view["last_pull"]["missing_account"], 1);
+        assert_eq!(view["last_pull"]["exit_code"], 3);
+    }
+    std::fs::remove_dir_all(&f.inbox).unwrap();
+    assert_eq!(pull_cli(&f, &stage).status.code(), Some(3));
+    let unknown = inbox_view(&f, "doctor");
+    assert!(unknown["waiting"].is_null());
+    assert_eq!(unknown["last_pull"]["state"], "unknown");
+    assert_eq!(
+        unknown["last_successful_pull"],
+        empty["last_successful_pull"]
+    );
+}
+
+#[test]
+fn inbox_visibility_corrupt_history_and_declaration_are_unknown_and_read_only() {
+    let f = Fixture::new();
+    let history = f
+        .owner
+        .config_home()
+        .join("chat-stasher/inboxes/synthetic-inbox.status.sqlite3");
+    std::fs::write(&history, b"synthetic-private-corruption").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    // Other platforms inherit the sandbox directory ACL.
+    let view = inbox_view(&f, "status");
+    assert_eq!(view["history_state"], "unknown");
+    assert!(view["last_successful_pull"].is_null());
+    assert_eq!(
+        std::fs::read(&history).unwrap(),
+        b"synthetic-private-corruption"
+    );
+    let declaration = history.with_file_name("synthetic-inbox.json");
+    std::fs::write(&declaration, b"synthetic-invalid-declaration").unwrap();
+    let output = run(&f.owner, &["doctor", "--json"], None);
+    assert_eq!(output.status.code(), Some(3));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["remote_inboxes"]["inboxes"][0]["waiting"].is_null());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-private-corruption"));
+}
 #[test]
 fn pull_cli_seals_but_preserves_objects_without_archive_proof_and_retains_hourly_quota() {
     let f = Fixture::with_limit(1);

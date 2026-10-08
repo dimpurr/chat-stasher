@@ -5973,6 +5973,7 @@ impl chat_stasher::ui::ContentSource for MergedContent<'_> {
 
 fn cmd_doctor(json: bool) -> ExitCode {
     let mut report = chat_stasher::doctor::run();
+    let inboxes = chat_stasher::inbox_status::inspect_default();
     // ADR-023 — the one place `doctor` opens a real connection. Kept out of
     // `doctor::run()` because a dozen integration tests call that entry point
     // directly and a test may not reach the network; the CLI is where a real
@@ -5985,10 +5986,12 @@ fn cmd_doctor(json: bool) -> ExitCode {
         report.destinations = chat_stasher::doctor::probe_destinations(&config);
     }
     if json {
-        let value = chat_stasher::doctor::report_to_json(&report);
+        let mut value = chat_stasher::doctor::report_to_json(&report);
+        value["remote_inboxes"] = serde_json::json!(&inboxes);
         println!("{}", json_string(&value));
     } else {
         chat_stasher::doctor::print_report(&report);
+        inboxes.print();
     }
     if let Some(error) = &report.config_error {
         // The one command that does not refuse on an unusable config, because
@@ -6002,6 +6005,10 @@ fn cmd_doctor(json: bool) -> ExitCode {
              reads it was NOT performed (those are listed above and in `not_checked` under `--json`). \
              Absent results there are unknown, not zero."
         );
+        return ExitCode::from(3);
+    }
+    if inboxes.incomplete() {
+        eprintln!("doctor: remote inbox observation incomplete; unavailable counts are unknown");
         return ExitCode::from(3);
     }
     if report.scan_failed {
@@ -17069,6 +17076,7 @@ fn cmd_status(
     // It used to print `config_source=defaults_after_parse_error` and carry on
     // with defaults — which is the fallback this change removes, spelled out
     // rather than silent.
+    let inboxes = chat_stasher::inbox_status::inspect_default();
     let config = match Config::load() {
         Ok(config) => config,
         Err(e) => {
@@ -17086,14 +17094,20 @@ fn cmd_status(
                 } else {
                     "unreadable"
                 };
-                println!("{}", status_json_config_error(&why, kind));
+                println!(
+                    "{}",
+                    status_with_inboxes(status_json_config_error(&why, kind), &inboxes)
+                );
             }
             eprintln!("status: {why}");
             eprintln!(
                 "status: exit_code=3 — the config file could not be read, so this report has no \
-                 verdict on the timer, the scan, or any destination. Nothing below is a count of \
-                 zero; there is no count at all."
+                 verdict on the timer, the scan, or any destination. Unavailable scan and \
+                 destination counts are unknown, not zero."
             );
+            if !json {
+                inboxes.print();
+            }
             return ExitCode::from(3);
         }
     };
@@ -17175,6 +17189,12 @@ fn cmd_status(
     };
 
     let query_writer_versions = destination.is_some() || repo.is_some();
+    // This observation is optional until inbox-init, but a declared inbox that
+    // could not be read is incomplete (3), just like a requested destination.
+    // Completed refusals remain findings; they do not mark the timer unhealthy.
+    if inboxes.incomplete() {
+        exit_code = 3;
+    }
     let mut writer_versions = None;
     let mut writer_version_error = None;
     if query_writer_versions {
@@ -17210,29 +17230,35 @@ fn cmd_status(
             Ok(report) => {
                 println!(
                     "{}",
-                    status_json(
-                        config.source,
-                        &info,
-                        &local,
-                        Ok(report),
-                        exit_code,
-                        writer_versions.as_deref(),
-                        writer_version_error.as_deref(),
-                        &keys_value,
+                    status_with_inboxes(
+                        status_json(
+                            config.source,
+                            &info,
+                            &local,
+                            Ok(report),
+                            exit_code,
+                            writer_versions.as_deref(),
+                            writer_version_error.as_deref(),
+                            &keys_value,
+                        ),
+                        &inboxes
                     )
                 )
             }
             Err(e) => println!(
                 "{}",
-                status_json(
-                    config.source,
-                    &info,
-                    &local,
-                    Err(e.to_string()),
-                    exit_code,
-                    writer_versions.as_deref(),
-                    writer_version_error.as_deref(),
-                    &keys_value,
+                status_with_inboxes(
+                    status_json(
+                        config.source,
+                        &info,
+                        &local,
+                        Err(e.to_string()),
+                        exit_code,
+                        writer_versions.as_deref(),
+                        writer_version_error.as_deref(),
+                        &keys_value,
+                    ),
+                    &inboxes
                 )
             ),
         }
@@ -17242,6 +17268,7 @@ fn cmd_status(
     if let Ok(report) = &scan {
         eprint!("{}", render_status(report, sessions));
     }
+    inboxes.print();
     // A destination needs its own key backed up: a second machine reads that
     // copy with `masterkey-<name>.json`, never with the local key (W281 BUG-2).
     // Silent when every destination key is present and declared, so the default
@@ -17513,6 +17540,14 @@ fn local_layer_json(config: &Config, info: &RunStateInfo) -> serde_json::Value {
     })
 }
 
+fn status_with_inboxes(rendered: String, inboxes: &chat_stasher::inbox_status::Report) -> String {
+    // Both callers pass a json_string result, so parsing is infallible.
+    let mut value: serde_json::Value =
+        serde_json::from_str(&rendered).expect("status renderer produces valid JSON");
+    value["remote_inboxes"] = serde_json::json!(inboxes);
+    json_string(&value)
+}
+
 /// The `status --json` object. `scan` is `Ok` when the registry-driven scan
 /// ran (then every count is measured); `Err(reason)` when it could not run —
 /// the `scanner` object is then `{"kind":"failed","why":…}` instead of an
@@ -17565,7 +17600,7 @@ fn status_exit_semantics(code: u8) -> &'static str {
     match code {
         0 => "0 = healthy: the timer is running, the last run succeeded and is not stale.",
         1 => "1 = unhealthy: never ran / timer stale / last run failed — for a script this is the \"go check the timer\" signal.",
-        _ => "3 = no conclusion possible: the scan or requested destination read did not finish, so its counts and version state are unknown, not empty.",
+        _ => "3 = no conclusion possible: the scan, remote inbox observation or requested destination read did not finish, so unavailable counts and version state are unknown, not empty.",
     }
 }
 
@@ -18342,6 +18377,30 @@ struct InboxPullArgs {
 }
 
 fn cmd_inbox_pull(args: InboxPullArgs) -> ExitCode {
+    let name = args.name.clone();
+    let root = chat_stasher::inbox_config::default_root();
+    let mut observation = None;
+    let code = cmd_inbox_pull_observed(args, &mut observation);
+    // Invalid or absent declarations are usage/configuration failures, not a
+    // request to create history. A valid declaration retains failed attempts.
+    if matches!(chat_stasher::inbox_config::load(&root, &name), Ok(Some(_))) {
+        let saved = u64::try_from(chrono::Utc::now().timestamp())
+            .map_err(anyhow::Error::from)
+            .and_then(|now| {
+                chat_stasher::inbox_status::record(&root, &name, now, observation.as_ref())
+            });
+        if saved.is_err() {
+            eprintln!("inbox-pull incomplete: status history unavailable; preserve existing state");
+            return ExitCode::from(3);
+        }
+    }
+    code
+}
+
+fn cmd_inbox_pull_observed(
+    args: InboxPullArgs,
+    observation: &mut Option<chat_stasher::remote_inbox::PullReport>,
+) -> ExitCode {
     use chat_stasher::{inbox_config, remote_inbox, send_key};
     if inbox_config::validate(&args.name, "memory://validation").is_err() {
         eprintln!("inbox-pull usage error: invalid inbox name");
@@ -18434,6 +18493,7 @@ fn cmd_inbox_pull(args: InboxPullArgs) -> ExitCode {
     })();
     match result {
         Ok(report) => {
+            let exit_status = report.exit_status();
             for reason in &report.refused {
                 eprintln!("inbox-pull refused: {reason:?}");
             }
@@ -18451,7 +18511,8 @@ fn cmd_inbox_pull(args: InboxPullArgs) -> ExitCode {
                 eprintln!("inbox-pull incomplete: output unavailable");
                 return ExitCode::from(3);
             }
-            ExitCode::from(report.exit_status())
+            *observation = Some(report);
+            ExitCode::from(exit_status)
         }
         Err(_) => {
             // No backend errors or credential-bearing paths enter diagnostics.
