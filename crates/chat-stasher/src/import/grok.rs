@@ -73,11 +73,29 @@ use std::collections::BTreeSet;
 /// `export_url` values are one-time-use credentials that must never
 /// be echoed, and a file this producer refuses has no business being
 /// archived byte-exact either.
+///
+/// JSON that stops part-way is a read that never finished; JSON that
+/// was read to the end and is not valid is a completed read of
+/// invalid input. The two are different refusals, and the exit code
+/// says which one happened.
 pub fn parse_grok_export(bytes: &[u8]) -> Result<ParsedExport, ImportError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
-        ImportError::ReadIncomplete(format!(
-            "export did not parse as JSON and was not read to the end: {e}"
-        ))
+        if e.is_eof() {
+            // The JSON stopped part-way: the file was cut off
+            // before a value completed, so the read never
+            // finished and nothing about the contents is known.
+            ImportError::ReadIncomplete(format!(
+                "export did not parse as JSON and was not read to the end: {e}"
+            ))
+        } else {
+            // The whole file was read and is not valid JSON: a
+            // completed read of invalid input, which is a
+            // different "no" from an unfinished read, and the
+            // exit code must not claim the read was incomplete.
+            ImportError::WrongInput(format!(
+                "export was read to the end but is not valid JSON: {e}"
+            ))
+        }
     })?;
 
     if let Some(files) = value.get("data_files") {
@@ -467,6 +485,25 @@ mod tests {
         let cut = &export[..export.len() - 20];
         let err = parse_grok_export(cut.as_bytes()).unwrap_err();
         assert!(matches!(err, ImportError::ReadIncomplete(_)), "{err}");
+    }
+
+    /// A file that was read to the end and is not valid JSON is a
+    /// completed read of invalid input, not an unfinished read: the
+    /// exit code must not claim the read was incomplete.
+    #[test]
+    fn a_complete_but_malformed_export_is_wrong_input_not_a_failed_read() {
+        let full = synthetic_grok_export(&[ID_A]);
+        // Garbage after a complete document: the whole file was read,
+        // and what it holds is not the payload this parser imports.
+        let malformed = format!("{full} {{");
+        let err = parse_grok_export(malformed.as_bytes()).unwrap_err();
+        let ImportError::WrongInput(message) = err else {
+            panic!(
+                "a fully read malformed document is wrong input, not a \
+                 failed read: {err}"
+            );
+        };
+        assert!(message.contains("read to the end"), "{message}");
     }
 
     /// The Grok payload is a dict, not Claude's flat array: a file of
