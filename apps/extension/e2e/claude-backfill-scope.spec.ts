@@ -63,23 +63,31 @@ test('a stored Claude scope is allowed by the cookie on a fresh /new page', asyn
   const firedAt = Date.now();
   await fireAlarm(ext, TICK_ALARM);
 
-  // The empty list is an ordinary completed run. The only page fetch is the
-  // list for the page-established organization; discovery is skipped because
-  // the cookie answered, and no request escaped the intercepted origins.
-  await expect.poll(() => requests).toEqual([`GET ${LIST_PATH}`]);
+  // 🔴 The list request is observable the moment the tick issues it, but the
+  //    tick writes its completion record only when the whole run has finished
+  //    (`conclude()` in entrypoints/background.ts, after the fetch, the cursor
+  //    save and the account observation). Reading storage here therefore raced
+  //    the write and could catch the key still absent — a stale read, not a
+  //    verdict. Wait for the record itself, the same waiter the other tick
+  //    specs use: it polls until a record written after `firedAt` exists and
+  //    its sweep has concluded, so neither an absent key nor the provisional
+  //    pre-sweep record (`SWEEP_NOT_CONCLUDED`, lib/backfill/alarm.ts) can pass
+  //    for the tick's outcome.
+  //
+  //    The request log is read only after this wait, and that ordering is the
+  //    fix for the flake this spec used to carry: the route handler records the
+  //    request before the fetch it belongs to resolves, and the record is
+  //    written only after that fetch, so a concluded record proves the request
+  //    was already observed. The previous `expect.poll(() => requests)` read the
+  //    same measurement but under its 5 s default, and failed on a loaded runner
+  //    when the tick was merely slow to issue the request. This waiter polls the
+  //    product's own signal with its 20 s bound instead, and no assertion changes:
+  //    the empty list is still an ordinary completed run, the only page fetch is
+  //    still the list for the page-established organization (discovery is skipped
+  //    because the cookie answered), and no request escaped the intercepted
+  //    origins.
+  const all = await waitForTickRecord(ext, { since: firedAt });
   expect(requests).toEqual([`GET ${LIST_PATH}`]);
   expect(escaped).toEqual([]);
-  // 🔴 The list request is observable the moment the tick issues it, but
-  //    the tick writes its completion record only when the whole run has
-  //    finished (`conclude()` in entrypoints/background.ts, after the
-  //    fetch, the cursor save and the account observation). Reading
-  //    storage here therefore raced the write and could catch the key
-  //    still absent — a stale read, not a verdict. Wait for the record
-  //    itself, the same waiter the other tick specs use: it polls until a
-  //    record written after `firedAt` exists and its sweep has concluded,
-  //    so neither an absent key nor the provisional pre-sweep record
-  //    (`SWEEP_NOT_CONCLUDED`, lib/backfill/alarm.ts) can pass for the
-  //    tick's outcome. No assertion above or below changes.
-  const all = await waitForTickRecord(ext, { since: firedAt });
   expect(all.cs_backfill_lasttick_v1).toMatchObject({ ran: true, reason: 'ran', stopped: 'queue-empty' });
 });
