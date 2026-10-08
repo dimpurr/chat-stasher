@@ -1340,13 +1340,15 @@ pub fn collect_scan_report(
                     report.state_saves += 1;
                 }
                 report.outcomes.push(outcome);
-                if !record.provenance.is_empty() {
+                let mut merged_provenance = record.provenance.clone();
+                crate::provenance::merge(&mut merged_provenance, &processed.provenance);
+                if !merged_provenance.is_empty() {
                     let body = stage_shard_fact(stage, machine, &record.id)?;
                     crate::provenance::append_scan_observation(
                         stage,
                         machine,
                         &record.id,
-                        &record.provenance,
+                        &merged_provenance,
                         body.shard_count,
                         &body.concat_sha256,
                     )?;
@@ -1383,6 +1385,7 @@ struct ReadData {
 struct Processed {
     outcome: CollectOutcome,
     state: OffsetEntry,
+    provenance: crate::provenance::SessionProvenance,
 }
 
 fn collect_one(
@@ -1496,6 +1499,15 @@ fn process_grok_bot(
         .find(|agent| agent.agent_id == agent_id)
         .ok_or_else(|| anyhow!("Grok Bot replica disappeared during collection"))?;
 
+    let mut provenance = crate::provenance::SessionProvenance::default();
+    if let Some(tenant) = &observed.tenant {
+        provenance.insert_tenant(tenant.clone());
+    }
+    provenance.insert_container(agent_id.to_string());
+    if let Some(name) = &observed.name {
+        provenance.insert_container(name.clone());
+    }
+
     let union_dir = state_dir.join("grok-bot-unions");
     fs::create_dir_all(&union_dir).context("create Grok Bot union state directory")?;
     let union_path = union_dir.join(format!("{}.json", sha256_hex(agent_id.as_bytes())));
@@ -1563,6 +1575,7 @@ fn process_grok_bot(
                 reset: false,
                 compressed: false,
             },
+            provenance,
         });
     }
     let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
@@ -1632,6 +1645,7 @@ fn process_grok_bot(
             reset: old.is_some_and(|entry| entry.grok_bot_row_digests.is_none()),
             compressed: false,
         },
+        provenance,
     })
 }
 

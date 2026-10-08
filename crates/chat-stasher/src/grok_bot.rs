@@ -42,6 +42,10 @@ impl ReplicaRecord {
 pub struct AgentReplica {
     pub agent_id: String,
     pub name: Option<String>,
+    /// The tenant this agent's state key is scoped to, extracted from the
+    /// `account.<account_ref>` segment of the state key. `None` when the key
+    /// carries no account scope.
+    pub tenant: Option<String>,
     pub source_path: PathBuf,
     pub records: Vec<ReplicaRecord>,
     /// Missing sequence positions from 1 through `max_sequence`.
@@ -169,9 +173,11 @@ pub fn read_persistence(root: &Path) -> Result<Vec<AgentReplica>> {
         let sequence_gaps = sequence_gaps(records.iter().map(|record| record.sequence));
         let max_sequence = records.last().map(|record| record.sequence);
         let name = names.get(agent_id).cloned();
+        let tenant = account_ref(&key).map(str::to_string);
         let agent = AgentReplica {
             agent_id: agent_id.to_string(),
             name,
+            tenant,
             source_path: path,
             records,
             sequence_gaps,
@@ -223,6 +229,16 @@ fn replica_agent_id(state_key: &str) -> Option<&str> {
     is_uuid(agent_id).then_some(agent_id)
 }
 
+/// Extract the account reference from a replica state key.
+///
+/// The key format is `sand.client.slice.account.<account_ref>.transcript.replicas.<agent-uuid>`.
+/// Returns `None` when the key does not carry an account scope.
+fn account_ref(state_key: &str) -> Option<&str> {
+    let rest = state_key.strip_prefix("sand.client.slice.account.")?;
+    let (account, _) = rest.split_once(".transcript.replicas.")?;
+    Some(account)
+}
+
 /// Find the app's persistence leaf below its platform app-support directory.
 /// Symlinks are ignored so a malformed local tree cannot redirect the reader
 /// outside Grok Bot's own data directory.
@@ -261,6 +277,9 @@ pub fn read_from_app_support(app_support: &Path) -> Result<Vec<AgentReplica>> {
                 agent.max_sequence = agent.records.last().map(|record| record.sequence);
                 if agent.name.is_none() {
                     agent.name = previous.name;
+                }
+                if agent.tenant.is_none() {
+                    agent.tenant = previous.tenant;
                 }
             }
             by_agent.insert(agent.agent_id.clone(), agent);
