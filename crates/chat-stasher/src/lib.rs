@@ -65,3 +65,5 @@ mod test_support;
 pub mod ui;
 pub mod verify;
 pub mod view;
+
+pub mod letta;

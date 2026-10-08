@@ -278,5 +278,30 @@
     "file": "hidden-source-directory.json",
     "valid": true,
     "sha256": "dc012b1a402b9a538a51cef608c86737786d5fc450205ec02448bf4e4bce3bdf"
+  },
+  {
+    "file": "api-export-utf8.json",
+    "valid": true,
+    "sha256": "0825df9b41749de705a618f856a7ecd8babf1a90a1b3e0dbbfae97cd227bc9ba"
+  },
+  {
+    "file": "api-export-base64.json",
+    "valid": true,
+    "sha256": "77adac5f3dd6b6ca74cf839796b73ade282d8a1161ba484bffd43dd6a660a0db"
+  },
+  {
+    "file": "api-export-parent.json",
+    "valid": true,
+    "sha256": "dcb8a028c79ac87a9d95499f96a5d2e3210001308647b38a0e82ebe7c2e16a14"
+  },
+  {
+    "file": "api-export-bad-role.json",
+    "valid": false,
+    "sha256": "c4685a90c26d9b2d149f4296b10af491c84008736dd86fc5e2867b5507170f70"
+  },
+  {
+    "file": "api-export-no-representation.json",
+    "valid": false,
+    "sha256": "1a9c88b5ce46c19dff9fb6d2b48de78ebd7db97a12d5752afe52a74bcf672d9b"
   }
 ]

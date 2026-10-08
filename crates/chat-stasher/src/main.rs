@@ -217,6 +217,8 @@ enum Command {
     /// deleting or moving it can reset local hourly accounting. Waiting is the
     /// pre-pull listing count; stored/duplicates refer to sealed stage only.
     InboxPull(InboxPullArgs),
+    /// Pull provider API exports through the local inbox and shared seal sink.
+    Pull(chat_stasher::letta::PullArgs),
     /// Walk through first-run setup: scan, then the local first save (which
     /// creates the encrypted local repository and its masterkey), then the
     /// remote destination (which is written, connected to, and — for a host
@@ -1706,6 +1708,7 @@ fn run() -> ExitCode {
         Command::SendKey(args) => cmd_send_key(args),
         Command::Send(args) => cmd_send(args),
         Command::InboxPull(args) => cmd_inbox_pull(args),
+        Command::Pull(args) => cmd_api_pull(args),
         Command::Setup {
             stage,
             destination,
@@ -18590,6 +18593,67 @@ fn cmd_inbox_pull_observed(
         Err(_) => {
             // No backend errors or credential-bearing paths enter diagnostics.
             eprintln!("inbox-pull incomplete: listing unavailable; waiting count unknown");
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
+    use chat_stasher::{letta, remote_inbox_archive::DestinationArchive};
+    let config = match config_or_refuse("pull") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("pull", &config, args.machine.as_deref()) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let result = (|| -> anyhow::Result<letta::Report> {
+        let destinations: Vec<StoreConfig> = if config.destinations.is_empty() {
+            vec![store_config_from(&config, None, None, None, &[])]
+        } else {
+            config
+                .destinations
+                .keys()
+                .map(|name| {
+                    resolve_store_config_checked(&config, Some(name), None, None, None, &[])
+                        .map_err(|_| anyhow::anyhow!("destination configuration unavailable"))
+                })
+                .collect::<anyhow::Result<_>>()?
+        };
+        let proof = DestinationArchive {
+            stage: &args.stage,
+            destinations: &destinations,
+        };
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or_else(|| anyhow::anyhow!("local agent home unavailable"))?;
+        let mut api = letta::Api::environment(
+            std::time::Duration::from_millis(args.pace_ms),
+            std::time::Duration::from_secs(args.budget_seconds),
+        )?;
+        letta::run(
+            &mut api,
+            &args.account_id,
+            &PathBuf::from(home).join(".letta/agents"),
+            &args.inbox,
+            &args.state,
+            &args.stage,
+            &machine,
+            &proof,
+        )
+    })();
+    match result {
+        Ok(report) => {
+            println!("pull letta: agents={}; local_id_only={}; bundles={}; cursors_committed={}; incomplete={}", report.agents, report.local_only, report.bundles, report.committed, report.incomplete);
+            if report.incomplete > 0 {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(_) => {
+            eprintln!("pull letta incomplete: source, state, publication or archive proof unavailable; counts unknown");
             ExitCode::from(3)
         }
     }
