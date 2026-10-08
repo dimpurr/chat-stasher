@@ -985,31 +985,31 @@ crates/chat-stasher/src/sqlite_probe.rs:2042-2051  5dea81db4c26  lines=10
   <- docs-dev/threat-model.md:834  :: /// so:
 crates/chat-stasher/src/sqlite_probe.rs:2868-2916  0dfae1a37b9a  lines=49
   <- docs-dev/threat-model.md:837  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
-crates/chat-stasher/src/store.rs:159-162  f2781c197162  lines=4
+crates/chat-stasher/src/store.rs:167-170  f2781c197162  lines=4
   <- docs-dev/install.md:630, docs-dev/install.md:720  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
-crates/chat-stasher/src/store.rs:318-418  fe1c57e64763  lines=101
+crates/chat-stasher/src/store.rs:326-426  fe1c57e64763  lines=101
   <- docs-dev/privacy.md:161, docs-dev/privacy.md:745, docs-dev/privacy.md:760, docs-dev/privacy.md:1008, docs-dev/threat-model.md:80, docs-dev/threat-model.md:218, docs-dev/threat-model.md:819  :: }
-crates/chat-stasher/src/store.rs:379-383  bd0dae8980fe  lines=5
+crates/chat-stasher/src/store.rs:387-391  bd0dae8980fe  lines=5
   <- docs-dev/install.md:630  :: if self.cfg.repo_root.starts_with("opendal:") || self.cfg.r…
-crates/chat-stasher/src/store.rs:435  43a7a775bbdc  lines=1
+crates/chat-stasher/src/store.rs:443  43a7a775bbdc  lines=1
   <- docs-dev/orphan-packs.md:95  :: pub fn open_indexed(
-crates/chat-stasher/src/store.rs:563-575  ea712fd262a4  lines=13
+crates/chat-stasher/src/store.rs:571-583  ea712fd262a4  lines=13
   <- docs-dev/node-metadata.md:96  :: let build_opts = BackupOptions::default()
-crates/chat-stasher/src/store.rs:714-731  a29fcdd26643  lines=18
+crates/chat-stasher/src/store.rs:722-739  a29fcdd26643  lines=18
   <- docs-dev/node-metadata.md:110  :: repo: &Repository<IndexedFullStatus>,
-crates/chat-stasher/src/store.rs:1217-1220  3624df839067  lines=4
+crates/chat-stasher/src/store.rs:1225-1228  3624df839067  lines=4
   <- docs-dev/openclaw-scanner.md:100  :: /// `<stage>/sessions/<machine>/<session_id>` — the partiti…
-crates/chat-stasher/src/store.rs:1945-1947  df67f1e3fcff  lines=3
+crates/chat-stasher/src/store.rs:1953-1955  df67f1e3fcff  lines=3
   <- docs-dev/install.md:583, docs-dev/install.md:1101, docs-dev/privacy.md:745, docs-dev/privacy.md:1076, docs-dev/threat-model.md:80, docs-dev/threat-model.md:904  :: /// Serialise a `MasterKey` (it is `serde.Deserialize`d fro…
-crates/chat-stasher/src/store.rs:1987-1994  652f49c633e5  lines=8
+crates/chat-stasher/src/store.rs:1995-2002  652f49c633e5  lines=8
   <- docs-dev/install.md:585  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:1987-1997  eeef621b37e3  lines=11
+crates/chat-stasher/src/store.rs:1995-2005  eeef621b37e3  lines=11
   <- docs-dev/privacy.md:745, docs-dev/threat-model.md:80  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:1987-2057  5118c8f5554c  lines=71
+crates/chat-stasher/src/store.rs:1995-2065  5118c8f5554c  lines=71
   <- docs-dev/privacy.md:1079, docs-dev/threat-model.md:124, docs-dev/threat-model.md:898  :: /// Write the masterkey to `cfg.key_file`, owner-readable o…
-crates/chat-stasher/src/store.rs:2074-2084  8ab0805e7812  lines=11
+crates/chat-stasher/src/store.rs:2082-2092  8ab0805e7812  lines=11
   <- docs-dev/threat-model.md:906  :: /// Load the masterkey from `cfg.key_file` (error when miss…
-crates/chat-stasher/src/store.rs:2132-2137  21850f31adf9  lines=6
+crates/chat-stasher/src/store.rs:2140-2145  21850f31adf9  lines=6
   <- docs-dev/install.md:630, docs-dev/install.md:720  :: pub fn backend_options(&self) -> BTreeMap<String, String> {
 crates/chat-stasher/src/ui/extension_profile.rs:146-177  fb34362ebddf  lines=32
   <- docs-dev/privacy.md:881  :: fn read_profiles(root: &Path) -> Option<BTreeMap<String, Pr…

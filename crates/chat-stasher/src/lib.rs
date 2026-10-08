@@ -35,6 +35,7 @@ pub mod packcheck;
 pub mod provenance;
 pub mod prune_orphans;
 pub mod push_progress;
+pub mod raw_export;
 pub mod readback;
 pub mod reader_guard;
 pub mod reap;

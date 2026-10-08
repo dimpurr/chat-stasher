@@ -82,6 +82,9 @@ pub enum StageWriter {
     /// `dest-init`: shards copied back from an *existing* destination because
     /// the local source no longer has them (ADR-013 difference set).
     Restore,
+    /// ADR-055 D4: a raw platform export file archived byte-exact into the
+    /// `export-files/` namespace, outside the session set.
+    Export,
 }
 
 impl StageWriter {
@@ -91,6 +94,7 @@ impl StageWriter {
             Self::Ingest => "ingest",
             Self::Seal => "seal",
             Self::Restore => "restore",
+            Self::Export => "export-file",
         }
     }
 }
@@ -117,6 +121,10 @@ pub const STAGE_WRITER_REGISTRY: &[StageWriterRegistration] = &[
     StageWriterRegistration {
         writer: StageWriter::Restore,
         reconciliation_hook: Some("restored concat sha256 vs source destination"),
+    },
+    StageWriterRegistration {
+        writer: StageWriter::Export,
+        reconciliation_hook: Some("export-files content address vs export-files-v1.jsonl row"),
     },
 ];
 
@@ -2476,7 +2484,7 @@ mod tests {
 
     #[test]
     fn every_registered_stage_writer_has_a_reconciliation_hook() {
-        assert_eq!(STAGE_WRITER_REGISTRY.len(), 4);
+        assert_eq!(STAGE_WRITER_REGISTRY.len(), 5);
         for registration in STAGE_WRITER_REGISTRY {
             assert!(
                 registration

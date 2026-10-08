@@ -218,6 +218,32 @@ under its own heading below.
   older than the fields says "not recorded" instead of inventing an outcome,
   and a build that cannot name itself says "not named", which is a distinct
   state.
+- **A raw platform export archives as itself, not as conversations.** A whole
+  takeout file as a platform produces it is sealed byte-exact into its own
+  stage namespace, at the key ADR-055 D4 states exactly:
+  `<stage>/export-files/<platform>/<sha256>/<as-delivered filename>`. The
+  directory is the file's own content digest, so it *is* the object's identity,
+  and the object keeps the name the file was downloaded under, which is what
+  makes a package findable for the user; a name that cannot be kept as one
+  ordinary path component is a usage error rather than a silent rewrite. It
+  travels through `push` and readback like any other staged object. Having its
+  own namespace is what keeps it out of the numbers: every session counter,
+  manifest and reader in the tool is scoped to `sessions/`, so an export file
+  enters neither "N sessions archived" nor coverage, `machine_recall`, `status`
+  nor the support matrix's session columns — `push` reports the same
+  session-shard count with the object staged as without it. Byte-identical
+  repeats of one package are stored once, because the content address is
+  recognised before any byte is copied, while every distinct export is kept; a
+  repeat that arrives under a different filename reports the name the object
+  already has. Its fidelity stamp is `raw`. A metadata-only row in
+  `meta/<machine>/export-files-v1.jsonl` binds the object into the run's
+  metadata hash, which is what lets a stage whose only new content is an export
+  still push instead of being refused as empty. An export that cannot be read
+  fails the run or reports did-not-finish — never "archived 0" — and an object
+  whose bytes are not the ones its address claims is an error rather than a
+  repeat. No command stages one yet: this is the archiving half of the takeout
+  work, and the command that reads a takeout into the archive is the ticket
+  built on top of it.
 
 #### Changed
 
