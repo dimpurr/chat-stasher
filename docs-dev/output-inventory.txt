@@ -440,6 +440,7 @@ context      crates/chat-stasher/src/inbox_config.rs:169  "inbox configuration s
 context      crates/chat-stasher/src/inbox_config.rs:174  "inbox configuration publication unavailable"
 context      crates/chat-stasher/src/inbox_config.rs:180  "inbox configuration directory sync unavailable"
 anyhow       crates/chat-stasher/src/inbox_config.rs:182  "inbox configuration disappeared after initialization"
+anyhow       crates/chat-stasher/src/inbox_rate.rs:17  "missing rate state parent"
 anyhow       crates/chat-stasher/src/keydecl.rs:235  "cannot read key file {} to fingerprint it"
 with_context crates/chat-stasher/src/keydecl.rs:252  "create state dir {}"
 context      crates/chat-stasher/src/keydecl.rs:255  "serialise key declarations"
@@ -2032,7 +2033,7 @@ help_doc     crates/chat-stasher/src/main.rs:17976  Human label retained in trus
 help_doc     crates/chat-stasher/src/main.rs:17979  Explicit lifetime (for example 90d); defaults to 24h.
 help_doc     crates/chat-stasher/src/main.rs:17982  JSON map of provider-specific write credential settings. Contents are secret.
 help_doc     crates/chat-stasher/src/main.rs:17985  Maximum decrypted bundle bytes; defaults to 10 MiB.
-help_doc     crates/chat-stasher/src/main.rs:17988  Maximum objects accepted per pull; defaults to 100. This is not a time-window quota.
+help_doc     crates/chat-stasher/src/main.rs:17988  Maximum authenticated attempts per pull and rolling hour; defaults to 100.
 help_doc     crates/chat-stasher/src/main.rs:17991  Print public metadata and active, expired or revoked state as JSON.
 help_doc     crates/chat-stasher/src/main.rs:17994  Permanently revoke an issued key id; repeating the command is harmless.
 eprintln     crates/chat-stasher/src/main.rs:18010  "send key usage error: {error}"
