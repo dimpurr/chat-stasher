@@ -763,6 +763,15 @@ fn extension_details(rows: &[&InstallView], now_unix: i64) -> String {
         match view.tick_ran {
             None => out.push_str(" · last tick not recorded"),
             Some(false) => match view.tick_reason {
+                // W933 (EXTA-a3) · The switch being off is the install
+                // owner's own choice, and the raw `disabled` code reads as a
+                // fault. The record already carries the reason, so the page
+                // says it in words; every other code stays verbatim — it is
+                // the record's own vocabulary — and an absent reason stays
+                // reason-less rather than inventing one.
+                Some("disabled") => {
+                    out.push_str(" · last tick did not run (backfill switch was off)")
+                }
                 Some(reason) => {
                     out.push_str(&format!(" · last tick did not run ({})", esc(reason)))
                 }

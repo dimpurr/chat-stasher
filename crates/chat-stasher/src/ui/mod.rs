@@ -2989,6 +2989,64 @@ mod tests {
         assert!(html.contains("last tick not recorded"), "{html}");
     }
 
+    /// W933 (EXTA-a3) · A quiet install whose own record says the backfill
+    /// switch was off went quiet by choice, not by fault, and the page says
+    /// so in words rather than in the raw `disabled` code. A record that
+    /// carries no reason gets none invented for it: unknown stays unknown.
+    #[test]
+    fn extensions_details_names_the_switched_off_backfill_and_invents_no_reason() {
+        let mut data = fixture::data();
+        data.local_machine_id = Some("Machine 1".to_string());
+        data.extension_installs = vec![
+            serde_json::json!({
+                "install_id": "synthetic-choice",
+                "machine": "Machine 1",
+                "browser": "Chrome",
+                "profile_label": "Personal",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-20T12:00:00Z",
+                "stale": true,
+                "tick_ran": false,
+                "tick_reason": "disabled",
+                "tick_stopped": "disabled",
+                "tick_halted": null,
+                "platforms": []
+            }),
+            serde_json::json!({
+                "install_id": "synthetic-unexplained",
+                "machine": "Machine 1",
+                "browser": "Arc",
+                "profile_label": "Work",
+                "extension_version": "0.2.0",
+                "reported_at": "2026-09-20T12:00:00Z",
+                "stale": true,
+                "tick_ran": false,
+                "platforms": []
+            }),
+        ];
+        let html = req("/extensions?token=t", &data, &NoContent).body;
+        let item = |label: &str| {
+            html.split("<li>")
+                .find(|item| item.starts_with(&format!("<b>{label}</b>")))
+                .unwrap_or_else(|| panic!("{label} has no details line: {html}"))
+                .to_string()
+        };
+        // The choice is named in words; the raw code is not what the reader
+        // is left with.
+        let choice = item("Chrome · Personal");
+        assert!(
+            choice.contains("last tick did not run (backfill switch was off)"),
+            "{html}"
+        );
+        assert!(!choice.contains("did not run (disabled)"), "{html}");
+        // The reason-less record keeps its bare sentence — the switch
+        // explanation belongs to the record that carries it, not to every
+        // quiet install.
+        let unexplained = item("Arc · Work");
+        assert!(unexplained.contains("last tick did not run"), "{html}");
+        assert!(!unexplained.contains("backfill switch"), "{html}");
+    }
+
     #[test]
     fn extensions_view_links_only_a_verified_local_profile_to_open_action() {
         let mut data = fixture::data();
