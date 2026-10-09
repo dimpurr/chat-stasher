@@ -916,7 +916,9 @@ a real limitation of the current code.
    `dest-init`, `search`, `export`, `ui` (`view` is a deprecated alias), `ingest`,
    `collect`, `seal`, `reclaim-stage`, `install-native-host`, `native-host`,
    `activity-index`, `machine-declare`, `machine-label`, `prune-orphans`,
-   `overview`, `index`, `repair-duplicates`
+   `overview`, `index`, `repair-duplicates`, `audit-backfill`, `cache`,
+   `import` (official-export importer; only Claude's `conversations.json`
+   has a parser in this build)
    (`crates/chat-stasher/src/main.rs:195-1427`); **a command that puts sessions
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing

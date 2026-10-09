@@ -33,6 +33,7 @@ chat-stasher <command> --help
 | [`prune-orphans`](#prune-orphans) | Reports the archive packs no index file names | No |
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
+| [`import`](#import) | Turns an official export (a takeout) into inbox bundles and a byte-exact raw archive object | An existing `--stage` and a named `--inbox` |
 
 Lower-level commands, used by the ones above or for repair, are listed under [Plumbing](#plumbing).
 
@@ -491,6 +492,23 @@ Archives extension export files, the ones the popup saves when you export undeli
 |---|---|
 | `--inbox <dir>` | The folder holding the export files. Processed files move to `<inbox>/consumed/`. |
 | `--stage <dir>` | The stage. |
+
+## Importing an official export
+
+### `import`
+
+Turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: `import` never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
+
+Only Claude's `conversations.json` has a parser in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
+
+| Flag | Meaning |
+|---|---|
+| `--inbox <dir>` | Required. The local inbox folder the bundles are written into, for a later `ingest --inbox`. |
+| `--stage <dir>` | Required. An existing stage directory that receives the byte-exact export under `import-raw/`. Never created. |
+
+The export file is only ever read: it is not moved, renamed or deleted, so importing from it again is safe.
+
+Exit codes: `0` the export was read whole and everything importable in it was written · `1` it was read, and a conversation or a write failed · `2` it was read and is not something this build imports · `3` the export was never read to the end, so nothing is claimed about which conversations it holds.
 
 ## Plumbing
 
