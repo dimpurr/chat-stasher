@@ -2,9 +2,9 @@
 //! writes must be a deterministic function of the stage: same stage in,
 //! same bytes out, whatever order `fs::read_dir` answers in.
 //!
-//! The field finding (`nm/W935-OUT.md` §8): the live index held 4,526
-//! ascending and 4,520 descending `session_id` transitions — not sorted —
-//! because the rebuild emitted rows in readdir order. Two consequences.
+//! The field finding behind it: the live index's `session_id`s held 4,526
+//! ascending and 4,520 descending transitions — not sorted — because the
+//! rebuild emitted rows in readdir order. Two consequences.
 //! Two full rebuilds of an *unchanged* stage could differ in bytes, and the
 //! byte-for-byte comparison SYNC-D's acceptance gate needs ("incremental
 //! update == full rebuild") was unassertable: it would flake on the
