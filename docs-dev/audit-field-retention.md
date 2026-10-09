@@ -48,6 +48,16 @@ sidecar. The raw body preserves full error details.
 | Error | `message.data.error`, including non-null structured error values |
 | Path and identity | `message.data.path.cwd`, message ID, and message timestamp |
 
+## Letta
+
+| Field | Retained value |
+|---|---|
+| Shared fields | Per-record timestamp (`captured_at`); source/session identity and stable message key (`source_message_id`); harness; source generation/body digest and record order |
+| Message identity | `source_message_id` (`message-<uuid>`) as the stable event key; `source_line_id` as a per-line identifier; UUID join key derived from the message-id suffix |
+| Record classification | `kind` (`user`, `assistant`, `reasoning`, `tool_call`) |
+| Tool calls | `name`, `argsText`, `resultOk`, `resultText` on `tool_call` records |
+| Model, provider, usage, error, cwd | **Not recorded** by the local transcript format; the audit projection records these as missing, never guessed |
+
 ## Grok
 
 | Field | Retention status |
@@ -74,3 +84,10 @@ fixture from under `subagents/`, pushes it, restores the archive activity
 index, and checks that `source_path_class` is `subagents/`. Step 2 can make
 that archived metadata assertion pass without replacing it with a stage-only
 check.
+
+The message-audit projection has its own synthetic tests for Claude Code,
+Codex, OpenCode, and Letta. They cover per-message audit rows, body digests,
+keyed joins, append-only sidecar roundtrips, and the field-state allowlist.
+Letta tests project local transcript JSONL, check that `source_message_id`
+drives the event key and UUID join, and verify that model, provider, usage,
+error, and cwd stay missing rather than being guessed.

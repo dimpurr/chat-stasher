@@ -342,9 +342,10 @@ pub fn project_bundle(bytes: &[u8], session: &str, key: &JoinPolicy) -> Result<P
     project_body(&body, &meta, key)
 }
 
-/// Extract Claude Code JSON/JSONL, Codex JSON/JSONL and OpenCode session exports.
-/// Web APIs and other harnesses are deliberately unsupported until a dated
-/// extractor is added; no generic recursive search through conversation text.
+/// Extract Claude Code JSON/JSONL, Codex JSON/JSONL, OpenCode session exports
+/// and Letta local transcript JSONL. Web APIs and other harnesses are
+/// deliberately unsupported until a dated extractor is added; no generic
+/// recursive search through conversation text.
 pub fn project_body(body: &[u8], meta: &BodyMetadata, key: &JoinPolicy) -> Result<Projection> {
     meta.validate()?;
     let sha = digest(body);
@@ -362,7 +363,10 @@ pub fn project_body(body: &[u8], meta: &BodyMetadata, key: &JoinPolicy) -> Resul
         unsupported: 0,
         malformed: 0,
     };
-    if !matches!(meta.harness.as_str(), "claude-code" | "codex" | "opencode") {
+    if !matches!(
+        meta.harness.as_str(),
+        "claude-code" | "codex" | "opencode" | "letta"
+    ) {
         outcome.status = ExtractionStatus::Unsupported;
     } else if body.iter().any(|b| !b.is_ascii_whitespace()) {
         if let Ok(v) = serde_json::from_slice::<Value>(body) {
@@ -563,6 +567,22 @@ fn extract_event(
                 event_time(e["time"].get("created"), "time.created", true),
             )
         }
+        "letta"
+            if matches!(
+                v["kind"].as_str(),
+                Some("user" | "assistant" | "reasoning" | "tool_call")
+            ) =>
+        {
+            (
+                v,
+                v["source_message_id"].as_str(),
+                "message-id",
+                None,
+                None,
+                None,
+                event_time(v.get("captured_at"), "captured_at", false),
+            )
+        }
         _ => return None,
     };
     let mut usage = BTreeMap::new();
@@ -595,6 +615,14 @@ fn extract_event(
     for (class, id) in [(id_class, id), ("uuid", v["uuid"].as_str())] {
         if let Some(id) = id {
             join_keys.insert(class.into(), key.join(&meta.harness, class, id));
+        }
+    }
+    if meta.harness == "letta" {
+        if let Some(uuid) = v["source_message_id"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("message-"))
+        {
+            join_keys.insert("uuid".into(), key.join(&meta.harness, "uuid", uuid));
         }
     }
     if let Some(native) = &meta.native_session {
@@ -666,6 +694,30 @@ fn extract_event(
             Some(_) => FieldState::Present,
         };
         field_states.insert(name.into(), state);
+    }
+    if meta.harness == "letta" {
+        for (name, value) in [
+            ("kind", v.get("kind")),
+            ("text", v.get("text")),
+            ("captured_at", v.get("captured_at")),
+            ("source_line_id", v.get("source_line_id")),
+            ("source_message_id", v.get("source_message_id")),
+            ("tool_name", v.get("name")),
+            ("tool_result_ok", v.get("resultOk")),
+        ] {
+            let state = match value {
+                None => FieldState::Missing,
+                Some(Value::Null) => FieldState::Null,
+                Some(value)
+                    if (name == "tool_result_ok" && !value.is_boolean())
+                        || (name != "tool_result_ok" && !value.is_string()) =>
+                {
+                    FieldState::Invalid
+                }
+                Some(_) => FieldState::Present,
+            };
+            field_states.insert(name.into(), state);
+        }
     }
     let error_class = label(
         event["error"]
@@ -808,6 +860,13 @@ fn validate_entry(e: &Entry) -> Result<()> {
                         | "message_id"
                         | "uuid"
                         | "api_error_flag"
+                        | "kind"
+                        | "text"
+                        | "captured_at"
+                        | "source_line_id"
+                        | "source_message_id"
+                        | "tool_name"
+                        | "tool_result_ok"
                 )),
                 "invalid audit field state"
             );
@@ -830,7 +889,10 @@ fn validate_entry(e: &Entry) -> Result<()> {
                 EventTime::Null { source }
                 | EventTime::Invalid { source }
                 | EventTime::Parsed { source, .. } => ensure!(
-                    matches!(source.as_str(), "timestamp" | "time.created"),
+                    matches!(
+                        source.as_str(),
+                        "timestamp" | "time.created" | "captured_at"
+                    ),
                     "invalid audit time source"
                 ),
                 EventTime::Missing => (),
