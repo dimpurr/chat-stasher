@@ -18,6 +18,7 @@ mod codex;
 mod cursor;
 mod deepseek_harness;
 mod gemini_cli;
+mod github_copilot_cli;
 mod grok_bot;
 mod grok_cli;
 mod hermes_agent;
@@ -290,8 +291,8 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
 /// is an inbox bundle (see [`is_web_bundle`], whose reader is the generic one),
 /// and the `""` row that carries no harness id at all (it keeps the structural
 /// attempt and its distinct provenance-unknown state). Every other id — the
-/// registry harnesses with no extractor yet (github-copilot-cli, aider, crush,
-/// zed, continue) — is served the raw view only.
+/// registry harnesses with no extractor yet (aider, crush, continue) — is served
+/// the raw view only.
 fn harness_has_a_reader(harness: &str) -> bool {
     matches!(
         harness,
@@ -307,6 +308,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "zed"
             | "grok"
             | "grok-bot"
+            | "github-copilot-cli"
             | "chatgpt"
             | "deepseek"
             // The local DeepSeek Harness (`dsh`) is a different harness from the
@@ -360,6 +362,7 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "hermes-agent" => hermes_agent::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
         "zed" => zed::normalize_session(value, conversation),
+        "github-copilot-cli" => github_copilot_cli::normalize_session(value, conversation),
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),

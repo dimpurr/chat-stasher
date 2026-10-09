@@ -46,6 +46,7 @@ pub enum SqliteSessionLayout {
     Grok,
     Zed,
     GrokBot,
+    GitHubCopilotCli,
 }
 
 impl HarnessSource {
