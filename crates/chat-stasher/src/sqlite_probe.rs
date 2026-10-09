@@ -146,6 +146,41 @@ pub fn zed_schema() -> SqliteSchemaSpec<'static> {
     }
 }
 
+/// Export-side schema for GitHub Copilot CLI's `session-store.db`, as the
+/// shipped build's own embedded documentation describes it (@github/copilot
+/// v1.0.80 build artifacts — the same source the registry cell cites): the
+/// `sessions` table holds one row per session (`id`, `cwd`, `repository`,
+/// `branch`, `summary`, `created_at`, `updated_at`), and the `turns` table
+/// one row per turn (`session_id`, `turn_index`, `user_message`,
+/// `assistant_response`, `timestamp`).
+///
+/// No timestamp column is declared. No real `session-store.db` has ever been
+/// observed (the one known session lives on a machine this archive cannot
+/// reach), so this build claims no session time for this harness — the same
+/// rule that keeps a value it could not read out of the archive rather than
+/// guessing it. The session's own `created_at`/`updated_at` and the turn
+/// `timestamp` still travel through the raw export below, so the observation
+/// exists without being read as a claim.
+pub fn github_copilot_cli_schema() -> SqliteSchemaSpec<'static> {
+    SqliteSchemaSpec {
+        table: "sessions",
+        id_column: Some("id"),
+        // The two columns the 4D projection (TICKET-4D-12) reads its
+        // dimensions from must exist before one session may be enumerated;
+        // every other column — including the time columns — is exported if
+        // present but never required.
+        required_columns: vec!["id", "cwd", "repository"],
+        key_column: None,
+        key_prefix: None,
+        time_column: None,
+        json_value_column: None,
+        json_time_path: None,
+        time_is_seconds: false,
+        time_is_iso8601: false,
+        qualification: None,
+    }
+}
+
 /// Build the schema spec for a harness from its registry cell. `None` when the
 /// cell is not a recognised SQLite store (no `sql_table` declared) — the
 /// caller then falls back to [`opencode_schema`], preserving pre-B27 behaviour
@@ -449,7 +484,7 @@ pub struct HermesSessionSnapshot {
 /// read-only SQLite transaction. `mode=ro` still lets SQLite read committed
 /// WAL content; no database or sidecar is opened for writing.
 pub fn read_hermes_session(db: &Path, session_id: &str) -> Result<HermesSessionSnapshot, String> {
-    ensure_hermes_wal_readable(db)?;
+    ensure_wal_readable(db)?;
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
@@ -522,14 +557,14 @@ fn ensure_hermes_schema(conn: &Connection) -> Result<(), String> {
 /// any message content. A partial or changed schema must not look like an
 /// empty archive.
 pub fn validate_hermes_schema(db: &Path) -> Result<(), String> {
-    ensure_hermes_wal_readable(db)?;
+    ensure_wal_readable(db)?;
     let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
     ensure_hermes_schema(&conn)
 }
 
-fn ensure_hermes_wal_readable(db: &Path) -> Result<(), String> {
+fn ensure_wal_readable(db: &Path) -> Result<(), String> {
     if db_is_wal(db) && sidecar(db, "-wal").exists() && !sidecar(db, "-shm").exists() {
         return Err(
             "WAL database has no shared-memory sidecar; refusing an incomplete read-only snapshot"
@@ -1698,7 +1733,146 @@ fn zed_row_to_json_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(Value::Object(object))
 }
 
+/// One complete GitHub Copilot CLI export unit: the session's `sessions` row
+/// with every same-session `turns` row, plus the dimensions the row itself
+/// observed.
+#[derive(Debug, Clone)]
+pub struct GitHubCopilotSessionSnapshot {
+    pub cursor: OpenCodeCursor,
+    pub json_line: Vec<u8>,
+    pub dimensions: crate::provenance::SessionProvenance,
+}
+
+/// The `schema` string stamped on one GitHub Copilot CLI export.
+pub const GITHUB_COPILOT_SESSION_SCHEMA: &str = "chat-stasher.github-copilot-cli.session.v1";
+
+/// The 4D dimensions one GitHub Copilot CLI session row observed — exactly
+/// `TICKET-4D-12`'s two fields, both read from the row itself: the
+/// `repository` it recorded as its workspace context, and the `cwd` it recorded
+/// as the directory the session ran in (an execution location, never a repo
+/// identity — `cwd ≠ repo identity`).
+///
+/// The map's original phrasing put the cwd on the CLI's per-session turn
+/// events; no real store's on-disk layout for those has ever been measured
+/// (they live somewhere below the `session-state/` directory whose exact shape
+/// the v1.0.80 artifacts do not spell out), so the turn-level cwd is not
+/// observable through this reader. The session-level `cwd` the same build
+/// documents *is* observed, and a missing or non-text value observes nothing
+/// rather than an empty one (`missing ≠ empty`).
+fn copilot_snapshot_dimensions(row: &Value) -> crate::provenance::SessionProvenance {
+    let mut dimensions = crate::provenance::SessionProvenance::default();
+    if let Some(repository) = row.get("repository").and_then(Value::as_str) {
+        dimensions.insert_container(repository);
+    }
+    if let Some(cwd) = row.get("cwd").and_then(Value::as_str) {
+        dimensions.insert_cwd(cwd);
+    }
+    dimensions
+}
+
+/// Validate the two tables a GitHub Copilot CLI export requires without
+/// materialising any content. A partial or changed schema must not look like
+/// an empty archive.
+fn ensure_github_copilot_schema(conn: &Connection) -> Result<(), String> {
+    for (table, required) in [
+        ("sessions", &["id", "cwd", "repository"][..]),
+        (
+            "turns",
+            &[
+                "session_id",
+                "turn_index",
+                "user_message",
+                "assistant_response",
+            ][..],
+        ),
+    ] {
+        let columns = sqlite_table_columns(conn, table)
+            .map_err(|error| format!("failed to read Copilot {table} schema: {error}"))?;
+        if required
+            .iter()
+            .any(|column| !columns.iter().any(|actual| actual == column))
+        {
+            return Err(format!(
+                "GitHub Copilot CLI schema mismatch: table={table} columns={}",
+                columns.join(",")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Export one GitHub Copilot CLI session and every `turns` row of the same
+/// session in a WAL-aware, read-only SQLite transaction. `mode=ro` still lets
+/// SQLite read committed WAL content; no database or sidecar is opened for
+/// writing.
+///
+/// No time field is claimed for the session: the schema this reader is built
+/// from was read out of the shipped v1.0.80 build artifacts, and no real
+/// `session-store.db` has ever been observed, so the session's `created_at` /
+/// `updated_at` and the turn `timestamp` travel through the raw export below
+/// but are never read as a time claim. That is why the cursor is a content
+/// hash of the exported line — the same construction [`read_hermes_session`]
+/// uses — instead of a time high-water: it must not depend on a column whose
+/// on-disk type no measurement has pinned down.
+pub fn read_github_copilot_session(
+    db: &Path,
+    session_id: &str,
+) -> Result<GitHubCopilotSessionSnapshot, String> {
+    ensure_wal_readable(db)?;
+    let conn = open_readonly(db).map_err(|error| format!("read-only open failed: {error}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("failed to set read-only query timeout: {error}"))?;
+    ensure_github_copilot_schema(&conn)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|error| format!("failed to start read-only transaction: {error}"))?;
+    let session = conn
+        .query_row(
+            "SELECT * FROM sessions WHERE id = ?1",
+            [session_id],
+            hermes_row_to_json_object,
+        )
+        .map_err(|error| format!("failed to read Copilot session row: {error}"))?;
+    let dimensions = copilot_snapshot_dimensions(&session);
+    let turns = read_copilot_turns(&conn, session_id)?;
+    let turn_count = turns.len() as u64;
+    let envelope = serde_json::json!({
+        "schema": GITHUB_COPILOT_SESSION_SCHEMA,
+        "session": session,
+        "turns": turns,
+    });
+    let json_line = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("failed to serialize Copilot session: {error}"))?;
+    let cursor = OpenCodeCursor {
+        session_time_updated: None,
+        content_sha256: Some(hex_digest(&Sha256::digest(&json_line))),
+        row_count: 1,
+        row_high_water: None,
+        message_count: turn_count,
+        message_high_water: None,
+        part_count: 0,
+        part_high_water: None,
+    };
+    Ok(GitHubCopilotSessionSnapshot {
+        cursor,
+        json_line,
+        dimensions,
+    })
+}
+
+fn read_copilot_turns(conn: &Connection, session_id: &str) -> Result<Vec<Value>, String> {
+    let sql = "SELECT * FROM turns WHERE session_id = ?1 ORDER BY turn_index, rowid";
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("failed to read Copilot turns: {error}"))?;
+    let rows = statement
+        .query_map([session_id], hermes_row_to_json_object)
+        .map_err(|error| format!("failed to enumerate Copilot turns: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("failed to read Copilot turn rows: {error}"))
+}
+
 /// Enumerate qualified composers in Cursor's legacy workspaceStorage. Each
+
 /// workspace database is read independently and remains untouched.
 pub fn enumerate_cursor_legacy_sessions(
     workspace_storage: &Path,
@@ -3469,5 +3643,208 @@ mod zed_tests {
         let spec = zed_schema();
         let result = read_zed_session(&db, &spec, "corrupt-zed-1");
         assert!(result.is_err(), "corrupt zstd blob must fail closed");
+    }
+}
+
+#[cfg(test)]
+mod github_copilot_tests {
+    use super::*;
+    use crate::test_support::Sandbox;
+
+    fn synthetic_copilot_store(sandbox: &Sandbox, drifted: bool) -> PathBuf {
+        let db = sandbox.root().join("session-store.db");
+        let conn = Connection::open(&db).unwrap();
+        let sessions_columns = if drifted {
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT)"
+        } else {
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT,
+                git_root TEXT,
+                repository TEXT,
+                host_type TEXT,
+                branch TEXT,
+                name TEXT,
+                summary TEXT,
+                user_named INTEGER,
+                summary_count INTEGER,
+                created_at TEXT,
+                updated_at TEXT
+            )"
+        };
+        conn.execute_batch(&format!(
+            "{sessions_columns};
+             CREATE TABLE turns (
+                session_id TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                user_message TEXT,
+                assistant_response TEXT,
+                timestamp TEXT,
+                model TEXT
+            );"
+        ))
+        .unwrap();
+        if drifted {
+            return db;
+        }
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, git_root, repository, host_type, branch, name, summary, user_named, summary_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                "synthetic-copilot",
+                "/synthetic/cwd",
+                "/synthetic/cwd/repo",
+                "dimpurr/synthetic-repo",
+                "github",
+                "synthetic-branch",
+                "synthetic-name",
+                "synthetic summary",
+                1,
+                3,
+                "2026-10-08T10:00:00Z",
+                "2026-10-08T11:00:00Z",
+            ],
+        )
+        .unwrap();
+        // A second session without any of the 4D fields: a missing value must
+        // stay unobserved rather than becoming an empty one.
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, repository, created_at, updated_at)
+             VALUES (?1, NULL, NULL, ?2, ?3)",
+            rusqlite::params![
+                "synthetic-copilot-bare",
+                "2026-10-08T10:00:00Z",
+                "2026-10-08T11:00:00Z",
+            ],
+        )
+        .unwrap();
+        let synthetic_turns: [(i64, &str, Option<&str>, &str); 2] = [
+            (
+                0,
+                "synthetic question",
+                Some("synthetic answer"),
+                "2026-10-08T10:00:01Z",
+            ),
+            (1, "synthetic follow-up", None, "2026-10-08T10:00:02Z"),
+        ];
+        for (turn_index, user, assistant, timestamp) in synthetic_turns {
+            conn.execute(
+                "INSERT INTO turns (session_id, turn_index, user_message, assistant_response, timestamp, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    "synthetic-copilot",
+                    turn_index,
+                    user,
+                    assistant,
+                    timestamp,
+                    "synthetic-model",
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        db
+    }
+
+    #[test]
+    fn copilot_export_carries_session_turns_and_both_4d_dimensions() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, false);
+        let spec = github_copilot_cli_schema();
+
+        let probe = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            probe.sessions,
+            SqliteSessionProbe::Known {
+                count: 2,
+                candidate_count: 2,
+                ..
+            }
+        ));
+
+        let rows = enumerate_sqlite_sessions(&db, &spec).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.mtime.is_none()));
+
+        let snapshot = read_github_copilot_session(&db, "synthetic-copilot").unwrap();
+        let value: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
+        assert_eq!(
+            value["schema"],
+            "chat-stasher.github-copilot-cli.session.v1"
+        );
+        assert_eq!(value["session"]["id"], "synthetic-copilot");
+        assert_eq!(value["session"]["repository"], "dimpurr/synthetic-repo");
+        // Every column travels — including the time columns, so the raw
+        // archive keeps the fact this reader deliberately does not claim.
+        assert_eq!(value["session"]["created_at"], "2026-10-08T10:00:00Z");
+        assert_eq!(value["turns"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["turns"][0]["user_message"], "synthetic question");
+        assert_eq!(value["turns"][1]["assistant_response"], Value::Null);
+        assert_eq!(
+            snapshot.dimensions.container,
+            vec!["dimpurr/synthetic-repo".to_string()]
+        );
+        assert_eq!(snapshot.dimensions.cwd, vec!["/synthetic/cwd".to_string()]);
+        assert!(snapshot.dimensions.tenant.is_empty());
+        assert!(snapshot.dimensions.status.is_empty());
+        // The cursor is a content hash, not a time high-water: it must hold
+        // no timestamp for a harness whose no field was measured.
+        assert_eq!(snapshot.cursor.session_time_updated, None);
+        assert!(snapshot.cursor.content_sha256.is_some());
+        assert_eq!(snapshot.cursor.message_count, 2);
+
+        let other = read_github_copilot_session(&db, "synthetic-copilot-bare").unwrap();
+        assert!(other.dimensions.is_empty());
+    }
+
+    #[test]
+    fn copilot_export_of_unknown_session_fails_closed() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, false);
+        let result = read_github_copilot_session(&db, "never-recorded");
+        assert!(
+            result.is_err(),
+            "a session that is not in the store must not export an empty session"
+        );
+    }
+
+    #[test]
+    fn copilot_drifted_schema_fails_closed_instead_of_reading_empty() {
+        let sandbox = Sandbox::new();
+        let db = synthetic_copilot_store(&sandbox, true);
+
+        // The store gate: enumeration must answer `SchemaMismatch`, never a
+        // clean-looking zero.
+        let spec = github_copilot_cli_schema();
+        let probe = probe_sqlite_store_with(&db, &spec);
+        assert!(matches!(
+            probe.sessions,
+            SqliteSessionProbe::SchemaMismatch { .. }
+        ));
+        assert!(enumerate_sqlite_sessions(&db, &spec).is_err());
+        assert!(read_github_copilot_session(&db, "synthetic-copilot").is_err());
+    }
+
+    #[test]
+    fn copilot_store_without_turns_table_fails_the_export() {
+        let sandbox = Sandbox::new();
+        let db = sandbox.root().join("session-store.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, repository TEXT, created_at TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, cwd, repository, created_at) VALUES ('synthetic-copilot', '/synthetic', 'synthetic/repo', '2026-10-08T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let result = read_github_copilot_session(&db, "synthetic-copilot");
+        assert!(
+            result.is_err(),
+            "no turns table means the export cannot happen"
+        );
+        assert!(result.unwrap_err().contains("turns"));
     }
 }

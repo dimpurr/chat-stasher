@@ -1700,6 +1700,11 @@ fn probe_harness_single(
                 base, confidence, root, env_note, source, machine, report,
             );
         }
+        if h.id == "github-copilot-cli" {
+            return probe_github_copilot_cli_harness(
+                base, confidence, root, env_note, source, machine, report,
+            );
+        }
         let recs = collect_records(
             &root,
             source,
@@ -1822,6 +1827,239 @@ fn probe_grok_bot_harness(
     }
 }
 
+/// GitHub Copilot CLI keeps its persisted sessions in one SQLite store,
+/// `session-store.db` directly under its home, and writes a per-session
+/// `events.jsonl` beside them. This reader is built on the store (the upstream's
+/// own documentation of `sessions`/`turns` is the schema
+/// [`crate::sqlite_probe::github_copilot_cli_schema`] encodes); the per-session
+/// events files are *not* enumerated, because the layout below
+/// `session-state/` has never been measured and a basename-only walk would give
+/// every session the same `events` stem. Session records therefore come from
+/// the store's `sessions` table, one per row.
+///
+/// When the store is absent, the count is not silently zero: the events files
+/// the CLI also writes are looked for by their exact, writer-confirmed name,
+/// and finding any means sessions exist that this build cannot enumerate — an
+/// unknown, carried in the note. Absent store and absent events together are a
+/// measured "nothing to read".
+fn probe_github_copilot_cli_harness(
+    mut base: HarnessProbe,
+    confidence: Confidence,
+    root: PathBuf,
+    env_note: String,
+    source: HarnessSource,
+    machine: &str,
+    report: &mut ScanReport,
+) -> HarnessProbe {
+    let db = root.join("session-store.db");
+    let metadata = match fs::metadata(&db) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let (events, unreadable_entries) = count_events_jsonl_files(&root);
+            if events > 0 || unreadable_entries > 0 {
+                let note = format!(
+                    "{env_note}session-store.db not present, but {events} events.jsonl file(s) were seen under the root (with {unreadable_entries} unreadable entries); the per-session events layout is unmeasured, so the session count from them is unknown"
+                );
+                return HarnessProbe {
+                    root: Some(root),
+                    confidence,
+                    state: ProbeState::Indeterminate,
+                    record_count: None,
+                    candidate_count: None,
+                    unreadable_count: None,
+                    // The events walk ran, so its tally is a counted number —
+                    // `Some(0)` says "looked and none unreadable", not "unknown".
+                    unreadable_entry_count: Some(unreadable_entries),
+                    recognized_files: Vec::new(),
+                    note,
+                    ..base
+                };
+            }
+            return HarnessProbe {
+                root: Some(root),
+                confidence,
+                state: ProbeState::Scanned,
+                record_count: Some(0),
+                candidate_count: Some(0),
+                unreadable_count: Some(0),
+                unreadable_entry_count: Some(unreadable_entries),
+                recognized_files: Vec::new(),
+                note: format!(
+                    "{env_note}no session-store.db and no events.jsonl under the Copilot home — no persisted sessions to read"
+                ),
+                ..base
+            };
+        }
+        Err(e) => {
+            report.indeterminate_roots.push(db);
+            return HarnessProbe {
+                root: Some(root),
+                confidence,
+                state: ProbeState::Indeterminate,
+                record_count: None,
+                candidate_count: None,
+                unreadable_count: None,
+                note: format!(
+                    "{env_note}session-store.db unreadable, existence unknown ({e}) — not 'absent'"
+                ),
+                ..base
+            };
+        }
+    };
+    if !metadata.is_file() {
+        report.indeterminate_roots.push(db);
+        return HarnessProbe {
+            root: Some(root),
+            confidence,
+            state: ProbeState::Indeterminate,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            note: format!(
+                "{env_note}session-store.db exists but is not a file ({}) — session count unknown, not 0",
+                path_kind(&metadata)
+            ),
+            ..base
+        };
+    }
+    let Ok(store_modified) = metadata.modified() else {
+        report.indeterminate_roots.push(db);
+        return HarnessProbe {
+            root: Some(root),
+            confidence,
+            state: ProbeState::Indeterminate,
+            record_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            note: format!(
+                "{env_note}session-store.db mtime unreadable — session records cannot be dated for staging"
+            ),
+            ..base
+        };
+    };
+    let spec = crate::sqlite_probe::github_copilot_cli_schema();
+    let info = crate::sqlite_probe::probe_sqlite_store_with(&db, &spec);
+    let expected = "sessions table(id, cwd, repository)".to_string();
+    let mut probe = HarnessProbe {
+        root: Some(root),
+        confidence,
+        state: ProbeState::Scanned,
+        recognized_files: vec![db.clone()],
+        ..base
+    };
+    probe.bytes = info.total_bytes;
+    match info.sessions {
+        SqliteSessionProbe::Known {
+            count,
+            candidate_count,
+            ..
+        } => {
+            let rows = match enumerate_sqlite_sessions(&db, &spec) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    probe.unreadable_count = enumeration_gap(count, 0, info.unreadable_count);
+                    probe.note = format!(
+                        "{env_note}SQLite read-only enumeration of {expected} (bytes include .db+-wal+-shm) failed: {error}"
+                    );
+                    return probe;
+                }
+            };
+            let records = copilot_records_from_rows(rows, &db, store_modified, source, machine);
+            let emitted = records.len();
+            let record_count = records.len() as u64;
+            report.records.extend(records);
+            probe.record_count = Some(count);
+            probe.candidate_count = Some(candidate_count);
+            probe.unreadable_count = enumeration_gap(count, emitted, info.unreadable_count);
+            probe.note = format!(
+                "{env_note}SQLite read-only enumeration of {expected} (bytes include .db+-wal+-shm); before filter {candidate_count} / after {count} sessions; SessionRecord={record_count}"
+            );
+        }
+        SqliteSessionProbe::SchemaMismatch { actual } => {
+            probe.note = format!(
+                "{env_note}detected SQLite but schema not recognized (expected {expected}, got {actual}) — not 0, it is un-enumerable"
+            );
+        }
+        SqliteSessionProbe::ReadFailed { error } => {
+            probe.note =
+                format!("{env_note}detected SQLite but read-only enumeration failed ({error})");
+        }
+    }
+    probe
+}
+
+/// Copilot session records from enumerated `sessions` rows. The spec declares
+/// no timestamp column (none was measured on a real store), so every record
+/// carries the store file's own mtime — the same fallback the Hermes reader
+/// uses — and the collect-side cursor is a content hash, never a time.
+fn copilot_records_from_rows(
+    rows: Vec<SqliteSessionRow>,
+    db: &Path,
+    store_modified: SystemTime,
+    source: HarnessSource,
+    machine: &str,
+) -> Vec<SessionRecord> {
+    rows.into_iter()
+        .map(|row| SessionRecord {
+            id: crate::id::SessionIdentity {
+                source_short: source.short(),
+                machine: machine.to_string(),
+                native_id: row.id,
+            }
+            .id(),
+            absolute_path: db.to_path_buf(),
+            byte_size: 0,
+            mtime: row.mtime.unwrap_or(store_modified),
+            source,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::GitHubCopilotCli),
+            provenance: Default::default(),
+        })
+        .collect()
+}
+
+/// Count the `events.jsonl` files a Copilot home holds, by the exact name the
+/// shipped CLI's own event writer uses (`<sessionStatePath>/events.jsonl`).
+/// Counting by name claims nothing about which session a file belongs to: the
+/// per-session layout is unmeasured, so the count is only ever reported as
+/// "sessions exist that this build cannot enumerate", never as a session count.
+fn count_events_jsonl_files(root: &Path) -> (u64, u64) {
+    let mut events = 0u64;
+    let mut unreadable_entries = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() && entry.file_name() == "events.jsonl" {
+                events += 1;
+            }
+        }
+    }
+    (events, unreadable_entries)
+}
+
 /// Name the kind of thing a path turned out to be, for the one message that
 /// has to say "this is not what the registry declared".
 fn path_kind(md: &fs::Metadata) -> &'static str {
@@ -1869,12 +2107,18 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
         ".kimi-code/"
     } else if template.contains(".dsh/") {
         // `DSH_HOME` is DeepSeek Harness's home directory, i.e. the `.dsh`
-        // layer itself; `sessions/` hangs below it. A cell that declares an
-        // env override this table does not know would resolve to the template
+        // layer itself; `sessions/` hangs below it. A cell that declares
+        // an env override this table does not know would resolve to the template
         // instead, silently reading the default location while the registry
         // claims the override works — which is what happened here until the
         // real binary was run against a moved home.
         ".dsh/"
+    } else if template.contains(".copilot/") {
+        // `COPILOT_HOME` replaces the whole `.copilot` layer: the CLI resolves
+        // its home from that variable before joining anything below it (the
+        // registry's v1.0.80 source note — "COPILOT_HOME/configDir can
+        // override" — declares exactly this).
+        ".copilot/"
     } else {
         return None;
     };
@@ -4670,5 +4914,209 @@ mod tests {
                 "{state:?} must not count as probed"
             );
         }
+    }
+
+    fn synthetic_copilot_registry() -> HarnessRegistry {
+        let cell = serde_json::json!({
+            "template": "~/.copilot/",
+            "format": "sqlite + jsonl",
+            "confidence": "source-confirmed",
+            "source": "synthetic fixture",
+            "env_override": "COPILOT_HOME"
+        });
+        let paths = match current_platform() {
+            "macos" => serde_json::json!({"macos": cell}),
+            "linux" => serde_json::json!({"linux": cell}),
+            "windows" => serde_json::json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{"id": "github-copilot-cli", "display_name": "GitHub Copilot CLI fixture", "paths": paths}]
+        }))
+        .unwrap()
+    }
+
+    /// Write a synthetic Copilot store. `home` is the Copilot home itself
+    /// (`~/.copilot` under the template, `$COPILOT_HOME` under the override),
+    /// so both resolutions can share one fixture.
+    fn write_copilot_store(home: &Path, drained: bool) {
+        fs::create_dir_all(home).unwrap();
+        let db = home.join("session-store.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let sessions = if drained {
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT)"
+        } else {
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                cwd TEXT,
+                repository TEXT,
+                branch TEXT,
+                summary TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )"
+        };
+        conn.execute_batch(&format!(
+            "{sessions}; CREATE TABLE turns (session_id TEXT, turn_index INTEGER, user_message TEXT, assistant_response TEXT);"
+        ))
+        .unwrap();
+        if !drained {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, repository, branch, summary, created_at, updated_at)
+                 VALUES ('synthetic-copilot-x', '/synthetic/cwd', 'dimpurr/synthetic-repo', 'main', 'synthetic summary', '2026-10-08T10:00:00Z', '2026-10-08T11:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, repository, branch, summary, created_at, updated_at)
+                 VALUES ('synthetic-copilot-y', NULL, NULL, NULL, NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        drop(conn);
+    }
+
+    #[test]
+    fn copilot_probe_enumerates_sessions_from_the_store() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        write_copilot_store(&sandbox.home().join(".copilot"), false);
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.id, "github-copilot-cli");
+        assert_eq!(probe.record_count, Some(2));
+        assert!(probe.note.contains("sessions table(id, cwd, repository)"));
+        let copilot_records: Vec<&SessionRecord> = report
+            .records
+            .iter()
+            .filter(|record| record.id.starts_with("github-copilot-cli."))
+            .collect();
+        assert_eq!(copilot_records.len(), 2);
+        assert!(copilot_records.iter().all(|record| record
+            .sqlite_layout
+            .is_some_and(|layout| layout == SqliteSessionLayout::GitHubCopilotCli)));
+        assert!(copilot_records
+            .iter()
+            .any(|record| record.id.ends_with("synthetic-copilot-x")));
+    }
+
+    #[test]
+    fn copilot_probe_home_env_override_wins_over_the_template() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox_home = tempfile::TempDir::new().unwrap();
+        let sandbox_override = tempfile::TempDir::new().unwrap();
+        env::set_var("HOME", sandbox_home.path());
+        env::set_var("COPILOT_HOME", sandbox_override.path());
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        // The override is empty so far: no store, no events — but the probe
+        // must have resolved the override, not the still-empty template home.
+        assert!(probe.note.contains("env_override=$COPILOT_HOME"));
+        assert_eq!(
+            probe.root,
+            Some(sandbox_override.path().to_path_buf()),
+            "COPILOT_HOME must win over the registry template"
+        );
+
+        write_copilot_store(sandbox_override.path(), false);
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        assert_eq!(report.probes[0].record_count, Some(2));
+        assert_eq!(report.records.len(), 2);
+
+        env::remove_var("COPILOT_HOME");
+        env::set_var("HOME", tempfile::TempDir::new().unwrap().path());
+    }
+
+    #[test]
+    fn copilot_probe_without_store_and_without_events_is_measured_zero() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        fs::create_dir_all(sandbox.home().join(".copilot/ide")).unwrap();
+        fs::write(sandbox.home().join(".copilot/ide/synthetic.lock"), b"lock").unwrap();
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, Some(0));
+        assert!(probe.note.contains("no persisted sessions to read"));
+        assert!(report.records.is_empty());
+    }
+
+    #[test]
+    fn copilot_events_without_a_store_keep_the_session_count_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        let session_state = sandbox.home().join(".copilot/session-state");
+        fs::create_dir_all(&session_state).unwrap();
+        fs::write(
+            session_state.join("events.jsonl"),
+            b"{\"event\":\"session.start\"}\n",
+        )
+        .unwrap();
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.record_count, None,
+            "events the reader cannot map to a session must not be counted as 0"
+        );
+        assert!(probe.note.contains("events.jsonl"));
+        assert!(probe.note.contains("unknown"));
+        assert!(report.records.is_empty());
+    }
+
+    #[test]
+    fn copilot_drifted_store_is_un_enumerable_not_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        env::remove_var("COPILOT_HOME");
+        write_copilot_store(&sandbox.home().join(".copilot"), true);
+
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &synthetic_copilot_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, None);
+        assert!(probe.note.contains("un-enumerable"));
+        assert!(report.records.is_empty());
     }
 }

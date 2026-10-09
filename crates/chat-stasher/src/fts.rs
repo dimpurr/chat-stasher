@@ -680,7 +680,7 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     ("cursor", FORMAT_SQLITE),
     ("grok", FORMAT_SQLITE),
     ("grok-bot", FORMAT_JSON),
-    ("github-copilot-cli", "jsonl"),
+    ("github-copilot-cli", FORMAT_SQLITE),
     ("aider", "markdown"),
     ("crush", FORMAT_SQLITE),
     ("zed", FORMAT_SQLITE),
@@ -772,6 +772,7 @@ fn export_reader(raw: &str) -> Option<String> {
         "chat-stasher.openclaw.session.v1" => Some("openclaw".to_string()),
         "chat-stasher.hermes-agent.session.v1" => Some("hermes-agent".to_string()),
         "chat-stasher.cursor.legacy.session.v1" => Some("cursor".to_string()),
+        "chat-stasher.github-copilot-cli.session.v1" => Some("github-copilot-cli".to_string()),
         "chat-stasher.sqlite.session.v1" => {
             match value.get("table").and_then(serde_json::Value::as_str) {
                 Some("cursorDiskKV") => Some("cursor".to_string()),
@@ -2716,10 +2717,11 @@ mod tests {
     /// disappearing into a coverage line that says the view is complete.
     #[test]
     fn every_local_harness_is_read_or_reported_by_format() {
-        let copilot_jsonl = concat!(
-            r#"{"event":"session.start","data":{"id":"synthetic"}}"#,
-            "\n",
-            r#"{"event":"session.end","data":{}}"#,
+        let copilot_export = concat!(
+            r#"{"schema":"chat-stasher.github-copilot-cli.session.v1","#,
+            r#""session":{"id":"synthetic","cwd":"/synthetic","repository":"dimpurr/synthetic"},"#,
+            r#""turns":[{"session_id":"synthetic","turn_index":0,"user_message":"synthetic question","#,
+            r#""assistant_response":"synthetic answer","timestamp":"2026-10-08T10:00:01Z"}]}"#
         );
         // A SQLite database archived whole: the bytes of the file, not text.
         let sqlite_bytes: &[u8] = b"SQLite format 3\0\x00\x01\x02\x03\xff\xfe";
@@ -2802,9 +2804,12 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
+                // The export of one `sessions` row together with its `turns`,
+                // as the Copilot CLI reader writes it (the `timestamp`
+                // column travels raw; no time is claimed).
                 "github-copilot-cli",
-                copilot_jsonl.as_bytes(),
-                Expected::Format(FORMAT_JSONL),
+                copilot_export.as_bytes(),
+                Expected::Text("synthetic question"),
             ),
             (
                 // aider's chat history *is* a markdown transcript.

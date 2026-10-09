@@ -554,26 +554,29 @@
       "id": "github-copilot-cli",
       "display_name": "GitHub Copilot CLI",
       "dev_priority": "low",
-      "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
+      "known_issue": "reader exports session-store.db (sessions+turns) per session; no real store has ever been measured (the schema is read from the v1.0.80 build artifacts), so conversation time is not claimed, and the per-session events.jsonl below session-state/ (turn-level cwd, event timestamps) is not read because its on-disk layout is unmeasured",
       "paths": {
         "macos": {
           "template": "~/.copilot/",
           "format": "sqlite + jsonl",
           "confidence": "source-confirmed",
-          "source": "@github/copilot v1.0.80 build artifacts(app.js + runtime.node embedded SQLite DDL)"
+          "source": "@github/copilot v1.0.80 build artifacts(app.js + runtime.node embedded SQLite DDL)",
+          "env_override": "COPILOT_HOME"
         },
         "linux": {
           "template": "~/.copilot/",
           "format": "sqlite + jsonl",
           "confidence": "source-confirmed",
           "source": "same as above(bOn=\".copilot\", join(homedir,.copilot), session-store.db)",
+          "env_override": "COPILOT_HOME",
           "notes": "When XDG_CONFIG_HOME and XDG_STATE_HOME are set, a one-time migration moves config to $XDG_CONFIG_HOME/copilot and state (including session-store.db) to $XDG_STATE_HOME/copilot."
         },
         "windows": {
           "template": "%USERPROFILE%\\.copilot\\",
           "format": "sqlite + jsonl",
           "confidence": "source-confirmed",
-          "source": "same as above(home has no win32 branch); cache goes to %LOCALAPPDATA%\\copilot\\"
+          "source": "same as above(home has no win32 branch); cache goes to %LOCALAPPDATA%\\copilot\\",
+          "env_override": "COPILOT_HOME"
         }
       },
       "notes": "persists sessions (non-ephemeral): session-store.db SQLite(sessions/turns/... WAL)+per-session events.jsonl+data.db/session.db/embedding-cache.db. COPILOT_HOME/configDir can override. Linux if set XDG_CONFIG_HOME/XDG_STATE_HOME performs a one-time migration config->XDG_CONFIG_HOME/copilot, state(including session-store.db)->XDG_STATE_HOME/copilot. XDG migration does not apply on Windows.",

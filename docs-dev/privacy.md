@@ -58,7 +58,7 @@ that document is the honest one.
 - **The optional local full-text index is plaintext.** `index build` reads
   changed archived sessions into a destination-scoped SQLite cache under the
   operating-system cache directory; `index clear` removes that cache
-  (`crates/chat-stasher/src/fts.rs:1-6,1468-1688,1690-1705`).
+  (`crates/chat-stasher/src/fts.rs:1-6,1469-1689,1691-1706`).
 - **The snapshot session cache is plaintext too, but holds identifiers rather
   than text.** A repeated `search` keeps each snapshot's session list — session
   ids, the machine partition, shard counts and byte sizes — in a
@@ -493,7 +493,7 @@ The activity index carries these fields into the archive, and `search --json`
 returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
-`crates/chat-stasher/src/collect.rs:1318-1331`,
+`crates/chat-stasher/src/collect.rs:1319-1332`,
 `crates/chat-stasher/src/main.rs:2808-2816,2892-2900`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
@@ -1060,7 +1060,7 @@ Retention on **your** machine is under your control:
 | Staged shards | Until `push` moves them into the repository | Delete the stage directory you chose |
 | A directory you exported to | **Until you delete it.** `export --out` writes the selected sessions there decrypted, and nothing — not `push`, not `ingest` — moves them on (`crates/chat-stasher/src/main.rs:737-823`). | Delete the directory you named. `--out` must be empty or absent unless `--force` is given, and the command deletes nothing, so nothing of yours is lost by pointing it at a directory you later remove. |
 | The optional full-text index | Until you run `chat-stasher index clear` or remove the OS cache directory. It stores indexed titles and user/assistant text in a local SQLite database. | Run `chat-stasher index clear --destination <name>` or use the explicit `--repo` used to select the index. |
-| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:1921-2030`; `crates/chat-stasher/src/collect.rs:2362-2429`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:195-1423`). Selective per-conversation deletion inside an archive is not implemented. |
+| Your archive repository | **Indefinitely, by design.** This is a backup tool: it exists so that history a platform deleted still survives. Grok CLI usage sidecars are retained as a separate shard linked by session id; the original `usage.json` bytes are kept intact, including each model's `modelUsage` object and all counters such as `inputTokens`, `cachedReadTokens`, `outputTokens`, `totalTokens`, and any additional fields the source contains (`crates/chat-stasher/src/scanner.rs:2165-2274`; `crates/chat-stasher/src/collect.rs:2380-2447`). | Delete the repository directory or remote bucket yourself. **There is no `delete` subcommand and no command that restores sessions into a harness's own directories in this version** — the subcommand list now includes `index` and has no restore command (`crates/chat-stasher/src/main.rs:195-1423`). Selective per-conversation deletion inside an archive is not implemented. |
 **Uninstalling the extension in one profile stops capture in that profile
 immediately** and removes that profile's local storage, which is where its outbox
 lives, so uninstalling also deletes the captures *that install* had not been

@@ -146,7 +146,7 @@ around it.
 | Local | Cursor | 2026-09-25 | normal | - |
 | Agent platform | Grok Bot (desktop) | - | low | local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |
-| Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | GitHub Copilot CLI | - | low | reader exports session-store.db (sessions+turns) per session; no real store has ever been measured (the schema is read from the v1.0.80 build artifacts), so conversation time is not claimed, and the per-session events.jsonl below session-state/ (turn-level cwd, event timestamps) is not read because its on-disk layout is unmeasured |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Zed | 2026-10-03 | low | image payloads, tool result contents, compaction summaries, per-message timestamps, and unrecognized content remain available in the raw archive and are not rendered |
