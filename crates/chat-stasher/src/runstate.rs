@@ -76,6 +76,11 @@ pub struct PassMetrics {
     // Wall time per phase, in milliseconds. A phase the pass never
     // reached (push preflight and backup on a no-op pass) stays 0:
     // zero is a measurement of "did not run", never a fallback.
+    /// The declared `[pull.letta]` API-pull producer, pulled before the
+    /// collect step. `0` also covers a pass with no producer declared:
+    /// a pull that did not run and a declaration that does not exist are
+    /// both "no letta pull happened".
+    pub letta_pull_ms: u64,
     /// Registry scan (`scanner::scan_with_machine`).
     pub scan_ms: u64,
     /// Incremental staging of every scanned record
@@ -128,11 +133,12 @@ impl PassMetrics {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "[run-once] phases ms: scan={} collect={} collect_harness=[{}] \
+            "[run-once] phases ms: letta_pull={} scan={} collect={} collect_harness=[{}] \
              stage_audit={} metadata_hash={} activity_index={} push_preflight={} \
              backup={} run_state_write={}; counts: records_scanned={} \
              files_statted={} source_bytes_read={} shard_bytes_read_hashed={} \
              sqlite_sessions_queried={} sqlite_sessions_exported={} state_saves={}",
+            self.letta_pull_ms,
             self.scan_ms,
             self.collect_ms,
             harness_ms,
@@ -497,6 +503,7 @@ mod tests {
         state.phases.sqlite_sessions_queried = 16;
         state.phases.sqlite_sessions_exported = 17;
         state.phases.state_saves = 18;
+        state.phases.letta_pull_ms = 19;
         save(&state_dir, &state).unwrap();
         match load(&state_dir) {
             RunStateRead::Present(read) => {
@@ -511,6 +518,7 @@ mod tests {
     #[test]
     fn summary_line_carries_every_phase_and_counter() {
         let mut metrics = PassMetrics::default();
+        metrics.letta_pull_ms = 0;
         metrics.scan_ms = 1;
         metrics.collect_ms = 2;
         metrics.collect_harness_ms.insert("chatgpt".to_string(), 3);
@@ -529,6 +537,7 @@ mod tests {
         metrics.state_saves = 16;
         let line = metrics.summary_line();
         for key in [
+            "letta_pull=0",
             "scan=1",
             "collect=2",
             "chatgpt=3",

@@ -155,6 +155,29 @@ This machine's **body cache** may retain bodies fetched by eligible single-sessi
 - A `[cache]` section with an unreadable value turns the cache **off** instead of guessing, and `doctor` says why.
 - `chat-stasher cache` shows what it holds, and `chat-stasher cache clear` empties it.
 
+## `[pull.letta]`
+
+Declares the Letta API-pull producer for the scheduled pass: with this
+section present, every `run-once` pass pulls the producer **before** its
+collect step, so the hourly job archives Letta without a separate command.
+`chat-stasher pull letta` (see [pull.md](pull.md)) is unchanged and reads
+the same pipeline. The section rejects unknown keys: a provider this build
+does not know must not look declared while silently never being pulled.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `account_id` | (required) | The stable provider account ID you chose, independent of the API key (`LETTA_API_KEY`, from the timer's environment). Never logged. |
+| `inbox` | (required) | The local inbox directory the producer's `inbox@3` bundles are published into. Keep it stable across runs. |
+| `state` | `~/.local/share/chat-stasher/state/api-pull/letta` | Durable private producer state. Preserve it across restores: its identity salt keeps the account's derived tenant stable across key rotation. |
+| `pace_ms` | `1000` | Serial request pacing, about one request per second. Accepts 0–60000. |
+| `budget_seconds` | `600` | Whole-pass wall-clock budget. Accepts 1–3600. |
+| `page_size` | `100` | Rows requested per page. Accepts **100–200** only — the provider rejects larger agent-history pages. |
+
+A declaration that cannot be honoured (a missing key, a value outside the
+band) stops the pass's pull with the config key named, and the whole pass
+ends with exit 3 ("did not finish reading") while the local archive cycle
+still runs: a partly-read producer is never reported as an empty one.
+
 ## Files chat-stasher keeps outside the config
 
 | What | Where | Safe to delete? |

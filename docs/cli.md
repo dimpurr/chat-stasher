@@ -16,7 +16,7 @@ chat-stasher <command> --help
 | [`init`](#init) | Writes a commented config file, if none exists | Config (new file only) |
 | [`setup`](#setup) | First-run wizard: first archive, key, destination, timer | Yes |
 | [`doctor`](#doctor) | Is anything on this machine deleting its history? | No |
-| [`run-once`](#run-once) | One archive pass: collect, then push if changed | Stage, archive |
+| [`run-once`](#run-once) | One archive pass: pull any declared producer, collect, then push if changed | Stage, archive |
 | [`schedule`](#schedule) | Renders, installs or removes the hourly timer | Timer files (with `install` / `uninstall`) |
 | [`status`](#status) | Is the timer working? What does the scanner find? | No |
 | [`dest-init`](#dest-init) | Seeds a new destination with this machine's history | Stage, destination |
@@ -115,7 +115,7 @@ Read-only. Reports each AI tool on this machine, whether its settings delete old
 
 ### `run-once`
 
-One pass: collect new session data into the stage, then push to the archive if anything changed.
+One pass: collect new session data into the stage, then push to the archive if anything changed. A declared `[pull.letta]` producer (see [pull.md](pull.md)) is pulled before the collect step, so the pass archives it too; a producer that cannot finish reading keeps the pass at exit 3 while the local cycle still runs.
 
 | Flag | Meaning |
 |---|---|
@@ -124,7 +124,7 @@ One pass: collect new session data into the stage, then push to the archive if a
 | `--verify` | Run the cheap structure check (`verify --level l1`) afterwards. |
 | `--shard-bucket-cap <n>` | Sealed shards per bucket. Default 20. |
 
-Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error. Safe to run again at any time.
+Ends with `result: COMPLETED` (a snapshot was created) or `result: NOOP` (nothing changed). Both exit `0`. Non-zero is a real error; `3` includes the case where a declared pull producer did not finish reading. Safe to run again at any time.
 
 ### `schedule`
 

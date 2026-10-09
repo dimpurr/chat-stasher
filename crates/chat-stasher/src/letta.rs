@@ -1,5 +1,12 @@
 //! Bounded Letta API producer. Local inbox publication and archive proof are
 //! separate: only destination proof settles the per-account, per-agent pass.
+//!
+//! Two entry points share one pipeline: the `pull letta` command (its own
+//! account, inbox and pacing on the command line) and the `[pull.letta]`
+//! declaration the scheduled pass pulls before collect (`[PassPull]`). The
+//! pass declaration resolves through [`pass_pull`] and the command through
+//! [`PullArgs`], and both feed the same [`run`] with the same pacing, page
+//! budget and `Retry-After` handling.
 use crate::remote_inbox::ArchiveProof;
 use anyhow::{ensure, Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
@@ -13,6 +20,23 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+/// Serial request pacing default: about one request per second.
+pub const DEFAULT_PACE_MS: u64 = 1000;
+/// Largest accepted serial pacing interval, in milliseconds.
+pub const MAX_PACE_MS: u64 = 60_000;
+/// Default whole-pass wall-clock budget, in seconds.
+pub const DEFAULT_BUDGET_SECONDS: u64 = 600;
+/// Largest accepted whole-pass budget: one hour.
+pub const MAX_BUDGET_SECONDS: u64 = 3_600;
+/// Rows requested per page. The provider rejects larger agent-history pages,
+/// so the accepted band is 100–200 rows and the default sits inside it.
+pub const DEFAULT_PAGE_SIZE: u64 = 100;
+/// Smallest page this producer will request.
+pub const MIN_PAGE_SIZE: u64 = 100;
+/// Largest page this producer will request; the provider's own cap (larger
+/// agent-history pages were measured to be rate-limit-refused at the source).
+pub const MAX_PAGE_SIZE: u64 = 200;
 
 #[derive(clap::Args)]
 pub struct PullArgs {
@@ -32,11 +56,102 @@ pub struct PullArgs {
     pub stage: PathBuf,
     #[arg(long)]
     pub machine: Option<String>,
-    /// Serial request pacing in milliseconds.
-    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(0..=60000))]
+    /// Serial request pacing in milliseconds (default ~1 request/second).
+    #[arg(long, default_value_t = DEFAULT_PACE_MS, value_parser = clap::value_parser!(u64).range(0..=MAX_PACE_MS))]
     pub pace_ms: u64,
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    /// Whole-pass wall-clock budget in seconds.
+    #[arg(long, default_value_t = DEFAULT_BUDGET_SECONDS, value_parser = clap::value_parser!(u64).range(1..=MAX_BUDGET_SECONDS))]
     pub budget_seconds: u64,
+    /// Rows requested per page. The provider caps agent-history pages, so the
+    /// accepted band is 100–200 rows and the default sits inside it.
+    #[arg(long, default_value_t = DEFAULT_PAGE_SIZE, value_parser = clap::value_parser!(u64).range(MIN_PAGE_SIZE..=MAX_PAGE_SIZE))]
+    pub page_size: u64,
+}
+
+/// The `[pull.letta]` declaration as a scheduled pass uses it: validated,
+/// with defaults applied once, and the producer state defaulted beside the
+/// pass's own state. `None` (from [`pass_pull`]) means no producer declared.
+pub struct PassPull {
+    /// Stable provider account ID. Never logged.
+    pub account: String,
+    /// Local inbox for ordinary @3 harness-file bundles.
+    pub inbox: PathBuf,
+    /// Durable private producer state.
+    pub state: PathBuf,
+    /// Serial request pacing in milliseconds (default ~1 request/second).
+    pub pace_ms: u64,
+    /// Whole-pass wall-clock budget in seconds.
+    pub budget_seconds: u64,
+    /// Rows requested per page (`MIN_PAGE_SIZE..=MAX_PAGE_SIZE`).
+    pub page_size: u64,
+}
+
+/// Resolve the declared `[pull.letta]` producer for a scheduled pass.
+///
+/// An absent section is `Ok(None)`: declaring the producer is opt-in, so an
+/// unchanged config keeps the pass's behaviour unchanged. A section that is
+/// present but cannot name the account or the inbox, or asks for pacing,
+/// budget or page size outside the accepted band, is an error naming the key
+/// it faults — a declared producer whose declaration silently never ran would
+/// look exactly like an archived one, which is the failure this refuses.
+pub fn pass_pull(config: &crate::config::Config) -> Result<Option<PassPull>> {
+    let Some(pull) = config.pull.as_ref().and_then(|pull| pull.letta.as_ref()) else {
+        return Ok(None);
+    };
+    let account = pull
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context(
+            "pull.letta.account_id is missing: the declared producer cannot name the account it reads",
+        )?
+        .to_owned();
+    let inbox = pull
+        .inbox
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .context(
+            "pull.letta.inbox is missing: the declared producer publishes inbox@3 bundles into \
+             that directory, so declaring it means naming the inbox",
+        )?;
+    let pace_ms = pull.pace_ms.unwrap_or(DEFAULT_PACE_MS);
+    ensure!(
+        pace_ms <= MAX_PACE_MS,
+        "pull.letta.pace_ms = {pace_ms} is outside the accepted 0–{MAX_PACE_MS} millisecond band"
+    );
+    let budget_seconds = pull.budget_seconds.unwrap_or(DEFAULT_BUDGET_SECONDS);
+    ensure!(
+        (1..=MAX_BUDGET_SECONDS).contains(&budget_seconds),
+        "pull.letta.budget_seconds = {budget_seconds} is outside the accepted \
+         1–{MAX_BUDGET_SECONDS} second band"
+    );
+    let page_size = pull.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
+    ensure!(
+        (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size),
+        "pull.letta.page_size = {page_size} is outside the accepted \
+         {MIN_PAGE_SIZE}–{MAX_PAGE_SIZE} row band the provider serves"
+    );
+    let state = pull
+        .state
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value.trim()))
+        .unwrap_or_else(|| {
+            crate::collect::default_state_dir()
+                .join("api-pull")
+                .join("letta")
+        });
+    Ok(Some(PassPull {
+        account,
+        inbox: PathBuf::from(inbox),
+        state,
+        pace_ms,
+        budget_seconds,
+        page_size,
+    }))
 }
 
 pub struct Api {
@@ -47,15 +162,22 @@ pub struct Api {
     pace: Duration,
     next: Instant,
     response_bytes: usize,
+    page_size: u64,
 }
 impl Api {
-    pub fn environment(pace: Duration, budget: Duration) -> Result<Self> {
+    pub fn environment(pace: Duration, budget: Duration, page_size: u64) -> Result<Self> {
         let key = std::env::var("LETTA_API_KEY")
             .map_err(|_| anyhow::anyhow!("Letta credential unavailable"))?;
         ensure!(!key.trim().is_empty(), "Letta credential unavailable");
-        Self::new("https://api.letta.com", Some(key), pace, budget)
+        Self::new("https://api.letta.com", Some(key), pace, budget, page_size)
     }
-    fn new(base: &str, key: Option<String>, pace: Duration, budget: Duration) -> Result<Self> {
+    fn new(
+        base: &str,
+        key: Option<String>,
+        pace: Duration,
+        budget: Duration,
+        page_size: u64,
+    ) -> Result<Self> {
         Ok(Self {
             client: reqwest::blocking::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -69,6 +191,7 @@ impl Api {
             pace,
             next: Instant::now(),
             response_bytes: 0,
+            page_size,
         })
     }
     fn wait(&self, delay: Duration) -> Result<()> {
@@ -175,7 +298,7 @@ impl Api {
         let mut stagnant = 0;
         for _ in 0..10000 {
             let mut query = extra.to_vec();
-            query.push(("limit", "100".into()));
+            query.push(("limit", self.page_size.to_string()));
             if !after.is_empty() {
                 query.push(("after", after.clone()));
             }
@@ -876,6 +999,13 @@ mod tests {
         mode: Arc<AtomicUsize>,
         thread: Option<thread::JoinHandle<()>>,
         retries: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+        /// 429 answers the mode-12 listing arm actually sent. The shared
+        /// `retries` counter also counts ordinary attempts of the visible
+        /// agent's 429 arm, so a test that wants "the rate-limited page was
+        /// answered 429 exactly once and retried" counts here.
+        listing_429s: Arc<AtomicUsize>,
+        limits: Arc<std::sync::Mutex<Vec<u64>>>,
     }
     impl Server {
         fn start() -> Self {
@@ -885,7 +1015,17 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let mode = Arc::new(AtomicUsize::new(0));
             let retries = Arc::new(AtomicUsize::new(0));
-            let (s, m, r) = (stop.clone(), mode.clone(), retries.clone());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let listing_429s = Arc::new(AtomicUsize::new(0));
+            let limits = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (s, m, r, q, g, l) = (
+                stop.clone(),
+                mode.clone(),
+                retries.clone(),
+                requests.clone(),
+                listing_429s.clone(),
+                limits.clone(),
+            );
             let thread = thread::spawn(move || {
                 while !s.load(Ordering::SeqCst) {
                     let (mut stream, _) = match listener.accept() {
@@ -902,6 +1042,21 @@ mod tests {
                     // Unit tests deliberately use no credential at all.
                     assert!(!request.to_ascii_lowercase().contains("authorization:"));
                     let path = request.split_whitespace().nth(1).unwrap();
+                    q.fetch_add(1, Ordering::SeqCst);
+                    // Every paged listing or message walk carries a `limit`
+                    // parameter; the value is recorded so a test can prove the
+                    // configured page size reached the wire.
+                    let limit = path
+                        .split("limit=")
+                        .nth(1)
+                        .and_then(|rest| rest.split('&').next())
+                        .and_then(|value| value.parse::<u64>().ok());
+                    if let Some(page) = limit {
+                        ensure_page_size(path, page);
+                        l.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(page);
+                    }
                     let mode = m.load(Ordering::SeqCst);
                     let after = path.contains("after=");
                     let mut status = "200 OK";
@@ -923,6 +1078,19 @@ mod tests {
                         }
                     } else if mode == 3 && path.starts_with("/v1/conversations/") {
                         status = "503 Service Unavailable";
+                        json!({})
+                    } else if mode == 11 && path.starts_with("/v1/agents/agent-hidden/messages") {
+                        // A source that cannot finish serving an agent's
+                        // history: retried, then exhausted mid-pass.
+                        status = "503 Service Unavailable";
+                        headers = "Retry-After: 0\r\n";
+                        json!({})
+                    } else if mode == 12
+                        && path.starts_with("/v1/agents/?")
+                        && g.swap(1, Ordering::SeqCst) == 0
+                    {
+                        status = "429 Too Many Requests";
+                        headers = "Retry-After: 1\r\n";
                         json!({})
                     } else if path.starts_with("/v1/agents/agent-visible/messages")
                         && r.fetch_add(1, Ordering::SeqCst) == 0
@@ -951,9 +1119,7 @@ mod tests {
                         } else {
                             json!([{"id":"message-a","seq_id":1,"content":if mode==1 {"synthetic edit"} else {"synthetic"},"unknown":{"null":null}}])
                         }
-                    } else if path.ends_with("/messages?limit=100")
-                        || path.contains("/messages?limit=100&after=")
-                    {
+                    } else if limit.is_some() && path.contains("/messages?") {
                         if after {
                             json!([])
                         } else {
@@ -975,10 +1141,20 @@ mod tests {
                 mode,
                 thread: Some(thread),
                 retries,
+                requests,
+                listing_429s,
+                limits,
             }
         }
         fn api(&self) -> Api {
-            Api::new(&self.base, None, Duration::ZERO, Duration::from_secs(20)).unwrap()
+            Api::new(
+                &self.base,
+                None,
+                Duration::ZERO,
+                Duration::from_secs(20),
+                DEFAULT_PAGE_SIZE,
+            )
+            .unwrap()
         }
     }
     impl Drop for Server {
@@ -1189,6 +1365,7 @@ mod tests {
                 None,
                 Duration::ZERO,
                 Duration::from_millis(200),
+                DEFAULT_PAGE_SIZE,
             )
             .unwrap(),
             "synthetic-account",
@@ -1322,6 +1499,297 @@ mod tests {
         assert_eq!(retry_after("2"), Some(Duration::from_secs(2)));
         assert!(retry_after("Wed, 21 Oct 2015 07:28:00 GMT").is_some());
         assert!(retry_after("invalid").is_none());
+    }
+
+    /// Every paged request in these tests must stay inside the band the
+    /// producer is allowed to ask for; a wider or narrower page reaching the
+    /// wire would otherwise pass unnoticed.
+    fn ensure_page_size(path: &str, page: u64) {
+        assert!(
+            (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page),
+            "page size {page} reached the wire outside the accepted \
+             {MIN_PAGE_SIZE}–{MAX_PAGE_SIZE} row band: {path}"
+        );
+    }
+
+    #[test]
+    fn pass_pull_resolves_the_declaration_or_names_what_it_lacks() {
+        let declared =
+            |account: Option<&str>, inbox: Option<&str>, page: Option<u64>| crate::config::Config {
+                pull: Some(crate::config::PullSectionConfig {
+                    letta: Some(crate::config::LettaPullConfig {
+                        account_id: account.map(str::to_owned),
+                        inbox: inbox.map(str::to_owned),
+                        state: None,
+                        pace_ms: None,
+                        budget_seconds: None,
+                        page_size: page,
+                    }),
+                }),
+                ..Default::default()
+            };
+        // Absent section and empty `[pull]` table are both "not declared".
+        assert_eq!(
+            pass_pull(&crate::config::Config::default())
+                .unwrap()
+                .is_none(),
+            true
+        );
+        assert_eq!(
+            pass_pull(&crate::config::Config {
+                pull: Some(crate::config::PullSectionConfig::default()),
+                ..Default::default()
+            })
+            .unwrap()
+            .is_none(),
+            true
+        );
+        // A valid resolution applies the documented defaults exactly once;
+        // the producer state defaults beside the pass's own state.
+        let resolved = pass_pull(&declared(
+            Some("synthetic-account"),
+            Some("/inbox"),
+            Some(150),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.account, "synthetic-account");
+        assert_eq!(resolved.inbox, PathBuf::from("/inbox"));
+        assert_eq!(resolved.page_size, 150);
+        assert_eq!(resolved.pace_ms, DEFAULT_PACE_MS);
+        assert_eq!(resolved.budget_seconds, DEFAULT_BUDGET_SECONDS);
+        assert_eq!(
+            resolved.state,
+            crate::collect::default_state_dir()
+                .join("api-pull")
+                .join("letta")
+        );
+        assert_eq!(
+            pass_pull(&declared(Some(" synthetic-account "), Some("/inbox"), None))
+                .unwrap()
+                .unwrap()
+                .account,
+            "synthetic-account"
+        );
+        // A declaration that cannot run names the key at fault rather than
+        // silently degrading to defaults the user never wrote.
+        let error = |config: crate::config::Config| match pass_pull(&config) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a declaration that cannot run must be refused"),
+        };
+        let missing_account = error(declared(Some("   "), Some("/inbox"), Some(100)));
+        assert!(
+            missing_account.contains("pull.letta.account_id"),
+            "missing account must name its key: {missing_account}"
+        );
+        let missing_inbox = error(declared(Some("synthetic-account"), None, Some(100)));
+        assert!(
+            missing_inbox.contains("pull.letta.inbox"),
+            "missing inbox must name its key: {missing_inbox}"
+        );
+        for page in [Some(99u64), Some(201u64)] {
+            let outside = error(declared(Some("synthetic-account"), Some("/inbox"), page));
+            assert!(
+                outside.contains("pull.letta.page_size"),
+                "out-of-band page size must name its key: {outside}"
+            );
+        }
+        let mut overpaced = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+        overpaced
+            .pull
+            .as_mut()
+            .unwrap()
+            .letta
+            .as_mut()
+            .unwrap()
+            .pace_ms = Some(MAX_PACE_MS + 1);
+        assert!(error(overpaced).contains("pull.letta.pace_ms"));
+        let mut unbudgeted = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+        unbudgeted
+            .pull
+            .as_mut()
+            .unwrap()
+            .letta
+            .as_mut()
+            .unwrap()
+            .budget_seconds = Some(0);
+        assert!(error(unbudgeted).contains("pull.letta.budget_seconds"));
+        // An explicit state is honoured verbatim.
+        let mut restated = declared(Some("synthetic-account"), Some("/inbox"), Some(100));
+        restated
+            .pull
+            .as_mut()
+            .unwrap()
+            .letta
+            .as_mut()
+            .unwrap()
+            .state = Some("/elsewhere/letta".to_owned());
+        assert_eq!(
+            pass_pull(&restated).unwrap().unwrap().state,
+            PathBuf::from("/elsewhere/letta")
+        );
+    }
+
+    #[test]
+    fn pass_uses_the_configured_page_size_on_every_serial_paced_request() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        let pace = Duration::from_millis(100);
+        let start = Instant::now();
+        let mut api = Api::new(&server.base, None, pace, Duration::from_secs(60), 150).unwrap();
+        let report = run(
+            &mut api,
+            "synthetic-account",
+            &root.join("agents"),
+            &root.join("inbox"),
+            &root.join("state"),
+            &root.join("stage"),
+            "synthetic-machine",
+            &Proof(true),
+        )
+        .unwrap();
+        assert_eq!(report.incomplete, 0, "the paced pass itself must settle");
+        let observed = server
+            .limits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            !observed.is_empty(),
+            "the walk must request at least one paged listing"
+        );
+        assert!(
+            observed.iter().all(|page| *page == 150),
+            "every request must carry the configured page size, saw {observed:?}"
+        );
+        let requests = server.requests.load(Ordering::SeqCst) as u32;
+        assert!(requests >= 10, "a full walk is at least ten requests");
+        // Serial pacing: request n cannot start before one full pace has
+        // passed since request n-1's response, so the whole pass takes at
+        // least (n-1) paces. This fails if the pacing clock is ignored even
+        // though every response here is an immediate 200-family answer.
+        assert!(
+            start.elapsed() >= pace * (requests - 1),
+            "the pass must take at least one pace per request after the first: \
+             {requests} requests in {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn rate_limited_page_is_waited_out_and_retried_inside_a_pass() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        server.mode.store(12, Ordering::SeqCst);
+        let start = Instant::now();
+        let mut api = server.api();
+        let report = run(
+            &mut api,
+            "synthetic-account",
+            &root.join("agents"),
+            &root.join("inbox"),
+            &root.join("state"),
+            &root.join("stage"),
+            "synthetic-machine",
+            &Proof(true),
+        )
+        .unwrap();
+        assert_eq!(report.agents, 1, "the retried listing served its rows");
+        assert_eq!(
+            report.incomplete, 0,
+            "a Retry-After waited out is a complete pass, not a refusal"
+        );
+        assert_eq!(
+            report.committed, 1,
+            "the whole pass is proven after the retry"
+        );
+        assert_eq!(
+            server.listing_429s.load(Ordering::SeqCst),
+            1,
+            "exactly the rate-limited page was answered 429, once"
+        );
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "the Retry-After delay must actually be waited out: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn mid_pass_source_failure_keeps_the_remainder_pending_not_empty() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        let local = root.join("agents");
+        fs::create_dir_all(local.join("agent-hidden")).unwrap();
+        let pull = |api: &mut Api, proof: &dyn ArchiveProof| {
+            run(
+                api,
+                "synthetic-account",
+                &local,
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                proof,
+            )
+            .unwrap()
+        };
+        // A complete, proven pass first, so the later failure has a prior
+        // journal to leave intact.
+        let first = pull(&mut server.api(), &Proof(true));
+        assert_eq!(first.agents, 2);
+        assert_eq!(first.incomplete, 0);
+        let pending_of = |agent: &str| {
+            let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
+            db.query_row(
+                "SELECT pending FROM agents WHERE scope LIKE ?",
+                rusqlite::params![format!("%/{agent}")],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let before = (pending_of("agent-hidden"), pending_of("agent-visible"));
+        // Mid-pass failure: the hidden agent's history cannot be served.
+        // `Retry-After: 0` makes the bounded retries exhaust immediately, so
+        // the failure is contained in the report instead of eating the whole
+        // pass budget the remaining agent still needs.
+        server.mode.store(11, Ordering::SeqCst);
+        let mut api = server.api();
+        let second = pull(&mut api, &Proof(true));
+        assert_eq!(
+            second.incomplete, 1,
+            "the unread agent is a halted remainder, not an absent one"
+        );
+        assert_eq!(second.committed, 1, "the other agent's pass still settles");
+        let after = (pending_of("agent-hidden"), pending_of("agent-visible"));
+        assert_eq!(
+            before.0, after.0,
+            "the unread agent's journal row must be untouched by the halted pass: \
+             pending receipts stay pending, never rewritten as an empty read"
+        );
+        assert!(
+            before.0.contains("\"bundles\":[\""),
+            "the fixture must actually carry the agent's prior receipt set: {}",
+            before.0
+        );
+        // The settled agent completed a fresh, proven pass: its journal row
+        // advanced and holds no outstanding receipts, which is what the
+        // halted pass must not fake for the unread one.
+        let after_visible = serde_json::from_str::<Value>(&after.1).unwrap();
+        assert_eq!(
+            after_visible["required"].as_array().map(Vec::len),
+            Some(0),
+            "the settled agent proved again: {}",
+            after.1
+        );
+        let halted = serde_json::from_str::<Value>(&after.0).unwrap();
+        assert!(
+            !halted["bundles"].as_array().unwrap().is_empty(),
+            "the unread agent keeps its receipt set: {}",
+            after.0
+        );
     }
 }
 

@@ -209,6 +209,48 @@ pub struct Config {
     /// 107 MB session cost 22.6 s (W117) — and is one quota shared by every
     /// destination on this machine, never an allowance per destination.
     pub cache: Option<CacheSectionConfig>,
+
+    /// The `[pull]` section: API-pull producers the scheduled pass pulls
+    /// before its collect step (LETTA-P3). Absent means no producer is
+    /// declared and the pass's behaviour is unchanged.
+    pub pull: Option<PullSectionConfig>,
+}
+
+/// The `[pull]` section. Only the `letta` producer exists today, and the
+/// section rejects any other key: a declared producer this build does not
+/// know would otherwise look declared while it is silently never pulled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PullSectionConfig {
+    /// The `[pull.letta]` Letta API-pull producer declaration.
+    pub letta: Option<LettaPullConfig>,
+}
+
+/// The `[pull.letta]` producer declaration for the scheduled pass.
+///
+/// Every key is optional in the *schema* sense; the pass resolves the
+/// declaration through `letta::pass_pull`, which requires the account and the
+/// inbox and validates the pacing band — an invalid declaration stops the
+/// pass's pull with the key named rather than substituting defaults nobody
+/// wrote.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LettaPullConfig {
+    /// Stable provider account ID, independent of the API key. Never logged.
+    pub account_id: Option<String>,
+    /// Local inbox directory the producer's @3 bundles are published into.
+    /// Declaring the producer means naming this inbox; the pass has no
+    /// default for it.
+    pub inbox: Option<String>,
+    /// Durable private producer state; preserve its identity salt across
+    /// restores. Default: the state directory's `api-pull/letta`.
+    pub state: Option<String>,
+    /// Serial request pacing in milliseconds. Default: ~1 request/second.
+    pub pace_ms: Option<u64>,
+    /// Whole-pass wall-clock budget in seconds. Default: 600.
+    pub budget_seconds: Option<u64>,
+    /// Rows requested per page. Default: 100; accepted band 100–200.
+    pub page_size: Option<u64>,
 }
 
 /// The `[cache]` section (ADR-034).
@@ -896,6 +938,13 @@ impl Config {
             }
             for key in bad_options {
                 dest.options.remove(&key);
+            }
+        }
+
+        if let Some(pull) = &mut self.pull {
+            if let Some(letta) = &mut pull.letta {
+                expand_opt_field("pull.letta.inbox", &mut letta.inbox, problems);
+                expand_opt_field("pull.letta.state", &mut letta.state, problems);
             }
         }
     }
@@ -1866,6 +1915,32 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# chat-stasher configuration
 # no_cache = false
 # [destinations.storagebox.options]
 # endpoint = "ssh://example:23"
+
+# ---------------------------------------------------------------- pull
+# API-pull producers the scheduled pass reads before it collects. Declaring
+# one is how the hourly job archives a cloud service whose authoritative
+# record is only reachable through its API, without a separate command.
+#
+# [pull.letta] lets the scheduled Letta pass read the API key from the
+# environment (`LETTA_API_KEY`; see docs/pull.md). Requests are serial and
+# paced (~1 per second by default, tune with pace_ms), pages stay in the
+# 100–200 row band the provider serves, and 429/503 answers honor Retry-After.
+# Local archiving still runs when the pull cannot finish reading; the pass
+# then exits 3 ("did not finish reading") and keeps the unread remainder
+# pending in the producer's state, never reported as "no messages".
+#
+# The account id is a stable label you choose for the account, independent of
+# the API key; the inbox is where the producer's @3 bundles are published.
+# Keep both stable across runs: the producer's durable state derives its
+# identity from the account id, and receipts in the inbox stay pending until
+# every destination proves it holds them.
+#
+# [pull.letta]
+# account_id = "my-letta-account"
+# inbox = "~/stash/chat-stasher/letta-inbox"
+# pace_ms = 1000
+# budget_seconds = 600
+# page_size = 100
 "#;
 
 #[cfg(test)]

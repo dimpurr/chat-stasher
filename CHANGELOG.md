@@ -15,11 +15,25 @@ under its own heading below.
 
 #### Added
 
+- **Letta pull inside the scheduled pass.** Declaring `[pull.letta]` in the
+  config (account id, inbox; pacing, budget and 100–200-row page size
+  optional) makes every `run-once` pass pull the producer before its collect
+  step, through the same paced, `Retry-After`-honouring pipeline as
+  `chat-stasher pull letta`, with the pass's own machine and stage and
+  `LETTA_API_KEY` from the environment. A producer that cannot finish
+  reading — rate-limited, refusing, partly proven, or contending with
+  another pass of the same machine — keeps the pass at exit 3 ("did not
+  finish reading") while the local collect-and-push cycle still runs and its
+  unread remainder stays pending in the producer state; the failure is
+  recorded as the pass's `pull-letta` step. The pull's wall time is the new
+  `letta_pull=` phase in the run-once summary line. See
+  [API pull](docs/pull.md).
 - **Letta API pull.** `pull letta` captures conversation exports and agent-window
   extras through the local inbox @3 sink, including hidden agents discovered
   from local IDs. Edits and source absence append observations; per-agent
-  cursors wait for destination archive proof. See [API pull](docs/pull.md).
-  Scheduling and local transcript capture remain separate work.
+  cursors wait for destination archive proof. Pages are sized by the new
+  `--page-size` (default 100, accepted band 100–200). See
+  [API pull](docs/pull.md). Local transcript capture remains separate work.
 - **Portable remote inbox posting keys.** `send-key <inbox> --for <platform>
   --credential-file <file>` prints a versioned secret after saving its public
   puller policy. Expiry defaults to 24 hours; `--expires 90d` requests a longer
