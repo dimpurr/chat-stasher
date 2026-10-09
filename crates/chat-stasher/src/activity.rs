@@ -2339,10 +2339,10 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 /// opposed to what the collection path or the registry already recorded. Seven
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
-/// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
-/// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
-/// row's `cwd`), `codex` (its `session_meta` record's working directory
-/// and repository) and `hermes-agent` (its `sessions` row's directory,
+/// directory, project and workspace keys, and archive fact), `openclaw` (its
+/// `agent_id`, plus the archived status of a cold snapshot), `grok` (its CLI
+/// `session_docs` row's `cwd`), `codex` (its `session_meta` record's working
+/// directory and repository) and `hermes-agent` (its `sessions` row's directory,
 /// gateway peer binding, repository identity, and its archived / pinned
 /// flags); every other harness answers with the empty set, which is
 /// the honest answer for a dimension nothing was read from — and never a
@@ -2519,7 +2519,7 @@ fn fold_gemini_cli_dimensions(
 /// opencode exports a session as one envelope that carries, beside the
 /// conversation, the row its own `session` table recorded about it
 /// (`sqlite_probe.rs` seals that row under the
-/// `chat-stasher.opencode.session.v1` schema). Three of its fields are
+/// `chat-stasher.opencode.session.v1` schema). Four of its fields are
 /// dimension facts, and they are three different kinds of fact:
 ///
 /// `directory` — else `path`, where the directory is null or empty — is where
@@ -2533,6 +2533,12 @@ fn fold_gemini_cli_dimensions(
 /// derivable from one. It names the project the session belonged to, which is
 /// what `container` exists for — and keeping it there rather than leaning on
 /// the directory is the whole point of the `cwd ≠ repo identity` rule.
+///
+/// `workspace_id` is that same kind of key once more, naming the workspace
+/// rather than the project: a second opaque foreign key, present on the rows
+/// that carry one and absent from the rest. It is kept beside `project_id` as
+/// a second container observation, never recorded *instead* of it — a row
+/// that names both identities states two facts, and neither is discarded.
 ///
 /// `time_archived` is a recorded fact, not a state to compute: the row holds
 /// the millisecond moment the session was archived, or nothing. An integer
@@ -2564,6 +2570,9 @@ fn fold_opencode_dimensions(
     }
     if let Some(project) = non_empty_str(session.get("project_id")) {
         dimensions.insert_container(project);
+    }
+    if let Some(workspace) = non_empty_str(session.get("workspace_id")) {
+        dimensions.insert_container(workspace);
     }
     if session
         .get("time_archived")
@@ -3354,9 +3363,40 @@ mod tests {
             "s",
             "mbp",
             "opencode",
-            &[oc_with(r#""id":"s1","directory":"/w/one","project_id"""#).as_str()],
+            &[oc_with(r#""id":"s1","directory":"/w/one","project_id":"""#).as_str()],
         );
         assert!(row.dimensions.container.is_empty());
+    }
+
+    #[test]
+    fn a_workspace_an_opencode_row_names_is_a_second_container_beside_the_project() {
+        // The row carries a second opaque foreign key beside the project one,
+        // and both are facts the harness recorded — kept as a set, never one
+        // promoted over the other.
+        let both = oc_with(
+            r#""id":"s1","directory":"/w/one","project_id":"project-fixture","workspace_id":"ws-fixture""#,
+        );
+        let row = build_row("s", "mbp", "opencode", &[both.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["project-fixture", "ws-fixture"],
+            "two identities the row stated are two container observations"
+        );
+        // A row without a project still names its workspace, so the key is a
+        // container answer in its own right, not a decoration on the project's.
+        let alone = oc_with(r#""id":"s1","directory":"/w/one","workspace_id":"ws-fixture""#);
+        let row = build_row("s", "mbp", "opencode", &[alone.as_str()]);
+        assert_eq!(row.dimensions.container, ["ws-fixture"]);
+        // The empty and null spellings of the same absence stay unobserved.
+        let blank = oc_with(r#""id":"s1","project_id":"project-fixture","workspace_id":"""#);
+        let null = oc_with(r#""id":"s1","workspace_id":null"#);
+        let row = build_row("s", "mbp", "opencode", &[blank.as_str(), null.as_str()]);
+        assert_eq!(
+            row.dimensions.container,
+            ["project-fixture"],
+            "an empty or absent workspace key is nothing observed: {:?}",
+            row.dimensions
+        );
     }
 
     #[test]

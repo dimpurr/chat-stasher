@@ -522,6 +522,95 @@ fn activity_index_leaves_an_opencode_dimension_the_export_stated_nothing_about_a
     );
 }
 
+/// TICKET-4D-14 · a row that names a workspace beside its project states two
+/// container facts, and the written index keeps both: the workspace key is a
+/// second opaque identity the harness recorded, not a decoration on the
+/// project's, and a row that carries it alone still answers the container
+/// question.
+#[test]
+fn activity_index_keeps_the_workspace_beside_the_project_an_opencode_row_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "opencode.mbp-test.sess-1-opencode-4d";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","directory":"/w/one","project_id":"project-fixture","workspace_id":"ws-fixture""#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["project-fixture", "ws-fixture"]),
+        "the project and the workspace the row named are both kept, as a set: {}",
+        row["dimensions"]
+    );
+
+    // The same key without a project beside it is still a container answer.
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[oc_envelope(
+            r#""id":"sess-1-opencode-4d","workspace_id":"ws-fixture""#,
+        )],
+    );
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["ws-fixture"]),
+        "a workspace key the row stated with no project beside it is recorded \
+         on its own: {}",
+        row["dimensions"]
+    );
+    assert!(
+        row["dimensions"].get("cwd").is_none(),
+        "a row that stated no directory carries no cwd: {}",
+        row["dimensions"]
+    );
+}
+
 /// TICKET-4D-04 · the working directory a Grok CLI `session_docs` row states
 /// reaches the written index. The row names no tenancy and no project, and the
 /// written line must not carry those dimensions either.
