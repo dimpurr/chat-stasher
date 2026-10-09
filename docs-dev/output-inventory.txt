@@ -2144,7 +2144,7 @@ anyhow       crates/chat-stasher/src/message_audit.rs:313  "invalid audit produc
 anyhow       crates/chat-stasher/src/message_audit.rs:327  "missing audit bytes"
 anyhow       crates/chat-stasher/src/message_audit.rs:331  "invalid audit encoding"
 bail         crates/chat-stasher/src/message_audit.rs:340  "missing authoritative audit body"
-anyhow       crates/chat-stasher/src/message_audit.rs:911  "invalid audit JSONL entry"
+anyhow       crates/chat-stasher/src/message_audit.rs:973  "invalid audit JSONL entry"
 with_context crates/chat-stasher/src/metahash.rs:53  "read {}"
 with_context crates/chat-stasher/src/metahash.rs:119  "read meta file {}"
 with_context crates/chat-stasher/src/metahash.rs:207  "create state dir {}"
