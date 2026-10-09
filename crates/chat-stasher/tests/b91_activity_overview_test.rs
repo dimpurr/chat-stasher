@@ -899,6 +899,122 @@ fn activity_index_leaves_an_unrecorded_codex_dimension_absent() {
     );
 }
 
+/// One synthetic Hermes Agent export envelope for a session whose own
+/// `sessions` row states whatever fields the caller spells in. The shape is the
+/// one `sqlite_probe.rs` seals: one line per session, the whole row beside its
+/// messages.
+fn hermes_envelope(session: &str) -> String {
+    format!(
+        r#"{{"schema":"chat-stasher.hermes-agent.session.v1","session":{{{session}}},"messages":[],"session_model_usage":[]}}"#
+    )
+}
+
+/// TICKET-4D-13 · the four facts a Hermes Agent session row states about itself
+/// reach the written index: the directory it ran in, the repository it belonged
+/// to, the gateway peer that owned it, and the archive flag it recorded.
+#[test]
+fn activity_index_records_the_dimensions_a_hermes_agent_row_states() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "hermes-agent.mbp-test.hermes-4d-1";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[hermes_envelope(
+            r#""id":"hermes-4d-1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the directory the session ran in is recorded as a path"
+    );
+    assert_eq!(
+        row["dimensions"]["container"],
+        serde_json::json!(["https://github.com/org/repo-fixture"]),
+        "the repository root the harness recorded is recorded as a container"
+    );
+    assert_eq!(
+        row["dimensions"]["tenant"],
+        serde_json::json!(["peer-fixture"]),
+        "the gateway peer binding the row recorded is recorded as a tenancy"
+    );
+    assert_eq!(
+        row["dimensions"]["status"],
+        serde_json::json!(["archived"]),
+        "a flag the harness set is a recorded lifecycle state"
+    );
+}
+
+/// A local Hermes Agent row with every flag at its zero default and no peer,
+/// directory or repository states **no** dimension: the written line carries no
+/// dimension object at all, and never an `active` the harness did not record.
+#[test]
+fn activity_index_leaves_a_local_hermes_agent_row_stating_nothing_absent() {
+    let sb = sandbox();
+    let stage = sb.path().join("stage");
+    let machine = "mbp-test";
+    let session = "hermes-agent.mbp-test.hermes-4d-2";
+    write_shard(
+        &stage,
+        machine,
+        session,
+        &[hermes_envelope(
+            r#""id":"hermes-4d-2","source":"cli","cwd":null,"user_id":null,"git_repo_root":null,"archived":0,"pinned":0"#,
+        )],
+    );
+
+    let out = run(
+        sb.path(),
+        &[
+            "activity-index",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--machine",
+            machine,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "activity-index failed: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let index = stage.join("meta").join(machine).join("activity-v1.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(index).unwrap().trim()).unwrap();
+    assert!(
+        row.get("dimensions").is_none(),
+        "the row recorded none of the four facts, so no dimension object is \
+         written — and a zero archive flag is never an `active` one: {}",
+        row
+    );
+}
+
 /// A machine that has a snapshot but no activity index must be *named* — it
 /// must never vanish silently (that would fold "no index" into "no sessions").
 #[test]
