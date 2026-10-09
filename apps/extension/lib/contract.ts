@@ -1704,7 +1704,7 @@ export interface InboxProducer {
   sendKeyId?: string;
 }
 export interface HarnessFileSource {
-  role: 'transcript' | 'subagent' | 'tool-result' | 'other';
+  role: 'transcript' | 'subagent' | 'tool-result' | 'other' | 'api-export';
   relPath: string;
   byteStart: number;
   byteEnd: number;

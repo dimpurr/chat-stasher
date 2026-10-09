@@ -43,10 +43,10 @@ Understanding the roles below requires knowing the path the content takes.
    (`apps/extension/lib/native-host.ts:1134-1143`). Separately, the CLI reads
    local coding-harness session stores (`collect`, `status`) and can take bundles
    from a directory by hand (`ingest --inbox`)
-   (`crates/chat-stasher/src/main.rs:884-934`).
+   (`crates/chat-stasher/src/main.rs:886-936`).
 4. `push` writes the stage into a rustic repository — encrypted — at a
    destination you configure, local or remote
-   (`crates/chat-stasher/src/main.rs:382-419`).
+   (`crates/chat-stasher/src/main.rs:384-421`).
 
 Steps 1–3 are plaintext on your own machine. Step 4 is the only encrypted
 boundary, and it is also the only step that can involve a network.
@@ -128,7 +128,7 @@ Concretely, five separate plaintext exposures:
 
 3. **The stage directory.** Sealed shards are ordinary files on disk before
    `push` encrypts them into the repository
-   (`crates/chat-stasher/src/main.rs:382-386`).
+   (`crates/chat-stasher/src/main.rs:384-388`).
 
 4. **The download-history entry for an export file.** If you press the popup's
    export button, the browser records an ordinary download whose file name is
@@ -143,7 +143,7 @@ Concretely, five separate plaintext exposures:
 
 5. **A directory you exported to.** `chat-stasher export --out <dir>` writes the
    archived sessions it selected back out **decrypted**, one file per session,
-   into a directory you name (`crates/chat-stasher/src/main.rs:739-825`). Unlike
+   into a directory you name (`crates/chat-stasher/src/main.rs:741-827`). Unlike
    the stage, nothing here is sealed and nothing moves it on: the files stay
    exactly as written until you delete them, and the command keeps no record of
    where they went. Name a directory you would be willing to lose, and delete it
@@ -838,12 +838,12 @@ machine:
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
   asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2908-2956`).
   `status` and `doctor` are likewise declared read-only
-  (`crates/chat-stasher/src/main.rs:446,536-537`).
+  (`crates/chat-stasher/src/main.rs:448,538-539`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
   the registry's `seal_policy`, an evidence line, and a platform-confidence
   cell; a harness that holds an open file descriptor (Codex) is refused with
   the active file untouched, because renaming it would strand later writes in
-  the old inode (`crates/chat-stasher/src/main.rs:936-968`).
+  the old inode (`crates/chat-stasher/src/main.rs:938-970`).
 
 ## Integrity: unknown is never treated as empty
 
@@ -926,7 +926,7 @@ a real limitation of the current code.
    (`crates/chat-stasher/src/main.rs:478-481,9005-9165`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
-   **plaintext** (`crates/chat-stasher/src/main.rs:739-825`) — see exposure 5
+   **plaintext** (`crates/chat-stasher/src/main.rs:741-827`) — see exposure 5
    above. Bulk retrieval of the sessions a time window selects is therefore
    possible; what remains missing is restoring them into a harness's own
    directories.
@@ -954,7 +954,7 @@ a real limitation of the current code.
    It also distinguishes "nothing matched" from "could not finish reading"
    **and** from "read it all but could not place every session in time", which
    is the same unknown-is-not-empty discipline as above
-   (`crates/chat-stasher/src/main.rs:697-701`).
+   (`crates/chat-stasher/src/main.rs:699-703`).
 
 6. **Session enumeration is incomplete for some harnesses**, which means the
    archive can be incomplete in ways this document does not enumerate. See the
@@ -1080,5 +1080,5 @@ Not a promise, just the honest best case with the current code:
 4. On a platform without Unix file modes, check the key file's permissions
    yourself after first run — the tool can only set them where the platform can
    express them (weakness 2).
-5. Run `verify` (`crates/chat-stasher/src/main.rs:548-586`) rather than assuming
+5. Run `verify` (`crates/chat-stasher/src/main.rs:550-588`) rather than assuming
    the archive is intact.

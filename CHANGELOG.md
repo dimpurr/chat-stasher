@@ -15,6 +15,11 @@ under its own heading below.
 
 #### Added
 
+- **Letta API pull.** `pull letta` captures conversation exports and agent-window
+  extras through the local inbox @3 sink, including hidden agents discovered
+  from local IDs. Edits and source absence append observations; per-agent
+  cursors wait for destination archive proof. See [API pull](docs/pull.md).
+  Scheduling and local transcript capture remain separate work.
 - **Portable remote inbox posting keys.** `send-key <inbox> --for <platform>
   --credential-file <file>` prints a versioned secret after saving its public
   puller policy. Expiry defaults to 24 hours; `--expires 90d` requests a longer

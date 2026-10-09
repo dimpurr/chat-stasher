@@ -378,7 +378,8 @@
                 "transcript",
                 "subagent",
                 "tool-result",
-                "other"
+                "other",
+                "api-export"
               ]
             },
             "relPath": {

@@ -1,0 +1,40 @@
+{
+  "schema": "chat-stasher/inbox@3",
+  "kind": "harness-file",
+  "harness": "letta",
+  "nativeSessionId": "agent-default-agent-synthetic",
+  "capturedAt": "2026-10-04T00:00:00Z",
+  "file": {
+    "role": "api-exports",
+    "relPath": "agents/agent-synthetic/default/messages.jsonl",
+    "byteStart": 0,
+    "byteEnd": 64,
+    "sha256": "100d9365a7c3fe3250e64ac7166cfeae33c27b2612bcd01ebe3426a626a9a7dc"
+  },
+  "raw": {
+    "encoding": "utf-8",
+    "data": "{\"id\":\"message-synthetic\",\"seq_id\":1,\"unknown\":{\"nested\":null}}\n"
+  },
+  "fidelity": {
+    "value": "full",
+    "representation": "api"
+  },
+  "producer": {
+    "kind": "collect",
+    "version": "0.5.0",
+    "platform": "letta"
+  },
+  "platformRefs": {
+    "session": "synthetic-ref"
+  },
+  "dimensions": {
+    "surface": [
+      "cloud"
+    ],
+    "tenant": [],
+    "container": [
+      "agent-synthetic"
+    ],
+    "status": []
+  }
+}
