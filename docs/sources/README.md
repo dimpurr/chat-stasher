@@ -14,17 +14,17 @@ One page per source chat-stasher can archive: what it is, what we collect from i
 | [Google Antigravity](google-antigravity.md) | cli, ide, desktop app | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
 | [opencode](opencode.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
 | [OpenClaw](openclaw.md) | cli | supported | not yet verified end to end |
-| [Hermes Agent](hermes-agent.md) | cli | supported | not yet verified end to end |
+| [Hermes Agent](hermes-agent.md) | cli | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
 | [Cursor](cursor.md) | ide | verified end-to-end (2026-09-25) | 2026-09-25 |
-| [Grok Bot (desktop)](grok-bot.md) | desktop app | supported | not yet verified end to end |
+| [Grok Bot (desktop)](grok-bot.md) | desktop app | verified end-to-end (2026-10-13) | 2026-10-13 (macOS) |
 | [Grok (xAI CLI)](grok.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
-| [GitHub Copilot CLI](github-copilot-cli.md) | cli | supported | not yet verified end to end |
+| [GitHub Copilot CLI](github-copilot-cli.md) | cli | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
 | [aider](aider.md) | cli | supported | not yet verified end to end |
 | [crush](crush.md) | cli | supported | not yet verified end to end |
 | [Zed](zed.md) | ide | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
 | [Continue](continue.md) | ide extension | supported | not yet verified end to end |
 | [Kimi Code](kimi-code.md) | cli | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |
-| [DeepSeek Harness](deepseek-harness.md) | cli, desktop app, web | supported | not yet verified end to end |
+| [DeepSeek Harness](deepseek-harness.md) | cli, desktop app, web | verified end-to-end (2026-10-06) | 2026-10-06 (macOS) |
 | [Codebuff / Freebuff](codebuff.md) | cli | supported | not yet verified end to end |
 
 The Status column uses exactly the words and rules of [docs/support.md](../support.md): `verified end-to-end (DATE)` is a real session archived on a real machine with the date recorded, `supported` claims the path or route and not the end to end run.
