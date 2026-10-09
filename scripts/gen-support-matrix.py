@@ -73,6 +73,18 @@ this script before any table is rendered from them:
     `knownIssue`               where it is tracked (an issue number, a commit
                                hash, or a repository document). Never a private
                                path, never a private number.
+    `accountSwitchRisk`        the platform row's SECOND caveat, for one fact
+    (platforms only)           only: the account-switch risk of issue #4, on a
+                               row that is actually unguarded (no account
+                               identity this build reads fires for it) and
+                               whose `knownIssue` slot is already spent on a
+                               different issue. The tables render it after
+                               `knownIssue` in the same Known issue cell; a row
+                               without it renders exactly as before. Refused
+                               when a row sets it while `knownIssue` is absent
+                               — the second slot exists only because the first
+                               is spent, and a row with a free slot says the
+                               risk in it.
 
 Freshness rule (ADR-041, decision 7). A recorded verification date that is
 more than 90 days old renders as `needs re-check (DATE)` in the Last verified
@@ -314,6 +326,22 @@ def validated_known_issue(owner: str, value: Any) -> str | None:
     return value
 
 
+def validated_account_switch_risk(owner: str, value: Any) -> str | None:
+    """The second caveat carries the account-switch risk of issue #4 (W960).
+
+    Same one-line, public-safe shape as a `known_issue` — a different fact,
+    not a different format, because both render into the same table cell and
+    a reader compares rows against each other.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SupportMatrixError(f"{owner}: `accountSwitchRisk` must be a non-empty string when present")
+    if "\n" in value:
+        raise SupportMatrixError(f"{owner}: `accountSwitchRisk` must be one line")
+    return value
+
+
 # --------------------------------------------------------------------------
 # Reading the two sources
 # --------------------------------------------------------------------------
@@ -414,6 +442,11 @@ _QUOTED_RE = re.compile(r"'([^']*)'")
 # with, so the only lines consumed here are the ones inside the object.
 _CONTRACT_PRIORITY_RE = re.compile(r"^\s+devPriority:\s*'([^']*)',\s*$")
 _CONTRACT_ISSUE_RE = re.compile(r"^\s+knownIssue:\s*'([^']*)',\s*$")
+# The platform row's second caveat (W960): the account-switch risk of issue #4,
+# present only on a row whose single `knownIssue` slot is spent on a different
+# issue. One line, exactly like `knownIssue` above it, because the parse below
+# is line-oriented by design.
+_CONTRACT_RISK_RE = re.compile(r"^\s+accountSwitchRisk:\s*'([^']*)',\s*$")
 _CONTRACT_VERIFIED_OPEN_RE = re.compile(r"^\s+lastVerified:\s*\{\s*$")
 _CONTRACT_VERIFIED_CLOSE_RE = re.compile(r"^\s*\},?\s*$")
 _CONTRACT_VERIFIED_DATE_RE = re.compile(r"^\s+date:\s*'([^']*)',\s*$")
@@ -494,6 +527,7 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
                 "credibility": None,
                 "devPriority": None,
                 "knownIssue": None,
+                "accountSwitchRisk": None,
                 "lastVerified": None,
             }
             platforms.append(current)
@@ -519,6 +553,10 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
         m_issue = _CONTRACT_ISSUE_RE.match(raw)
         if m_issue:
             current["knownIssue"] = m_issue.group(1)
+            continue
+        m_risk = _CONTRACT_RISK_RE.match(raw)
+        if m_risk:
+            current["accountSwitchRisk"] = m_risk.group(1)
             continue
         if _CONTRACT_VERIFIED_OPEN_RE.match(raw):
             verified = {}
@@ -553,6 +591,17 @@ def parse_contract_platforms(root: str) -> list[dict[str, Any]]:
         p["lastVerified"] = validated_verified(owner, p["lastVerified"])
         p["devPriority"] = validated_dev_priority(owner, p["devPriority"] or None)
         p["knownIssue"] = validated_known_issue(owner, p["knownIssue"] or None)
+        p["accountSwitchRisk"] = validated_account_switch_risk(owner, p["accountSwitchRisk"] or None)
+        # The second caveat exists for the row whose first slot is spent on a
+        # different issue (W944 §H item 4): a row with no `knownIssue` has a
+        # free slot, so the risk belongs in it — recorded here instead, the
+        # account gap would be invisible to every reader of the first slot,
+        # which is exactly the failure the second field was added to close.
+        if p["accountSwitchRisk"] is not None and p["knownIssue"] is None:
+            raise SupportMatrixError(
+                f"{owner}: `accountSwitchRisk` is set while `knownIssue` is absent — "
+                "record the account-switch risk in `knownIssue` instead"
+            )
     return platforms
 
 
@@ -717,6 +766,16 @@ def browser_legend_short() -> str:
     )
 
 
+def known_issue_cell(p: dict[str, Any]) -> str:
+    """The Known issue cell for one platform row (W960): the row's `knownIssue`,
+    then its second caveat `accountSwitchRisk` when the row records one —
+    first slot first, joined by the one separator that reads as a list. Every
+    row that records only one caveat renders exactly as before this field
+    existed, and a row that records neither renders the placeholder."""
+    caveats = [c for c in (p.get("knownIssue"), p.get("accountSwitchRisk")) if c]
+    return "; ".join(caveats)
+
+
 def render_short(
     harnesses: list[dict[str, Any]],
     platforms: list[dict[str, Any]],
@@ -839,7 +898,7 @@ def render_full(
                 name=esc(p["id"]),
                 when=esc(last_verified_cell(p.get("lastVerified"), as_of)),
                 prio=esc(p.get("devPriority") or ABSENT),
-                issue=esc(p.get("knownIssue") or ABSENT),
+                issue=esc(known_issue_cell(p) or ABSENT),
             )
         )
     out.append("")
@@ -1208,6 +1267,7 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
     origins: ['https://stable.example'],
     devPriority: 'normal',
     knownIssue: 'one caveat | with a pipe',
+    accountSwitchRisk: 'a second caveat with a pointer (see issue #4)',
     lastVerified: {
       date: '2026-09-15',
       version: '1.2.3',
@@ -1385,6 +1445,12 @@ def selftest() -> int:
             and web["p-exp"]["lastVerified"] is None
             and web["p-unver"]["devPriority"] is None,
         )
+        probe(
+            "the account-switch risk is parsed as the row's second caveat, absent where missing",
+            web["p-stable"]["accountSwitchRisk"] == "a second caveat with a pointer (see issue #4)"
+            and web["p-exp"]["accountSwitchRisk"] is None
+            and web["p-unver"]["accountSwitchRisk"] is None,
+        )
 
         # The freshness rule (ADR-041, decision 7), on both sides of the
         # threshold. Known-answer probes first, on dates picked relative to
@@ -1463,7 +1529,12 @@ def selftest() -> int:
         # table cell it renders into.
         probe(
             "the editorial section renders a row with every field present",
-            "| Web | p-stable | 2026-09-15 | normal | one caveat \\| with a pipe |" in full,
+            "| Web | p-stable | 2026-09-15 | normal | "
+            "one caveat \\| with a pipe; a second caveat with a pointer (see issue #4) |" in full,
+        )
+        probe(
+            "the one-caveat rows render exactly as before the second field existed",
+            "| Web | p-unver | - | - | - |" in full,
         )
         probe(
             "the editorial section renders a verified harness with no priority or issue",
@@ -1626,6 +1697,28 @@ def selftest() -> int:
             "date: '2026-08-01',",
         ))
         probe("a changed platform lastVerified fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        _scaffold(tmp, contract=_SELFTEST_CONTRACT.replace(
+            "accountSwitchRisk: 'a second caveat with a pointer (see issue #4)',",
+            "accountSwitchRisk: 'a changed second caveat',",
+        ))
+        probe("a changed accountSwitchRisk fails the check", run_check(tmp, SELFTEST_AS_OF) == 1)
+        second_without_first = _SELFTEST_CONTRACT.replace(
+            "    knownIssue: 'one caveat | with a pipe',\n"
+            "    accountSwitchRisk: 'a second caveat with a pointer (see issue #4)',",
+            "    accountSwitchRisk: 'a second caveat with a pointer (see issue #4)',",
+        )
+        _scaffold(tmp, contract=second_without_first)
+        try:
+            parse_contract_platforms(tmp)
+            second_without_first_diagnostic = None
+        except SupportMatrixError as exc:
+            second_without_first_diagnostic = str(exc)
+        probe(
+            "a second caveat with no knownIssue to spend the first slot fails precisely",
+            second_without_first_diagnostic
+            == f"{CONTRACT_REL}: platform `p-stable`: `accountSwitchRisk` is set while "
+            "`knownIssue` is absent — record the account-switch risk in `knownIssue` instead",
+        )
         duplicate_platform = _SELFTEST_CONTRACT.replace(
             "  {\n    id: 'p-exp',",
             "  {\n    id: 'p-stable',\n    origins: ['https://duplicate.example'],\n"

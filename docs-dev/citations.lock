@@ -331,79 +331,79 @@ apps/extension/lib/contract.ts:34-95  8137d0d1ef2d  lines=62
   <- docs-dev/threat-model.md:290  :: * needs them.**
 apps/extension/lib/contract.ts:97-99  212496897aef  lines=3
   <- docs-dev/threat-model.md:563  :: export const PAGE_HOOK_VERSION = 'v1';
-apps/extension/lib/contract.ts:305-350  0d21a1234c75  lines=46
+apps/extension/lib/contract.ts:305-373  a33341b7107e  lines=69
   <- SECURITY.md:65, docs-dev/threat-model.md:26  :: export interface ChatPlatform {
-apps/extension/lib/contract.ts:356-873  7a33f995184e  lines=518
+apps/extension/lib/contract.ts:385-918  34f6264bb31d  lines=534
   <- docs-dev/install.md:83, docs-dev/install.md:204, docs-dev/privacy.md:111, docs-dev/privacy.md:918, docs-dev/privacy.md:989  :: export const ALL_PLATFORMS: readonly ChatPlatform[] = [
-apps/extension/lib/contract.ts:359  65cef6a544ee  lines=1
+apps/extension/lib/contract.ts:388  65cef6a544ee  lines=1
   <- docs-dev/privacy.md:869  :: origins: ['https://chat.deepseek.com'],
-apps/extension/lib/contract.ts:414-420  90fc5f0d7b4a  lines=7
+apps/extension/lib/contract.ts:443-449  90fc5f0d7b4a  lines=7
   <- docs-dev/install.md:32  :: // The external API route/shape differences may represent d…
-apps/extension/lib/contract.ts:440-505  85d95a112633  lines=66
+apps/extension/lib/contract.ts:469-534  85d95a112633  lines=66
   <- docs-dev/install.md:87  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:440  779465350317  lines=1
+apps/extension/lib/contract.ts:469  779465350317  lines=1
   <- docs-dev/privacy.md:870  :: origins: ['https://www.perplexity.ai'],
-apps/extension/lib/contract.ts:457-472  6ff6670d0810  lines=16
+apps/extension/lib/contract.ts:486-501  6ff6670d0810  lines=16
   <- docs-dev/threat-model.md:332  :: pathHints: ['/rest/thread/'],
-apps/extension/lib/contract.ts:492-497  1631eb0ed4f9  lines=6
+apps/extension/lib/contract.ts:521-526  1631eb0ed4f9  lines=6
   <- docs-dev/install.md:89  :: sessionIdPatterns: [
-apps/extension/lib/contract.ts:499-505  748b3e6fe537  lines=7
+apps/extension/lib/contract.ts:528-534  748b3e6fe537  lines=7
   <- docs-dev/install.md:32  :: // 'from-source': nobody on either change opened a logged-i…
-apps/extension/lib/contract.ts:510-524  3c2febd21c22  lines=15
+apps/extension/lib/contract.ts:539-553  3c2febd21c22  lines=15
   <- docs-dev/install.md:32  :: id: 'chatgpt',
-apps/extension/lib/contract.ts:511  4eda2e856655  lines=1
+apps/extension/lib/contract.ts:540  4eda2e856655  lines=1
   <- docs-dev/privacy.md:871  :: origins: ['https://chatgpt.com', 'https://chat.openai.com'],
-apps/extension/lib/contract.ts:535  586fc9c878ac  lines=1
+apps/extension/lib/contract.ts:564  586fc9c878ac  lines=1
   <- docs-dev/privacy.md:872  :: origins: ['https://gemini.google.com'],
-apps/extension/lib/contract.ts:561-573  ffbeb3d9ba7d  lines=13
+apps/extension/lib/contract.ts:590-602  ffbeb3d9ba7d  lines=13
   <- docs-dev/install.md:32  :: //    `WIZ_global_data` — an XSRF token in the body's `at` …
-apps/extension/lib/contract.ts:584  1f7678ac6786  lines=1
+apps/extension/lib/contract.ts:622  1f7678ac6786  lines=1
   <- docs-dev/privacy.md:873  :: origins: ['https://claude.ai'],
-apps/extension/lib/contract.ts:635-639  d3006384d2f5  lines=5
+apps/extension/lib/contract.ts:673-677  d3006384d2f5  lines=5
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:658  047cc8b8ab4e  lines=1
+apps/extension/lib/contract.ts:696  047cc8b8ab4e  lines=1
   <- docs-dev/privacy.md:874  :: origins: ['https://www.kimi.com'],
-apps/extension/lib/contract.ts:769-774  81d80c1cc585  lines=6
+apps/extension/lib/contract.ts:807-812  81d80c1cc585  lines=6
   <- docs-dev/install.md:32  :: // '/api/chat/...' route family, which is why that origin i…
-apps/extension/lib/contract.ts:783  23c99a148fbc  lines=1
+apps/extension/lib/contract.ts:821  23c99a148fbc  lines=1
   <- docs-dev/privacy.md:875  :: origins: ['https://grok.com'],
-apps/extension/lib/contract.ts:854-864  757ff261970a  lines=11
+apps/extension/lib/contract.ts:892-902  757ff261970a  lines=11
   <- docs-dev/install.md:32  :: credibility: 'from-source',
-apps/extension/lib/contract.ts:899-934  ebba5d56a375  lines=36
+apps/extension/lib/contract.ts:944-979  ebba5d56a375  lines=36
   <- docs-dev/privacy.md:878, docs-dev/threat-model.md:26  :: export function platformsForChannel(channel: ReleaseChannel…
-apps/extension/lib/contract.ts:921-934  ee0db2699c92  lines=14
+apps/extension/lib/contract.ts:966-979  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
-apps/extension/lib/contract.ts:954  93f15da49cac  lines=1
+apps/extension/lib/contract.ts:999  93f15da49cac  lines=1
   <- docs-dev/privacy.md:915  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1112-1133  6ada7641acdc  lines=22
+apps/extension/lib/contract.ts:1157-1178  6ada7641acdc  lines=22
   <- docs-dev/privacy.md:913  :: }
-apps/extension/lib/contract.ts:1124-1184  ef664a94fbba  lines=61
+apps/extension/lib/contract.ts:1169-1229  ef664a94fbba  lines=61
   <- docs-dev/privacy.md:111, docs-dev/privacy.md:913  :: } catch {
-apps/extension/lib/contract.ts:1133-1212  29287c06f936  lines=80
+apps/extension/lib/contract.ts:1178-1257  29287c06f936  lines=80
   <- docs-dev/threat-model.md:572  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1172-1173  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1217-1218  d72720cd403e  lines=2
   <- docs-dev/privacy.md:458  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1224-1234  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1269-1279  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:571  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1248-1253  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1293-1298  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:374  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1321-1332  1e11e46c5e13  lines=12
+apps/extension/lib/contract.ts:1366-1377  1e11e46c5e13  lines=12
   <- docs-dev/threat-model.md:445  :: /**
-apps/extension/lib/contract.ts:1324-1332  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1369-1377  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:430  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1353-1362  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1398-1407  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:291, docs-dev/threat-model.md:418  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1382-1386  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1427-1431  91a5d6065664  lines=5
   <- docs-dev/privacy.md:573, docs-dev/threat-model.md:375, docs-dev/threat-model.md:415  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1390-1399  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1435-1444  b3b4db645114  lines=10
   <- docs-dev/privacy.md:287  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1413-1416  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1458-1461  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:702  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1479-1558  74df7cf45831  lines=80
+apps/extension/lib/contract.ts:1524-1603  74df7cf45831  lines=80
   <- docs-dev/install.md:101  :: /**
-apps/extension/lib/contract.ts:1575-1578  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1620-1623  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:357  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1628-1644  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1673-1689  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:611, docs-dev/threat-model.md:357  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:781, docs-dev/privacy.md:842, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(

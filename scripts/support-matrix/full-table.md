@@ -96,10 +96,10 @@
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |
-| Web | gemini | 2026-09-24 | normal | a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md) |
+| Web | gemini | 2026-09-24 | normal | a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md); an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | claude | 2026-09-24 | normal | two accounts inside one organization are not yet distinguished by the organization check (see issue #4) |
 | Web | kimi | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
-| Web | grok | 2026-09-24 | normal | the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md) |
+| Web | grok | 2026-09-24 | normal | the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md); an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 
 ### Browsers (native messaging host registration)
 
