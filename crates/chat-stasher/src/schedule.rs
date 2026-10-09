@@ -1437,7 +1437,9 @@ fn plist_integer(text: &str, key: &str) -> Option<u64> {
 /// the next `</dict>` is unambiguous. A value outside the range launchd
 /// accepts is treated as unreadable rather than clamped: clamping would move
 /// the fire time to one nobody asked for. Which fields a dict may carry at all
-/// is [`plist_calendar_refusal`]'s question, asked before this one.
+/// is [`plist_calendar_refusal`]'s question, asked by the caller after this one
+/// returns a slot: a dict with no `Minute` at all is reported as naming none,
+/// and only a dict that does name one goes on to be refused for its shape.
 fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
     let after_key = text.split_once("<key>StartCalendarInterval</key>")?.1;
     let dict = after_key.split_once("</dict>")?.0;
