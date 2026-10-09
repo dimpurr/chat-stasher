@@ -1664,25 +1664,61 @@ OPENCODE_DEFAULT_CELL = {
 }
 
 
-def _probe_cell_for(tool: LocalTool | None) -> dict[str, Any] | None:
-    """The registry cell a harness's live store is probed through: the
-    platform-resolved `paths` cell, or opencode's dedicated default schema for
-    a `sqlite` store the registry does not spell out (`spec_from_cell`'s
-    fallback). None = the probe does not read this harness's source."""
+def _probe_cell_for(tool: LocalTool | None, platform_name: str | None = None) -> dict[str, Any] | None:
+    """The registry cell a harness's live store is probed through, mirroring
+    the scanner: the current platform's cell supplies the *location*
+    (`template` / `env_override`), and the schema declaration is borrowed from
+    whichever cell carries one — a store's table layout does not change across
+    operating systems, only its location does, so a platform cell that omits
+    `sql_table` is a gap in that row, not a claim that the schema differs
+    (Rust `schema_cell`, `scanner.rs`). A `sqlite` cell no platform row spells
+    out falls back to opencode's dedicated default schema, the same fallback
+    `spec_from_cell` gives the scanner. None = the probe does not read this
+    harness's source. `platform_name` lets the self-test drive another
+    platform cell on any host."""
     if tool is None or not tool.paths:
         return None
-    platform_cell = {
-        "Darwin": "macos",
-        "Linux": "linux",
-        "Windows": "windows",
-    }.get(_platform.system())
-    if platform_cell is None:
-        return None
-    cell = tool.paths.get(platform_cell)
+    if platform_name is None:
+        platform_name = {
+            "Darwin": "macos",
+            "Linux": "linux",
+            "Windows": "windows",
+        }.get(_platform.system()) or ""
+    cell = tool.paths.get(platform_name)
     if not isinstance(cell, dict):
         return None
     if cell.get("format") != "sqlite":
         return None
+    schema = cell
+    if not schema.get("sql_table"):
+        for fallback_platform in ("macos", "linux", "windows"):
+            candidate = tool.paths.get(fallback_platform)
+            if isinstance(candidate, dict) and candidate.get("sql_table") and candidate.get("format") == "sqlite":
+                schema = candidate
+                break
+    if schema is not cell:
+        # Keep the *location* of the platform cell; borrow only the schema
+        # declaration, exactly as the scanner composes the borrowed cell.
+        merged = dict(cell)
+        for name in (
+            "sql_table",
+            "sql_id_column",
+            "sql_required_columns",
+            "sql_key_column",
+            "sql_key_pattern",
+            "sql_value_column",
+            "sql_time_column",
+            "sql_time_json_path",
+            "sql_qualification",
+            "sql_time_value_is_seconds",
+            "sql_time_is_iso8601",
+            "sql_time_format",
+        ):
+            if name in schema:
+                merged[name] = schema[name]
+            else:
+                merged.pop(name, None)
+        cell = merged
     if cell.get("sql_table"):
         shaped = dict(cell)
         shaped["_default_table"] = cell["sql_table"]
@@ -1695,8 +1731,8 @@ def _probe_cell_for(tool: LocalTool | None) -> dict[str, Any] | None:
         else:
             shaped["_required_columns"] = cell["sql_required_columns"]
         return shaped
-    # format == "sqlite" with no declared table: opencode's default schema,
-    # the same fallback `spec_from_cell` gives the scanner.
+    # format == "sqlite" with no declared table anywhere: opencode's default
+    # schema, the same fallback `spec_from_cell` gives the scanner.
     merged = dict(OPENCODE_DEFAULT_CELL)
     merged["template"] = cell.get("template")
     merged["env_override"] = cell.get("env_override")
@@ -3739,6 +3775,27 @@ def selftest() -> int:
         # at crafted fixtures through the same cell `_probe_cell_for` builds
         # from the registry — which is why these run in-process against the
         # same probe functions the board consults.
+        cursor_tool = next((t for t in catalog.local if t.id == "cursor"), None)
+        linux_cursor_cell = _probe_cell_for(cursor_tool, "linux")
+        expect(
+            linux_cursor_cell is not None
+            and linux_cursor_cell.get("sql_table") == "cursorDiskKV"
+            and str(linux_cursor_cell.get("template")).endswith("Cursor/User/globalStorage/state.vscdb"),
+            "a platform cell without a schema declaration borrows the schema "
+            "and keeps its own location (Rust schema_cell): cursor on linux reads "
+            "cursorDiskKV through the linux template",
+        )
+        os.environ["CURSOR_USER_DIR"] = os.path.join(tmp, "linux-cursor-user")
+        try:
+            linux_root = _probe_root_from_env(linux_cursor_cell)
+        finally:
+            del os.environ["CURSOR_USER_DIR"]
+        expect(
+            linux_root is not None
+            and linux_root[0].endswith("globalStorage/state.vscdb")
+            and linux_root[1] is True,
+            "the borrowed-schema cell keeps its own platform's env override and template for location",
+        )
         grok_tool = next((t for t in catalog.local if t.id == "grok"), None)
         grok_cell = _probe_cell_for(grok_tool)
         expect(grok_cell is not None, "the grok registry cell resolves to a probe spec")
