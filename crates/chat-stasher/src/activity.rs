@@ -2720,8 +2720,9 @@ fn fold_openclaw_dimensions(
 ///
 /// `cwd` is where the session ran. It is a path, so it lands in `cwd` under
 /// the same rule as Claude Code's, and the repository it may sit inside is
-/// never inferred from it: a session resumed and re-exported states each
-/// directory it ran in, and every one is kept.
+/// never inferred from it. Each export states the directory its own row
+/// recorded, so a session whose row moved between exports keeps every
+/// directory it recorded rather than only the last.
 ///
 /// `git_repo_root` is the inverse case, and the one that makes the pair a
 /// pair: the upstream repository the session's checkout belonged to, an
@@ -2733,14 +2734,15 @@ fn fold_openclaw_dimensions(
 /// session belongs to. It is a namespace rather than a person — one peer owns
 /// many sessions (locally, two peers own every row that records one) — which
 /// is what makes it a tenancy. It is recorded only on gateway rows: a local
-/// `cli` / `cron` / `oneshot` session stores no account at all and is left
-/// unobserved rather than filed under a fabricated one.
+/// `cli`, `cron`, `oneshot` or `recovered` session stores no account at all
+/// and is left unobserved rather than filed under a fabricated one.
 ///
 /// `archived` and `pinned` are explicit lifecycle flags the harness records
 /// (`INTEGER NOT NULL DEFAULT 0`). Nonzero stamps the state it names, and the
 /// zero default is not `active`: it says the harness marked nothing, which
 /// leaves Status unobserved — the same reading opencode's null `time_archived`
-/// gets, and the same one Rule #4 requires. Only the integer shape the
+/// gets, because the absence of a marker is never the state it might have
+/// been. Only the integer shape the
 /// exporter writes is trusted: a value of another type is a row this reader
 /// cannot read, not a fact it may take on faith.
 ///
@@ -2781,9 +2783,10 @@ fn fold_hermes_agent_dimensions(
 ///
 /// A flag is recorded only when the row holds an integer that is not zero. The
 /// zero default means the harness marked nothing, which is an unobserved state
-/// and not the state's absence (`Rule #4`: a missing `archived` is never
-/// `active`); a null, a string, and a row with no such column are equally
-/// nothing this reader can read, so none of them is turned into a state.
+/// and says nothing about the state that could have been: a missing `archived`
+/// is never read as `active`. A null, a string, and a row with no such column
+/// are equally nothing this reader can read, so none of them is turned into a
+/// state.
 fn hermes_flag_is_set(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(serde_json::Value::as_i64)
@@ -4027,7 +4030,7 @@ mod tests {
     #[test]
     fn an_unarchived_unpinned_hermes_session_stays_status_unobserved() {
         // The zero default says the harness marked nothing; it is not `active`,
-        // and no state is inferred from the absence (Rule #4).
+        // and no state is inferred from the absence.
         let line = hermes_with(r#""id":"s1","cwd":"/w/one","archived":0,"pinned":0"#);
         let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
         assert!(
