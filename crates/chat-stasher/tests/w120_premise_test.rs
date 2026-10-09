@@ -490,7 +490,16 @@ fn below_minimum_selection_is_whole_files_only() {
         "only the 1-byte counter is below the minimum, not the 4096-byte body: {:?}",
         files.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
-    assert_eq!(files[0].0, "sessions/w120-premise/w120-premise-0/shard-seq");
+    // Built with `join` so the expected name carries this platform's own
+    // separator: the helper reports the path as the filesystem spells it, which
+    // on Windows is not `/`.
+    let expected = Path::new("sessions")
+        .join("w120-premise")
+        .join("w120-premise-0")
+        .join("shard-seq")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(files[0].0, expected);
     assert_eq!(files[0].1, b"1");
 
     // Nothing below the minimum is still an answer, and it is not an error.
