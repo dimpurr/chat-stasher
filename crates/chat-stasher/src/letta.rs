@@ -1,5 +1,5 @@
 //! Bounded Letta API producer. Local inbox publication and archive proof are
-//! separate: only destination proof commits the per-account, per-agent cursor.
+//! separate: only destination proof settles the per-account, per-agent pass.
 use crate::remote_inbox::ArchiveProof;
 use anyhow::{ensure, Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
@@ -80,6 +80,38 @@ impl Api {
         Ok(())
     }
     fn get(&mut self, route: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.request(route, query, false)?
+            .context("Letta response unavailable")
+    }
+    fn organization(&mut self) -> Result<Option<String>> {
+        // This route lists connections for the authenticated organization.
+        // An unsupported/forbidden route or an empty list cannot identify it.
+        let Some(value) = self.request("/v1/environments", &[], true)? else {
+            return Ok(None);
+        };
+        let connections = value["connections"]
+            .as_array()
+            .context("Letta organization response invalid")?;
+        let mut organizations = BTreeSet::new();
+        for connection in connections {
+            let organization = connection["organizationId"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .context("Letta organization identity unavailable")?;
+            organizations.insert(organization.to_owned());
+        }
+        ensure!(
+            organizations.len() <= 1,
+            "Letta organization identity ambiguous"
+        );
+        Ok(organizations.into_iter().next())
+    }
+    fn request(
+        &mut self,
+        route: &str,
+        query: &[(&str, String)],
+        optional_identity: bool,
+    ) -> Result<Option<Value>> {
         for retry in 0..=4 {
             self.wait(self.next.saturating_duration_since(Instant::now()))?;
             let mut request = self
@@ -114,6 +146,9 @@ impl Api {
                 self.wait(delay)?;
                 continue;
             }
+            if optional_identity && (status == 403 || status == 404) {
+                return Ok(None);
+            }
             ensure!(status == 200, "Letta HTTP status {status}");
             let mut body = Vec::new();
             response
@@ -127,6 +162,7 @@ impl Api {
                 "Letta pass byte budget exhausted"
             );
             return serde_json::from_slice(&body)
+                .map(Some)
                 .map_err(|_| anyhow::anyhow!("Letta malformed JSON"));
         }
         unreachable!()
@@ -194,10 +230,21 @@ fn hash(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+fn scoped_identity(salt: &str, domain: &[u8], value: &str) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(salt.as_bytes())
+        .map_err(|_| anyhow::anyhow!("identity hash unavailable"))?;
+    mac.update(domain);
+    mac.update(value.as_bytes());
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
 #[derive(Default, Serialize, Deserialize)]
 struct Snapshot {
     sessions: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
-    high: u64,
     bundles: Vec<String>,
     #[serde(default)]
     required: BTreeSet<String>,
@@ -211,10 +258,22 @@ pub struct Report {
     pub incomplete: usize,
 }
 fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write(path, |temp| {
+        temp.write_all(bytes)?;
+        Ok(())
+    })
+}
+fn atomic_write(
+    path: &Path,
+    write: impl FnOnce(&mut tempfile::NamedTempFile) -> Result<()>,
+) -> Result<()> {
     let parent = path.parent().context("publication parent missing")?;
     fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix("letta-")
+        .suffix(".part")
+        .tempfile_in(parent)?;
+    write(&mut temp)?;
     temp.as_file().sync_all()?;
     temp.persist(path)
         .map_err(|_| anyhow::anyhow!("publication rename failed"))?;
@@ -243,8 +302,8 @@ fn bundle(
     Ok(bytes)
 }
 
-/// Always replay complete inventories, including below the cursor, to detect
-/// edits. Window exhaustion cannot establish absence for agent-only messages.
+/// Always replay complete inventories to detect edits at earlier sequences.
+/// Window exhaustion cannot establish absence for agent-only messages.
 pub fn run(
     api: &mut Api,
     account: &str,
@@ -283,7 +342,9 @@ pub fn run(
             fs::Permissions::from_mode(0o600),
         )?;
     }
-    db.execute_batch("CREATE TABLE IF NOT EXISTS identity (salt TEXT NOT NULL); CREATE TABLE IF NOT EXISTS agents (scope TEXT PRIMARY KEY, cursor INTEGER, pending TEXT NOT NULL); BEGIN IMMEDIATE;")?;
+    // Retain the legacy cursor column for state compatibility, but do not
+    // record a sequence checkpoint: edit/absence detection requires full replay.
+    db.execute_batch("CREATE TABLE IF NOT EXISTS identity (salt TEXT NOT NULL); CREATE TABLE IF NOT EXISTS agents (scope TEXT PRIMARY KEY, cursor INTEGER, pending TEXT NOT NULL); CREATE TABLE IF NOT EXISTS account_bindings (organization TEXT PRIMARY KEY, tenant TEXT NOT NULL UNIQUE); BEGIN IMMEDIATE; UPDATE agents SET cursor=NULL WHERE cursor IS NOT NULL;")?;
     let salt = match db.query_row("SELECT salt FROM identity", [], |row| {
         row.get::<_, String>(0)
     }) {
@@ -298,16 +359,27 @@ pub fn run(
     };
     // Persist the salt before any publication; a crash must not rename sessions.
     db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(salt.as_bytes())
-        .map_err(|_| anyhow::anyhow!("identity hash unavailable"))?;
-    mac.update(b"chat-stasher/api-pull/letta/account/v1\0");
-    mac.update(account.as_bytes());
-    let tenant: String = mac
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let tenant = scoped_identity(&salt, b"chat-stasher/api-pull/letta/account/v1\0", account)?;
+    if let Some(organization) = api.organization()? {
+        // Bind an observed organization to the existing caller-derived tenant,
+        // without assuming an organization ID is a literal user account ID.
+        let organization = scoped_identity(
+            &salt,
+            b"chat-stasher/api-pull/letta/organization/v1\0",
+            &organization,
+        )?;
+        let conflicts: u64 = db.query_row(
+            "SELECT COUNT(*) FROM account_bindings WHERE (organization=?1 AND tenant<>?2) OR (tenant=?2 AND organization<>?1)",
+            rusqlite::params![organization, tenant], |row| row.get(0),
+        )?;
+        ensure!(conflicts == 0, "Letta observed account scope mismatch");
+        db.execute(
+            "INSERT OR IGNORE INTO account_bindings VALUES (?1,?2)",
+            rusqlite::params![organization, tenant],
+        )?;
+        // Identity binding, like the salt, survives a crash before publication.
+        db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
+    }
     let agents = api.pages("/v1/agents/", &[], false)?;
     let conversations = api.pages(
         "/v1/conversations/",
@@ -349,7 +421,7 @@ pub fn run(
     report.agents = known.len();
     for agent in known {
         let scope = format!("{tenant}/{agent}");
-        let mut cursor_committed = false;
+        let mut pass_proven = false;
         let result = (|| -> Result<()> {
             let metadata = api.get(&format!("/v1/agents/{agent}"), &[])?;
             ensure!(id(&metadata)? == agent, "agent metadata identity mismatch");
@@ -369,17 +441,23 @@ pub fn run(
                 crate::test_identity_guard::refuse_fixture_write(&[machine], stage)?;
                 fs::create_dir_all(stage)?;
                 if prove_receipts(&previous.required, inbox, stage, machine, proof)? {
+                    previous.bundles = previous.required.iter().cloned().collect();
                     previous.required.clear();
-                    db.execute("UPDATE agents SET cursor=MAX(COALESCE(cursor,0),?2),pending=?3 WHERE scope=?1", rusqlite::params![scope, previous.high, serde_json::to_string(&previous)?])?;
+                    db.execute(
+                        "UPDATE agents SET pending=?2 WHERE scope=?1",
+                        rusqlite::params![scope, serde_json::to_string(&previous)?],
+                    )?;
                     db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
-                    cursor_committed = true;
+                    pass_proven = true;
+                } else {
+                    // Keep exactly this completed pass until its receipts are
+                    // proven. Fresh timestamps would otherwise grow the journal
+                    // without bound while archive proof remains unavailable.
+                    report.incomplete += 1;
+                    return Ok(());
                 }
             }
-            let mut snapshot = Snapshot {
-                bundles: previous.bundles.clone(),
-                required: previous.required.clone(),
-                ..Snapshot::default()
-            };
+            let mut snapshot = Snapshot::default();
             let mut exports = Vec::new();
             let mut capture_order = String::new();
             let mut conversation_ids = BTreeSet::new();
@@ -396,9 +474,8 @@ pub fn run(
                 let rows =
                     api.pages(&format!("/v1/conversations/{session}/messages"), &[], false)?;
                 capture_order.push_str(&observation_order(session, "conversation", &rows)?);
-                let (raw, variants, high) = messages(&rows)?;
+                let (raw, variants) = messages(&rows)?;
                 overlap.extend(variants.keys().cloned());
-                snapshot.high = snapshot.high.max(high);
                 snapshot.sessions.insert(session.into(), variants);
                 let status = match conversation["archived"].as_bool() {
                     Some(true) => vec!["archived"],
@@ -443,8 +520,7 @@ pub fn run(
                 .cloned()
                 .collect();
             let default = format!("agent-default-{agent}");
-            let (raw, variants, high) = messages(&extras)?;
-            snapshot.high = snapshot.high.max(high);
+            let (raw, variants) = messages(&extras)?;
             snapshot.sessions.insert(default.clone(), variants);
             exports.push(bundle(
                 &tenant,
@@ -479,7 +555,7 @@ pub fn run(
                 true,
             )?);
             // Retain the complete window, including overlapping renderings.
-            let (window, _, _) = messages(&rows)?;
+            let (window, _) = messages(&rows)?;
             exports.push(bundle(
                 &tenant,
                 &agent,
@@ -561,19 +637,19 @@ pub fn run(
             if proven {
                 snapshot.required.clear();
                 db.execute(
-                    "UPDATE agents SET cursor=MAX(COALESCE(cursor,0),?2),pending=?3 WHERE scope=?1",
-                    rusqlite::params![scope, snapshot.high, serde_json::to_string(&snapshot)?],
+                    "UPDATE agents SET pending=?2 WHERE scope=?1",
+                    rusqlite::params![scope, serde_json::to_string(&snapshot)?],
                 )?;
             }
             db.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
             if proven {
-                cursor_committed = true;
+                pass_proven = true;
             } else {
                 report.incomplete += 1;
             }
             Ok(())
         })();
-        if cursor_committed {
+        if pass_proven {
             report.committed += 1;
         }
         if result.is_err() {
@@ -605,10 +681,9 @@ fn prove_receipts(
 }
 
 use rusqlite::OptionalExtension;
-fn messages(rows: &[Value]) -> Result<(String, BTreeMap<String, BTreeSet<String>>, u64)> {
+fn messages(rows: &[Value]) -> Result<(String, BTreeMap<String, BTreeSet<String>>)> {
     let mut ordered = BTreeMap::new();
     let mut variants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut high = 0;
     for row in rows {
         let id = id(row)?;
         let seq = row["seq_id"]
@@ -616,7 +691,6 @@ fn messages(rows: &[Value]) -> Result<(String, BTreeMap<String, BTreeSet<String>
             .context("message sequence unavailable")?;
         let canonical = crate::import::canonical_json(row);
         let digest = hash(canonical.as_bytes());
-        high = high.max(seq);
         variants
             .entry(id.into())
             .or_default()
@@ -624,7 +698,7 @@ fn messages(rows: &[Value]) -> Result<(String, BTreeMap<String, BTreeSet<String>
         ordered.insert((seq, id.to_owned(), digest), canonical);
     }
     let raw = ordered.values().map(|s| format!("{s}\n")).collect();
-    Ok((raw, variants, high))
+    Ok((raw, variants))
 }
 
 fn observation_order(session: &str, route: &str, rows: &[Value]) -> Result<String> {
@@ -654,6 +728,125 @@ mod tests {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+    }
+
+    #[test]
+    fn publication_is_invisible_until_rename_and_crash_residue_is_ignored() {
+        use crate::bundle_transport::{BundleTransport, LocalFolder};
+        let sandbox = crate::test_support::Sandbox::new();
+        let inbox = sandbox.root().join("inbox");
+        let folder = LocalFolder::new(&inbox).unwrap();
+        let published = inbox.join("letta-synthetic.json");
+        atomic_write(&published, |temp| {
+            temp.write_all(b"{")?;
+            let listing = folder.list()?;
+            assert_eq!(listing.total_inbox_files, 0);
+            assert!(listing.items.is_empty());
+            assert_eq!(listing.part_files_seen, 1);
+            // Preserve a truncated copy under the actual publication name to
+            // model a crash leaving the temp entry behind.
+            fs::copy(
+                temp.path(),
+                inbox.join(format!(
+                    "crash-{}",
+                    temp.path().file_name().unwrap().to_str().unwrap()
+                )),
+            )?;
+            temp.write_all(b"}")?;
+            Ok(())
+        })
+        .unwrap();
+        let listing = folder.list().unwrap();
+        assert_eq!(listing.total_inbox_files, 1);
+        assert_eq!(listing.part_files_seen, 1);
+        assert_eq!(listing.items[0].item, published);
+        assert_eq!(fs::read(&published).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn full_replay_snapshot_has_no_unused_high_water_mark() {
+        let value = serde_json::to_value(Snapshot::default()).unwrap();
+        assert!(value.get("high").is_none());
+    }
+
+    #[test]
+    fn receipt_journal_stays_bounded_across_proven_and_unproven_passes() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        let pull = |held| {
+            run(
+                &mut server.api(),
+                "synthetic-account",
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(held),
+            )
+            .unwrap()
+        };
+        let pending = || {
+            let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
+            let serialized: String = db
+                .query_row("SELECT pending FROM agents", [], |r| r.get(0))
+                .unwrap();
+            serde_json::from_str::<Value>(&serialized).unwrap()
+        };
+        for _ in 0..3 {
+            let report = pull(true);
+            assert_eq!(report.committed, 1);
+            let snapshot = pending();
+            assert_eq!(
+                snapshot["bundles"].as_array().unwrap().len(),
+                report.bundles
+            );
+        }
+        assert_eq!(pull(false).incomplete, 1);
+        let before = pending();
+        for _ in 0..3 {
+            let report = pull(false);
+            assert_eq!(report.incomplete, 1);
+            assert_eq!(
+                report.bundles, 0,
+                "unproven receipts block fresh publication for this agent"
+            );
+            assert_eq!(pending(), before);
+        }
+        assert_eq!(pull(true).committed, 1);
+    }
+
+    #[test]
+    fn unproven_pass_does_not_accumulate_fresh_receipts() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        let pull = || {
+            run(
+                &mut server.api(),
+                "synthetic-account",
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(false),
+            )
+            .unwrap()
+        };
+        assert_eq!(pull().incomplete, 1);
+        let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
+        let before: String = db
+            .query_row("SELECT pending FROM agents", [], |r| r.get(0))
+            .unwrap();
+        let replay = pull();
+        assert_eq!(replay.incomplete, 1);
+        assert_eq!(replay.bundles, 0);
+        let after: String = db
+            .query_row("SELECT pending FROM agents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
@@ -713,7 +906,22 @@ mod tests {
                     let after = path.contains("after=");
                     let mut status = "200 OK";
                     let mut headers = "";
-                    let body = if mode == 3 && path.starts_with("/v1/conversations/") {
+                    let body = if path.starts_with("/v1/environments") {
+                        if mode == 8 || mode == 9 {
+                            status = if mode == 8 {
+                                "404 Not Found"
+                            } else {
+                                "403 Forbidden"
+                            };
+                            json!({})
+                        } else if mode == 10 {
+                            json!({"connections":[{"organizationId":"synthetic-organization-a"},{"organizationId":"synthetic-organization-b"}],"hasNextPage":false})
+                        } else if mode == 6 || mode == 7 {
+                            json!({"connections":[{"id":"synthetic-connection", "organizationId":if mode == 6 {"synthetic-organization-a"} else {"synthetic-organization-b"}}],"hasNextPage":false})
+                        } else {
+                            json!({"connections":[],"hasNextPage":false})
+                        }
+                    } else if mode == 3 && path.starts_with("/v1/conversations/") {
                         status = "503 Service Unavailable";
                         json!({})
                     } else if path.starts_with("/v1/agents/agent-visible/messages")
@@ -903,6 +1111,74 @@ mod tests {
         .exists());
     }
     #[test]
+    fn observable_organization_refuses_tenant_forks_and_account_changes() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        server.mode.store(6, Ordering::SeqCst);
+        let pull = |account| {
+            run(
+                &mut server.api(),
+                account,
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+        };
+        assert_eq!(pull("synthetic-account").unwrap().committed, 1);
+        let files = fs::read_dir(root.join("inbox")).unwrap().count();
+        assert!(
+            pull("synthetic-account-typo").is_err(),
+            "an observed organization cannot silently fork tenant scope"
+        );
+        assert_eq!(fs::read_dir(root.join("inbox")).unwrap().count(), files);
+        server.mode.store(7, Ordering::SeqCst);
+        assert!(
+            pull("synthetic-account").is_err(),
+            "a supplied account cannot silently switch observed organization"
+        );
+        assert_eq!(fs::read_dir(root.join("inbox")).unwrap().count(), files);
+        server.mode.store(6, Ordering::SeqCst);
+        assert_eq!(pull("synthetic-account").unwrap().committed, 1);
+        let files = fs::read_dir(root.join("inbox")).unwrap().count();
+        server.mode.store(10, Ordering::SeqCst);
+        assert!(pull("synthetic-account").is_err());
+        assert_eq!(fs::read_dir(root.join("inbox")).unwrap().count(), files);
+        let state = fs::read(root.join("state/letta.sqlite3")).unwrap();
+        for secret in ["synthetic-account", "synthetic-organization-a"] {
+            assert!(!state
+                .windows(secret.len())
+                .any(|bytes| bytes == secret.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn unavailable_organization_probe_keeps_the_documented_unverified_scope() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let root = sandbox.root();
+        let server = Server::start();
+        for mode in [8, 9] {
+            server.mode.store(mode, Ordering::SeqCst);
+            let report = run(
+                &mut server.api(),
+                "synthetic-account",
+                &root.join("agents"),
+                &root.join("inbox"),
+                &root.join("state"),
+                &root.join("stage"),
+                "synthetic-machine",
+                &Proof(true),
+            )
+            .unwrap();
+            assert_eq!(report.committed, 1);
+            assert_eq!(report.incomplete, 0);
+        }
+    }
+
+    #[test]
     fn partial_enumeration_never_commits_or_establishes_absence() {
         let root = tempfile::tempdir().unwrap();
         let server = Server::start();
@@ -933,7 +1209,7 @@ mod tests {
         );
     }
     #[test]
-    fn previously_archived_receipts_commit_before_fresh_unarchived_captures() {
+    fn previously_archived_receipts_are_proven_before_fresh_unarchived_captures() {
         struct Held(BTreeSet<String>);
         impl ArchiveProof for Held {
             fn holds(&self, _: &str, outcome: &crate::inbox::SealOutcome) -> Result<bool> {
@@ -974,7 +1250,7 @@ mod tests {
         assert_eq!(fresh.incomplete, 2);
         let db = rusqlite::Connection::open(root.join("state/letta.sqlite3")).unwrap();
         assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM agents WHERE cursor=3", [], |row| row
+            db.query_row("SELECT COUNT(*) FROM agents WHERE cursor IS NULL AND json_array_length(json_extract(pending, '$.required')) > 0", [], |row| row
                 .get::<_, u64>(
                 0
             ))

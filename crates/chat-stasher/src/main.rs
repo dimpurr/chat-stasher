@@ -18599,53 +18599,82 @@ fn cmd_inbox_pull_observed(
 }
 
 fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
-    use chat_stasher::{letta, remote_inbox_archive::DestinationArchive};
     let config = match config_or_refuse("pull") {
         Ok(config) => config,
         Err(code) => return code,
     };
-    let machine = match resolve_machine("pull", &config, args.machine.as_deref()) {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    cmd_api_pull_with(
+        args,
+        &config,
+        home,
+        |args, config, machine, local_agents| {
+            use chat_stasher::{letta, remote_inbox_archive::DestinationArchive};
+            let destinations: Vec<StoreConfig> = if config.destinations.is_empty() {
+                vec![store_config_from(config, None, None, None, &[])]
+            } else {
+                config
+                    .destinations
+                    .keys()
+                    .map(|name| {
+                        resolve_store_config_checked(config, Some(name), None, None, None, &[])
+                            .map_err(|_| anyhow::anyhow!("destination configuration unavailable"))
+                    })
+                    .collect::<anyhow::Result<_>>()?
+            };
+            let proof = DestinationArchive {
+                stage: &args.stage,
+                destinations: &destinations,
+            };
+            let mut api = letta::Api::environment(
+                std::time::Duration::from_millis(args.pace_ms),
+                std::time::Duration::from_secs(args.budget_seconds),
+            )?;
+            letta::run(
+                &mut api,
+                &args.account_id,
+                local_agents,
+                &args.inbox,
+                &args.state,
+                &args.stage,
+                machine,
+                &proof,
+            )
+        },
+    )
+}
+
+fn cmd_api_pull_with(
+    args: chat_stasher::letta::PullArgs,
+    config: &Config,
+    home: Option<std::ffi::OsString>,
+    capture: impl FnOnce(
+        &chat_stasher::letta::PullArgs,
+        &Config,
+        &str,
+        &Path,
+    ) -> anyhow::Result<chat_stasher::letta::Report>,
+) -> ExitCode {
+    let machine = match resolve_machine("pull", config, args.machine.as_deref()) {
         Ok(machine) => machine,
         Err(code) => return code,
     };
-    let result = (|| -> anyhow::Result<letta::Report> {
-        let destinations: Vec<StoreConfig> = if config.destinations.is_empty() {
-            vec![store_config_from(&config, None, None, None, &[])]
-        } else {
-            config
-                .destinations
-                .keys()
-                .map(|name| {
-                    resolve_store_config_checked(&config, Some(name), None, None, None, &[])
-                        .map_err(|_| anyhow::anyhow!("destination configuration unavailable"))
-                })
-                .collect::<anyhow::Result<_>>()?
-        };
-        let proof = DestinationArchive {
-            stage: &args.stage,
-            destinations: &destinations,
-        };
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .ok_or_else(|| anyhow::anyhow!("local agent home unavailable"))?;
-        let mut api = letta::Api::environment(
-            std::time::Duration::from_millis(args.pace_ms),
-            std::time::Duration::from_secs(args.budget_seconds),
-        )?;
-        letta::run(
-            &mut api,
-            &args.account_id,
-            &PathBuf::from(home).join(".letta/agents"),
-            &args.inbox,
-            &args.state,
-            &args.stage,
+    let result = (|| {
+        anyhow::ensure!(
+            !args.account_id.trim().is_empty(),
+            "Letta account identity unavailable"
+        );
+        let home = home.ok_or_else(|| anyhow::anyhow!("local agent home unavailable"))?;
+        capture(
+            &args,
+            config,
             &machine,
-            &proof,
+            &PathBuf::from(home).join(".letta/agents"),
         )
     })();
     match result {
         Ok(report) => {
-            println!("pull letta: agents={}; local_id_only={}; bundles={}; cursors_committed={}; incomplete={}", report.agents, report.local_only, report.bundles, report.committed, report.incomplete);
+            println!("pull letta: agents={}; local_id_only={}; bundles={}; passes_proven={}; incomplete={}", report.agents, report.local_only, report.bundles, report.committed, report.incomplete);
             if report.incomplete > 0 {
                 ExitCode::from(3)
             } else {
@@ -18655,6 +18684,77 @@ fn cmd_api_pull(args: chat_stasher::letta::PullArgs) -> ExitCode {
         Err(_) => {
             eprintln!("pull letta incomplete: source, state, publication or archive proof unavailable; counts unknown");
             ExitCode::from(3)
+        }
+    }
+}
+
+#[cfg(test)]
+mod api_pull_boundary_tests {
+    use super::*;
+    fn args(account: &str, root: &Path) -> chat_stasher::letta::PullArgs {
+        let cli = Cli::try_parse_from([
+            "chat-stasher",
+            "pull",
+            "letta",
+            "--account-id",
+            account,
+            "--inbox",
+            root.join("inbox").to_str().unwrap(),
+            "--state",
+            root.join("state").to_str().unwrap(),
+            "--stage",
+            root.join("stage").to_str().unwrap(),
+            "--machine",
+            "synthetic-machine",
+        ])
+        .unwrap();
+        let Command::Pull(args) = cli.command else {
+            panic!("pull command required")
+        };
+        args
+    }
+    #[test]
+    fn api_pull_boundary_maps_proof_and_source_results_and_resolves_local_home() {
+        let sandbox = test_support::Sandbox::new();
+        let root = sandbox.root();
+        for (incomplete, expected) in [(0, ExitCode::SUCCESS), (1, ExitCode::from(3))] {
+            let code = cmd_api_pull_with(
+                args("synthetic-account", root),
+                &Config::default(),
+                Some(root.as_os_str().to_owned()),
+                |args, _, machine, local| {
+                    assert_eq!(machine, "synthetic-machine");
+                    assert_eq!(local, root.join(".letta/agents"));
+                    assert_eq!(args.inbox, root.join("inbox"));
+                    Ok(chat_stasher::letta::Report {
+                        incomplete,
+                        ..Default::default()
+                    })
+                },
+            );
+            assert_eq!(code, expected);
+        }
+        assert_eq!(
+            cmd_api_pull_with(
+                args("synthetic-account", root),
+                &Config::default(),
+                Some(root.as_os_str().to_owned()),
+                |_, _, _, _| anyhow::bail!("synthetic source unavailable")
+            ),
+            ExitCode::from(3)
+        );
+    }
+    #[test]
+    fn api_pull_boundary_refuses_empty_account_before_capture() {
+        let sandbox = test_support::Sandbox::new();
+        for account in ["", "   "] {
+            let code = cmd_api_pull_with(
+                args(account, sandbox.root()),
+                &Config::default(),
+                Some(sandbox.root().as_os_str().to_owned()),
+                |_, _, _, _| panic!("empty account must be refused before contacting provider"),
+            );
+            assert_eq!(code, ExitCode::from(3));
         }
     }
 }
