@@ -2613,6 +2613,12 @@ fn redact_local_activity_index_message(message: &str, stage: &Path) -> String {
 /// for conversation-time extraction. One `ActivityRow` per session is written
 /// as JSONL to `<stage>/meta/<machine>/activity-v1.jsonl`.
 ///
+/// Rows are written in one canonical order — ascending `session_id` — so the
+/// same stage bytes always rebuild to the same index bytes; the order
+/// `fs::read_dir` answers in is filesystem-defined and never reaches the
+/// output (T0 of the SYNC-D groundwork:
+/// `tests/syncd_index_determinism_test.rs`).
+///
 /// Deliberately a **full rebuild**, never an incremental update: the index is
 /// derived from the stage, so after a full rebuild "the index says" and "the
 /// archive holds" can never diverge, while an incremental scheme would have to
@@ -2708,6 +2714,17 @@ fn rebuild_activity_index(
             )));
         }
     }
+
+    // Canonical row order: ascending `session_id`, which is the session
+    // directory's own name — every path here shares `sessions_root`, so
+    // sorting the paths sorts the names. `fs::read_dir` order is
+    // filesystem-defined (the live index measured 4,526 ascending and
+    // 4,520 descending id transitions), so without this the same stage
+    // could rebuild to different bytes on a different readdir answer.
+    // Readers are position-independent (see
+    // [`read_previous_activity_rows`], keyed by session id), so only a
+    // row's position can change here, never its content.
+    session_dirs.sort();
 
     let meta_dir = stage.join("meta").join(machine);
     if let Err(e) = fs::create_dir_all(&meta_dir) {

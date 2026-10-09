@@ -494,7 +494,7 @@ returns them with each matched or unplaced session that has a provenance row;
 older archives without one omit the field
 (`crates/chat-stasher/src/activity.rs:132-213`,
 `crates/chat-stasher/src/collect.rs:1318-1331`,
-`crates/chat-stasher/src/main.rs:2808-2816,2892-2900`,
+`crates/chat-stasher/src/main.rs:2825-2833,2909-2917`,
 `crates/chat-stasher/src/search.rs:749-795`). The parent id is still session
 metadata in plaintext in the stage and inside the encrypted archive; it can link
 a subagent to its parent conversation.
@@ -764,7 +764,7 @@ Three things in that table deserve to be called out rather than buried:
 own disk, or a remote store (S3, SFTP, and the like) whose credentials only you
 hold (`crates/chat-stasher/src/config.rs:116`). Content is encrypted
 by `rustic` before it is written there, with a master key that is generated and
-kept on your machine (`crates/chat-stasher/src/store.rs:326-427,2126-2128,2168-2178`; `crates/chat-stasher/src/main.rs:8180-8185`).
+kept on your machine (`crates/chat-stasher/src/store.rs:326-427,2126-2128,2168-2178`; `crates/chat-stasher/src/main.rs:8197-8202`).
 A directory written by `export --out` is **not** this: it is a separate,
 unencrypted copy, and it is not created unless you run that command.
 
@@ -1119,7 +1119,7 @@ There is one key file per repository — `rustic_key_file` for the local archive
 that copy alone, and a copy of one does not restore another. A second machine
 reads a destination with that destination's key and does not use the local one,
 which is why every key file has to be backed up
-(`crates/chat-stasher/src/main.rs:8062-8067`).
+(`crates/chat-stasher/src/main.rs:8079-8084`).
 
 **4. What other browser extensions can observe is unresolved.** We did not test
 whether a second, hostile extension with broad host permissions on a chat origin
