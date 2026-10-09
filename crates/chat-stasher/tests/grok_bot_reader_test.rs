@@ -243,6 +243,44 @@ fn roster_blob_names_an_agent_and_no_replica_names_itself() {
 }
 
 #[test]
+fn an_account_scoped_replica_key_names_the_tenant() {
+    let sandbox = test_support::Sandbox::new();
+    let root = sandbox.root().join("persistence");
+    fs::create_dir_all(&root).unwrap();
+    // The `account.<ref>` segment the app scopes its state keys with (W321)
+    // is the replica's tenancy: a multi-account desktop app files one
+    // account's bots separately from another's (TICKET-4D-08).
+    fs::write(
+        root.join(blob_name(&replica_key(AGENT))),
+        replica_bytes(&[entry(1, "synthetic-one")]),
+    )
+    .unwrap();
+
+    let agents = read_persistence(&root).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].tenant.as_deref(), Some(ACCOUNT));
+}
+
+#[test]
+fn a_state_key_without_an_account_scope_leaves_tenant_unobserved() {
+    let sandbox = test_support::Sandbox::new();
+    let root = sandbox.root().join("persistence");
+    fs::create_dir_all(&root).unwrap();
+    // A replica key with no `account.<ref>` segment states no tenancy, so
+    // the tenant is unobserved — `None`, never a placeholder account.
+    let unscoped = format!("sand.client.slice.transcript.replicas.{AGENT}");
+    fs::write(
+        root.join(blob_name(&unscoped)),
+        replica_bytes(&[entry(1, "synthetic-one")]),
+    )
+    .unwrap();
+
+    let agents = read_persistence(&root).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].tenant, None);
+}
+
+#[test]
 fn two_account_scoped_keys_for_one_agent_merge_into_one_agent() {
     let sandbox = test_support::Sandbox::new();
     let root = sandbox.root().join("persistence");
