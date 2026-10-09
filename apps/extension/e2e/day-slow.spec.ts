@@ -34,6 +34,7 @@ import {
   readStorage,
   test,
   waitForAlarm,
+  waitForTickRecord,
   writeStorage,
   type Extension,
 } from './harness';
@@ -98,11 +99,48 @@ test('a 429 on a real tick writes the platform brake, and the tick stops on it',
   const page = await ext.context.newPage();
   await page.goto(`${ORIGIN}/new`, { waitUntil: 'domcontentloaded' });
   await waitForAlarm(ext, TICK_ALARM);
+  // 🔴 The instant the fire is issued, not the instant the tick runs:
+  //    the record below is only accepted from a wake newer than this
+  //    (`waitForTickRecord`'s `since`), so an already-concluded record
+  //    from an earlier wake can never be read as this tick's verdict.
+  const firedAt = Date.now();
   await fireAlarm(ext, TICK_ALARM);
+
+  // 🔴 The list request is observable the moment the tick issues it, but the
+  //    tick writes its completion record only when the whole run has finished
+  //    (`conclude()` in entrypoints/background.ts, after the fetch, its 429
+  //    verdict and the brake that verdict arms). Reading the log here therefore
+  //    raced the tick and could catch it before the request was issued — the
+  //    stale reading, not a refuted run. Wait for the record itself, the same
+  //    waiter the other tick specs use: it polls until a record written after
+  //    `firedAt` exists and its sweep has concluded, so neither an absent key
+  //    nor the provisional pre-sweep record (`SWEEP_NOT_CONCLUDED`,
+  //    lib/backfill/alarm.ts) can pass for this tick's outcome.
+  //
+  //    The request log is read only after this wait, and that ordering is the
+  //    fix for the flake this spec carried — the same pre-fix pattern its
+  //    sibling spec already shed (`claude-backfill-scope.spec.ts`, whose own
+  //    comment tells the same story): the route handler records the request
+  //    before the fetch it belongs to resolves, and the record is written
+  //    only after that fetch, so a concluded record proves the request was
+  //    already observed. The previous `expect.poll(() => requests)` read the
+  //    same measurement but under its 5 s default, and failed on a loaded
+  //    runner when the tick was merely slow to issue the request. This waiter
+  //    polls the product's own signal with its 20 s bound instead, and no
+  //    assertion changes: the tick really made one list request, and nothing
+  //    escaped the intercepted origins.
+  //
+  //    The wait also settles the brake reads below: the report the tick makes
+  //    for a 429 arms the local brake *inside the request gateway*
+  //    (`reportPlatformRateLimit`, entrypoints/background.ts) — before the
+  //    response reaches the engine, so long before `conclude()` — which means
+  //    the concluded record this wait returned on already proves the brake was
+  //    written, and the polls and reads below cannot race a write either.
+  await waitForTickRecord(ext, { since: firedAt });
 
   // The tick really asked the platform and really got the refusal: one list
   // request, and nothing escaped the intercepted origin.
-  await expect.poll(() => requests).toEqual([`GET ${LIST_PATH}`]);
+  expect(requests).toEqual([`GET ${LIST_PATH}`]);
   expect(escaped).toEqual([]);
 
   // …and the same observation left the brake behind, in the extension's own storage.
