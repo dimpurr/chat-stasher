@@ -1979,6 +1979,7 @@ fn process_sqlite_snapshot(
             reset: old.is_some() || force_reset,
             compressed: false,
         },
+        provenance: Default::default(),
     })
 }
 
@@ -2042,6 +2043,7 @@ fn unchanged_content_sqlite(
             reset: false,
             compressed: false,
         },
+        provenance: Default::default(),
     }
 }
 
@@ -2074,6 +2076,7 @@ fn unchanged_sqlite(
             reset: false,
             compressed: false,
         },
+        provenance: Default::default(),
     }
 }
 
@@ -2154,6 +2157,7 @@ fn process_jsonl(
             reset: data.reset,
             compressed: false,
         },
+        provenance: Default::default(),
     })
 }
 
@@ -2252,6 +2256,7 @@ fn process_opencode(
             reset: old.is_some() || force_reset,
             compressed: false,
         },
+        provenance: Default::default(),
     })
 }
 
@@ -2278,6 +2283,7 @@ fn process_whole_file(
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, false),
+            provenance: Default::default(),
         });
     }
     let lines = if bytes.is_empty() {
@@ -2319,6 +2325,7 @@ fn process_whole_file(
             reset,
             compressed: false,
         },
+        provenance: Default::default(),
     })
 }
 
@@ -2349,6 +2356,7 @@ fn process_compressed(
         return Ok(Processed {
             state: old.expect("checked above").clone(),
             outcome: unchanged_outcome(record, source_len, true),
+            provenance: Default::default(),
         });
     }
     let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
@@ -2397,6 +2405,7 @@ fn process_compressed(
             reset: old.is_some(),
             compressed: true,
         },
+        provenance: Default::default(),
     })
 }
 

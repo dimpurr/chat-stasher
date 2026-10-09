@@ -23,6 +23,24 @@ fn replica_blob_name() -> String {
     )
 }
 
+/// Same, for a replica key with no `account.<ref>` segment: no tenancy.
+fn unscoped_replica_blob_name() -> String {
+    format!(
+        "{}.blob",
+        test_support::grok_bot_blob_name(&format!("sand.client.slice.transcript.replicas.{AGENT}"))
+    )
+}
+
+/// The roster-shaped blob that names an agent (W321 key names).
+fn roster_blob_name() -> String {
+    format!(
+        "{}.blob",
+        test_support::grok_bot_blob_name(&format!(
+            "sand.client.slice.account.{ACCOUNT}.roster.last-roster"
+        ))
+    )
+}
+
 /// One app-shaped entry (key names from W321/W319b) for a given sequence.
 fn entry(sequence: u64, content: &str) -> Value {
     json!({
@@ -169,4 +187,80 @@ fn collection_keeps_raw_rows_and_accumulates_a_sequence_union() {
     .unwrap();
     let stable_bytes = store::concat_shards(&stage, "synthetic-machine", session_id).unwrap();
     assert_eq!(sequence_rows(&stable_bytes).len(), 4);
+}
+
+fn dimensions_observation(
+    stage: &std::path::Path,
+    session_id: &str,
+) -> chat_stasher::provenance::ProvenanceObservation {
+    let observations =
+        chat_stasher::provenance::read_observations(stage, "synthetic-machine").unwrap();
+    observations
+        .into_iter()
+        .find(|observation| observation.session_id == session_id)
+        .expect("the collected session carries a provenance observation")
+}
+
+#[test]
+fn collection_projects_the_tenant_and_agent_into_dimensions() {
+    let sandbox = test_support::Sandbox::new();
+    let persistence = sandbox.root().join("persistence");
+    fs::create_dir_all(&persistence).unwrap();
+    let source = persistence.join(replica_blob_name());
+    fs::write(&source, replica_payload(vec![entry(1, "synthetic-one")])).unwrap();
+    // The roster names the agent, so `container` holds both identities the
+    // ticket defines: the agent uuid and the name the user knows it by.
+    fs::write(
+        persistence.join(roster_blob_name()),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "value": {"rows": [{
+                "id": AGENT,
+                "name": "synthetic-agent-name",
+                "createdAt": 1780000000000u64,
+                "updatedAt": 1780000000000u64,
+            }]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut scan = ScanReport::default();
+    scan.records.push(record(&source));
+    let stage = sandbox.data_home().join("stage");
+    let state = sandbox.state_home().join("chat-stasher");
+    let destination = DestinationView::unreachable("synthetic-destination");
+    collect::collect_scan_report(&scan, &stage, "synthetic-machine", &state, 20, &destination)
+        .unwrap();
+
+    let observation = dimensions_observation(&stage, &scan.records[0].id);
+    assert_eq!(observation.dimensions.tenant, [ACCOUNT]);
+    assert_eq!(
+        observation.dimensions.container,
+        [AGENT, "synthetic-agent-name"]
+    );
+}
+
+#[test]
+fn an_unscoped_state_key_leaves_tenant_unobserved_but_names_the_container() {
+    let sandbox = test_support::Sandbox::new();
+    let persistence = sandbox.root().join("persistence");
+    fs::create_dir_all(&persistence).unwrap();
+    let source = persistence.join(unscoped_replica_blob_name());
+    fs::write(&source, replica_payload(vec![entry(1, "synthetic-one")])).unwrap();
+
+    let mut scan = ScanReport::default();
+    scan.records.push(record(&source));
+    let stage = sandbox.data_home().join("stage");
+    let state = sandbox.state_home().join("chat-stasher");
+    let destination = DestinationView::unreachable("synthetic-destination");
+    collect::collect_scan_report(&scan, &stage, "synthetic-machine", &state, 20, &destination)
+        .unwrap();
+
+    // No `account.<ref>` in the key states no tenancy: the tenant dimension
+    // stays empty — unobserved, never a placeholder account — while the
+    // agent the key does name still lands in `container`.
+    let observation = dimensions_observation(&stage, &scan.records[0].id);
+    assert!(observation.dimensions.tenant.is_empty());
+    assert_eq!(observation.dimensions.container, [AGENT]);
 }

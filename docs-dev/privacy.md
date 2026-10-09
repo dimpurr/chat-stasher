@@ -554,6 +554,22 @@ gain a byte; what is new is that these two fields now also sit on the
 index line beside it, as plaintext session metadata like the paths and
 ids above.
 
+A Grok Bot replica states two facts in the name of the persistence key it
+lives under — `sand.client.slice.account.<account
+ref>.transcript.replicas.<agent uuid>`. The `<account ref>` segment is the
+account the desktop app scoped that state to — one account's bots are filed
+separately from another's — so it lands on the session's row as its tenant,
+beside Claude Code's organization and account ids. The `<agent uuid>` the key ends in —
+and the name the app's own roster gives that agent — is the agent the whole
+replica belongs to, recorded as the session's container
+(`crates/chat-stasher/src/grok_bot.rs:232-240`,
+`crates/chat-stasher/src/collect.rs:1502-1509`). A state key without an
+`account.<ref>` segment states no tenancy, so none is recorded — never a
+placeholder — while the agent the key does name still arrives. The sealed
+replica rows did not gain a byte; what is new is that the two facts now also
+sit on the index line beside them, as plaintext session metadata like the
+paths and ids above.
+
 **b. Your browser's local extension storage** (`storage.local`, never
 `storage.sync`: no `storage.sync` call exists anywhere under `apps/extension`,
 so nothing here is synced to a browser account by this extension).
