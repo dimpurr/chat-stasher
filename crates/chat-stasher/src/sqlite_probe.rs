@@ -2479,10 +2479,10 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at TEXT, ended_at TEXT, archived INTEGER, input_tokens INTEGER);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at TEXT, ended_at TEXT, archived INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, cwd TEXT, user_id TEXT, git_repo_root TEXT, input_tokens INTEGER);
              CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT, token_count INTEGER, active INTEGER, compacted INTEGER, _compressed_summary TEXT);
              CREATE TABLE session_model_usage (session_id TEXT, model TEXT, billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT, task TEXT, api_call_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER, estimated_cost_usd REAL, actual_cost_usd REAL, cost_status TEXT, cost_source TEXT, first_seen TEXT, last_seen TEXT);
-             INSERT INTO sessions VALUES ('hermes-s1','cli','model-a','2026-01-01','2026-01-02',1,99);
+             INSERT INTO sessions VALUES ('hermes-s1','cli','model-a','2026-01-01','2026-01-02',1,0,'/w/hermes-fixture','peer-fixture','https://github.com/org/hermes-fixture',99);
              INSERT INTO messages VALUES (1,'hermes-s1','user','synthetic prompt','2026-01-01T00:00:00Z',3,0,1,'synthetic summary');
              INSERT INTO messages VALUES (2,'hermes-s1','assistant','synthetic reply','2026-01-01T00:00:01Z',5,1,0,NULL);
              INSERT INTO session_model_usage VALUES ('hermes-s1','model-a','provider-a','https://a.invalid','default','chat',1,10,5,2,1,4,0.25,0.2,'priced','fixture','a','b');
@@ -2492,6 +2492,17 @@ mod tests {
         let snapshot = read_hermes_session(&db, "hermes-s1").unwrap();
         let value: Value = serde_json::from_slice(&snapshot.json_line).unwrap();
         assert_eq!(value["schema"], "chat-stasher.hermes-agent.session.v1");
+        // The envelope carries the whole `sessions` row, so the four columns the
+        // 4D fold reads reach it through `SELECT *`: the working directory, the
+        // gateway peer binding, the repository root, and both lifecycle flags.
+        assert_eq!(value["session"]["cwd"], "/w/hermes-fixture");
+        assert_eq!(value["session"]["user_id"], "peer-fixture");
+        assert_eq!(
+            value["session"]["git_repo_root"],
+            "https://github.com/org/hermes-fixture"
+        );
+        assert_eq!(value["session"]["archived"], 1);
+        assert_eq!(value["session"]["pinned"], 0);
         assert_eq!(value["messages"].as_array().unwrap().len(), 2);
         assert_eq!(value["messages"][0]["active"], 0);
         assert_eq!(value["messages"][0]["compacted"], 1);

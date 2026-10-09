@@ -2336,13 +2336,15 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Six
+/// opposed to what the collection path or the registry already recorded. Seven
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
 /// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
 /// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
-/// row's `cwd`) and `codex` (its `session_meta` record's working directory
-/// and repository); every other harness answers with the empty set, which is
+/// row's `cwd`), `codex` (its `session_meta` record's working directory
+/// and repository) and `hermes-agent` (its `sessions` row's directory,
+/// gateway peer binding, repository identity, and its archived / pinned
+/// flags); every other harness answers with the empty set, which is
 /// the honest answer for a dimension nothing was read from — and never a
 /// value inferred from the harness name.
 ///
@@ -2437,6 +2439,17 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                     continue;
                 };
                 fold_openclaw_dimensions(&mut dimensions, &record);
+            }
+        }
+        "hermes-agent" => {
+            // Hermes Agent exports a session as **one sealed envelope line**
+            // carrying the whole `sessions` row beside its messages, exactly as
+            // opencode does, so the same per-line loop applies here too.
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_hermes_agent_dimensions(&mut dimensions, &record);
             }
         }
         _ => {}
@@ -2697,6 +2710,84 @@ fn fold_openclaw_dimensions(
     if archived {
         dimensions.insert_status("archived");
     }
+}
+
+/// Hermes Agent exports a session as one envelope that carries, beside the
+/// conversation, the whole `sessions` row the store recorded about it
+/// (`sqlite_probe.rs` seals that row under the
+/// `chat-stasher.hermes-agent.session.v1` schema). Four of its columns are
+/// dimension facts, and they are four different kinds of fact:
+///
+/// `cwd` is where the session ran. It is a path, so it lands in `cwd` under
+/// the same rule as Claude Code's, and the repository it may sit inside is
+/// never inferred from it: a session resumed and re-exported states each
+/// directory it ran in, and every one is kept.
+///
+/// `git_repo_root` is the inverse case, and the one that makes the pair a
+/// pair: the upstream repository the session's checkout belonged to, an
+/// identity the harness recorded rather than one derivable from the path, so
+/// it lands in `container`. The directory itself never becomes a `container`
+/// (the `cwd ≠ repo identity` rule).
+///
+/// `user_id` is the **gateway peer binding**: the messenger account a gateway
+/// session belongs to. It is a namespace rather than a person — one peer owns
+/// many sessions (locally, two peers own every row that records one) — which
+/// is what makes it a tenancy. It is recorded only on gateway rows: a local
+/// `cli` / `cron` / `oneshot` session stores no account at all and is left
+/// unobserved rather than filed under a fabricated one.
+///
+/// `archived` and `pinned` are explicit lifecycle flags the harness records
+/// (`INTEGER NOT NULL DEFAULT 0`). Nonzero stamps the state it names, and the
+/// zero default is not `active`: it says the harness marked nothing, which
+/// leaves Status unobserved — the same reading opencode's null `time_archived`
+/// gets, and the same one Rule #4 requires. Only the integer shape the
+/// exporter writes is trusted: a value of another type is a row this reader
+/// cannot read, not a fact it may take on faith.
+///
+/// Only an envelope identified by its schema is read at all: a line with a
+/// `session` object that the exporter did not seal is a record nothing
+/// vouches for, however much it looks like one.
+fn fold_hermes_agent_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    if record.get("schema").and_then(serde_json::Value::as_str)
+        != Some("chat-stasher.hermes-agent.session.v1")
+    {
+        return;
+    }
+    let Some(session) = record.get("session") else {
+        return;
+    };
+    if let Some(cwd) = non_empty_str(session.get("cwd")) {
+        dimensions.insert_cwd(cwd);
+    }
+    if let Some(tenant) = non_empty_str(session.get("user_id")) {
+        dimensions.insert_tenant(tenant);
+    }
+    if let Some(container) = non_empty_str(session.get("git_repo_root")) {
+        dimensions.insert_container(container);
+    }
+    if hermes_flag_is_set(session.get("archived")) {
+        dimensions.insert_status("archived");
+    }
+    if hermes_flag_is_set(session.get("pinned")) {
+        dimensions.insert_status("pinned");
+    }
+}
+
+/// Whether one `INTEGER NOT NULL DEFAULT 0` Hermes lifecycle column records the
+/// state it names.
+///
+/// A flag is recorded only when the row holds an integer that is not zero. The
+/// zero default means the harness marked nothing, which is an unobserved state
+/// and not the state's absence (`Rule #4`: a missing `archived` is never
+/// `active`); a null, a string, and a row with no such column are equally
+/// nothing this reader can read, so none of them is turned into a state.
+fn hermes_flag_is_set(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|flag| flag != 0)
 }
 
 /// A string a record actually recorded, as opposed to one that is absent, of
@@ -3876,6 +3967,186 @@ mod tests {
             json.contains(r#""container":["synthetic-agent"]"#),
             "line: {json}"
         );
+        assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    // --------------------------------------------- TICKET-4D-13 · hermes-agent
+    //
+    // The four facts a Hermes Agent session row states about itself: the
+    // directory it ran in, the repository it belonged to, the gateway peer it
+    // served, and the archived / pinned flags it recorded.
+
+    /// One Hermes Agent export envelope carrying whatever `session` fields the
+    /// caller spells in, so each case states exactly which fields it is about.
+    /// The shape is the one `sqlite_probe.rs` seals: one line per session, the
+    /// whole `sessions` row beside its messages.
+    fn hermes_with(fields: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.hermes-agent.session.v1","session":{{{fields}}},"messages":[],"session_model_usage":[]}}"#
+        )
+    }
+
+    #[test]
+    fn hermes_agent_states_its_directory_repository_peer_and_lifecycle() {
+        let line = hermes_with(
+            r#""id":"s1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        );
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(
+            row.dimensions.container,
+            ["https://github.com/org/repo-fixture"],
+            "the repository root the harness recorded is a container, which is \
+             what the directory on its own can never be"
+        );
+        assert_eq!(
+            row.dimensions.tenant,
+            ["peer-fixture"],
+            "a gateway row's peer binding is a namespace many sessions share, \
+             which is what makes it a tenancy"
+        );
+        assert_eq!(row.dimensions.status, ["archived"]);
+    }
+
+    #[test]
+    fn a_local_hermes_session_states_no_dimension() {
+        // A local run stores no peer binding, no repository root and no flag:
+        // the row's own defaults, and every dimension stays unobserved.
+        let line = hermes_with(
+            r#""id":"s1","source":"cli","cwd":null,"user_id":null,"git_repo_root":null,"archived":0,"pinned":0"#,
+        );
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert!(
+            row.dimensions.is_empty(),
+            "a row that recorded none of the four facts states none of them: {:?}",
+            row.dimensions
+        );
+        assert!(row.dimensions.is_valid());
+    }
+
+    #[test]
+    fn an_unarchived_unpinned_hermes_session_stays_status_unobserved() {
+        // The zero default says the harness marked nothing; it is not `active`,
+        // and no state is inferred from the absence (Rule #4).
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one","archived":0,"pinned":0"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert!(
+            row.dimensions.status.is_empty(),
+            "a zero flag is an unobserved status, never `{}`: {:?}",
+            "active",
+            row.dimensions.status
+        );
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.tenant.is_empty(),
+            "a local row recorded no peer, and none is invented: {:?}",
+            row.dimensions.tenant
+        );
+    }
+
+    #[test]
+    fn a_hermes_flagged_session_records_every_flag_the_row_set() {
+        let line = hermes_with(r#""id":"s1","pinned":1"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.status, ["pinned"]);
+        // Both flags set is both states, not one of them: the row recorded two.
+        let line = hermes_with(r#""id":"s1","archived":1,"pinned":1"#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.status, ["archived", "pinned"]);
+    }
+
+    #[test]
+    fn an_absent_empty_or_mistyped_hermes_value_records_no_dimension() {
+        let row = build_row(
+            "s",
+            "mbp",
+            "hermes-agent",
+            &[
+                "not json at all",
+                hermes_with(r#""id":"s1","cwd":"","user_id":"","git_repo_root":"""#).as_str(),
+                hermes_with(r#""id":"s1","cwd":7,"user_id":{"id":"x"},"git_repo_root":["r"]"#)
+                    .as_str(),
+                // A flag spelled as a string is not the integer shape the
+                // exporter writes, so it is unread rather than trusted.
+                hermes_with(r#""id":"s1","archived":"1","pinned":"1""#).as_str(),
+                // A `session` object the exporter did not seal is a record
+                // nothing vouches for, whatever it says.
+                r#"{"session":{"cwd":"/w/one","user_id":"peer-fixture","archived":1}}"#,
+                // Nor is an envelope whose schema names something else.
+                r#"{"schema":"chat-stasher.hermes-agent.session.v2","session":{"cwd":"/w/one"}}"#,
+                // Nor one sealed for another harness, even under a key this
+                // fold reads.
+                r#"{"schema":"chat-stasher.opencode.session.v1","session":{"cwd":"/w/one","user_id":"peer-fixture"}}"#,
+            ],
+        );
+        assert!(
+            row.dimensions.is_empty(),
+            "an empty, mistyped, or unsealed value is nothing observed, never a value: {:?}",
+            row.dimensions
+        );
+        assert!(
+            row.dimensions.is_valid(),
+            "and it must never be a value a capture envelope could compare against"
+        );
+    }
+
+    #[test]
+    fn a_hermes_directory_never_becomes_a_container() {
+        // The one field that could be mistaken for a repository identity is the
+        // directory itself; it stays a path, and the container stays unobserved
+        // rather than being inferred from where the session happened to run.
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one""#);
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert!(
+            row.dimensions.container.is_empty(),
+            "a path is not a repository identity: {:?}",
+            row.dimensions.container
+        );
+    }
+
+    #[test]
+    fn another_harness_reads_no_hermes_agent_dimensions() {
+        // The same bytes under a harness nobody asked about, and under the
+        // harness that shares the envelope-with-a-`session`-row shape: the
+        // facts belong to the harness whose reader states them.
+        let line = hermes_with(r#""id":"s1","cwd":"/w/one","user_id":"peer-fixture""#);
+        for harness in ["opencode", "claude-code"] {
+            let row = build_row("s", "mbp", harness, &[line.as_str()]);
+            assert!(
+                row.dimensions.is_empty(),
+                "dimensions are answered per harness, not read from whatever an \
+                 archived line happens to carry: {harness} {:?}",
+                row.dimensions
+            );
+        }
+        // And the envelope under its own harness is where the facts live.
+        let row = build_row("s", "mbp", "hermes-agent", &[line.as_str()]);
+        assert_eq!(row.dimensions.cwd, ["/w/one"]);
+        assert_eq!(row.dimensions.tenant, ["peer-fixture"]);
+    }
+
+    #[test]
+    fn the_hermes_agent_dimensions_travel_in_the_index_line() {
+        let line = hermes_with(
+            r#""id":"s1","cwd":"/w/one","git_repo_root":"https://github.com/org/repo-fixture","user_id":"peer-fixture","archived":1"#,
+        );
+        let json = to_jsonl(&build_row("s", "mbp", "hermes-agent", &[line.as_str()]));
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
+        assert!(
+            json.contains(r#""tenant":["peer-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(
+            json.contains(r#""container":["https://github.com/org/repo-fixture"]"#),
+            "line: {json}"
+        );
+        assert!(json.contains(r#""status":["archived"]"#), "line: {json}");
+
+        // A row that recorded no flag omits the status rather than writing an
+        // `active` the harness never stated.
+        let bare = hermes_with(r#""id":"s1","cwd":"/w/one""#);
+        let json = to_jsonl(&build_row("s", "mbp", "hermes-agent", &[bare.as_str()]));
         assert!(!json.contains("\"status\""), "line: {json}");
     }
 
