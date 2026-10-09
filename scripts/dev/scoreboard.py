@@ -5,7 +5,9 @@ SB-2 generator (public code, private OUTPUT). This script is pure plumbing:
 it reads saved inputs and renders markdown. It never calls a model, never
 opens the archive itself, and never writes to a chat-stasher destination or
 stage — the only paths it writes are `--out` and the small state file kept
-next to it. Every input is opened read-only.
+next to it. Every input is opened read-only, and so is every live harness
+source the default local-tool probe reads (`mode=ro`, creating nothing beside
+any store).
 
 The board covers every platform the shipped product knows: the local AI
 coding tools from `crates/chat-stasher/data/harness-registry-v1.json` and the
@@ -13,11 +15,15 @@ web chat platforms from `apps/extension/lib/contract.ts`'s `ALL_PLATFORMS` —
 the same two sources `gen-support-matrix.py` renders, loaded through that
 script so the two can never drift.
 
-Four inputs, each optional: a missing input is shown as "source unavailable"
+Five inputs, each optional: a missing input is shown as "source unavailable"
 and is never folded into a zero. The editorial fields are the exception to
 being handed in — they already live in the two platform sources this script
 loads, so they are read from there by default and `--editorial` only overrides
-them (see below).
+them (see below). The live-source probe is the same kind of exception: when
+no document is handed in, this script probes this machine's live harness
+sources itself, read-only (`mode=ro`, the registry-declared queries the
+scanner probes with, opening nothing for writing and creating nothing beside
+any store).
 
   --ext-status DIR    The native host's per-install status reports: the
                       `ext-status` directory of a machine's local stage.
@@ -77,6 +83,29 @@ them (see below).
                       nothing. Rows for ids this product does not know are
                       listed, never dropped.
 
+  --source-probe FILE A saved live-source probe document (`{"schema":
+                      "chat-stasher/source-probe@1", "probed_at": …,
+                      "harnesses": {"<harness-id>": {"state": "probed",
+                      "newest_unix": <int-seconds>} | {"state": …}}}`), the
+                      per-harness reading of the LIVE sources (not the
+                      archive) that the local-tool `no-new-capture` rule
+                      judges against. By default no document is needed: this
+                      script probes this machine's live sources itself,
+                      read-only, through the same registry-declared SQLite
+                      queries the Rust scanner probes with (cursor's
+                      `cursor_composer` qualification included), consulting
+                      a harness only when a rule actually needs its reading.
+                      The probe covers the registry's single-file SQLite
+                      stores (cursor, grok, zed, hermes-agent, opencode);
+                      a harness whose source the probe does not read is
+                      named as unjudged, never passed — a named gap, not a
+                      clean bill. A hand-in document replaces the whole
+                      reading (one row per harness; a harness with no row is
+                      the same named gap), so a board can be re-rendered
+                      from a reading taken elsewhere or captured earlier —
+                      its `probed_at` is judged against --stale-hours like
+                      every other saved input.
+
 Output: markdown on stdout, or to `--out`. Sections, top to bottom:
 
   # chat-stasher platform scoreboard
@@ -100,8 +129,24 @@ ANOMALIES rules and their knobs:
                         measured between two runs of this script — the first
                         run only establishes a baseline, and a first run
                         never reports this rule as either clean or dirty);
-                        (local tools) a tool's newest known session content
-                        timestamp, across machines, is older than N days.
+                        (local tools) a fresh archive — newest known session
+                        within N days — is clean on its own, because recent
+                        capture proves itself. An archive older than N days
+                        is only *suspicious*: the rule resolves it against
+                        the live source's newest qualified timestamp (the
+                        probe above). A source with nothing newer than the
+                        archive is named quiet in the visibility list —
+                        nothing new exists to capture, and quiet is never
+                        an all-clear, let alone an anomaly. A source session
+                        the archive still lacks, itself older than N days,
+                        is the anomaly: capture is lagging or stopped. A
+                        label the probe cannot qualify (no reading, missing
+                        source, unreadable store, a web-capture producer
+                        whose source is the browser extension) is named
+                        unjudged and never passed; the archive's age alone
+                        never fires this rule, because "no sessions archived
+                        recently" cannot tell a quiet tool from a stopped
+                        capture.
   pending-rising        Some (machine, install, platform) pending count is
                         higher than in the previous run, compared through the
                         state file kept next to `--out` (`<out>.state.json`),
@@ -152,12 +197,17 @@ carries none):
       --out SCOREBOARD.md
 
 The editorial fields come from `--root`, so the pipeline has nothing to
-produce for them; add `--editorial <file>` only to overrule the sources.
+produce for them; add `--editorial <file>` only to overrule the sources. The
+live-source probe needs no pipeline line either: without `--source-probe` the
+board reads this machine's own harness sources at generation time, and a
+harness that does not exist on this machine is named unjudged, never passed.
 
 The board itself carries machine names, browser/profile labels and
 per-platform counts — treat wherever `--out` points the way you treat any
 other local working notes about your own archive. This script ships none of
-that and knows no paths of its own; every input is handed to it.
+that and knows no paths of its own; every input is handed to it, and the
+only paths it opens without being asked are the local harness stores the
+registry it was handed names, read-only.
 """
 
 from __future__ import annotations
@@ -167,6 +217,9 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import platform as _platform
+import re
+import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -182,6 +235,66 @@ DEFAULT_STALE_HOURS = 48.0
 DEFAULT_QUIET_DAYS = 3.0
 DEFAULT_UNKNOWN_SHARE = 0.5
 DEFAULT_VERIFY_DAYS = 90.0
+
+# The schema marker a saved live-source probe document must carry. A file that
+# does not say this is another schema's payload and is refused, never guessed
+# at (the same rule every other input follows).
+SOURCE_PROBE_SCHEMA = "chat-stasher/source-probe@1"
+
+# The states one harness's live-source reading can be in. These are a
+# vocabulary, not prose: every state except PROBED means "the comparison
+# cannot be judged", and the rendered line quotes the `why` words below so a
+# named gap reads the same everywhere.
+PROBE_PROBED = "probed"               # the source's newest qualified timestamp is known
+PROBE_MISSING = "missing"              # the source store is not on this machine
+PROBE_FAILED = "unreadable"            # the store exists but could not be opened read-only
+PROBE_MISMATCH = "schema-mismatch"     # the store's shape is not one the probe reads
+PROBE_EMPTY = "no-qualified-session"   # the store exists and holds no qualified session
+PROBE_NOTIME = "no-readable-time"     # sessions qualify but none carries a readable time
+PROBE_GAP = "probe-gap"               # the probe does not read this harness's source
+PROBE_ABSENT = "absent"               # a saved probe document has no row for the harness
+PROBE_WEB = "web-capture"             # the label's producer is the browser extension
+PROBE_UNAVAILABLE = "unavailable"     # the probe source itself is unavailable
+
+PROBE_STATE_WHY = {
+    PROBE_MISSING: "the source store is not on this machine",
+    PROBE_FAILED: "the source store could not be opened read-only",
+    PROBE_MISMATCH: "the source store's shape is not one the probe reads",
+    PROBE_EMPTY: "no qualified session exists in the source",
+    PROBE_NOTIME: "qualified sessions exist but none carries a readable time",
+    PROBE_GAP: "the probe does not read this harness's source yet",
+    PROBE_ABSENT: "the probe document has no row for this harness",
+    PROBE_WEB: "a web capture's source is the browser extension, not a local store",
+    PROBE_UNAVAILABLE: "the live-source probe is unavailable",
+}
+
+# The harness ids the CURRENT reader extracts a conversation time for: the
+# archive's own `SUPPORTED_HARNESSES` (`crates/chat-stasher/src/activity.rs`),
+# the list the product names in its "not implemented" `why` and the one that
+# decides which no-known-time tools are a *stale archive* (a reader exists, so
+# re-ingest reads the time) and which are a *reader gap* (none exists yet).
+#
+# The authoritative copy is parsed out of activity.rs at load time; this pinned
+# copy answers only when the source file is not there (fixture roots), and
+# `--selftest` asserts the two are the same set, so a reader that lands without
+# this copy learning about it fails the suite instead of quietly misnaming the
+# cause.
+SUPPORTED_TIME_HARNESSES = (
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "gemini-cli",
+    "google-antigravity",
+    "grok",
+    "kimi-code",
+    "chatgpt",
+    "deepseek",
+    "claude",
+    "gemini",
+    "perplexity",
+    "kimi",
+)
 
 
 class UsageError(Exception):
@@ -294,6 +407,10 @@ class LocalTool:
     verified: dict[str, Any] | None = None
     dev_priority: str | None = None
     known_issue: str | None = None
+    # The registry's raw per-platform path cells (template/format/sql_*), kept
+    # so the live-source probe can resolve a harness's store the same way the
+    # Rust scanner does. Never rendered.
+    paths: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +474,7 @@ def load_catalog(root: str) -> Catalog:
             verified=h.get("verified"),
             dev_priority=h.get("dev_priority"),
             known_issue=h.get("known_issue"),
+            paths=h.get("paths") if isinstance(h.get("paths"), dict) else None,
         )
         for h in harnesses
     ]
@@ -1120,6 +1238,579 @@ def read_editorial(path: str | None, catalog: Catalog, root: str) -> EditorialRe
 
 
 # ---------------------------------------------------------------------------
+# Input 5: the live-source probe (read-only)
+# ---------------------------------------------------------------------------
+
+
+def load_time_reader_list(root: str) -> tuple[set[str], str]:
+    """The harness ids the current reader extracts a conversation time for.
+
+    Parsed out of `crates/chat-stasher/src/activity.rs`'s
+    `SUPPORTED_HARNESSES` — the list the product itself prints in its "not
+    implemented" `why` — so the board's stale-archive vs reader-gap split can
+    never drift from the code that reads or refuses the time. A checkout that
+    does not hold the file (fixture roots) falls back to the pinned
+    `SUPPORTED_TIME_HARNESSES` copy, which `--selftest` asserts equals the
+    parsed list, so the fallback can never quietly rot.
+    """
+    path = os.path.join(root, "crates", "chat-stasher", "src", "activity.rs")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return set(SUPPORTED_TIME_HARNESSES), f"the pinned copy in {os.path.basename(__file__)} (no activity.rs under {root})"
+    match = re.search(r"const\s+SUPPORTED_HARNESSES[^=]*=\s*&\[([^\]]*)\]", text)
+    if match is None:
+        return set(SUPPORTED_TIME_HARNESSES), f"the pinned copy in {os.path.basename(__file__)} (SUPPORTED_HARNESSES unreadable in activity.rs)"
+    ids = [m for m in re.findall(r'"([^"]+)"', match.group(1))]
+    if len(ids) < 5:
+        return set(SUPPORTED_TIME_HARNESSES), f"the pinned copy in {os.path.basename(__file__)} (SUPPORTED_HARNESSES too short to be real)"
+    return set(ids), f"{os.path.join('crates', 'chat-stasher', 'src', 'activity.rs')}'s SUPPORTED_HARNESSES"
+
+
+@dataclass(frozen=True)
+class ProbeEntry:
+    """One harness's live-source reading: a state word, the newest qualified
+    whole-second timestamp when the state is `probed`, and the fixed `why`
+    wording the unjudged line quotes. `newest` is None for every state other
+    than `probed` — a missing reading is never zero."""
+    state: str
+    newest: dt.datetime | None = None
+    why: str | None = None
+
+
+def _probe_unjudged(state: str, why: str | None = None) -> ProbeEntry:
+    return ProbeEntry(state, None, why if why is not None else PROBE_STATE_WHY.get(state, f"the reading names an unknown state {state!r}"))
+
+
+class LiveSourceProbe:
+    """The per-harness reading of the live sources the local-tool rules judge
+    against. Two shapes, one interface:
+
+      * a saved probe document (`--source-probe FILE`) — the whole reading at
+        once, so a board can be re-rendered from a reading taken elsewhere;
+      * this machine's live sources, probed read-only during this run, one
+        harness at a time and only when a rule actually needs it.
+
+    Either way, a harness the reading cannot qualify is a named state the
+    rule reads as unjudged — never as clean, never as an anomaly.
+    """
+
+    def __init__(
+        self,
+        available: bool,
+        reason: str | None,
+        origin: str,
+        entries: dict[str, ProbeEntry] | None = None,
+        probed_at: dt.datetime | None = None,
+        catalog: Catalog | None = None,
+    ):
+        self.available = available
+        self.reason = reason
+        self.origin = origin
+        self.entries = entries if entries is not None else {}
+        self.probed_at = probed_at
+        self.catalog = catalog
+        self.consulted: set[str] = set()
+
+    @classmethod
+    def from_document(cls, path: str) -> LiveSourceProbe | None:
+        if path is None:
+            return None
+        if not os.path.isfile(path):
+            return LiveSourceProbe(False, f"{path} is not a file", "saved probe document")
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            return LiveSourceProbe(False, f"unreadable: {exc.strerror or exc}", "saved probe document")
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return LiveSourceProbe(False, f"not valid JSON: {exc}", "saved probe document")
+        if not isinstance(parsed, dict):
+            return LiveSourceProbe(False, "not a JSON object", "saved probe document")
+        if parsed.get("schema") != SOURCE_PROBE_SCHEMA:
+            return LiveSourceProbe(
+                False,
+                f"schema is {parsed.get('schema')!r}, not {SOURCE_PROBE_SCHEMA}",
+                "saved probe document",
+            )
+        probed_at = parse_rfc3339(parsed.get("probed_at"))
+        entries: dict[str, ProbeEntry] = {}
+        harnesses = parsed.get("harnesses")
+        if isinstance(harnesses, dict):
+            for harness_id, payload in harnesses.items():
+                if not isinstance(harness_id, str) or not isinstance(payload, dict):
+                    entries[harness_id if isinstance(harness_id, str) else "<not a string>"] = _probe_unjudged(PROBE_GAP, "the row is not a JSON object")
+                    continue
+                state = payload.get("state")
+                if not isinstance(state, str) or not state:
+                    entries[harness_id] = _probe_unjudged(PROBE_GAP, "the row carries no state")
+                    continue
+                if state == PROBE_PROBED:
+                    newest_unix = payload.get("newest_unix")
+                    if isinstance(newest_unix, bool) or not isinstance(newest_unix, int):
+                        entries[harness_id] = _probe_unjudged(PROBE_PROBED, "the reading carries no newest timestamp")
+                        continue
+                    entries[harness_id] = ProbeEntry(
+                        PROBE_PROBED,
+                        dt.datetime.fromtimestamp(newest_unix, tz=dt.timezone.utc),
+                        None,
+                    )
+                    continue
+                entries[harness_id] = _probe_unjudged(state)
+        return cls(
+            True,
+            None,
+            f"saved probe document {path}",
+            entries=entries,
+            probed_at=probed_at,
+        )
+
+    def entry_for(self, harness_id: str, producer: str | None) -> ProbeEntry:
+        """The reading for one producer-split label. A web-capture producer
+        never consults a store at all: the browser extension is its source,
+        and the local-source probe has nothing to say about it."""
+        if producer == PRODUCER_WEB:
+            return _probe_unjudged(PROBE_WEB)
+        self.consulted.add(harness_id)
+        if not self.available:
+            return _probe_unjudged(PROBE_UNAVAILABLE)
+        if self.catalog is not None:
+            if harness_id not in self.entries:
+                tool = next((t for t in self.catalog.local if t.id == harness_id), None)
+                self.entries[harness_id] = _probe_live_harness(harness_id, tool)
+            return self.entries[harness_id]
+        # A saved document names exactly what it read; a harness it never read
+        # is a named gap, not a guess.
+        if harness_id not in self.entries:
+            return _probe_unjudged(PROBE_ABSENT)
+        return self.entries[harness_id]
+
+
+def _probe_sqlite_connect(path: str) -> sqlite3.Connection:
+    """Open `path` strictly read-only, mirroring the Rust probe's
+    `open_readonly` (`sqlite_probe.rs`): `mode=ro` always, plus
+    `immutable=1` exactly when the header marks the store WAL and no `-shm`
+    sidecar exists, because SQLite's read-only WAL access would otherwise
+    create the sidecars itself — the one filesystem side effect a probe must
+    never have. WAL is read from the format bytes at offsets 18/19."""
+    uri_path = path.replace("%", "%25").replace(" ", "%20")
+    uri = f"file:{uri_path}?mode=ro"
+    wal = False
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(100)
+        wal = len(header) >= 19 and header[18] == 2 and header[19] == 2
+    except OSError:
+        pass
+    if wal and not os.path.exists(path + "-shm"):
+        uri += "&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    conn.execute("PRAGMA busy_timeout=2000")
+    return conn
+
+
+def _probe_text_to_seconds(value: str) -> dt.datetime | None:
+    """The Rust probe's timestamp-text fallbacks: RFC 3339, then the naive
+    `%Y-%m-%dT…`/`%Y-%m-%d …` shapes, then a bare epoch-millis integer."""
+    trimmed = value.strip()
+    parsed = parse_rfc3339(trimmed)
+    if parsed is not None:
+        return parsed
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return dt.datetime.strptime(trimmed, fmt).replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+    try:
+        return dt.datetime.fromtimestamp(int(trimmed) / 1000.0, tz=dt.timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _probe_value_to_seconds(value: Any, is_seconds: bool) -> dt.datetime | None:
+    """One stored time value → an instant, mirroring the Rust probe's
+    `convert_epoch` / `parse_sqlite_timestamp_text`: integers are epochs in
+    the schema's unit (seconds for grok's `updated_at`, millis for cursor's
+    `createdAt` and opencode's `time_created`); text tries the date shapes
+    before falling back to a bare epoch. Any result is floored to whole
+    seconds — the archive's own `first_unix` axis is whole seconds, so a
+    millis source and its truncated archive row compare equal rather than
+    590 ms apart."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = value / 1000.0 if not is_seconds else float(value)
+        return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
+    if isinstance(value, str):
+        parsed = _probe_text_to_seconds(value)
+        if parsed is not None:
+            return parsed
+        try:
+            return dt.datetime.fromtimestamp(int(value) / 1000.0 if not is_seconds else int(value), tz=dt.timezone.utc)
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def _floor_seconds(moment: dt.datetime | None) -> dt.datetime | None:
+    if moment is None:
+        return None
+    return dt.datetime.fromtimestamp(int(moment.timestamp()), tz=dt.timezone.utc)
+
+
+# The `min`/`max` SQL fragment for a schema's declared time source, mirroring
+# `sqlite_probe.rs`'s `time_expression`: a declared column, else the JSON path
+# inside the value column (cursor's `$.createdAt`). A schema with neither
+# declares no readable time at all.
+def _probe_time_expression(cell: dict[str, Any]) -> list[str] | None:
+    time_column = cell.get("sql_time_column") or cell.get("default_time_column")
+    value_column = cell.get("sql_value_column")
+    json_path = cell.get("sql_time_json_path")
+    if time_column:
+        return [f'min("{time_column}")', f'max("{time_column}")']
+    if value_column and json_path:
+        escaped = json_path.replace("'", "''")
+        expr = f"json_extract(\"{value_column}\", '{escaped}')"
+        return [f"min({expr})", f"max({expr})"]
+    return None
+
+
+def _probe_sqlite_store(path: str, cell: dict[str, Any]) -> ProbeEntry:
+    """Probe one registry-declared SQLite store read-only: the newest
+    qualified timestamp the schema declares, or a named state when the store
+    is missing, unreadable, mismatched or carries no readable time.
+
+    Mirrors `sqlite_probe.rs`'s `probe_sqlite_sessions_with`: required
+    columns checked first (a mismatch is loudly named, never a zero), the
+    candidate `WHERE` (`key LIKE …` when declared), the `cursor_composer`
+    qualification for cursor, and the time `min()/max()` restricted to the
+    qualified rows and well-formed values (`json_valid`) — `json_extract`
+    errors rather than returning NULL, so a store with junk values must not
+    fail the whole probe (the count, not the guard, is what a junk row
+    loses).
+    """
+    if not os.path.isfile(path):
+        return _probe_unjudged(PROBE_MISSING)
+    try:
+        conn = _probe_sqlite_connect(path)
+    except sqlite3.Error:
+        return _probe_unjudged(PROBE_FAILED)
+    try:
+        try:
+            columns = [row[1] for row in conn.execute(f'PRAGMA table_info("{cell.get("sql_table") or cell.get("_default_table")}")')]
+        except sqlite3.Error:
+            return _probe_unjudged(PROBE_FAILED)
+        required = cell.get("_required_columns") or []
+        if not all(any(column == expect for column in columns) for expect in required):
+            return _probe_unjudged(PROBE_MISMATCH)
+        key_column = cell.get("sql_key_column")
+        key_pattern = cell.get("sql_key_pattern")
+        table = cell.get("sql_table") or cell.get("_default_table")
+        if key_column and key_pattern:
+            candidate_where = f" WHERE \"{key_column}\" LIKE '" + key_pattern.replace("'", "''") + "'"
+        else:
+            candidate_where = ""
+        where_sql = candidate_where
+        if cell.get("sql_qualification") == "cursor_composer":
+            value = cell.get("sql_value_column") or "value"
+            where_sql = (
+                f"{candidate_where} AND json_valid(\"{value}\")=1"
+                f" AND COALESCE(CAST(json_extract(\"{value}\", '$.isArchived') AS INTEGER), 0) <> 1"
+                f" AND ("
+                f"(json_type(\"{value}\", '$.fullConversationHeadersOnly')='array'"
+                f" AND json_array_length(\"{value}\", '$.fullConversationHeadersOnly') > 0)"
+                f" OR CAST(COALESCE(json_extract(\"{value}\", '$.promptTokenBreakdown.totalUsedTokens'), 0) AS INTEGER) > 0"
+                f")"
+            )
+        try:
+            qualified = conn.execute(f'SELECT count(*) FROM "{table}"{where_sql}').fetchone()[0]
+        except sqlite3.Error:
+            return _probe_unjudged(PROBE_MISMATCH)
+        expression = _probe_time_expression(cell)
+        latest = None
+        if expression is not None:
+            json_guard = (
+                f' AND json_valid("{cell.get("sql_value_column") or "value"}")=1'
+                if cell.get("sql_time_json_path")
+                else ""
+            )
+            try:
+                row = conn.execute(f'SELECT {expression[0]}, {expression[1]} FROM "{table}"{where_sql}{json_guard}').fetchone()
+            except sqlite3.Error:
+                return _probe_unjudged(PROBE_MISMATCH)
+            if row is None or len(row) != 2:
+                return _probe_unjudged(PROBE_MISMATCH)
+            for raw in (row[0], row[1]):
+                if raw is not None:
+                    parsed = _probe_value_to_seconds(raw, bool(cell.get("sql_time_value_is_seconds")))
+                    if parsed is not None and (latest is None or parsed > latest):
+                        latest = parsed
+        if qualified == 0:
+            return _probe_unjudged(PROBE_EMPTY)
+        if latest is None:
+            return _probe_unjudged(PROBE_NOTIME)
+        return ProbeEntry(PROBE_PROBED, _floor_seconds(latest), None)
+    finally:
+        conn.close()
+
+
+def _probe_root_from_env(cell: dict[str, Any]) -> tuple[str, bool] | None:
+    """Where a harness's store lives when an install overrode it, mirroring
+    the Rust `root_from_env_override`: the declared env var wins over the
+    template, and each override's value splices onto the template's static
+    suffix after its marker dir (cursor's `CURSOR_USER_DIR` names the
+    `…/Cursor/User` layer itself). Only the marker this probe's sqlite set
+    declares is mirrored; a declared override this table does not know
+    resolves to the template, not to a guess (the same rule the scanner
+    holds)."""
+    variable = cell.get("env_override")
+    if not variable:
+        return None
+    value = os.environ.get(variable, "").strip()
+    if not value:
+        return None
+    if variable == "OPENCODE_DB":
+        if value == ":memory:":
+            return value, True
+        if os.path.isabs(value):
+            return value, True
+        return os.path.join(_xdg_dir("XDG_DATA_HOME", ".local/share"), value), True
+    template = str(cell.get("template") or "").replace("\\", "/")
+    if "Cursor/User/" not in template:
+        return None
+    suffix = template.split("Cursor/User/", 1)[1]
+    static = suffix.split("<", 1)[0].rstrip("/")
+    if not static:
+        return value, False
+    return os.path.join(value, static), _looks_like_file(static)
+
+
+def _xdg_dir(variable: str, default_suffix: str) -> str:
+    """The XDG base the Rust scanner resolves: the env var when exported and
+    non-empty, else `~/<default_suffix>`."""
+    value = os.environ.get(variable, "").strip()
+    if value:
+        return value
+    return os.path.join(os.path.expanduser("~"), default_suffix)
+
+
+def _looks_like_file(path: str) -> bool:
+    """The scanner's `looks_like_file_path`: a dotted basename that is not a
+    dotfile — `state.vscdb` is a file, `.copilot` is not."""
+    component = path.rstrip("/\\").rsplit("/", 1)[-1] if "/" in path.rstrip("/\\") else path.rstrip("/\\")
+    return "." in component and not component.startswith(".")
+
+
+def _probe_static_root(template: str) -> tuple[str, bool] | None:
+    """Resolve a registry template's static prefix, mirroring the scanner's
+    `static_prefix_root`: a leading `~` is the home dir, `$HOME` / the XDG
+    three expand (with their documented defaults), `<…>` ends the anchor
+    (per-session detail this probe has no business resolving), and a variable
+    this rule does not know (`$CWD`) leaves the template unresolvable — the
+    probe names a gap rather than guessing a directory."""
+    out: list[str] = []
+    rest = template
+    while rest:
+        ch = rest[0]
+        if ch == "<":
+            return "".join(out).rstrip("/"), False
+        if ch == "~":
+            if out:
+                out.append("~")
+                rest = rest[1:]
+                continue
+            if rest == "~":
+                return os.path.expanduser("~"), False
+            if rest.startswith("~/"):
+                out.append(os.path.expanduser("~") + "/")
+                rest = rest[2:]
+                continue
+            return None
+        if ch == "$":
+            name_len = 1
+            while name_len < len(rest) and (rest[name_len].isalnum() or rest[name_len] == "_"):
+                name_len += 1
+            if name_len == 1:
+                return None
+            name = rest[1:name_len]
+            base = {
+                "HOME": os.path.expanduser("~"),
+                "XDG_DATA_HOME": _xdg_dir("XDG_DATA_HOME", ".local/share"),
+                "XDG_CONFIG_HOME": _xdg_dir("XDG_CONFIG_HOME", ".config"),
+                "XDG_STATE_HOME": _xdg_dir("XDG_STATE_HOME", ".local/state"),
+            }.get(name)
+            if base is None:
+                return None
+            out.append(base)
+            rest = rest[name_len:]
+            continue
+        out.append(ch)
+        rest = rest[1:]
+    resolved = "".join(out).rstrip("/\\")
+    if not resolved:
+        return None
+    return resolved, _looks_like_file(resolved)
+
+
+OPENCODE_DEFAULT_CELL = {
+    "sql_table": "session",
+    "_default_table": "session",
+    "_required_columns": ["id", "time_created", "time_updated"],
+    "default_time_column": "time_created",
+    "sql_time_value_is_seconds": False,
+}
+
+
+def _probe_cell_for(tool: LocalTool | None) -> dict[str, Any] | None:
+    """The registry cell a harness's live store is probed through: the
+    platform-resolved `paths` cell, or opencode's dedicated default schema for
+    a `sqlite` store the registry does not spell out (`spec_from_cell`'s
+    fallback). None = the probe does not read this harness's source."""
+    if tool is None or not tool.paths:
+        return None
+    platform_cell = {
+        "Darwin": "macos",
+        "Linux": "linux",
+        "Windows": "windows",
+    }.get(_platform.system())
+    if platform_cell is None:
+        return None
+    cell = tool.paths.get(platform_cell)
+    if not isinstance(cell, dict):
+        return None
+    if cell.get("format") != "sqlite":
+        return None
+    if cell.get("sql_table"):
+        shaped = dict(cell)
+        shaped["_default_table"] = cell["sql_table"]
+        if not cell.get("sql_required_columns"):
+            shaped["_required_columns"] = [
+                name
+                for name in (cell.get("sql_key_column"), cell.get("sql_time_column"), cell.get("sql_value_column"))
+                if name
+            ]
+        else:
+            shaped["_required_columns"] = cell["sql_required_columns"]
+        return shaped
+    # format == "sqlite" with no declared table: opencode's default schema,
+    # the same fallback `spec_from_cell` gives the scanner.
+    merged = dict(OPENCODE_DEFAULT_CELL)
+    merged["template"] = cell.get("template")
+    merged["env_override"] = cell.get("env_override")
+    return merged
+
+
+def _probe_cursor_legacy(user_dir: str) -> tuple[int, dt.datetime | None]:
+    """Cursor's legacy `workspaceStorage` fallback, mirroring
+    `sqlite_probe.rs`'s legacy walk and `probe_cursor_harness`'s
+    fallback condition: only when the global store yields nothing. Each
+    workspace's `ItemTable` holds the composer array under
+    `composer.composerData` (preferred) or `allComposers`; a composer
+    qualifies when it is not archived and carries a non-empty inline
+    `conversation` array, and its time is its own `createdAt` (epoch millis).
+    Returns (qualified_count, newest) over every readable workspace."""
+    storage = os.path.join(user_dir, "workspaceStorage")
+    qualified = 0
+    newest: dt.datetime | None = None
+    try:
+        workspaces = sorted(os.listdir(storage))
+    except OSError:
+        return 0, None
+    for workspace in workspaces:
+        db = os.path.join(storage, workspace, "state.vscdb")
+        if not os.path.isfile(db):
+            continue
+        try:
+            conn = _probe_sqlite_connect(db)
+        except sqlite3.Error:
+            continue
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT value FROM ItemTable WHERE key IN ('composer.composerData', 'allComposers') "
+                    "ORDER BY CASE key WHEN 'composer.composerData' THEN 0 ELSE 1 END LIMIT 1"
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            for (raw,) in rows:
+                if not isinstance(raw, (str, bytes)) or len(raw) == 0:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                composers = None
+                if isinstance(payload, dict) and isinstance(payload.get("allComposers"), list):
+                    composers = payload["allComposers"]
+                elif isinstance(payload, list):
+                    composers = payload
+                if composers is None:
+                    continue
+                for composer in composers:
+                    if not isinstance(composer, dict):
+                        continue
+                    if composer.get("isArchived") is True:
+                        continue
+                    conversation = composer.get("conversation")
+                    if not isinstance(conversation, list) or not conversation:
+                        # No inline conversation: a metadata-only index entry
+                        # whose body lives elsewhere — not a qualified
+                        # session (the same verdict the Rust walk reaches).
+                        continue
+                    qualified += 1
+                    moment = _probe_value_to_seconds(composer.get("createdAt"), False)
+                    if moment is not None and (newest is None or moment > newest):
+                        newest = moment
+        finally:
+            conn.close()
+    return qualified, newest
+
+
+def _probe_live_harness(harness_id: str, tool: LocalTool | None) -> ProbeEntry:
+    """One harness's live-source reading. The probe reads the registry's
+    single-file SQLite stores (cursor, grok, zed, hermes-agent, opencode)
+    through the same declared specs the Rust scanner probes with, honors the
+    registry's env overrides, and names everything else a gap — a
+    file-family source (claude-code, gemini-cli, kimi-code, …) or a
+    directory root has no single-file store to open, and "not probed yet" is
+    the honest state, never a zero."""
+    cell = _probe_cell_for(tool)
+    if cell is None:
+        return _probe_unjudged(PROBE_GAP)
+    root = _probe_root_from_env(cell)
+    if root is None:
+        root = _probe_static_root(str(cell.get("template") or ""))
+    if root is None:
+        return _probe_unjudged(PROBE_GAP)
+    path, is_file = root
+    if harness_id == "opencode" and path == ":memory:":
+        return _probe_unjudged(PROBE_GAP, "no persistent store is configured for this harness")
+    if not is_file:
+        # A directory root (the registry lists the store as a directory) is a
+        # multi-store shape the single-file probe does not walk.
+        return _probe_unjudged(PROBE_GAP)
+    entry = _probe_sqlite_store(path, cell)
+    if harness_id != "cursor":
+        return entry
+    # Cursor falls back to its legacy workspaceStorage when the global store
+    # yields nothing — the same conditions `probe_cursor_harness`'s
+    # `global_needs_fallback` holds (missing, unreadable, mismatched or zero
+    # qualified) — and the newest qualified composer then comes from the
+    # legacy walk. The User dir is globalStorage's parent, mirroring
+    # `cursor_user_dir_from_global_db`'s two-step walk up from the db file.
+    if entry.state not in (PROBE_MISSING, PROBE_FAILED, PROBE_MISMATCH, PROBE_EMPTY):
+        return entry
+    user_dir = os.path.dirname(os.path.dirname(path))
+    qualified, newest = _probe_cursor_legacy(user_dir)
+    if qualified == 0 or newest is None:
+        return entry if entry.state in (PROBE_MISSING, PROBE_FAILED, PROBE_MISMATCH) else _probe_unjudged(PROBE_EMPTY)
+    return ProbeEntry(PROBE_PROBED, _floor_seconds(newest), None)
+
+
+# ---------------------------------------------------------------------------
 # Previous-run state
 # ---------------------------------------------------------------------------
 
@@ -1231,7 +1922,8 @@ def _restore_tracks(previous: dict[str, Any] | None) -> dict[tuple[str, str], In
 
 
 def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: OverviewReading,
-             oracle: OracleReading, editorial: EditorialReading, state: StateReading) -> Evaluation:
+             oracle: OracleReading, editorial: EditorialReading, state: StateReading,
+             probe: LiveSourceProbe) -> Evaluation:
     now = args.parsed_now
     ev = Evaluation()
     tracks = _restore_tracks(state.previous)
@@ -1344,6 +2036,18 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     # Cell stats and arrivals are keyed by the producer-split label, so a
     # shared id space (grok: web captures and the local CLI) reports each
     # producer's own count and newest session instead of one merged number.
+    #
+    # The rule itself no longer fires on archive age alone: an archive's
+    # newest known session being old is only *suspicious* — a fresh archive
+    # proves recent capture by itself, and an old one is resolved against the
+    # live source's newest qualified timestamp (the probe). Source caught up
+    # = quiet (named in the visibility list, never an anomaly and never an
+    # all-clear); source carrying something the archive lacks, itself older
+    # than the window = the anomaly; a source the probe cannot qualify =
+    # unjudged, named, never passed. Reading "old archive" as "stopped" is
+    # exactly the confusion this removes (W952: cursor was quiet, not stopped).
+    quiet_local: list[str] = []
+    unjudged_local: list[str] = []
     for session in overview.sessions:
         key = (session.machine, overview.label_for(session))
         total, unknown, no_content = ev.cell_stats.get(key, (0, 0, 0))
@@ -1357,12 +2061,36 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
                 continue
             newest = max(anchors, key=lambda pair: pair[0])
             ev.tool_newest[label] = newest
-            age = (now - newest[0]).total_seconds()
-            if age > quiet_seconds:
-                ev.anomalies.append(
-                    f"no-new-capture: {label} — newest archived session content is {fmt_age(age)} old "
-                    f"({iso_z(newest[0])}, machine {newest[1]})"
-                )
+            if (now - newest[0]).total_seconds() <= quiet_seconds:
+                # A fresh archive needs no source reading: capture happened
+                # within the window, which is the fact the rule asks for.
+                continue
+            producer = label[len(tool.id) + 2 : -1] if label.startswith(tool.id + " (") and label.endswith(")") else None
+            entry = probe.entry_for(tool.id, producer)
+            if entry.newest is None:
+                unjudged_local.append(f"{label} ({entry.why})")
+                continue
+            source_age = (now - entry.newest).total_seconds()
+            if entry.newest > newest[0]:
+                if source_age > quiet_seconds:
+                    # The source has carried a qualified session the archive
+                    # still lacks for a whole window: not between runs —
+                    # lagging or stopped. (A source-newer session younger
+                    # than the window is normal pipeline lag: clean,
+                    # unlisted — the next run compares it as the archive
+                    # catches up.)
+                    ev.anomalies.append(
+                        f"no-new-capture: {label} — the live source's newest qualified session "
+                        f"({iso_z(entry.newest)}) is newer than the archive's newest "
+                        f"({iso_z(newest[0])}, machine {newest[1]}); capture is lagging or stopped"
+                    )
+                continue
+            pair = (
+                f"both {iso_z(newest[0])}"
+                if entry.newest == newest[0]
+                else f"source {iso_z(entry.newest)}, archive {iso_z(newest[0])}"
+            )
+            quiet_local.append(f"{label} ({pair})")
     for (machine, group), (total, unknown, no_content) in sorted(ev.cell_stats.items()):
         denominator = total - no_content
         if denominator <= 0 or unknown == 0:
@@ -1394,7 +2122,7 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
                 )
 
     # -- source availability, freshness, and their anomalies ------------------
-    ev.sources, source_anomalies = _source_rows(args, ext, overview, oracle, editorial, state, now)
+    ev.sources, source_anomalies = _source_rows(args, ext, overview, oracle, editorial, state, probe, now)
     ev.anomalies.extend(source_anomalies)
 
     # -- per-install report age (a status report past the freshness limit) ----
@@ -1486,16 +2214,45 @@ def evaluate(args: argparse.Namespace, ext: ExtStatusReading, overview: Overview
     if not overview.available:
         ev.not_evaluable.append("time-unknown-share + no-new-capture (local tools) — overview document is unavailable")
     else:
-        no_known_time: list[str] = []
+        # The no-new-capture states the probe resolved this run, in the
+        # visibility list — never an all-clear, and the archive-age anomaly
+        # they replace can no longer fire behind their backs.
+        if unjudged_local:
+            ev.not_evaluable.append(
+                "no-new-capture (local tools) — the live source could not be qualified, so quiet "
+                "cannot be told from stopped; named as unjudged, never passed: "
+                + ", ".join(unjudged_local)
+            )
+        if quiet_local:
+            ev.not_evaluable.append(
+                "quiet (local tools) — the live source's newest qualified session equals the "
+                "archive's newest; nothing new exists to capture: " + ", ".join(quiet_local)
+            )
+        # "No known time" is split by cause (W952 §Q3): a harness the current
+        # reader reads a time for is a stale archive — the field exists and a
+        # re-ingest reads it; a harness with no time reader at all is a reader
+        # gap — no re-ingest can help until the product learns the shape.
+        stale_archive: list[str] = []
+        no_reader: list[str] = []
         for tool in args.catalog.local:
             for label in overview.group_labels(tool.id):
                 rows = overview.sessions_for_label(label)
                 if rows and ev.tool_newest.get(label) is None:
-                    no_known_time.append(label)
-        if no_known_time:
+                    if tool.id in args.time_reader_ids:
+                        stale_archive.append(label)
+                    else:
+                        no_reader.append(label)
+        parts = []
+        if stale_archive:
+            parts.append(
+                "stale archive, field present and reader implemented (re-ingest): " + ", ".join(stale_archive)
+            )
+        if no_reader:
+            parts.append("reader not implemented: " + ", ".join(no_reader))
+        if parts:
             ev.not_evaluable.append(
-                "no-new-capture (local tools) — sessions exist but none carries a known time, so no age can be read: "
-                + ", ".join(no_known_time)
+                "no known time (local tools) — sessions exist but the current reader extracts no "
+                "time, so no age can be read; split by cause — " + "; ".join(parts)
             )
     if not editorial.available:
         ev.not_evaluable.append("verification-stale — editorial fields are unavailable")
@@ -1518,6 +2275,7 @@ def _source_rows(
     oracle: OracleReading,
     editorial: EditorialReading,
     state: StateReading,
+    probe: LiveSourceProbe,
     now: dt.datetime,
 ) -> tuple[list[tuple[str, str, str]], list[str]]:
     rows: list[tuple[str, str, str]] = []
@@ -1624,6 +2382,40 @@ def _source_rows(
         else:
             freshness += " · no readable last_verified date in the source"
         rows.append(("editorial fields", state_text, freshness))
+
+    # live source probe (the input the local-tool no-new-capture rule judges
+    # suspicious archives against)
+    if not probe.available:
+        rows.append(("live source probe", f"{UNAVAILABLE} — {probe.reason}", "n/a"))
+        anomalies.append(f"source-unavailable: live source probe — {probe.reason}")
+    else:
+        if probe.catalog is not None:
+            state_text = "available · this machine's live sources, probed read-only during this run"
+            if probe.consulted:
+                freshness = f"{len(probe.consulted)} harness consultation(s) during this run"
+            else:
+                freshness = "not consulted this run (no local-tool rule needed a source reading)"
+        else:
+            state_text = (
+                f"available · {probe.origin}"
+                + (f" · {len(probe.entries)} harness(es) with a reading" if probe.entries else "")
+            )
+            if probe.probed_at is not None:
+                freshness = f"probed {when(probe.probed_at, now)}"
+                age = (now - probe.probed_at).total_seconds()
+                if age > stale_limit:
+                    freshness += " — stale"
+                    anomalies.append(
+                        f"source-stale: live source probe — reading is {fmt_age(age)} old "
+                        f"(limit {args.stale_hours:.0f} h)"
+                    )
+            else:
+                freshness = "no readable probed_at"
+                anomalies.append(
+                    "source-stale: live source probe — the document carries no readable probed_at, "
+                    "counted as stale"
+                )
+        rows.append(("live source probe", state_text, freshness))
 
     # previous-run state (its own row: rule 2 lives or dies here)
     if state.enabled:
@@ -1990,6 +2782,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--editorial",
         help="override the editorial fields with this JSON file (default: read them from the two platform sources under --root)",
     )
+    parser.add_argument(
+        "--source-probe",
+        help="a saved live-source probe document (default: probe this machine's live sources read-only during the run)",
+    )
     parser.add_argument("--now", help="the reference clock, RFC3339 (default: the system clock)")
     parser.add_argument(
         "--stale-hours", type=float, default=DEFAULT_STALE_HOURS,
@@ -2030,6 +2826,7 @@ def prepare(args: argparse.Namespace) -> None:
         if value is None or value < 0:
             raise UsageError(f"{flag} must be a non-negative number")
     args.catalog = load_catalog(args.root if args.root else default_root())
+    args.time_reader_ids, args.time_reader_origin = load_time_reader_list(args.root if args.root else default_root())
 
 
 def atomic_write(path: str, body: str) -> None:
@@ -2062,8 +2859,14 @@ def main(argv: list[str]) -> int:
     overview = read_overview(args.overview)
     oracle = read_oracle(args.oracle)
     editorial = read_editorial(args.editorial, args.catalog, args.root or default_root())
+    saved_probe = LiveSourceProbe.from_document(args.source_probe)
+    if saved_probe is None:
+        # No document handed in: the reading is taken from this machine's own
+        # live sources, read-only, one harness at a time and only when a rule
+        # needs it (see LiveSourceProbe).
+        saved_probe = LiveSourceProbe(True, None, "this machine's live sources", catalog=args.catalog)
     state = load_state(resolve_state(args))
-    ev = evaluate(args, ext, overview, oracle, editorial, state)
+    ev = evaluate(args, ext, overview, oracle, editorial, state, saved_probe)
     board = render_markdown(args, ext, overview, oracle, editorial, state, ev)
     try:
         if args.out:
@@ -2224,8 +3027,11 @@ def selftest() -> int:
         print(f"[scoreboard] selftest WRONG: {label}")
         return False
 
-    def run_cli(args_list: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, here] + args_list, capture_output=True, text=True)
+    def run_cli(args_list: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        merged_env = dict(os.environ)
+        if env:
+            merged_env.update(env)
+        return subprocess.run([sys.executable, here] + args_list, capture_output=True, text=True, env=merged_env)
 
     def base_args(
         root: str,
@@ -2235,6 +3041,7 @@ def selftest() -> int:
         editorial: str | None = None,
         quiet_days: str | None = None,
         unknown_share: str | None = None,
+        source_probe: str | None = None,
     ) -> list[str]:
         args = ["--root", root, "--now", NOW]
         if ext_status:
@@ -2250,6 +3057,8 @@ def selftest() -> int:
             args += ["--quiet-days", quiet_days]
         if unknown_share:
             args += ["--unknown-share", unknown_share]
+        if source_probe:
+            args += ["--source-probe", source_probe]
         return args
 
     repo_root = default_root()
@@ -2450,11 +3259,28 @@ def selftest() -> int:
             mtime=UNIX_NOW,
         )
 
+        def _probe_document(harnesses: dict[str, Any], probed_at: str = NOW) -> dict[str, Any]:
+            return {
+                "schema": SOURCE_PROBE_SCHEMA,
+                "probed_at": probed_at,
+                "harnesses": harnesses,
+            }
+
+        # The standard probe reading: the quiet tool is caught up with its
+        # source (both at UNIX_QUIET), which is the case the old rule misread
+        # as "stopped" and the new rule names quiet. Its absence from other
+        # harnesses is what the unjudged cases below exercise.
+        probe_path = _write_json(
+            os.path.join(tmp, "source-probe.json"),
+            _probe_document({quiet_tool: {"state": "probed", "newest_unix": UNIX_QUIET}}),
+            mtime=UNIX_NOW,
+        )
+
         # ---------------- case: full run, every source present -------------
         out_path = os.path.join(tmp, "board.md")
         state_path = out_path + STATE_SUFFIX
         result = run_cli(
-            base_args(repo_root, ext_dir, overview_path, [oracle_dir], editorial_path)
+            base_args(repo_root, ext_dir, overview_path, [oracle_dir], editorial_path, source_probe=probe_path)
             + ["--out", out_path]
         )
         expect(result.returncode == 0, f"full run exits 0 (got {result.returncode}: {result.stderr})")
@@ -2480,19 +3306,25 @@ def selftest() -> int:
         expect("40.0%" in text, "a below-threshold share is still displayed")
         expect("share n/a (no conversation content)" in text, "no-content cells say share n/a, not 0%")
         expect(f"verification-stale: {first_platform} — last verified 2026-06-20" in text, "verification-stale fires past the 90-day window")
-        expect(f"no-new-capture: {quiet_tool} — newest archived session content is 4.0 d old" in text, "quiet local tool is flagged by content age")
+        expect(
+            f"quiet (local tools) — the live source's newest qualified session equals the archive's newest; "
+            f"nothing new exists to capture: {quiet_tool} (both 2026-09-25T18:00:00Z)" in text,
+            "a caught-up local tool is named quiet in the visibility list, not flagged as stopped",
+        )
+        expect(f"no-new-capture: {quiet_tool}" not in text, "a quiet local tool leaves ANOMALIES: archive age alone no longer flags it")
         expect(f"no-new-capture: {first_tool}" not in text, "fresh local tool is not flagged")
         expect("unknown (no known-time session)" in text, "a tool whose sessions carry no readable time says unknown, not a fabricated age")
         expect(
-            "no-new-capture (local tools) — sessions exist but none carries a known time, so no age can be read: "
-            f"{second_tool}" in text,
-            "the no-known-time state is named in the not-evaluable list, never silently passed",
+            "no known time (local tools) — sessions exist but the current reader extracts no time, "
+            "so no age can be read; split by cause — stale archive, field present and reader "
+            f"implemented (re-ingest): {second_tool}" in text,
+            "a no-known-time tool with a reader is a stale archive a re-ingest can read, never silently passed",
         )
         expect("recall 58/234 = 24.8%" in text, "newest oracle result supplies the platform cell")
         expect("1 older result(s) in the results section" in text, "older oracle results are referenced, not hidden")
         expect("window 2025-01-05 → 2026-06-29" in text, "the export window travels with the recall number")
         expect("an-id-nobody-knows" in text, "editorial rows for unknown ids are listed, never dropped")
-        expect("source-unavailable:" not in text, "no unavailable-source anomaly when all four sources are present")
+        expect("source-unavailable:" not in text, "no unavailable-source anomaly when all five sources are present")
         expect("| 12 install(s)" not in text and "pending total" not in text, "pending is never summed into a platform total")
         expect("| 12 | 3 |" in text and "| 30 | 9 |" in text, "each install's own captured/pending pair is listed")
         expect("| 2 install(s) | 2 install(s) | 1 install(s) |" in text, "install counts aggregate, counts of installs")
@@ -2545,8 +3377,16 @@ def selftest() -> int:
             "the merged grok row is gone: a single number can no longer hide the dead leg",
         )
         expect(
-            "no-new-capture: grok (web capture) — newest archived session content is 4.0 d old" in text,
-            "the stalled web producer is flagged by its own content age",
+            "no-new-capture: grok (web capture) — newest archived session content is 4.0 d old"
+            not in text,
+            "a stalled web-producer leg is no longer flagged by archive age alone: the local-source "
+            "probe cannot qualify it, and the rule says so instead of guessing",
+        )
+        expect(
+            "no-new-capture (local tools) — the live source could not be qualified, so quiet "
+            "cannot be told from stopped; named as unjudged, never passed: grok (web capture) "
+            "(a web capture's source is the browser extension, not a local store)" in text,
+            "the web-producer leg is named unjudged with the probe's reason, never passed",
         )
         expect(
             "no-new-capture: grok (local harness)" not in text,
@@ -2603,6 +3443,422 @@ def selftest() -> int:
             "Machine A (machine-a) (machine-a)" not in text,
             "the anomaly never names a machine twice",
         )
+
+        # ---------------- case: a newer live source is the anomaly ----------
+        # The one state the archive cannot excuse: the source carries a
+        # qualified session the archive still lacks, and that session is
+        # itself older than the quiet window — the pipeline had a whole
+        # window to capture it and did not. This is the anomaly the
+        # quiet/unjudged split keeps honest: it must still exist.
+        UNIX_SRC_NEWER = UNIX_NOW - 302400  # 3.5 d before NOW
+        newer_sessions = [_session("cursor", "machine-a", "known", UNIX_QUIET)]
+        newer_path = _write_json(
+            os.path.join(tmp, "overview-newer.json"), _overview_doc(newer_sessions), mtime=UNIX_NOW
+        )
+        newer_probe = _write_json(
+            os.path.join(tmp, "probe-newer.json"),
+            _probe_document({"cursor": {"state": "probed", "newest_unix": UNIX_SRC_NEWER}}),
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(repo_root, None, newer_path, source_probe=newer_probe) + ["--no-state"])
+        expect(result.returncode == 0, f"newer-source run exits 0 (got {result.returncode}: {result.stderr})")
+        text = result.stdout
+        expect(
+            "no-new-capture: cursor — the live source's newest qualified session (2026-09-26T06:00:00Z) "
+            "is newer than the archive's newest (2026-09-25T18:00:00Z, machine machine-a); "
+            "capture is lagging or stopped" in text,
+            "a source session the archive lacks, older than the window, is the anomaly",
+        )
+        expect("quiet (local tools)" not in text, "a lagging capture is not called quiet")
+
+        # ---------------- case: cursor leaves ANOMALIES ---------------------
+        # The pinned W952 story: cursor's archive is old, its source is caught
+        # up, and the old rule read that as a capture stoppage. Under the new
+        # rule the comparison resolves the suspicion as quiet — named in the
+        # visibility list with both timestamps, never an all-clear, and gone
+        # from ANOMALIES.
+        cursor_sessions = [_session("cursor", "machine-a", "known", UNIX_QUIET)]
+        cursor_path = _write_json(
+            os.path.join(tmp, "overview-cursor.json"), _overview_doc(cursor_sessions), mtime=UNIX_NOW
+        )
+        equal_probe = _write_json(
+            os.path.join(tmp, "probe-equal.json"),
+            _probe_document({"cursor": {"state": "probed", "newest_unix": UNIX_QUIET}}),
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(repo_root, None, cursor_path, source_probe=equal_probe) + ["--no-state"])
+        expect(result.returncode == 0, f"quiet-cursor run exits 0 (got {result.returncode}: {result.stderr})")
+        text = result.stdout
+        expect(
+            "quiet (local tools) — the live source's newest qualified session equals the archive's "
+            "newest; nothing new exists to capture: cursor (both 2026-09-25T18:00:00Z)" in text,
+            "cursor resolves to the quiet list against a caught-up source",
+        )
+        expect("no-new-capture: cursor" not in text, "cursor leaves ANOMALIES: neither age nor suspicion flags it now")
+        expect("named as unjudged, never passed: cursor" not in text, "a qualified quiet reading is not named unjudged")
+
+        # ---------------- case: an unqualifiable probe reading ---------------
+        # A suspicious archive the probe document has no row for — the rule
+        # stays unjudged and is never passed; the old archive-age anomaly must
+        # not fire behind the probe's back.
+        empty_probe = _write_json(
+            os.path.join(tmp, "probe-empty.json"), _probe_document({}), mtime=UNIX_NOW
+        )
+        result = run_cli(base_args(repo_root, None, cursor_path, source_probe=empty_probe) + ["--no-state"])
+        expect(result.returncode == 0, "empty-probe run exits 0")
+        text = result.stdout
+        expect(
+            "no-new-capture (local tools) — the live source could not be qualified, so quiet "
+            "cannot be told from stopped; named as unjudged, never passed: cursor "
+            "(the probe document has no row for this harness)" in text,
+            "a harness the reading never covered is named unjudged with the gap, never passed",
+        )
+        expect("no-new-capture: cursor" not in text, "an unjudged tool never falls back to the archive-age anomaly")
+
+        # ---------------- case: an unavailable probe document ----------------
+        result = run_cli(base_args(repo_root, None, cursor_path) + ["--no-state", "--source-probe", os.path.join(tmp, "not-a-probe.json")])
+        expect(result.returncode == 0, "missing-probe run exits 0")
+        text = result.stdout
+        expect(
+            "source-unavailable: live source probe — " in result.stdout
+            and "not-a-probe.json is not a file" in result.stdout,
+            "a probe document that cannot be read is unavailable, never silently swapped for a live reading",
+        )
+        expect(
+            "named as unjudged, never passed: cursor (the live-source probe is unavailable)" in text,
+            "an unavailable probe leaves the rule unjudged, never passed",
+        )
+        bad_probe = _write_json(
+            os.path.join(tmp, "probe-wrong-schema.json"),
+            {"schema": "someone-else@1", "harnesses": {"cursor": {"state": "probed", "newest_unix": 1}}},
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(repo_root, None, cursor_path) + ["--no-state", "--source-probe", bad_probe])
+        expect(
+            "schema is 'someone-else@1'" in result.stdout,
+            "a probe document of another schema is refused with its reason",
+        )
+
+        # ---------------- case: a stale probe document ------------------------
+        # A saved reading is judged against --stale-hours like every other
+        # saved input: named stale, never silently trusted.
+        stale_probe = _write_json(
+            os.path.join(tmp, "probe-stale.json"),
+            _probe_document({"cursor": {"state": "probed", "newest_unix": UNIX_QUIET}}, probed_at="2026-09-24T18:00:00Z"),
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(repo_root, None, cursor_path, source_probe=stale_probe) + ["--no-state"])
+        expect(result.returncode == 0, "stale-probe run exits 0")
+        text = result.stdout
+        expect(
+            "source-stale: live source probe — reading is 5.0 d old (limit 48 h)" in text,
+            "a probe reading older than the freshness limit is named stale",
+        )
+        expect(
+            "quiet (local tools) — the live source's newest qualified session equals the archive's "
+            "newest; nothing new exists to capture: cursor (both 2026-09-25T18:00:00Z)" in text,
+            "a stale reading still answers with its own data, like every other stale source",
+        )
+
+        # ---------------- case: no known time, split by cause ----------------
+        # Two causes, one line (W952 §Q3): a reader a re-ingest can use vs a
+        # missing reader. The reader list is parsed from the current build's
+        # own `SUPPORTED_HARNESSES`, so the split follows the reader, not a
+        # second opinion.
+        unknown_sessions: list[dict[str, Any]] = []
+        for index in range(2):
+            unknown_sessions.append(_session("gemini-cli", "machine-a", "unknown", session_index=1100 + index))
+        for index in range(2):
+            unknown_sessions.append(_session("codex", "machine-a", "unknown", session_index=1200 + index))
+        for index in range(3):
+            unknown_sessions.append(_session("github-copilot-cli", "machine-a", "unknown", session_index=1300 + index))
+        unknowns_path = _write_json(
+            os.path.join(tmp, "overview-unknowns.json"), _overview_doc(unknown_sessions), mtime=UNIX_NOW
+        )
+        result = run_cli(base_args(repo_root, None, unknowns_path) + ["--no-state"])
+        expect(result.returncode == 0, "unknowns run exits 0")
+        text = result.stdout
+        expect(
+            "no known time (local tools) — sessions exist but the current reader extracts no time, "
+            "so no age can be read; split by cause — stale archive, field present and reader "
+            "implemented (re-ingest): codex, gemini-cli; reader not implemented: github-copilot-cli" in text,
+            "the no-known-time state is split by cause: re-ingest where a reader exists, "
+            "reader gap where none does, never silently passed",
+        )
+
+        # ---------------- case: a fresh source-newer session is pipeline lag --
+        # The source carries something the archive lacks, but young enough
+        # that the hourly pipeline may simply not have run past it: not an
+        # anomaly, not quiet — clean and unlisted.
+        lag_probe = _write_json(
+            os.path.join(tmp, "probe-lag.json"),
+            _probe_document({"cursor": {"state": "probed", "newest_unix": UNIX_FRESH}}),
+            mtime=UNIX_NOW,
+        )
+        result = run_cli(base_args(repo_root, None, cursor_path, source_probe=lag_probe) + ["--no-state"])
+        expect(result.returncode == 0, "lag run exits 0")
+        text = result.stdout
+        expect("no-new-capture: cursor" not in text, "a within-window pipeline lag is not called stopped")
+        expect("quiet (local tools)" not in text, "a lag with something new to capture is not called quiet")
+
+        # ---------------- pinned: the reader list mirror ----------------------
+        parsed_readers, reader_origin = load_time_reader_list(repo_root)
+        expect(
+            parsed_readers == set(SUPPORTED_TIME_HARNESSES),
+            f"the pinned SUPPORTED_TIME_HARNESSES equals activity.rs's parsed list ({reader_origin})",
+        )
+
+        # ---------------- case: the builtin probe, end to end ------------------
+        # A cursor store crafted to carry one qualified composer per lifetime
+        # corner — archived, empty, unqualified junk, a NULL value — read
+        # through the registry's declared `cursor_composer` rule with the
+        # probe's own mode=ro connection, and the store must come out
+        # byte-identical, sidecars included.
+
+        def _snapshot_tree(root_dir: str) -> dict[str, tuple[int, bytes]]:
+            snap: dict[str, tuple[int, bytes]] = {}
+            for base, _dirs, names in os.walk(root_dir):
+                for name in names:
+                    full = os.path.join(base, name)
+                    with open(full, "rb") as handle:
+                        snap[os.path.relpath(full, root_dir)] = (os.stat(full).st_size, handle.read())
+            return snap
+
+        builtin_user = os.path.join(tmp, "cursor-builtin-user")
+        builtin_store = os.path.join(builtin_user, "globalStorage", "state.vscdb")
+        os.makedirs(os.path.dirname(builtin_store), exist_ok=True)
+        conn = sqlite3.connect(builtin_store)
+        conn.execute("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)")
+        qualified_older_ms = (UNIX_QUIET - 86400) * 1000
+        # A millisecond tail inside the archived second: the probe floors like
+        # the archive truncates, so the comparison reads equal, not 590 ms
+        # apart.
+        qualified_newest_ms = UNIX_QUIET * 1000 + 590
+        archived_ms = (UNIX_QUIET + 3600) * 1000  # newer than everything, must be excluded
+        conn.executemany(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            [
+                ("composerData:q-older", json.dumps(
+                    {"createdAt": qualified_older_ms, "fullConversationHeadersOnly": [{"role": "user"}]}
+                )),
+                ("composerData:q-newest", json.dumps(
+                    {"createdAt": qualified_newest_ms, "fullConversationHeadersOnly": [],
+                     "promptTokenBreakdown": {"totalUsedTokens": 3}}
+                )),
+                ("composerData:archived", json.dumps(
+                    {"createdAt": archived_ms, "isArchived": 1, "fullConversationHeadersOnly": [{"role": "user"}]}
+                )),
+                ("composerData:empty", json.dumps(
+                    {"createdAt": archived_ms, "fullConversationHeadersOnly": [],
+                     "promptTokenBreakdown": {"totalUsedTokens": 0}}
+                )),
+                ("composerData:junk", "not json at all"),
+                ("otherKey:unrelated", json.dumps({"createdAt": archived_ms})),
+            ],
+        )
+        # A row with a NULL value: `json_valid(NULL)<>1` drops it, exactly like
+        # the Rust predicate.
+        conn.execute("INSERT INTO cursorDiskKV (key, value) VALUES (?, NULL)", ("composerData:nulled",))
+        conn.commit()
+        conn.close()
+        before_tree = _snapshot_tree(builtin_user)
+        result = run_cli(
+            base_args(repo_root, None, cursor_path) + ["--no-state"],
+            env={"CURSOR_USER_DIR": builtin_user},
+        )
+        expect(result.returncode == 0, f"builtin-probe run exits 0 (got {result.returncode}: {result.stderr})")
+        text = result.stdout
+        expect(
+            "quiet (local tools) — the live source's newest qualified session equals the archive's "
+            "newest; nothing new exists to capture: cursor (both 2026-09-25T18:00:00Z)" in text,
+            "the builtin probe read the crafted store: archived/empty/junk rows excluded, "
+            "the qualified newest (millis floored) matches the archive's whole seconds",
+        )
+        expect("no-new-capture: cursor" not in text, "the builtin probe's reading keeps cursor out of ANOMALIES")
+        expect(
+            "1 harness consultation(s) during this run" in text,
+            "the sources row counts this run's live consultations",
+        )
+        expect(
+            "available · this machine's live sources, probed read-only during this run" in text,
+            "the builtin reading names its origin, like every other source row",
+        )
+        expect(
+            _snapshot_tree(builtin_user) == before_tree,
+            "the builtin probe leaves the crafted store byte-identical, no sidecar files created",
+        )
+
+        # ---------------- case: cursor's legacy fallback ---------------------
+        # No global store at all: the probe falls back to the workspaceStorage
+        # walk (`probe_cursor_harness`'s fallback), where a qualified legacy
+        # composer carries `createdAt` and a body-elsewhere entry must not
+        # win the newest.
+        legacy_user = os.path.join(tmp, "cursor-legacy-user")
+        legacy_ws = os.path.join(legacy_user, "workspaceStorage", "ws-1")
+        os.makedirs(legacy_ws, exist_ok=True)
+        legacy_newest_ms = (UNIX_QUIET + 7200) * 1000
+        legacy_body_elsewhere_ms = (UNIX_QUIET + 90000) * 1000  # newer, but not qualified
+        legacy_conn = sqlite3.connect(os.path.join(legacy_ws, "state.vscdb"))
+        legacy_conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        legacy_conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES ('composer.composerData', ?)",
+            (json.dumps([
+                {"composerId": "leg-old", "createdAt": (UNIX_QUIET - 86400) * 1000, "conversation": [{"m": 1}]},
+                {"composerId": "leg-archived", "createdAt": legacy_body_elsewhere_ms,
+                 "isArchived": True, "conversation": [{"m": 2}]},
+                {"composerId": "leg-qualified", "createdAt": legacy_newest_ms, "conversation": [{"m": 3}]},
+                {"composerId": "leg-body-elsewhere", "createdAt": legacy_body_elsewhere_ms},
+            ]),),
+        )
+        legacy_conn.commit()
+        legacy_conn.close()
+        legacy_before = _snapshot_tree(legacy_user)
+        legacy_sessions = [_session("cursor", "machine-a", "known", UNIX_QUIET + 7200)]
+        legacy_path = _write_json(
+            os.path.join(tmp, "overview-cursor-legacy.json"), _overview_doc(legacy_sessions), mtime=UNIX_NOW
+        )
+        result = run_cli(
+            base_args(repo_root, None, legacy_path) + ["--no-state"],
+            env={"CURSOR_USER_DIR": legacy_user},
+        )
+        expect(result.returncode == 0, f"legacy-cursor run exits 0 (got {result.returncode}: {result.stderr})")
+        text = result.stdout
+        expect(
+            "quiet (local tools) — the live source's newest qualified session equals the archive's "
+            "newest; nothing new exists to capture: cursor (both 2026-09-25T20:00:00Z)" in text,
+            "the legacy fallback reads the qualified legacy composer's createdAt, skipping "
+            "archived composers and body-elsewhere index entries",
+        )
+        expect(
+            _snapshot_tree(legacy_user) == legacy_before,
+            "the legacy walk leaves the crafted workspaces byte-identical",
+        )
+
+        # ---------------- case: the other declared sqlite stores -------------
+        # Each registry-declared single-file store's reading, driven straight
+        # at crafted fixtures through the same cell `_probe_cell_for` builds
+        # from the registry — which is why these run in-process against the
+        # same probe functions the board consults.
+        grok_tool = next((t for t in catalog.local if t.id == "grok"), None)
+        grok_cell = _probe_cell_for(grok_tool)
+        expect(grok_cell is not None, "the grok registry cell resolves to a probe spec")
+        grok_store = os.path.join(tmp, "grok-search.sqlite")
+        grok_conn = sqlite3.connect(grok_store)
+        grok_conn.execute("CREATE TABLE session_docs (session_id TEXT, updated_at INTEGER)")
+        grok_conn.executemany(
+            "INSERT INTO session_docs (session_id, updated_at) VALUES (?, ?)",
+            [("s-old", UNIX_QUIET), ("s-new", UNIX_QUIET + 7400)],
+        )
+        grok_conn.commit()
+        grok_conn.close()
+        entry = _probe_sqlite_store(grok_store, grok_cell)
+        expect(entry.state == PROBE_PROBED, f"the grok store reads probed (got {entry.state})")
+        expect(
+            entry.newest is not None and iso_z(entry.newest) == "2026-09-25T20:03:20Z",
+            "grok's updated_at is seconds, read through the declared spec",
+        )
+        expect(
+            not any(name.startswith("grok-search.sqlite") for name in os.listdir(tmp) if name != "grok-search.sqlite"),
+            "probing grok's store creates no sidecar beside it",
+        )
+
+        zed_tool = next((t for t in catalog.local if t.id == "zed"), None)
+        zed_cell = _probe_cell_for(zed_tool)
+        expect(zed_cell is not None, "the zed registry cell resolves to a probe spec")
+        zed_store = os.path.join(tmp, "zed-threads.db")
+        zed_conn = sqlite3.connect(zed_store)
+        zed_conn.execute("CREATE TABLE threads (id TEXT, updated_at TEXT, data_type TEXT, data TEXT)")
+        zed_conn.executemany(
+            "INSERT INTO threads (id, updated_at, data_type, data) VALUES (?, ?, ?, ?)",
+            [
+                ("t-old", "2026-09-20T08:09:10Z", "thread", "{}"),
+                ("t-new", "2026-09-21 09:10:11", "thread", "{}"),
+            ],
+        )
+        zed_conn.commit()
+        zed_conn.close()
+        entry = _probe_sqlite_store(zed_store, zed_cell)
+        expect(entry.state == PROBE_PROBED, "the zed store reads probed")
+        expect(
+            entry.newest is not None and iso_z(entry.newest) == "2026-09-21T09:10:11Z",
+            "zed's updated_at is ISO text, read through the text fallbacks",
+        )
+
+        opencode_tool = next((t for t in catalog.local if t.id == "opencode"), None)
+        opencode_cell = _probe_cell_for(opencode_tool)
+        expect(opencode_cell is not None, "opencode's undeclared schema falls back to the default spec")
+        opencode_store = os.path.join(tmp, "opencode.db")
+        opencode_conn = sqlite3.connect(opencode_store)
+        opencode_conn.execute("CREATE TABLE session (id TEXT, time_created INTEGER, time_updated INTEGER)")
+        opencode_conn.execute(
+            "INSERT INTO session (id, time_created, time_updated) VALUES (?, ?, ?)",
+            ("o-1", UNIX_QUIET * 1000 + 400, UNIX_QUIET * 1000 + 900),
+        )
+        opencode_conn.commit()
+        opencode_conn.close()
+        entry = _probe_sqlite_store(opencode_store, opencode_cell)
+        expect(entry.state == PROBE_PROBED, "the opencode default-schema store reads probed")
+        expect(
+            entry.newest is not None and iso_z(entry.newest) == "2026-09-25T18:00:00Z",
+            "opencode's time_created is millis, floored to the archive's whole-second axis",
+        )
+
+        hermes_tool = next((t for t in catalog.local if t.id == "hermes-agent"), None)
+        hermes_cell = _probe_cell_for(hermes_tool)
+        expect(hermes_cell is not None, "the hermes-agent registry cell resolves to a probe spec")
+        hermes_store = os.path.join(tmp, "hermes-state.db")
+        hermes_conn = sqlite3.connect(hermes_store)
+        hermes_conn.execute("CREATE TABLE sessions (id TEXT)")
+        hermes_conn.execute("INSERT INTO sessions (id) VALUES ('h-1')")
+        hermes_conn.commit()
+        hermes_conn.close()
+        entry = _probe_sqlite_store(hermes_store, hermes_cell)
+        expect(
+            entry.state == PROBE_NOTIME and entry.newest is None,
+            f"a declared store with no time column reads no-readable-time, never a fabricated newest (got {entry.state})",
+        )
+
+        mismatch_store = os.path.join(tmp, "mismatch.db")
+        mismatch_conn = sqlite3.connect(mismatch_store)
+        mismatch_conn.execute("CREATE TABLE session_docs (something_else TEXT)")
+        mismatch_conn.commit()
+        mismatch_conn.close()
+        expect(
+            _probe_sqlite_store(mismatch_store, grok_cell).state == PROBE_MISMATCH,
+            "a store whose shape is not the declared one reads schema-mismatch, not zero",
+        )
+        expect(
+            _probe_sqlite_store(os.path.join(tmp, "no-such-store.db"), grok_cell).state == PROBE_MISSING,
+            "a store that is not on the machine reads missing",
+        )
+        empty_store = os.path.join(tmp, "grok-empty.sqlite")
+        empty_conn = sqlite3.connect(empty_store)
+        empty_conn.execute("CREATE TABLE session_docs (session_id TEXT, updated_at INTEGER)")
+        empty_conn.commit()
+        empty_conn.close()
+        expect(
+            _probe_sqlite_store(empty_store, grok_cell).state == PROBE_EMPTY,
+            "a declared store holding zero qualified sessions reads no-qualified-session",
+        )
+
+        # ---------------- units: template resolution -------------------------
+        expect(
+            _probe_static_root("$XDG_DATA_HOME/opencode/opencode.db") is not None
+            and _probe_static_root("$XDG_DATA_HOME/opencode/opencode.db")[0].endswith("opencode/opencode.db"),
+            "the XDG template expands to a file root",
+        )
+        expect(_probe_static_root("$CWD/.crush/crush.db") is None, "an unknown variable leaves the template unresolvable")
+        expect(
+            _looks_like_file(os.path.join(os.path.expanduser("~"), ".copilot")) is False,
+            "a dotfile directory is not mistaken for a single-file store",
+        )
+        opencode_reg_cell = _probe_cell_for(opencode_tool)
+        os.environ["OPENCODE_DB"] = "custom-dir/custom.db"
+        try:
+            rooted = _probe_root_from_env(opencode_reg_cell)
+            expect(rooted is not None and rooted[1] is True, "a relative OPENCODE_DB resolves below the XDG data dir")
+        finally:
+            del os.environ["OPENCODE_DB"]
 
         # ---------------- case: pending rising through the state -----------
         rise_now = "2026-09-29T19:00:00Z"
@@ -2991,7 +4247,7 @@ def selftest() -> int:
                 with open(full, "rb") as handle:
                     input_paths[full] = handle.read()
         result = run_cli(
-            base_args(repo_root, ext_dir, overview_path, [oracle_dir], editorial_path)
+            base_args(repo_root, ext_dir, overview_path, [oracle_dir], editorial_path, source_probe=probe_path)
             + ["--out", os.path.join(tmp, "readonly-board.md")]
         )
         expect(result.returncode == 0, "the read-only probe run exits 0")
