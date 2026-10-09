@@ -43,19 +43,27 @@
 //!     repositories (the premise, per key);
 //!   * each shard body is present in both repositories as a run of consecutive
 //!     chunks — the same bytes, possibly cut differently;
-//!   * every blob **below** the chunker's minimum size carries the same id in
-//!     both repositories. Such a file is returned as a single chunk before the
-//!     polynomial is ever consulted, so this is the one cross-key id equality
-//!     the chunker cannot disturb; the shard-sequence counters are the fixture's
-//!     below-minimum files;
+//!   * every **whole file** the stage holds below the chunker's minimum size
+//!     carries the same id in both repositories. Such a file is returned as a
+//!     single chunk before the polynomial is ever consulted, so this is the one
+//!     cross-key id equality the chunker cannot disturb; the three sessions'
+//!     `shard-seq` counters are the fixture's below-minimum files;
+//!   * the below-minimum blobs that are *not* a whole file are printed, never
+//!     asserted: a fragment below the minimum is the tail of a body the
+//!     polynomial cut, and the other key may hold those same bytes inside a
+//!     longer chunk, so no id equality is promised for it. Asserting over every
+//!     below-minimum blob was this test's second flake, red in CI on 2026-10-09
+//!     with one repository cut as 1050139 + 262451 bytes where the other kept
+//!     the body whole: the 262451-byte tail has no counterpart id, by
+//!     construction;
 //!   * pack ids are disjoint and equal in number, because a pack id hashes the
 //!     *encrypted* pack, which is the half of the ADR-034 premise that says a
 //!     ciphertext-level cache cannot be shared across destinations.
 //!
 //! The two repositories' chunker polynomials (and, when they differ, the cut
-//! shape of each body) are printed: a differing cut is the mechanism behind the
-//! flake this test used to have, so it is reported as a measurement rather than
-//! asserted away.
+//! shape of each body), and every below-minimum blob that is not a whole file,
+//! are printed: a differing cut is the mechanism behind the flakes this test
+//! used to have, so it is reported as a measurement rather than asserted away.
 //!
 //! Everything here is synthetic: the shard bodies are generated in this file
 //! and no real archive, key or destination is touched. The test prints only
@@ -66,6 +74,7 @@ use rustic_core::repofile::{BlobType, IndexFile, IndexId, MasterKey, PackId};
 use rustic_core::{Credentials, Repository, RepositoryOptions};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 /// Metadata cache under the sandbox (W289), not the real user cache the two
@@ -212,6 +221,41 @@ fn cut_lengths(body: &[u8], plaintexts: &BTreeSet<&[u8]>) -> Option<Vec<usize>> 
     Some(cuts)
 }
 
+/// Every regular file under `stage` whose bytes are below `min` — the files the
+/// chunker returns as one chunk before it ever consults its polynomial — as
+/// (path relative to `stage`, bytes), sorted by path so a failure names the same
+/// file every run.
+///
+/// A *fragment* of a larger file is deliberately not among them: it is not a
+/// file, and its bytes are a run of chunker output whose boundaries came from
+/// the previous cut.
+fn stage_files_below(stage: &Path, min: usize) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut dirs = vec![stage.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).expect("read stage directory") {
+            let entry = entry.expect("stage entry");
+            let path = entry.path();
+            let kind = entry.file_type().expect("stage entry type");
+            if kind.is_dir() {
+                dirs.push(path);
+            } else if kind.is_file() {
+                let bytes = fs::read(&path).expect("read stage file");
+                if bytes.len() < min {
+                    let name = path
+                        .strip_prefix(stage)
+                        .expect("stage file is under the stage root")
+                        .to_string_lossy()
+                        .into_owned();
+                    found.push((name, bytes));
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 #[test]
 fn same_content_different_keys_plaintext_blob_ids_different_pack_ids() {
     let sandbox = tempfile::tempdir().expect("tempdir");
@@ -340,32 +384,71 @@ fn same_content_different_keys_plaintext_blob_ids_different_pack_ids() {
         }
     }
 
-    // What IS key-independent across the two repositories: a blob below the
-    // chunker's minimum size is never split, so the same bytes carry the same
-    // id under both keys. (The shard-sequence counters are the fixture's
-    // below-minimum files.)
+    // What IS key-independent across the two repositories: a *whole file* below
+    // the chunker's minimum size is returned as one chunk before the polynomial
+    // is consulted, so its bytes carry the same id under both keys. This is
+    // asked of the stage's own files, not of every blob below the minimum: a
+    // fragment below the minimum is the tail of a larger body the polynomial
+    // cut, and the other key can hold those same bytes inside a longer chunk, so
+    // a fragment promises nothing across keys. (The fixture's below-minimum
+    // files are the three sessions' `shard-seq` counters.)
     assert_eq!(
         a.chunk_min_size, b.chunk_min_size,
         "the two repositories must be compared under the same chunker sizes, or the comparison is not like-for-like"
     );
-    let below_minimum: Vec<&String> = a
-        .blobs
-        .iter()
-        .filter(|(_, plaintext)| plaintext.len() < a.chunk_min_size)
-        .map(|(id, _)| id)
-        .collect();
+    let below_minimum_files = stage_files_below(&stage, a.chunk_min_size);
     assert!(
-        !below_minimum.is_empty(),
-        "the fixture holds no blob below the chunker minimum, so the one cross-key id equality this test asserts would be vacuous"
+        !below_minimum_files.is_empty(),
+        "the fixture holds no file below the chunker minimum, so the one cross-key id equality this test asserts would be vacuous"
     );
-    for id in below_minimum {
+    for (name, bytes) in &below_minimum_files {
+        let id = sha256_hex(bytes);
+        let in_a = a.blobs.get(&id);
+        let in_b = b.blobs.get(&id);
+        assert!(
+            in_a.is_some() && in_b.is_some(),
+            "`{name}` ({} bytes, below the chunker minimum) is not stored under its own id {} in both repositories (present in a={}, b={})",
+            bytes.len(),
+            &id[..8],
+            in_a.is_some(),
+            in_b.is_some()
+        );
         assert_eq!(
-            b.blobs.get(id),
-            a.blobs.get(id),
-            "a blob below the chunker minimum is one chunk under any polynomial, so blob {} must be the same under both keys",
-            &id[..8]
+            in_b, in_a,
+            "a whole file below the chunker minimum is one chunk under any polynomial, so `{name}` must carry the same id under both keys"
         );
     }
+
+    // Reported, never asserted: the below-minimum blobs that are not a whole
+    // file. Each is a tail some polynomial cut, and the other repository may
+    // hold those bytes inside a longer chunk, so its id is not expected on both
+    // sides — this is the flake the assertion above used to have, kept as a
+    // measurement.
+    let fragments = |ids: &RepoIds| -> Vec<String> {
+        ids.blobs
+            .iter()
+            .filter(|(_, plaintext)| {
+                plaintext.len() < ids.chunk_min_size
+                    && !below_minimum_files
+                        .iter()
+                        .any(|(_, bytes)| bytes.as_slice() == plaintext.as_slice())
+            })
+            .map(|(id, _)| id[..8].to_string())
+            .collect()
+    };
+    println!(
+        "premise: below-minimum files={} ({} bytes, their ids asserted equal under both keys)",
+        below_minimum_files.len(),
+        below_minimum_files
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>()
+    );
+    println!(
+        "premise: below-minimum fragments (first 8, measured and not asserted) a={:?} b={:?}",
+        fragments(&a),
+        fragments(&b)
+    );
 
     // The other half of the measurement, and the reason a ciphertext-level cache
     // cannot reuse entries across destinations: pack ids are hashes of the
@@ -379,4 +462,37 @@ fn same_content_different_keys_plaintext_blob_ids_different_pack_ids() {
         b.packs.len(),
         "both repositories must hold the same number of packs, or the comparison is not like-for-like"
     );
+}
+
+/// The selector the cross-key assertion above rests on, pinned on its own: only
+/// a whole file below the minimum is returned. A run of bytes below the minimum
+/// that is not a file's whole content — the fragment the old assertion read out
+/// of the repository and asserted over — is not, and no recursion into the
+/// stage's directory tree is missed.
+#[test]
+fn below_minimum_selection_is_whole_files_only() {
+    let sandbox = tempfile::tempdir().expect("tempdir");
+    let stage = sandbox.path().join("stage");
+    let session = stage
+        .join("sessions")
+        .join("w120-premise")
+        .join("w120-premise-0");
+    fs::create_dir_all(&session).expect("create session dir");
+    // The writer's own below-minimum file: the shard-sequence counter.
+    fs::write(session.join("shard-seq"), b"1").expect("write shard-seq");
+    // A shard body, above any minimum this test passes.
+    fs::write(session.join("000000.jsonl"), vec![b'x'; 4096]).expect("write shard");
+
+    let files = stage_files_below(&stage, 1024);
+    assert_eq!(
+        files.len(),
+        1,
+        "only the 1-byte counter is below the minimum, not the 4096-byte body: {:?}",
+        files.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    assert_eq!(files[0].0, "sessions/w120-premise/w120-premise-0/shard-seq");
+    assert_eq!(files[0].1, b"1");
+
+    // Nothing below the minimum is still an answer, and it is not an error.
+    assert!(stage_files_below(&stage, 1).is_empty());
 }
