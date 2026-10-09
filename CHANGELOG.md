@@ -293,6 +293,22 @@ under its own heading below.
   hourly one fires at that machine's minute too. Existing macOS installs need
   `chat-stasher schedule install` (and `schedule install --pull <name>` for pull
   agents) to update their installed plist.
+- **One registry scan and one shard count per `run-once` pass, not two
+  and three.** A pass that pushed used to scan the harness registry
+  twice — once for `collect`, once for the push empty-stage guard — and
+  count the sealed stage shards three times: the stage audit, the push
+  guard and the backup's own setup. The pass now carries collection's
+  validated scan evidence and its sealed-shard count into the push
+  path, so the guard answers from what the pass already read and the
+  backup reuses the audit's count. The count is bound to the stage tree
+  by a freshness token — the mtimes of the sessions root and of every
+  machine and session directory — and a push that finds the tree changed
+  recounts instead of trusting a count taken before files were written,
+  so a shard sealed between collect and push is never omitted, and
+  unreadable or unknown probe states still refuse an empty-stage push
+  exactly as before, because the reused evidence is the scan the pass
+  itself validated. A standalone `push` is unchanged: it performs the
+  full guard itself.
 - **Conversation counts count conversations.** A conversation archived on a
   laptop and a desktop under one id was counted twice, by `overview`'s
   headline, by the dashboard's stat tile and by the host's summary count, and

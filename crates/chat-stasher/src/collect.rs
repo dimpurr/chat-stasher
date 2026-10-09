@@ -982,6 +982,10 @@ pub struct CollectReport {
     pub sqlite_sessions_exported: u64,
     /// W880: collector state saves this pass.
     pub state_saves: u64,
+    /// Registry-scan evidence for the push-stage guard, derived from the scan
+    /// this collection already performed. `run-once` passes it to `push` so
+    /// the empty-stage guard does not rescan the registry.
+    pub scan: ScanEvidence,
 }
 
 /// W880: counters only the per-record read paths can measure. They
@@ -1005,6 +1009,42 @@ pub fn default_state_dir() -> PathBuf {
             .join("share")
             .join("chat-stasher")
             .join("state")
+    }
+}
+
+/// The registry-scan half of the empty-stage guard, split out so a scan that
+/// has already been validated can be reused without running it again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanEvidence {
+    pub scanner_records: usize,
+    pub scanner_sqlite_sessions: u64,
+    pub scanner_sqlite_unknown: usize,
+    pub scanner_unknown: usize,
+}
+
+impl ScanEvidence {
+    /// Derive the guard's scan evidence from a completed registry scan.
+    pub fn from_scan_report(scan: &scanner::ScanReport) -> Self {
+        Self {
+            scanner_records: scan.records.len(),
+            scanner_sqlite_sessions: scan
+                .probes
+                .iter()
+                .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
+                .filter_map(|probe| probe.record_count)
+                .sum(),
+            scanner_sqlite_unknown: scan
+                .probes
+                .iter()
+                .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
+                .filter(|probe| probe.record_count.is_none())
+                .count(),
+            scanner_unknown: scan
+                .probes
+                .iter()
+                .filter(|probe| probe.record_count.is_none())
+                .count(),
+        }
     }
 }
 
@@ -1036,9 +1076,27 @@ impl PushStageCheck {
     }
 }
 
+/// What `collect` validated about the stage and the registry, for the push
+/// path to reuse instead of rescanning and recounting. `stage_shards` is bound
+/// to the stage tree by its freshness token: a push that finds the tree
+/// changed must recount rather than trust a count taken before files were
+/// written.
+#[derive(Debug, Clone)]
+pub struct CollectedStageEvidence {
+    /// Registry-scan evidence from collection's already-validated scan.
+    pub scan: ScanEvidence,
+    /// The sealed-shard count collection's caller took right after collecting.
+    pub stage_shards: store::CountedStageShards,
+}
+
 /// Collect the metadata needed to distinguish a genuinely new/empty machine
 /// from a stage that disappeared after collection. This reads registry
 /// metadata and the collector cursor only; it never reads session bodies.
+///
+/// This is the standalone `push` path: it performs the full guard, scanning
+/// the registry and counting the stage itself. `run-once` instead reuses the
+/// evidence collection already produced
+/// ([`inspect_stage_for_push_with_evidence`]).
 pub fn inspect_stage_for_push(
     config: &Config,
     stage: &Path,
@@ -1047,30 +1105,36 @@ pub fn inspect_stage_for_push(
 ) -> anyhow::Result<PushStageCheck> {
     let scan = scanner::scan_with_machine(config, machine)
         .context("scan harness sessions for empty-stage guard")?;
+    inspect_stage_for_push_with_evidence(
+        &ScanEvidence::from_scan_report(&scan),
+        stage,
+        state_dir,
+        &store::CountedStageShards::count(stage)?,
+    )
+}
+
+/// Push-stage guard from evidence collection already validated. This is the
+/// `run-once` reuse path: the registry scan is collection's own, passed in
+/// rather than repeated, and the stage count is reused only while its
+/// freshness token still matches the stage — otherwise the stage is recounted,
+/// so a shard written between collection and push is never omitted.
+pub fn inspect_stage_for_push_with_evidence(
+    scan: &ScanEvidence,
+    stage: &Path,
+    state_dir: &Path,
+    counted: &store::CountedStageShards,
+) -> anyhow::Result<PushStageCheck> {
+    let stage_shards = match counted.fresh_count(stage) {
+        Some(count) => count,
+        None => store::sealed_shard_count(stage)?,
+    };
     let state = load_state(&state_dir.join(STATE_FILE))?;
-    let scanner_sqlite_sessions = scan
-        .probes
-        .iter()
-        .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
-        .filter_map(|probe| probe.record_count)
-        .sum();
-    let scanner_sqlite_unknown = scan
-        .probes
-        .iter()
-        .filter(|probe| matches!(probe.state, scanner::ProbeState::FileTarget))
-        .filter(|probe| probe.record_count.is_none())
-        .count();
-    let scanner_unknown = scan
-        .probes
-        .iter()
-        .filter(|probe| probe.record_count.is_none())
-        .count();
     Ok(PushStageCheck {
-        stage_shards: store::sealed_shard_count(stage)?,
-        scanner_records: scan.records.len(),
-        scanner_sqlite_sessions,
-        scanner_sqlite_unknown,
-        scanner_unknown,
+        stage_shards,
+        scanner_records: scan.scanner_records,
+        scanner_sqlite_sessions: scan.scanner_sqlite_sessions,
+        scanner_sqlite_unknown: scan.scanner_sqlite_unknown,
+        scanner_unknown: scan.scanner_unknown,
         // Counted across every destination on purpose: the question this guard
         // answers is "did this machine ever commit a read at all", and any
         // positive signal must keep the conservative failure path.
@@ -1175,6 +1239,7 @@ pub fn collect_scan_report(
             })
             .count(),
         archive_gaps: scan.archive_gaps(),
+        scan: ScanEvidence::from_scan_report(scan),
         ..CollectReport::default()
     };
 

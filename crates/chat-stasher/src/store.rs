@@ -487,7 +487,7 @@ impl BackupStore {
     /// Push the whole stage tree (`sessions/<machine>/<id>/NNNNNN.jsonl`) into
     /// a fresh snapshot. The stage root must already hold only sealed shards.
     pub fn push(&self, stage_root: &Path, mk: &MasterKey) -> anyhow::Result<PushSummary> {
-        self.push_with(stage_root, mk, false)
+        self.push_with(stage_root, mk, false, None)
     }
 
     /// Push, but let the repository decline to write the snapshot when its tree
@@ -512,7 +512,20 @@ impl BackupStore {
         stage_root: &Path,
         mk: &MasterKey,
     ) -> anyhow::Result<PushSummary> {
-        self.push_with(stage_root, mk, true)
+        self.push_with(stage_root, mk, true, None)
+    }
+
+    /// Push with a stage-shard count already taken by the caller (run-once's
+    /// collect-time audit). The count is reused only while its freshness token
+    /// still matches the stage; otherwise it is retaken here, so a shard
+    /// written between the caller's count and this backup is never omitted.
+    pub fn push_with_count(
+        &self,
+        stage_root: &Path,
+        mk: &MasterKey,
+        counted: Option<&CountedStageShards>,
+    ) -> anyhow::Result<PushSummary> {
+        self.push_with(stage_root, mk, false, counted)
     }
 
     fn push_with(
@@ -520,11 +533,19 @@ impl BackupStore {
         stage_root: &Path,
         mk: &MasterKey,
         skip_if_unchanged: bool,
+        counted: Option<&CountedStageShards>,
     ) -> anyhow::Result<PushSummary> {
         // This must run before opening or backing up the repository. A stage
         // assembled for machine A must never be snapshotted as machine B.
         validate_stage_machines(stage_root, &self.machine)?;
-        let stage_shards = sealed_shard_count(stage_root)?;
+        // A count the caller took at collection time is reused only while the
+        // stage tree still matches its freshness token; a mismatch means files
+        // were written or removed since, and the count must be retaken so the
+        // empty-stage guard below and the progress total stay honest.
+        let stage_shards = match counted.and_then(|c| c.fresh_count(stage_root)) {
+            Some(count) => count,
+            None => sealed_shard_count(stage_root)?,
+        };
         // This guard used to refuse any shard-less stage: while readers looked only at the
         // newest snapshot per machine, an empty snapshot made the machine look as if it
         // held nothing. ADR-021 made those readers cumulative, so the guard now refuses
@@ -1312,31 +1333,182 @@ pub fn machine_fingerprint(machine: &str) -> String {
     hex_digest(&Sha256::digest(machine.as_bytes()))
 }
 
-/// Count sealed shards across every machine/session in a stage. Directories
-/// without a shard do not make an archive look non-empty, and unrelated files
-/// are ignored. This is the push guard that distinguishes a retained stage
-/// with no new content from an empty stage that must not create a snapshot.
-pub fn sealed_shard_count(stage_root: &Path) -> anyhow::Result<usize> {
+/// How many times [`sealed_shard_count_with_token`] has run in this process.
+/// Test-only: the collect-once-reuse path asserts a quiet run-once pass
+/// performs exactly one stage-shard count, and this is the counter that
+/// proves it.
+#[doc(hidden)]
+pub static SEALED_SHARD_COUNT_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read [`SEALED_SHARD_COUNT_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn sealed_shard_count_calls() -> usize {
+    SEALED_SHARD_COUNT_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Reset [`SEALED_SHARD_COUNT_CALLS`]. Test-only.
+#[doc(hidden)]
+pub fn reset_sealed_shard_count_calls() {
+    SEALED_SHARD_COUNT_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A freshness token for the sealed-shard tree under `stage/sessions/`: the
+/// mtime of the sessions root, of every machine directory, and of every
+/// session directory, each paired with its path.
+///
+/// The token stops at session directories: it never stats shard files, so it
+/// stays far cheaper than a count. Adding or removing anything under
+/// `sessions/` — a whole session directory, or a shard inside an existing
+/// one — changes a tracked directory's mtime and breaks the match, so a count
+/// bound to the old token is retaken. A shard whose bytes are replaced in
+/// place leaves every directory mtime alone and is not caught, which is safe:
+/// the number of shards is unchanged and the backup walks the live tree, so
+/// the new bytes are archived regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFreshnessToken {
+    sessions_root: Option<std::time::SystemTime>,
+    dirs: Vec<(PathBuf, std::time::SystemTime)>,
+}
+
+impl StageFreshnessToken {
+    /// True when the stage tree still looks exactly as it did when the token
+    /// was taken, so a count bound to this token is still valid. A token that
+    /// cannot be recomputed (an unreadable directory) never matches, so the
+    /// caller fails closed and recounts.
+    pub fn still_matches(&self, stage_root: &Path) -> bool {
+        stage_freshness_token(stage_root)
+            .map(|current| &current == self)
+            // reason: a token that cannot be recomputed must read as "the
+            // stage changed", never as "still fresh" — the caller then
+            // recounts and fails closed when the retake fails, so an
+            // unreadable stage can never be mistaken for a verified one.
+            .unwrap_or(false)
+    }
+}
+
+/// A sealed-shard count bound to the stage tree it was taken from.
+#[derive(Debug, Clone)]
+pub struct CountedStageShards {
+    /// The number of sealed shards counted.
+    pub count: usize,
+    /// What the stage tree looked like when the count was taken.
+    pub freshness: StageFreshnessToken,
+}
+
+impl CountedStageShards {
+    /// Take a fresh count of the sealed shards under `stage_root`.
+    pub fn count(stage_root: &Path) -> anyhow::Result<Self> {
+        let (count, freshness) = sealed_shard_count_with_token(stage_root)?;
+        Ok(Self { count, freshness })
+    }
+
+    /// The count, but only while the stage tree still matches the token it was
+    /// taken from. `None` means the caller must recount — the stage gained or
+    /// lost a session's shards since the count, so the old number could be
+    /// wrong in the dangerous direction.
+    pub fn fresh_count(&self, stage_root: &Path) -> Option<usize> {
+        if self.freshness.still_matches(stage_root) {
+            Some(self.count)
+        } else {
+            None
+        }
+    }
+}
+
+/// Recompute the freshness token for `stage_root` cheaply. This enumerates the
+/// sessions root, every machine directory, and every session directory, and
+/// stats each one — it never enumerates bucket contents or stats files, so it
+/// is far cheaper than a full [`sealed_shard_count_with_token`] walk.
+pub fn stage_freshness_token(stage_root: &Path) -> anyhow::Result<StageFreshnessToken> {
+    let sessions_root = stage_root.join(SESSIONS_DIR);
+    let sessions_mtime = match fs::metadata(&sessions_root) {
+        Ok(meta) => Some(meta.modified()?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("stat {}", sessions_root.display())),
+    };
+    let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    if sessions_mtime.is_some() {
+        for machine in fs::read_dir(&sessions_root)
+            .with_context(|| format!("read {}", sessions_root.display()))?
+        {
+            let machine = machine?;
+            if !machine.file_type()?.is_dir() {
+                continue;
+            }
+            dirs.push((machine.path(), fs::metadata(machine.path())?.modified()?));
+            for session in fs::read_dir(machine.path())? {
+                let session = session?;
+                if session.file_type()?.is_dir() {
+                    dirs.push((session.path(), fs::metadata(session.path())?.modified()?));
+                }
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(StageFreshnessToken {
+        sessions_root: sessions_mtime,
+        dirs,
+    })
+}
+
+/// Count sealed shards across every machine/session in a stage, and return a
+/// freshness token binding the count to the stage tree it was taken from.
+/// Directories without a shard do not make an archive look non-empty, and
+/// unrelated files are ignored. This is the push guard that distinguishes a
+/// retained stage with no new content from an empty stage that must not create
+/// a snapshot.
+pub fn sealed_shard_count_with_token(
+    stage_root: &Path,
+) -> anyhow::Result<(usize, StageFreshnessToken)> {
+    SEALED_SHARD_COUNT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let sessions_root = stage_root.join(SESSIONS_DIR);
     let machines = match fs::read_dir(&sessions_root) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((
+                0,
+                StageFreshnessToken {
+                    sessions_root: None,
+                    dirs: Vec::new(),
+                },
+            ))
+        }
         Err(e) => return Err(e).with_context(|| format!("read {}", sessions_root.display())),
     };
+    let sessions_mtime = fs::metadata(&sessions_root)?.modified()?;
     let mut count = 0;
+    let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     for machine in machines {
         let machine = machine?;
         if !machine.file_type()?.is_dir() {
             continue;
         }
+        dirs.push((machine.path(), fs::metadata(machine.path())?.modified()?));
         for session in fs::read_dir(machine.path())? {
             let session = session?;
             if session.file_type()?.is_dir() {
+                dirs.push((session.path(), fs::metadata(session.path())?.modified()?));
                 count += sealed_shard_entries(&session.path())?.len();
             }
         }
     }
-    Ok(count)
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((
+        count,
+        StageFreshnessToken {
+            sessions_root: Some(sessions_mtime),
+            dirs,
+        },
+    ))
+}
+
+/// Count sealed shards across every machine/session in a stage. Directories
+/// without a shard do not make an archive look non-empty, and unrelated files
+/// are ignored. This is the push guard that distinguishes a retained stage
+/// with no new content from an empty stage that must not create a snapshot.
+pub fn sealed_shard_count(stage_root: &Path) -> anyhow::Result<usize> {
+    sealed_shard_count_with_token(stage_root).map(|(count, _)| count)
 }
 
 /// Absolute path of shard `seq` using the default bucket cap.
