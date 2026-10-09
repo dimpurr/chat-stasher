@@ -77,13 +77,46 @@ absence. The local state is a rebuildable cache: deleting its pass records cause
 replay, but replacing its identity salt changes scope and must be treated as a
 deliberate migration.
 
-Requests are serial, paced by `--pace-ms` (default 1000), with 100-row pages,
+Requests are serial, paced by `--pace-ms` (default 1000, about one request
+per second), with pages sized by `--page-size` (default 100; the accepted
+band is 100–200 rows, the provider rejects larger agent-history pages),
 finite timeouts, retry and page limits, and `--budget-seconds` (default 600).
-429/503 honors delta-seconds or HTTP-date `Retry-After`; invalid headers use
-bounded exponential backoff with jitter. Redirects are refused. Diagnostics show
-counts only; no API key or response body is printed. Concurrent passes using the
-same state directory serialize through a durable-state file lock; contention
-returns an incomplete result rather than racing a receipt journal update.
+Pagination always stops on the existing page budget rather than looping
+forever. 429/503 honors delta-seconds or HTTP-date `Retry-After`; invalid
+headers use bounded exponential backoff with jitter. Redirects are refused.
+Diagnostics show counts only; no API key or response body is printed.
+Concurrent passes using the same state directory serialize through a
+durable-state file lock; contention returns an incomplete result rather
+than racing a receipt journal update.
 
-Paced backfill inside `run-once` and local transcript collection remain separate
-work. `run-once` does not invoke this producer.
+## The scheduled pass
+
+Declaring the producer in the config pulls it inside the hourly job, before
+the pass's collect step — no separate command to remember:
+
+```toml
+[pull.letta]
+account_id = "my-letta-account"
+inbox = "~/stash/chat-stasher/letta-inbox"
+```
+
+See [config.md](config.md) for every key. The pass pulls with the same one
+pipeline as the command above: the same pacing, page-size band, `Retry-After`
+handling, receipt journal and archive-proof rule (every declared destination,
+or the single-destination repository while none is declared), and the same
+`LETTA_API_KEY` from the environment — make sure the timer's environment has
+it. `chat-stasher pull letta` is unchanged.
+
+What the pass does when the producer cannot finish reading is the point of
+the integration. The local cycle (collect, push) still runs, so a later pass
+can settle the producer's pending receipts — halting the whole pass instead
+would deadlock the producer, whose proof needs an earlier push. But the pass
+does not stop there being something left to read: it ends with exit 3
+("did not finish reading") and records the failed `pull-letta` step, so
+`status` reports the failure — never a clean exit 0 that would read "no
+messages". The unread remainder stays pending in the producer state exactly
+as the standalone command leaves it. One corner worth naming: with more
+than one destination, each destination's timer runs the same declared
+producer; concurrent passes serialize through the state lock, and the
+contending pass reports the incomplete result the lock guarantees (meaning
+"another pass of this machine is reading it now", not "no messages").
