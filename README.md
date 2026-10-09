@@ -171,17 +171,17 @@ These tables are generated from the registry that ships inside the CLI and from 
 | Local | Google Antigravity | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | opencode | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Agent platform | OpenClaw | supported | - |
-| Agent platform | Hermes Agent | supported | - |
+| Agent platform | Hermes Agent | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | Cursor | verified end-to-end (2026-09-25) | 2026-09-25 |
 | Agent platform | Grok Bot (desktop) | supported | - |
 | Local | Grok (xAI CLI) | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | GitHub Copilot CLI | supported | - |
+| Local | GitHub Copilot CLI | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Local | aider | supported | - |
 | Local | crush | supported | - |
 | Local | Zed | verified end-to-end (2026-10-03) | 2026-10-03 |
 | Local | Continue | supported | - |
 | Local | Kimi Code | verified end-to-end (2026-10-03) | 2026-10-03 |
-| Local | DeepSeek Harness | supported | - |
+| Local | DeepSeek Harness | verified end-to-end (2026-10-06) | 2026-10-06 |
 | Web | deepseek | verified end-to-end (2026-09-24) | 2026-09-24 |
 | Web | perplexity | experimental | - |
 | Web | chatgpt | verified end-to-end (2026-09-24) | 2026-09-24 |

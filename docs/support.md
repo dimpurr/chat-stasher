@@ -86,7 +86,7 @@ around it.
 | OpenClaw | macOS | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
 | OpenClaw | Linux | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
 | OpenClaw | Windows | `$HOME/.openclaw/agents` | sqlite | official-docs | supported | https://docs.openclaw.ai/concepts/session |
-| Hermes Agent | macOS | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
+| Hermes Agent | macOS | `~/.hermes/state.db` | sqlite | official-docs | verified end-to-end (2026-10-06) | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
 | Hermes Agent | Linux | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
 | Hermes Agent | Windows | `~/.hermes/state.db` | sqlite | official-docs | supported | https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/session-storage-recovery.md |
 | Cursor | macOS | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | sqlite | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/cursor/cursor/main/README.md |
@@ -98,7 +98,7 @@ around it.
 | Grok (xAI CLI) | macOS | `~/.grok/sessions/session_search.sqlite` | sqlite | measured-locally | verified end-to-end (2026-10-03) | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Linux | `$HOME/.grok/sessions/session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
 | Grok (xAI CLI) | Windows | `%USERPROFILE%\.grok\sessions\session_search.sqlite` | sqlite | unascertained | not supported | https://github.com/xai-org/grok-cli |
-| GitHub Copilot CLI | macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
+| GitHub Copilot CLI | macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | verified end-to-end (2026-10-06) | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Linux | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | GitHub Copilot CLI | Windows | `%USERPROFILE%\.copilot\` | sqlite + jsonl | source-confirmed | supported | https://raw.githubusercontent.com/github/copilot-cli/main/README.md |
 | aider | macOS | `$CWD/.aider.chat.history.md` | markdown / txt / jsonl | source-confirmed | supported | https://raw.githubusercontent.com/Aider-AI/aider/main/aider/args.py |
@@ -116,7 +116,7 @@ around it.
 | Kimi Code | macOS | `~/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-10-03) | - |
 | Kimi Code | Linux | `$HOME/.kimi-code/sessions/<workspaceId>/<sessionId>/agents/main/wire.jsonl` | jsonl | unascertained | not supported | - |
 | Kimi Code | Windows | `%USERPROFILE%\.kimi-code\sessions\<workspaceId>\<sessionId>\agents\main\wire.jsonl` | jsonl | unascertained | not supported | - |
-| DeepSeek Harness | macOS | `~/.dsh/sessions/` | jsonl.zstd | measured-locally | supported | https://github.com/deepseek-ai/deepseek-harness |
+| DeepSeek Harness | macOS | `~/.dsh/sessions/` | jsonl.zstd | measured-locally | verified end-to-end (2026-10-06) | https://github.com/deepseek-ai/deepseek-harness |
 | DeepSeek Harness | Linux | `$HOME/.dsh/sessions/` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
 | DeepSeek Harness | Windows | `%USERPROFILE%\.dsh\sessions\` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
 
@@ -142,17 +142,17 @@ around it.
 | Local | Google Antigravity | 2026-10-03 | normal | - |
 | Local | opencode | 2026-09-25 | normal | a one-line change still re-exports the whole session as a new full snapshot (git a908a00) |
 | Agent platform | OpenClaw | - | normal | Cold transcript matching rules are documented in docs-dev/openclaw-scanner.md. |
-| Agent platform | Hermes Agent | - | normal | - |
+| Agent platform | Hermes Agent | 2026-10-06 | normal | - |
 | Local | Cursor | 2026-09-25 | normal | - |
 | Agent platform | Grok Bot (desktop) | - | low | local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness |
 | Local | Grok (xAI CLI) | 2026-10-03 | low | the session_docs row preserves plain text and title but not speaker roles, turn boundaries, or per-message timestamps; the reader labels the speaker unknown and uses the session update time |
-| Local | GitHub Copilot CLI | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
+| Local | GitHub Copilot CLI | 2026-10-06 | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | aider | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | crush | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Zed | 2026-10-03 | low | image payloads, tool result contents, compaction summaries, per-message timestamps, and unrecognized content remain available in the raw archive and are not rendered |
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | 2026-10-03 | normal | Activity bounds are inferred and partial when unrecognised wire operation types occur. |
-| Local | DeepSeek Harness | - | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); no session has been archived end to end yet |
+| Local | DeepSeek Harness | 2026-10-06 | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); attachments are not archived yet |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |
