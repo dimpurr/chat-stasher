@@ -499,7 +499,7 @@ Archives extension export files, the ones the popup saves when you export undeli
 
 Turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: `import` never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
 
-Only Claude's `conversations.json` has a parser in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
+Claude's `conversations.json` and Grok's `prod-grok-backend.json` have parsers in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
 
 | Flag | Meaning |
 |---|---|
