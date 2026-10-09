@@ -408,6 +408,17 @@ pub struct HarnessFootprint {
     pub root: Option<PathBuf>,
     /// False = not installed at all (NOT "0 sessions" — different meaning).
     pub installed: bool,
+    /// True when the probe could not establish whether the source is
+    /// present at all: an indeterminate probe, a skip shape
+    /// (`skip_unascertained` / `skip_unresolvable` — a root the
+    /// registry never resolved or declined to scan), or a harness
+    /// with no probe row at all. Distinct from a measured absence
+    /// (`missing`: looked, and not there) and from a harness the
+    /// registry does not list for this platform (`skip_wrong_platform`)
+    /// — those two know the source is not here, so their
+    /// `installed: false` is a measurement, while a `false` here
+    /// would be a guess.
+    pub presence_unknown: bool,
     /// `None` when the harness stores sessions in something non-enumerable
     /// by a file walk (e.g. opencode's single SQLite).
     pub session_count: Option<u64>,
@@ -463,6 +474,7 @@ pub fn coverage_from_records<'a>(
         name: name.to_string(),
         root: Some(root),
         installed,
+        presence_unknown: false,
         session_count: if installed {
             Some(recs.len() as u64)
         } else {
@@ -556,7 +568,7 @@ fn fmt_bytes(b: u64) -> String {
 fn footprint_bytes_label(f: &HarnessFootprint) -> String {
     match f.total_bytes {
         Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
-        None if f.installed => "unknown".to_string(),
+        None if f.installed || f.presence_unknown => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -663,6 +675,7 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         name: probe.id.clone(),
         root: probe.root.clone(),
         installed: probe.installed_p(),
+        presence_unknown: probe.not_probed_p(),
         session_count: probe.record_count,
         candidate_count: probe.candidate_count,
         unreadable_count: probe.unreadable_count,
@@ -705,6 +718,7 @@ fn footprint_from_dir_probe<'a>(
 ) -> HarnessFootprint {
     let Some(probe) = probe else {
         return HarnessFootprint {
+            presence_unknown: true,
             note: "registry has no entry for this platform — session count unknown (not 0)"
                 .to_string(),
             ..default_footprint(name, fallback_root)
@@ -713,6 +727,7 @@ fn footprint_from_dir_probe<'a>(
     let root = probe.root.clone().unwrap_or(fallback_root);
     if !probe.installed_p() {
         return HarnessFootprint {
+            presence_unknown: probe.not_probed_p(),
             note: if probe.note.is_empty() {
                 "registry did not scan this harness — session count unknown (not 0)".to_string()
             } else {
@@ -739,6 +754,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         name: name.to_string(),
         root: Some(root),
         installed: false,
+        presence_unknown: false,
         session_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -1821,7 +1837,17 @@ pub fn run() -> DoctorReport {
                     "zed" => home.join("Library/Application Support/Zed/threads/threads.db"),
                     _ => home.join(".grok/sessions/session_search.sqlite"),
                 };
-                footprints.push(default_footprint(id, root));
+                // No probe row: the registry in effect has no entry
+                // for this harness, so its presence was never
+                // established — the same skip shape as a `skip_*`
+                // probe, not a measured absence.
+                footprints.push(HarnessFootprint {
+                    presence_unknown: true,
+                    note:
+                        "registry has no probe row for this harness — session count unknown (not 0)"
+                            .to_string(),
+                    ..default_footprint(id, root)
+                });
             }
         }
     }
@@ -3129,17 +3155,34 @@ fn gemini_json(g: &GeminiRetention) -> serde_json::Value {
     })
 }
 
-/// One footprint row. The three-state rule is the same as the human table:
-/// a count that was not measured is `unknown` (installed store we could not
-/// enumerate) or `not_applicable` (not installed on this machine).
+/// One footprint row. The three-state rule is the same as the human
+/// table: a count that was not measured is `unknown` (an installed
+/// store we could not enumerate, or a source whose presence was
+/// never established) or `not_applicable` (a measured absence: not
+/// installed on this machine).
 fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
+    let presence_reason = if f.note.is_empty() {
+        "source presence could not be determined"
+    } else {
+        &f.note
+    };
     serde_json::json!({
         "name": f.name,
-        "installed": f.installed,
+        "installed": if f.presence_unknown {
+            serde_json::json!(CountState::unknown(presence_reason))
+        } else {
+            serde_json::json!(f.installed)
+        },
         "root": f.root.as_ref().map(|root| root.display().to_string()),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
-            None if f.installed => CountState::unknown("session count could not be enumerated"),
+            None if f.installed || f.presence_unknown => CountState::unknown(
+                if f.note.is_empty() {
+                    "session count could not be enumerated"
+                } else {
+                    &f.note
+                },
+            ),
             None => CountState::not_applicable("not installed"),
         },
         "candidate_count": match f.candidate_count {
@@ -3150,12 +3193,22 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         "unreadable_entry_count": unreadable_tri(f.session_count.is_some(), f.unreadable_entry_count),
         "total_bytes": match f.total_bytes {
             Some(bytes) => CountState::known(bytes),
-            None if f.installed => CountState::unknown("byte count could not be measured"),
+            None if f.installed || f.presence_unknown => CountState::unknown(
+                if f.note.is_empty() {
+                    "byte count could not be measured"
+                } else {
+                    &f.note
+                },
+            ),
             None => CountState::not_applicable("not installed"),
         },
         "earliest": system_time_state(f.earliest),
         "latest": system_time_state(f.latest),
-        "compressed_count": CountState::known(f.compressed_count),
+        "compressed_count": if f.presence_unknown {
+            CountState::unknown(presence_reason)
+        } else {
+            CountState::known(f.compressed_count)
+        },
         "note": f.note,
     })
 }
@@ -3299,8 +3352,9 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
     match f.session_count {
         Some(count) => count.to_string(),
         // Installed but the store is not enumerable (schema not recognised):
-        // "unknown", never a fake zero.
-        None if f.installed => "unknown".to_string(),
+        // "unknown", never a fake zero. A source whose presence was
+        // never established is the same answer for the same reason.
+        None if f.installed || f.presence_unknown => "unknown".to_string(),
         None => "N/A".to_string(),
     }
 }
@@ -3455,7 +3509,7 @@ pub fn print_report(r: &DoctorReport) {
             if f.name != "gemini" && f.name != "opencode" {
                 continue;
             }
-            if !f.installed {
+            if !f.installed && !f.presence_unknown {
                 eprintln!(
                     "  {:<10} not installed ({})",
                     f.name,
@@ -3527,7 +3581,7 @@ pub fn print_report(r: &DoctorReport) {
         never = coverage.never_probed(),
     );
     for f in &r.footprints {
-        if !f.installed {
+        if !f.installed && !f.presence_unknown {
             eprintln!(
                 "  {:<10} not installed ({})",
                 f.name,
@@ -4484,6 +4538,7 @@ mod b90_unknown_count_tests {
             name: "opencode".to_string(),
             root: Some(PathBuf::from("/nowhere/store.db")),
             installed: true,
+            presence_unknown: false,
             session_count: Some(3),
             candidate_count: Some(414),
             unreadable_count: unreadable,
@@ -4560,6 +4615,7 @@ mod json_tests {
             name: "opencode".to_string(),
             root: Some(PathBuf::from("/nowhere/store.db")),
             installed: true,
+            presence_unknown: false,
             session_count: Some(3),
             candidate_count: Some(414),
             unreadable_count: None,
@@ -4709,6 +4765,76 @@ mod json_tests {
         assert_eq!(
             v["footprints"][0]["latest"],
             serde_json::json!({"kind":"unknown","why":"no timestamp recorded"})
+        );
+    }
+
+    /// A skip shape (`skip_unascertained` / `skip_unresolvable`) or a
+    /// no-probe row never established whether the source is present, so
+    /// `installed` and every count stay `unknown` with the reason —
+    /// never a boolean absence claim, and never a measured zero for a
+    /// tally nobody took.
+    #[test]
+    fn doctor_json_skip_shape_keeps_presence_and_counts_unknown() {
+        let reason = "confidence=unascertained; skipped (scanning a guessed path = false negatives/positives)"
+            .to_string();
+        let mut r = report();
+        r.footprints[0] = HarnessFootprint {
+            installed: false,
+            presence_unknown: true,
+            session_count: None,
+            candidate_count: None,
+            unreadable_count: None,
+            unreadable_entry_count: None,
+            total_bytes: None,
+            earliest: None,
+            latest: None,
+            compressed_count: 0,
+            note: reason.clone(),
+            ..fp()
+        };
+        let row = &report_to_json(&r)["footprints"][0];
+        let unknown = serde_json::json!({"kind": "unknown", "why": reason});
+        assert_eq!(row["installed"], unknown);
+        assert_eq!(row["session_count"], unknown);
+        assert_eq!(row["total_bytes"], unknown);
+        assert_eq!(row["compressed_count"], unknown);
+        assert_ne!(
+            row["compressed_count"],
+            serde_json::json!({"kind": "known", "count": 0}),
+            "a source nobody probed has no compressed-session tally; 0 would be a measurement nobody made"
+        );
+    }
+
+    /// The two states that *earn* their numbers: an enumerated store
+    /// reports a measured count — a measured zero included — and a
+    /// measured absence keeps `installed: false` with its measured
+    /// zero. The skip shape above must not have loosened either.
+    #[test]
+    fn doctor_json_keeps_measured_zero_and_known_absence() {
+        let present = report_to_json(&report());
+        assert_eq!(
+            present["footprints"][0]["installed"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            present["footprints"][0]["compressed_count"],
+            serde_json::json!({"kind": "known", "count": 0})
+        );
+
+        let mut absent = report();
+        absent.footprints[0] = HarnessFootprint {
+            installed: false,
+            presence_unknown: false,
+            session_count: None,
+            total_bytes: None,
+            note: "not installed".to_string(),
+            ..fp()
+        };
+        let row = &report_to_json(&absent)["footprints"][0];
+        assert_eq!(row["installed"], serde_json::json!(false));
+        assert_eq!(
+            row["compressed_count"],
+            serde_json::json!({"kind": "known", "count": 0})
         );
     }
 
@@ -5249,6 +5375,60 @@ mod w285_coverage_and_clock_tests {
             coverage.hit + coverage.never_probed(),
             4,
             "the defect this replaces: `hit/known` would have printed 1/6 here"
+        );
+    }
+
+    /// The footprint row must inherit the probe's presence verdict:
+    /// every never-probed state (`skip_unascertained`,
+    /// `skip_unresolvable`, indeterminate) leaves presence unknown,
+    /// while `missing` (looked, and found nothing) and `skip_wrong_platform`
+    /// (no cell for this platform) keep the measured absence.
+    #[test]
+    fn footprint_rows_inherit_the_probes_presence_verdict() {
+        let sqlite_row =
+            |state: ProbeState| footprint_from_sqlite_probe(&probe("sqlite-store", state));
+        for state in [
+            ProbeState::SkipUnascertained,
+            ProbeState::SkipUnresolvable,
+            ProbeState::Indeterminate,
+        ] {
+            let row = sqlite_row(state);
+            assert!(
+                row.presence_unknown && !row.installed,
+                "{state:?} never established presence, so the row must not claim absence"
+            );
+        }
+        for state in [ProbeState::Missing, ProbeState::SkipWrongPlatform] {
+            let row = sqlite_row(state);
+            assert!(
+                !row.presence_unknown && !row.installed,
+                "{state:?} is a measured absence or non-applicability, not an unknown presence"
+            );
+        }
+
+        // A directory harness with no probe row at all (the registry in
+        // effect has no entry for it): presence unknown, never absence.
+        let no_probe = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/nowhere/.claude/projects"),
+            None,
+            std::iter::empty(),
+        );
+        assert!(
+            no_probe.presence_unknown && !no_probe.installed,
+            "a row with no probe never established presence"
+        );
+
+        // A resolved-but-absent directory root is a measured absence.
+        let missing = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/nowhere/.claude/projects"),
+            Some(&probe("claude-code", ProbeState::Missing)),
+            std::iter::empty(),
+        );
+        assert!(
+            !missing.presence_unknown && !missing.installed,
+            "a probe that looked and found nothing is a measured absence"
         );
     }
 

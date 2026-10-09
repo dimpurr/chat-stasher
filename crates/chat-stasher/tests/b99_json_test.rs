@@ -386,9 +386,20 @@ fn doctor_json_prints_one_object_and_exit_0() {
     assert_eq!(v["reclaim"]["kind"], serde_json::json!("no_repo"));
     // Every footprint count is a tri-state object, never a bare number or null.
     let footprint = &v["footprints"][0];
+    // This fixture's registry lists no harness at all, so this row was never
+    // probed: its presence was never established, and the count is `unknown`
+    // carrying the reason — not `not_applicable`, which is the answer for a
+    // *measured* absence (W945).
     assert_eq!(
         footprint["session_count"]["kind"],
-        serde_json::json!("not_applicable")
+        serde_json::json!("unknown")
+    );
+    assert!(
+        footprint["session_count"]["why"]
+            .as_str()
+            .is_some_and(|why| !why.is_empty()),
+        "an unknown count must say why it is unknown: {:?}",
+        footprint["session_count"]
     );
     assert_eq!(footprint["earliest"]["kind"], serde_json::json!("unknown"));
     // stdout was exactly one object — json_stdout already asserted it.

@@ -117,6 +117,12 @@ fn status_body(output: &Output) -> String {
 
 /// A registry cell with no statically resolvable root reaches the exact
 /// `probe.root == None` branch that used to build an empty `PathBuf`.
+///
+/// W945: a root nobody resolved is a probe that never looked, so the
+/// footprint row is an unknown presence carrying the reason — not a measured
+/// `not installed` at a path that was never resolved. The unresolved root
+/// stays visible as `-` in the registry probe table, and nowhere does any
+/// rendering of it collapse to `()`.
 #[test]
 fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
     // B97: see `ENV_LOCK` — readers serialize with writers too.
@@ -139,8 +145,82 @@ fn a6_unresolved_root_is_unknown_not_empty_parentheses() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("not installed (unknown)") && !text.contains("not installed ()"),
+        !text.contains("not installed ()"),
         "unresolved root must be rendered as unknown, not an empty path: {text}"
+    );
+    assert!(
+        text.contains("opencode   sessions unknown")
+            && text.contains("template cannot be statically resolved to a root path"),
+        "an unresolved root is an unknown presence with its reason beside it, never a measured \
+         absence: {text}"
+    );
+    assert!(
+        text.contains("sessions=unknown -"),
+        "the registry probe table must render an unresolved root as `-`, not as an empty path: \
+         {text}"
+    );
+}
+
+/// The other half of the same rule: a harness the registry lists but has no
+/// cell for **on this platform** is a measured non-applicability, not an
+/// unknown presence, so its row keeps `not installed` — with its unresolvable
+/// root as `unknown` rather than an empty pair of parentheses.
+///
+/// This is the row W945 moved the unresolved-root fixture off, so the
+/// `unknown` root rendering keeps a guard. It is also what would go red if a
+/// future change treated `skip_wrong_platform` as an unknown presence: there
+/// is nothing on this machine to have missed, which is a different claim from
+/// "did not look".
+#[test]
+fn a6b_no_cell_for_this_platform_is_not_installed_at_an_unknown_root() {
+    // B97: see `ENV_LOCK` — readers serialize with writers too.
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sandbox = tempfile::tempdir().expect("create sandbox");
+    let registry = sandbox.path().join("registry.json");
+    // Every platform but this one: the registry lists the harness, and the
+    // scan still has no cell to look at here.
+    let cell = serde_json::json!({
+        "template": "$B85_UNKNOWN/state.vscdb",
+        "format": "sqlite",
+        "confidence": "measured-locally",
+        "source": "B85",
+    });
+    let mut paths = serde_json::Map::new();
+    for platform in ["macos", "linux", "windows"] {
+        if platform != chat_stasher::scanner::current_platform() {
+            paths.insert(platform.to_string(), cell.clone());
+        }
+    }
+    let fixture = serde_json::json!({
+        "schema_version": 1,
+        "generated": "B85",
+        "harnesses": [{
+            "id": "cursor",
+            "display_name": "cursor",
+            "paths": paths,
+        }],
+    });
+    fs::write(&registry, serde_json::to_vec(&fixture).unwrap())
+        .expect("write cross-platform registry");
+    let mut command = isolated_command(sandbox.path(), &["doctor"], &registry);
+    command.env("HOSTNAME", "b85-machine");
+    let output = command.output().expect("run doctor");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("cursor     not installed (unknown)") && !text.contains("not installed ()"),
+        "a platform the registry has no cell for is a measured non-applicability whose unresolved \
+         root renders as `unknown`, never as an empty path: {text}"
+    );
+    assert!(
+        text.contains("sessions=N/A"),
+        "the registry probe table must keep the non-applicability column (`N/A`) for that cell \
+         rather than an unknown count: {text}"
     );
 }
 

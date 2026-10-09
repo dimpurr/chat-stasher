@@ -17,6 +17,10 @@ use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+#[path = "../src/test_support.rs"]
+mod test_support;
 
 /// How many sessions exist in each harness store the test plants, so the
 /// assertion is against known counts, not just "the two numbers are equal".
@@ -316,4 +320,130 @@ fn doctor_tables_never_contradict_any_harness() {
         Some(GROK_SESSIONS),
         "footprint table self-check against known ground truth: should recognize our {GROK_SESSIONS} planted session_docs sessions"
     );
+}
+
+/// A skip shape is not a measured absence. A registry cell whose
+/// confidence is `unascertained` is never scanned — the probe
+/// refuses to walk a guessed path — so doctor's footprint row must
+/// keep `installed` and `compressed_count` unknown in `--json`
+/// instead of claiming absence (`installed: false`) and a measured
+/// zero (`compressed_count: {"kind":"known","count":0}`), and the
+/// human table must print the reason beside an unknown count rather
+/// than "not installed".
+///
+/// The synthetic registry lists a single harness, so every other
+/// footprint row is the second skip shape — a harness with no
+/// probe row at all — and is held to the same rule.
+#[test]
+fn doctor_keeps_skip_shaped_sources_unknown_in_both_outputs() {
+    let sandbox = test_support::Sandbox::new();
+    sandbox.ensure_dirs();
+    let registry = sandbox.root().join("registry.json");
+    // `unascertained` confidence makes the probe skip the harness
+    // on every platform, deterministically, without touching the
+    // disk — the shape the registry itself uses for cells it
+    // declines to vouch for.
+    let cell = serde_json::json!({
+        "template": "~/.synthetic-skip-shape/sessions/",
+        "format": "jsonl",
+        "confidence": "unascertained",
+        "source": "synthetic doctor fixture",
+    });
+    let fixture_registry = serde_json::json!({
+        "schema_version": 1,
+        "generated": "synthetic doctor fixture",
+        "harnesses": [{
+            "id": "codex",
+            "display_name": "Synthetic Codex",
+            "paths": {
+                "macos": cell.clone(),
+                "linux": cell.clone(),
+                "windows": cell,
+            },
+        }],
+    });
+    fs::write(&registry, serde_json::to_vec(&fixture_registry).unwrap()).unwrap();
+
+    let run_doctor = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_chat-stasher"));
+        sandbox
+            .apply(&mut command)
+            .arg("doctor")
+            .env("CHAT_STASHER_REGISTRY", &registry);
+        if json {
+            command.arg("--json");
+        }
+        command.output().expect("run isolated doctor")
+    };
+
+    let human = run_doctor(false);
+    assert!(
+        human.status.success(),
+        "a skip shape is a completed diagnosis, not an incomplete read; status={:?}, stderr={}",
+        human.status.code(),
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human = String::from_utf8_lossy(&human.stderr);
+    // Two tables print this row's count, in two shapes: the registry probe
+    // table above renders `sessions=unknown`, the D3 footprint table renders
+    // `sessions unknown`. Only the footprint row's shape carries this fix
+    // (an unknown presence, not a measured "not installed"), so assert on
+    // that row. An assertion on the probe table's `sessions=unknown` would
+    // also pass with the fix reverted — that table's shape predates it.
+    assert!(
+        human.contains("codex      sessions unknown")
+            && human.contains("confidence=unascertained"),
+        "human doctor output must keep the skip shape's unknown count and its reason; output:\n{human}"
+    );
+    assert!(
+        !human.contains("codex      not installed"),
+        "a skip shape must not be rendered as a measured absence; output:\n{human}"
+    );
+
+    let json = run_doctor(true);
+    assert!(
+        json.status.success(),
+        "doctor --json must finish on a skip shape; status={:?}, stderr={}",
+        json.status.code(),
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("doctor --json must emit JSON ({e}): {stdout}"));
+    let footprints = report["footprints"]
+        .as_array()
+        .unwrap_or_else(|| panic!("doctor --json footprints must be an array: {stdout}"));
+
+    let unknown = |why: &str| serde_json::json!({"kind": "unknown", "why": why});
+    let skip_reason =
+        "confidence=unascertained; skipped (scanning a guessed path = false negatives/positives)";
+
+    // The skip shape itself: presence was never established, so
+    // `installed` and every count are unknown with the probe's
+    // reason — never a boolean absence claim, never a measured
+    // zero for a tally nobody took.
+    let codex = footprints
+        .iter()
+        .find(|row| row["name"] == "codex")
+        .unwrap_or_else(|| panic!("no footprint row for the skip-shaped harness: {stdout}"));
+    assert_eq!(codex["installed"], unknown(skip_reason));
+    assert_eq!(codex["session_count"], unknown(skip_reason));
+    assert_eq!(codex["total_bytes"], unknown(skip_reason));
+    assert_eq!(codex["compressed_count"], unknown(skip_reason));
+    assert_ne!(
+        codex["compressed_count"],
+        serde_json::json!({"kind": "known", "count": 0}),
+        "the skip shape never enumerated the store"
+    );
+
+    // The no-probe shape (the registry lists no cell for any other
+    // harness): the same unknown rule, with the registry's own
+    // reason for it.
+    let no_probe_reason = "registry has no entry for this platform — session count unknown (not 0)";
+    let claude = footprints
+        .iter()
+        .find(|row| row["name"] == "claude-code")
+        .unwrap_or_else(|| panic!("no footprint row for the no-probe harness: {stdout}"));
+    assert_eq!(claude["installed"], unknown(no_probe_reason));
+    assert_eq!(claude["compressed_count"], unknown(no_probe_reason));
 }
