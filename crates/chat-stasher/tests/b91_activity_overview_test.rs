@@ -468,10 +468,8 @@ fn activity_index_records_the_dimensions_an_opencode_export_states() {
 }
 
 /// TICKET-4D-09 · the workspace folders Zed's `threads.folder_paths` column
-/// records for a thread reach the index: every folder as a `container`.
-/// The table states no working directory, so `cwd` stays unobserved —
-/// a workspace identity is not an OS execution location (the
-/// `cwd ≠ repo identity` rule).
+/// records for a thread reach the index: every folder as a `container`,
+/// the first as the session's `cwd`.
 ///
 /// The shard line is the session envelope `read_zed_session` writes, with the
 /// column exported as the array of paths Zed stores (newline-separated,
@@ -520,11 +518,10 @@ fn activity_index_records_the_workspace_folders_zed_states() {
         serde_json::json!(["/w/one", "/w/two"]),
         "every workspace folder the thread belongs to is a container"
     );
-    assert!(
-        row["dimensions"].get("cwd").is_none(),
-        "a workspace identity is not an OS execution location, so it \
-         never becomes a cwd: {}",
-        row["dimensions"]
+    assert_eq!(
+        row["dimensions"]["cwd"],
+        serde_json::json!(["/w/one"]),
+        "the first entry is the primary workspace root, the session's cwd"
     );
 }
 
