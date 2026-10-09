@@ -611,9 +611,9 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1031  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:132-213  251d5fb340ee  lines=82
   <- docs-dev/privacy.md:495  :: /// Privacy-safe provenance captured from a source path dur…
-crates/chat-stasher/src/activity.rs:2348-2516  5d4747150d71  lines=169
+crates/chat-stasher/src/activity.rs:2350-2529  71eecce0fa85  lines=180
   <- docs-dev/privacy.md:507  :: ///
-crates/chat-stasher/src/activity.rs:2766-2815  a0ac92c15fee  lines=50
+crates/chat-stasher/src/activity.rs:2860-2909  a0ac92c15fee  lines=50
   <- docs-dev/privacy.md:453  :: /// or is a label the closed enum does not name, is a bundl…
 crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
@@ -1007,7 +1007,7 @@ crates/chat-stasher/src/sqlite_probe.rs:2078-2096  714c3c1685ee  lines=19
   <- docs-dev/threat-model.md:836  :: /// SQLite's read-only WAL access needs the store's `-shm` …
 crates/chat-stasher/src/sqlite_probe.rs:2082-2089  ae091c19ff12  lines=8
   <- SECURITY.md:68  :: /// so:
-crates/chat-stasher/src/sqlite_probe.rs:2908-2956  0dfae1a37b9a  lines=49
+crates/chat-stasher/src/sqlite_probe.rs:2919-2967  0dfae1a37b9a  lines=49
   <- docs-dev/threat-model.md:839  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:167-170  f2781c197162  lines=4
   <- docs-dev/install.md:630, docs-dev/install.md:720  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
