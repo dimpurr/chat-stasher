@@ -657,19 +657,19 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:873  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:873  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1005-1015  e88e5fd731c5  lines=11
+crates/chat-stasher/src/doctor.rs:1021-1031  e88e5fd731c5  lines=11
   <- docs-dev/install.md:1047, docs-dev/install.md:1056  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1033-1140  bbabec918aa9  lines=108
+crates/chat-stasher/src/doctor.rs:1049-1156  bbabec918aa9  lines=108
   <- docs-dev/install.md:1051  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1143-1164  7b4d69687a1b  lines=22
+crates/chat-stasher/src/doctor.rs:1159-1180  7b4d69687a1b  lines=22
   <- docs-dev/install.md:1047, docs-dev/install.md:1056  :: pub enum DestinationOutcome {
-crates/chat-stasher/src/doctor.rs:1296-1349  4176d416bb38  lines=54
+crates/chat-stasher/src/doctor.rs:1312-1365  4176d416bb38  lines=54
   <- docs-dev/install.md:1047, docs-dev/install.md:1056  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
-crates/chat-stasher/src/doctor.rs:1522-1558  cb18519fdbb9  lines=37
+crates/chat-stasher/src/doctor.rs:1538-1574  cb18519fdbb9  lines=37
   <- docs-dev/install.md:295  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:1847-1848  c49d6fc9ccfa  lines=2
+crates/chat-stasher/src/doctor.rs:1873-1874  c49d6fc9ccfa  lines=2
   <- docs-dev/install.md:1054  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:2376-2438  0d89a3dbd659  lines=63
+crates/chat-stasher/src/doctor.rs:2402-2464  0d89a3dbd659  lines=63
   <- docs-dev/install.md:1054  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/export.rs:962-979  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
