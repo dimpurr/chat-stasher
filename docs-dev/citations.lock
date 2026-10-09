@@ -981,13 +981,13 @@ crates/chat-stasher/src/scanner.rs:1901-2010  a0af3dfb37e8  lines=110
   <- docs-dev/privacy.md:1063  :: /// Additional raw usage files stored under
 crates/chat-stasher/src/scanner.rs:2316-2325  f09925927335  lines=10
   <- docs-dev/openclaw-scanner.md:32  :: }
-crates/chat-stasher/src/schedule.rs:199-234  31cde3d34520  lines=36
+crates/chat-stasher/src/schedule.rs:208-243  31cde3d34520  lines=36
   <- docs-dev/install.md:923  :: /// Resolve the executable that a persistent scheduler may …
-crates/chat-stasher/src/schedule.rs:278-382  0146bafd68ef  lines=105
+crates/chat-stasher/src/schedule.rs:287-391  0146bafd68ef  lines=105
   <- docs-dev/install.md:925  :: /// Render the templates for one scheduled job. `unit` pick…
-crates/chat-stasher/src/schedule.rs:589-1010  a3de767913be  lines=422
+crates/chat-stasher/src/schedule.rs:598-1019  a3de767913be  lines=422
   <- docs-dev/install.md:933, docs-dev/install.md:1236  :: /// One agent file [`install_launchd_agents`] changed, and …
-crates/chat-stasher/src/schedule.rs:1063-1233  4e93b40c31ff  lines=171
+crates/chat-stasher/src/schedule.rs:1072-1242  4e93b40c31ff  lines=171
   <- docs-dev/install.md:938  :: /// The state of one scheduled job on this machine, from th…
 crates/chat-stasher/src/search.rs:16-38  b967cd30c55b  lines=23
   <- docs-dev/threat-model.md:935, docs-dev/threat-model.md:951  :: //! * **metadata tier** (this module): snapshot files + ind…

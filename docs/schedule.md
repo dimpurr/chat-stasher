@@ -137,11 +137,12 @@ Every `run-once` pass also prints one summary line on stdout, last in its output
 
 | | Hourly archive (`run-once`) |
 |---|---|
-| Interval | `backup_interval_secs` in your config, default `3600` |
-| Start | macOS: counted from when the timer was loaded, not on the hour. Linux: one interval after boot, then every interval after the last run. |
-| Jitter | Up to 5 minutes of random delay per run, so several machines do not hit one destination at the same second. |
+| Cadence | `backup_interval_secs` in your config, default `3600` |
+| Start | macOS: on the hour at a fixed minute (`StartCalendarInterval`) when `backup_interval_secs` is 3600, avoiding run duration drift; other intervals fall back to `StartInterval` relative to load time. Linux: one interval after boot, then every interval after the last run (`OnUnitActiveSec`). |
+| Minute selection | macOS hourly timers choose their firing minute deterministically from this machine's identity (`--machine`, the identity file, or the hostname), so several machines pushing to a shared destination do not all fire at the same minute. A machine that has none of the three has one shared value to hash and so shares its minute with any other machine in that state; pass `--machine <id>` to give it a minute of its own. |
+| Jitter | Up to 5 minutes of random delay per run, so multiple machines do not hit one destination at the same second. |
 
-Change the interval in the config, then run `schedule install` again so the timer picks it up.
+Change the interval in the config, then run `schedule install` again so the timer picks it up. Existing macOS installs created prior to this fixed-minute calendar schedule use the older `StartInterval` template and drift by their own run duration; run `chat-stasher schedule install` to update the installed plist to the calendar schedule.
 
 ### Logs
 

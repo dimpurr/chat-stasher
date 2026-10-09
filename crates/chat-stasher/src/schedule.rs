@@ -5,7 +5,7 @@
 //! side-effect free; the launchd install helpers are explicit and testable.
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Datelike, Days, Local, LocalResult, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, LocalResult, NaiveDate, TimeZone, Timelike};
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -40,10 +40,11 @@ pub const SYSTEMD_TIMER_RECLAIM_STAGE: &str = "chat-stasher-reclaim-stage.timer"
 /// minute marks that cron-style maintenance jobs cluster on. launchd has no
 /// native jitter for `StartCalendarInterval`, so the fixed off-boundary minute
 /// *is* the stagger lever; systemd gets real jitter via `RandomizedDelaySec`
-/// ([`RECLAIM_STAGE_RANDOMIZED_DELAY_SECS`]). The hourly run-once uses
-/// `StartInterval`, whose phase is relative to load time, so no single minute
-/// is guaranteed collision-free — but a weekly ~20 minute network-bound pass
-/// occasionally overlapping the hourly pass is a non-event compared with
+/// ([`RECLAIM_STAGE_RANDOMIZED_DELAY_SECS`]). The hourly run-once is a
+/// `StartCalendarInterval` too, at the minute [`hourly_minute_for_machine`]
+/// picks for the machine it is installed on, so a machine that picked `:17`
+/// fires both jobs on the same minute — but a weekly ~20 minute network-bound
+/// pass occasionally overlapping the hourly pass is a non-event compared with
 /// running it on top of interactive work.
 pub const RECLAIM_STAGE_WEEKDAY: u8 = 0; // launchd: 0 and 7 both mean Sunday.
 pub const RECLAIM_STAGE_HOUR: u8 = 3;
@@ -55,9 +56,17 @@ pub const RECLAIM_STAGE_MINUTE: u8 = 17;
 pub const RECLAIM_STAGE_RANDOMIZED_DELAY_SECS: u64 = 15 * 60;
 
 /// Per-run scheduler jitter, in seconds. launchd has no random-delay key for
-/// `StartInterval`, so the shell preamble sleeps for a bounded random interval
-/// before `exec`; systemd gets the same bound through `RandomizedDelaySec`.
+/// `StartInterval` or `StartCalendarInterval`, so the shell preamble sleeps for
+/// a bounded random interval before `exec`; systemd gets the same bound through
+/// `RandomizedDelaySec`.
 pub const SCHEDULER_RANDOMIZED_DELAY_SECS: u64 = 5 * 60;
+
+/// The cadence, in seconds, at which the launchd `run-once` timer is
+/// rendered as a `StartCalendarInterval` (one fire per hour at a fixed
+/// minute) rather than a `StartInterval`. Exactly one hour is the only
+/// interval whose calendar form is a single `Minute` key; every other
+/// interval keeps `StartInterval`.
+const HOURLY_INTERVAL_SECS: u64 = 3600;
 
 /// Cap for the launchd stdout/stderr logs, in bytes. Beyond this the log is
 /// truncated to empty in place at the start of the next run (see
@@ -172,7 +181,7 @@ pub fn render_pull(
             let label = pull_label(name);
             vec![TemplateFile {
                 name: format!("{label}.plist"),
-                content: render_launchd_job(&argv, interval, home, &label, &label),
+                content: render_launchd_job(&argv, interval, home, &label, &label, machine),
             }]
         }
         Format::Systemd => {
@@ -1393,10 +1402,17 @@ fn launchd_next_run(
     let Some(slot) = plist_calendar_slot(&text) else {
         return NextRun::Unknown(format!(
             "the installed plist {} declares neither StartInterval nor a StartCalendarInterval \
-             naming Weekday, Hour and Minute, so no next fire time can be derived from it",
+             naming a Minute, so no next fire time can be derived from it",
             path.display()
         ));
     };
+    if let Some(refusal) = plist_calendar_refusal(&text) {
+        return NextRun::Unknown(format!(
+            "the installed plist {} declares {refusal}, so no next fire time can be derived from \
+             it",
+            path.display()
+        ));
+    }
     match next_calendar_occurrence(slot, now) {
         Some(when) => NextRun::Known(when.format("%a %Y-%m-%d %H:%M:%S %z").to_string()),
         None => NextRun::Unknown(
@@ -1420,16 +1436,37 @@ fn plist_integer(text: &str, key: &str) -> Option<u64> {
 /// The dictionary the renderer writes is flat, so the text between the key and
 /// the next `</dict>` is unambiguous. A value outside the range launchd
 /// accepts is treated as unreadable rather than clamped: clamping would move
-/// the fire time to one nobody asked for.
+/// the fire time to one nobody asked for. Which fields a dict may carry at all
+/// is [`plist_calendar_refusal`]'s question, asked by the caller after this one
+/// returns a slot: a dict with no `Minute` at all is reported as naming none,
+/// and only a dict that does name one goes on to be refused for its shape.
 fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
     let after_key = text.split_once("<key>StartCalendarInterval</key>")?.1;
     let dict = after_key.split_once("</dict>")?.0;
-    let weekday = u32::try_from(plist_integer(dict, "Weekday")?).ok()?;
-    let hour = u32::try_from(plist_integer(dict, "Hour")?).ok()?;
     let minute = u32::try_from(plist_integer(dict, "Minute")?).ok()?;
-    if weekday > 7 || hour > 23 || minute > 59 {
+    if minute > 59 {
         return None;
     }
+    let weekday = match plist_integer(dict, "Weekday") {
+        Some(w) => {
+            let val = u32::try_from(w).ok()?;
+            if val > 7 {
+                return None;
+            }
+            Some(val)
+        }
+        None => None,
+    };
+    let hour = match plist_integer(dict, "Hour") {
+        Some(h) => {
+            let val = u32::try_from(h).ok()?;
+            if val > 23 {
+                return None;
+            }
+            Some(val)
+        }
+        None => None,
+    };
     Some(CalendarSlot {
         weekday,
         hour,
@@ -1437,9 +1474,62 @@ fn plist_calendar_slot(text: &str) -> Option<CalendarSlot> {
     })
 }
 
+/// Why a `StartCalendarInterval` dict is a shape this tool cannot read, if it
+/// is one; `None` is a slot [`next_calendar_occurrence`] can turn into a time.
+///
+/// The readable shapes are exactly the two the renderers write: a `Minute`
+/// alone (one fire per hour) and `Weekday` with `Hour` and `Minute` (one fire a
+/// week). Everything else is refused rather than partly read, because a partly
+/// read dict states a fire time its other fields take back:
+///
+/// * a `Day`, `Month` or `Week` narrows the slot past the fields read here;
+/// * an array of dicts declares one slot per dict, and this report carries one
+///   next run;
+/// * a `Weekday` without an `Hour`, or the reverse, is half of a slot.
+///
+/// Nothing else can tell what launchd will do with such a plist, so the answer
+/// is that there is no fire time to state — never the time the readable half
+/// implies.
+fn plist_calendar_refusal(text: &str) -> Option<String> {
+    let after_key = text.split_once("<key>StartCalendarInterval</key>")?.1;
+    let dict = after_key.split_once("</dict>")?.0;
+    if dict.trim_start().starts_with("<array>") {
+        return Some("a StartCalendarInterval array, one slot for each dict it holds".to_string());
+    }
+    let mut weekday = false;
+    let mut hour = false;
+    let mut rest = dict;
+    while let Some((_, after)) = rest.split_once("<key>") {
+        let Some((field, tail)) = after.split_once("</key>") else {
+            break;
+        };
+        match field {
+            "Weekday" => weekday = true,
+            "Hour" => hour = true,
+            "Minute" => {}
+            other => {
+                return Some(format!(
+                    "a StartCalendarInterval naming a {other} beside the Weekday, Hour and Minute \
+                     this tool reads"
+                ))
+            }
+        }
+        rest = tail;
+    }
+    match (weekday, hour) {
+        (true, false) => {
+            Some("a StartCalendarInterval naming a Weekday but not an Hour".to_string())
+        }
+        (false, true) => {
+            Some("a StartCalendarInterval naming an Hour but not a Weekday".to_string())
+        }
+        _ => None,
+    }
+}
+
 struct CalendarSlot {
-    weekday: u32,
-    hour: u32,
+    weekday: Option<u32>,
+    hour: Option<u32>,
     minute: u32,
 }
 
@@ -1452,21 +1542,49 @@ struct CalendarSlot {
 /// nothing rather than moved, because moving it would state a fire time
 /// launchd was never asked for.
 fn next_calendar_occurrence(slot: CalendarSlot, now: DateTime<Local>) -> Option<DateTime<Local>> {
-    // launchd accepts 0 and 7 for Sunday; chrono counts from Sunday at 0.
-    let target = slot.weekday % 7;
-    let today = now.date_naive();
-    let day = today.checked_add_days(Days::new(u64::from(
-        (target + 7 - today.weekday().num_days_from_sunday()) % 7,
-    )))?;
-    match local_at(day, &slot)? {
-        this_week if this_week > now => Some(this_week),
-        _ => local_at(day.checked_add_days(Days::new(7))?, &slot),
+    if let (Some(weekday), Some(hour)) = (slot.weekday, slot.hour) {
+        // launchd accepts 0 and 7 for Sunday; chrono counts from Sunday at 0.
+        let target = weekday % 7;
+        let today = now.date_naive();
+        let day = today.checked_add_days(Days::new(u64::from(
+            (target + 7 - today.weekday().num_days_from_sunday()) % 7,
+        )))?;
+        match local_at(day, hour, slot.minute)? {
+            this_week if this_week > now => Some(this_week),
+            _ => local_at(day.checked_add_days(Days::new(7))?, hour, slot.minute),
+        }
+    } else if slot.weekday.is_none() && slot.hour.is_none() {
+        next_hourly_occurrence(slot.minute, now)
+    } else {
+        None
     }
 }
 
-/// `date` at the slot's wall-clock time in the local zone.
-fn local_at(date: NaiveDate, slot: &CalendarSlot) -> Option<DateTime<Local>> {
-    let naive = date.and_hms_opt(slot.hour, slot.minute, 0)?;
+fn next_hourly_occurrence(minute: u32, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let today = now.date_naive();
+    let current_hour = now.hour();
+    for hours_ahead in 0..48u32 {
+        let naive_base = today.and_hms_opt(current_hour, minute, 0)?;
+        let candidate_naive =
+            naive_base.checked_add_signed(chrono::Duration::hours(i64::from(hours_ahead)))?;
+        match Local.from_local_datetime(&candidate_naive) {
+            LocalResult::Single(dt) if dt > now => return Some(dt),
+            LocalResult::Ambiguous(first, second) => {
+                if first > now {
+                    return Some(first);
+                } else if second > now {
+                    return Some(second);
+                }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// `date` at `hour`:`minute` in the local zone.
+fn local_at(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Local>> {
+    let naive = date.and_hms_opt(hour, minute, 0)?;
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(when) => Some(when),
         // A repeated wall-clock time (the autumn fall-back) happens twice; the
@@ -1626,6 +1744,57 @@ fn reclaim_stage_argv(binary: &Path, stage: &Path, args: &ReclaimStageArgs) -> V
     argv
 }
 
+/// Deterministically pick a minute of the hour (0..=59) derived from a machine identifier.
+///
+/// Spreading machines across different minutes of the hour prevents several machines
+/// from hitting the same destination (e.g. S3, R2, or SSH) at the exact same minute.
+pub fn hourly_minute_for_machine(seed: &str) -> u32 {
+    let digest = Sha256::digest(seed.as_bytes());
+    let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    u32::from_be_bytes(bytes) % 60
+}
+
+/// Resolve the machine seed used for deterministic hourly minute selection.
+///
+/// The identity file is read from [`crate::config::default_data_root`] —
+/// the one spelling of the data root — because that is where every writer
+/// puts it. A second spelling here would read a path the identity is never
+/// written to, and when `$XDG_DATA_HOME` is unset it is the same path
+/// again. `home` is deliberately not a parameter: the render `home` is
+/// `config::home_dir()`, which `default_data_root` already derives from.
+///
+/// `machine` is the caller's own `--machine`, if it has one (the run-once args
+/// and the inbox-pull args both carry the flag, and a renderer should seed from
+/// the flag it was given rather than from an args struct it no longer holds).
+/// Then the identity file, then the platform's own machine id: each is a value
+/// this machine has and its neighbours generally do not, which is all the seed
+/// is for. A machine with none of the three shares the literal seed below, and
+/// with it a minute — a seed that changed between renders would rewrite the
+/// installed plist on every `schedule install`, so one constant value is the
+/// price of a stable minute for a machine that cannot be told apart;
+/// `--machine` is how such a machine gets a minute of its own.
+fn resolve_machine_seed(machine: Option<&str>) -> String {
+    if let Some(machine) = machine {
+        if !machine.is_empty() {
+            return machine.to_string();
+        }
+    }
+    let id_path = crate::config::default_data_root().join("machine-identity");
+    if let crate::identity::IdentityFileState::Loaded(id) =
+        crate::identity::load_identity_state(&id_path)
+    {
+        return id.as_hex();
+    }
+    // Check hostname / platform machine id
+    if let Some(m) = crate::id::machine_id() {
+        if !m.is_empty() {
+            return m;
+        }
+    }
+    // Deterministic fallback
+    "chat-stasher".to_string()
+}
+
 fn render_launchd(
     binary: &Path,
     stage: &Path,
@@ -1640,15 +1809,24 @@ fn render_launchd(
         home,
         label,
         "run-once",
+        args.machine.as_deref(),
     )
 }
 
+/// One launchd agent for one one-shot command: every job shares the same
+/// log-capped, jittered shell preamble, `RunAtLoad=false` and the same schedule
+/// rule — an hourly job (`interval` is [`HOURLY_INTERVAL_SECS`]) fires on
+/// `StartCalendarInterval` at the fixed minute [`hourly_minute_for_machine`]
+/// picks, every other interval keeps `StartInterval`. `machine` is the caller's
+/// `--machine`, if it has one; [`resolve_machine_seed`] says what is used when
+/// it does not.
 fn render_launchd_job(
     argv: &[String],
     interval: u64,
     home: &Path,
     label: &str,
     log_name: &str,
+    machine: Option<&str>,
 ) -> String {
     let success_note = if log_name == "run-once" {
         "exit 0 is success; result=NOOP means no snapshot, result=COMPLETED means snapshot created; non-zero is error."
@@ -1685,6 +1863,17 @@ fn render_launchd_job(
         .map(|arg| format!("        <string>{}</string>", xml_escape(arg)))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let schedule_key = if interval == HOURLY_INTERVAL_SECS {
+        let seed = resolve_machine_seed(machine);
+        let minute = hourly_minute_for_machine(&seed);
+        format!(
+            "  <!-- Hourly at a deterministic minute per machine (:{minute:02}) so passes do not drift by their own duration and multiple machines do not hit a destination at the same minute. -->\n  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Minute</key>\n    <integer>{minute}</integer>\n  </dict>"
+        )
+    } else {
+        format!("  <key>StartInterval</key>\n  <integer>{interval}</integer>")
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1697,8 +1886,7 @@ fn render_launchd_job(
   <array>
 {arguments}
   </array>
-  <key>StartInterval</key>
-  <integer>{interval}</integer>
+{schedule_key}
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
@@ -1711,6 +1899,7 @@ fn render_launchd_job(
         stdout = xml_escape(&stdout_log.to_string_lossy()),
         stderr = xml_escape(&stderr_log.to_string_lossy()),
         label = xml_escape(label),
+        schedule_key = schedule_key,
     )
 }
 
@@ -2275,6 +2464,156 @@ mod tests {
             .expect("jitter sleep");
         let exec = plist.find("exec &apos;").expect("exec");
         assert!(sleep < exec, "jitter must be applied before exec");
+    }
+
+    /// Hourly launchd unit renders StartCalendarInterval with a deterministic minute,
+    /// RunAtLoad=false, and jitter preamble, instead of StartInterval.
+    #[test]
+    fn launchd_hourly_plist_renders_start_calendar_interval() {
+        let args = RunOnceArgs {
+            machine: Some("machine-alpha".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(!plist.contains("<key>StartInterval</key>"));
+        assert!(!plist.contains("<key>Hour</key>"));
+        assert!(!plist.contains("<key>Weekday</key>"));
+        let minute = hourly_minute_for_machine("machine-alpha");
+        assert!(plist.contains(&format!(
+            "<key>Minute</key>\n    <integer>{minute}</integer>"
+        )));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// Non-hourly intervals (backup_interval_secs != 3600) fall back to StartInterval.
+    #[test]
+    fn launchd_non_hourly_plist_falls_back_to_start_interval() {
+        let args = RunOnceArgs::default();
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            1800,
+            &args,
+            &ReclaimStageArgs::default(),
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(!plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(plist.contains("<key>StartInterval</key>\n  <integer>1800</integer>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// The inbox-pull agent goes through the same renderer as the archive
+    /// agent, so an hourly pull job is a `StartCalendarInterval` too: the drift
+    /// this branch removes belongs to the template, not to one job.
+    ///
+    /// `--machine` seeds the pull minute exactly as it seeds the archive
+    /// agent's, and the pull agent keeps the shared `RunAtLoad=false` and the
+    /// jitter preamble.
+    #[test]
+    fn launchd_hourly_pull_job_renders_the_calendar_slot() {
+        let files = render_pull(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            "synthetic-inbox",
+            Some("machine-alpha"),
+            None,
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(files[0].name.starts_with("com.chat-stasher.inbox-pull."));
+        assert!(plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(!plist.contains("<key>StartInterval</key>"));
+        let minute = hourly_minute_for_machine("machine-alpha");
+        assert!(plist.contains(&format!(
+            "<key>Minute</key>\n    <integer>{minute}</integer>"
+        )));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+        assert!(plist.contains("jitter="));
+    }
+
+    /// A non-hourly pull interval keeps `StartInterval`, the same fallback the
+    /// archive agent takes.
+    #[test]
+    fn launchd_non_hourly_pull_job_keeps_start_interval() {
+        let files = render_pull(
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            900,
+            "synthetic-inbox",
+            None,
+            None,
+            Path::new("/home/tester"),
+        );
+        let plist = &files[0].content;
+        assert!(!plist.contains("<key>StartCalendarInterval</key>"));
+        assert!(plist.contains("<key>StartInterval</key>\n  <integer>900</integer>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <false/>"));
+    }
+
+    /// The hourly minute is derived deterministically from the machine ID and distributes across 0..=59.
+    #[test]
+    fn deterministic_hourly_minute_derived_from_machine_id() {
+        let min_a = hourly_minute_for_machine("host-a");
+        let min_b = hourly_minute_for_machine("host-b");
+        assert!(min_a < 60);
+        assert!(min_b < 60);
+        assert_eq!(min_a, hourly_minute_for_machine("host-a"));
+        assert_ne!(min_a, min_b);
+    }
+
+    /// The hourly StartCalendarInterval plist yields the exact next occurrence in local time.
+    #[test]
+    fn launchd_hourly_calendar_plist_yields_the_exact_next_local_occurrence() {
+        use chrono::Timelike;
+
+        let home = tempfile::tempdir().unwrap();
+        let args = RunOnceArgs {
+            machine: Some("machine-alpha".to_string()),
+            ..RunOnceArgs::default()
+        };
+        let files = render(
+            Unit::RunOnce,
+            Format::Launchd,
+            Path::new("/opt/chat-stasher"),
+            Path::new("/var/lib/chat-stasher/stage"),
+            3600,
+            &args,
+            &ReclaimStageArgs::default(),
+            home.path(),
+        );
+        write_plists(home.path(), &files);
+
+        let now = local_noon();
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), now);
+        let value = next
+            .value()
+            .expect("the hourly plist names a calendar slot");
+        assert_eq!(next.note(), None, "a known time carries no excuse");
+
+        let when = DateTime::parse_from_str(value, "%a %Y-%m-%d %H:%M:%S %z")
+            .expect("the reported value is a local timestamp");
+        let expected_minute = hourly_minute_for_machine("machine-alpha");
+        assert_eq!(when.minute(), expected_minute);
+        assert!(when > now, "the next occurrence is never in the past");
     }
 
     /// The weekly unit must embed the `reclaim-stage` subcommand, the stage path
@@ -3004,7 +3343,7 @@ mod tests {
     /// A calendar plist is its own source: the fire time is computed from the
     /// `StartCalendarInterval` keys the plist carries, on the local calendar.
     ///
-    /// The four plist tests below call [`launchd_next_run`] rather than going
+    /// The plist tests below call [`launchd_next_run`] rather than going
     /// through [`next_run`]: since W287 the dispatcher asks launchd whether the
     /// agent is loaded before it reads the plist, and asking means executing a
     /// manager, which a test can only fake with an executable script — unix
@@ -3091,7 +3430,7 @@ mod tests {
             Format::Launchd,
             Path::new("/opt/chat-stasher"),
             Path::new("/var/lib/chat-stasher/stage"),
-            3600,
+            1800,
             &RunOnceArgs::default(),
             &ReclaimStageArgs::default(),
             home.path(),
@@ -3103,9 +3442,134 @@ mod tests {
         assert_eq!(
             next.note(),
             Some(
-                "launchd interval jobs expose no next fire time; the job runs every 60 minutes \
+                "launchd interval jobs expose no next fire time; the job runs every 30 minutes \
                  after load"
             )
+        );
+    }
+
+    #[test]
+    fn a_partial_calendar_shape_is_reported_as_unreadable_not_as_a_dst_gap() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        let label = launchd_label_for_destination(Unit::RunOnce, None);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>StartCalendarInterval</key>\n\
+             \t<dict>\n\
+             \t\t<key>Hour</key>\n\
+             \t\t<integer>3</integer>\n\
+             \t\t<key>Minute</key>\n\
+             \t\t<integer>17</integer>\n\
+             \t</dict>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+        fs::write(agents.join(format!("{label}.plist")), plist).expect("write plist");
+
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
+        assert_eq!(next.value(), None);
+        let note = next.note().expect("an empty answer carries its reason");
+        assert!(
+            !note.contains("daylight-saving"),
+            "a partial shape is not a DST gap: note={note}"
+        );
+        assert!(
+            note.contains("naming an Hour but not a Weekday"),
+            "the missing half is named: note={note}"
+        );
+    }
+
+    /// A calendar field this tool does not read must not be dropped on the way
+    /// to a fire time.
+    ///
+    /// `Minute` alone is one fire per hour; `Minute` beside a `Day` is one fire
+    /// on that date each month. Answering the first while the plist declares the
+    /// second reports a time launchd was never asked for, so the dict goes
+    /// unread — and the note names the field that caused it.
+    #[test]
+    fn a_calendar_field_this_tool_does_not_read_is_reported_not_ignored() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        let label = launchd_label_for_destination(Unit::RunOnce, None);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>StartCalendarInterval</key>\n\
+             \t<dict>\n\
+             \t\t<key>Minute</key>\n\
+             \t\t<integer>17</integer>\n\
+             \t\t<key>Day</key>\n\
+             \t\t<integer>4</integer>\n\
+             \t</dict>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+        fs::write(agents.join(format!("{label}.plist")), plist).expect("write plist");
+
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
+        assert_eq!(
+            next.value(),
+            None,
+            "a slot narrowed by a field this tool does not read has no fire time it can state"
+        );
+        let note = next.note().expect("an empty answer carries its reason");
+        assert!(
+            note.contains("naming a Day"),
+            "the field that cannot be read is named: note={note}"
+        );
+    }
+
+    /// An array of dicts is several slots, and this report carries one next run:
+    /// the first dict's slot is not the schedule, so there is no single time to
+    /// state.
+    #[test]
+    fn a_calendar_interval_array_is_refused_rather_than_half_read() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).expect("create launchd agent directory");
+        let label = launchd_label_for_destination(Unit::RunOnce, None);
+        let plist = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>StartCalendarInterval</key>\n\
+             \t<array>\n\
+             \t\t<dict>\n\
+             \t\t\t<key>Minute</key>\n\
+             \t\t\t<integer>17</integer>\n\
+             \t\t</dict>\n\
+             \t\t<dict>\n\
+             \t\t\t<key>Minute</key>\n\
+             \t\t\t<integer>47</integer>\n\
+             \t\t</dict>\n\
+             \t</array>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+        fs::write(agents.join(format!("{label}.plist")), plist).expect("write plist");
+
+        let next = launchd_next_run(Unit::RunOnce, None, home.path(), local_noon());
+        assert_eq!(
+            next.value(),
+            None,
+            "the schedule is every dict in the array, not the first one"
+        );
+        let note = next.note().expect("an empty answer carries its reason");
+        assert!(
+            note.contains("StartCalendarInterval array"),
+            "the shape that cannot be read is named: note={note}"
         );
     }
 

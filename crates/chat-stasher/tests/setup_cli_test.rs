@@ -834,6 +834,67 @@ fn rule_1_wins_when_the_masterkey_declaration_and_a_remote_parameter_are_both_mi
     );
 }
 
+/// The next run a macOS probe reports has to be the slot the installed plist
+/// declares — read out of `$HOME/Library/LaunchAgents`, never recomputed here
+/// from the cadence the run was given.
+///
+/// The hourly launchd template is a `StartCalendarInterval` at a fixed minute
+/// per machine (`docs/schedule.md`, "Minute selection"), so an installed agent
+/// that launchd confirms *does* have a fire time: a probe that answered nothing
+/// for one would be dropping a time it can read. The minute is what ties the
+/// answer to the file; the comparison is against "a minute ago" rather than
+/// "now" because the probe answered milliseconds before this runs, and a test
+/// that can only pass when it does not straddle a minute boundary is a flake.
+fn assert_reported_slot_is_the_installed_one(value: &serde_json::Value, home: &Path) {
+    use chrono::Timelike;
+
+    let reported = value["schedule"]["next_run"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the installed hourly plist declares a slot: {value}"));
+    let when = chrono::DateTime::parse_from_str(reported, "%a %Y-%m-%d %H:%M:%S %z")
+        .unwrap_or_else(|error| panic!("the probe reports a local timestamp ({error}): {value}"));
+    assert_eq!(
+        u32::try_from(when.minute()).expect("a minute of the hour"),
+        installed_hourly_minute(home),
+        "the reported fire time is the minute the installed plist declares: {value}"
+    );
+    assert!(
+        when > chrono::Local::now() - chrono::Duration::minutes(1),
+        "the reported slot is the next one, not one already past: {value}"
+    );
+    assert!(
+        value["schedule"].get("next_run_note").is_none(),
+        "a reported next run carries no excuse: {value}"
+    );
+}
+
+/// The `Minute` the hourly launchd agent under `home` declares.
+///
+/// Read out of the file the run wrote rather than recomputed: the point of the
+/// assertion that uses it is that the reported fire time comes from this plist.
+/// The label is the documented one for a machine with no destination
+/// (`docs/schedule.md`, "Coming from start.md").
+fn installed_hourly_minute(home: &Path) -> u32 {
+    let path = home.join("Library/LaunchAgents/com.chat-stasher.run-once.plist");
+    let plist = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {} ({error})", path.display()));
+    let after_key = plist
+        .split_once("<key>Minute</key>")
+        .unwrap_or_else(|| panic!("the hourly template declares its minute: {plist}"))
+        .1;
+    let after_open = after_key
+        .split_once("<integer>")
+        .unwrap_or_else(|| panic!("the minute is an integer: {plist}"))
+        .1;
+    let (value, _) = after_open
+        .split_once("</integer>")
+        .unwrap_or_else(|| panic!("the integer closes: {plist}"));
+    value
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("the minute is a number ({error}): {plist}"))
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
@@ -948,15 +1009,11 @@ fn setup_installs_scheduler_checks_run_once_and_reports_no_false_next_run() {
                 "a reported next run carries no excuse: {value}"
             );
         } else {
-            assert_eq!(value["schedule"]["next_run"], serde_json::Value::Null);
-            assert_eq!(
-                value["schedule"]["next_run_note"],
-                serde_json::json!(
-                    "launchd interval jobs expose no next fire time; the job runs every 60 \
-                     minutes after load"
-                ),
-                "an empty next run has to arrive with the sentence saying why: {value}"
-            );
+            // The hourly launchd template is a `StartCalendarInterval` at a fixed
+            // minute per machine, so the agent this run installed declares a slot
+            // and the probe must report *that* slot — never a time recomputed from
+            // the cadence it was given.
+            assert_reported_slot_is_the_installed_one(&value, &sandbox.home());
         }
         assert!(!String::from_utf8_lossy(&output.stdout).contains("scheduler-noise"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("scheduler-error"));
@@ -1138,20 +1195,20 @@ fn setup_self_check_uses_the_installed_binary_selected_from_a_build_artifact() {
     assert_eq!(exit_code(&output), 1, "value={value}");
     assert_eq!(value["schedule"]["status"], "self_check_failed");
     assert_eq!(value["steps"]["schedule"], "self_check_failed");
-    assert_eq!(
-        value["schedule"]["next_run"],
-        serde_json::Value::Null,
-        "a next run the scheduler did not report must not be invented"
-    );
-    let note = value["schedule"]["next_run_note"]
-        .as_str()
-        .expect("an empty next run arrives with the sentence saying why");
     if cfg!(target_os = "macos") {
-        assert!(
-            note.contains("launchd interval jobs expose no next fire time"),
-            "note={note}"
-        );
+        // The agent was written and loaded before the self-check ran, so the
+        // scheduler does report a next run here: the self-check's failure is
+        // about the binary, not about a timer that is armed.
+        assert_reported_slot_is_the_installed_one(&value, &sandbox.home());
     } else {
+        assert_eq!(
+            value["schedule"]["next_run"],
+            serde_json::Value::Null,
+            "a next run the scheduler did not report must not be invented"
+        );
+        let note = value["schedule"]["next_run_note"]
+            .as_str()
+            .expect("an empty next run arrives with the sentence saying why");
         // This fake answers `is-active` and `enable` only, so the probe gets no
         // `Trigger:` line at all — which is not the same as a timer systemd
         // says has no next elapse, and both must be reported as an absence.
