@@ -31,7 +31,7 @@
           "source": "https://code.claude.com/docs/en/claude-directory(original text: ~/.claude -> %USERPROFILE%\\.claude)+ anthropics/claude-code#80683 #84354"
         }
       },
-      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days.",
+      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days. Claude Code Workflows also writes one journal.jsonl per workflow run at <parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl; the scanner ids those journals by the wf_<run-uuid> directory (measured on macOS; the constant filename stem would otherwise merge every run into one session id).",
       "seal_policy": "rename",
       "seal_source": "A9 measured(macOS): 201 sample points across real write windows(172210->194561 B, 11 size changes)all lsof=0 => reopens by path each time, rename seal is safe",
       "reference": {

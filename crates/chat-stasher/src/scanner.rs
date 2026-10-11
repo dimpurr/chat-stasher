@@ -548,9 +548,12 @@ pub struct HarnessProbe {
     pub root: Option<PathBuf>,
     pub confidence: Confidence,
     pub state: ProbeState,
-    /// Session records found at this harness's root. `None` when this harness
-    /// cannot be enumerated at all (missing, skipped, single-file store whose
-    /// schema we do not recognise) — never a fabricated zero.
+    /// Session records found at this harness's root, counted by **distinct
+    /// session id** — the quantity collect can address, and the quantity the
+    /// multi-source-root aggregation already counted (a file count cannot
+    /// stand in for it where several files share one stem). `None` when this
+    /// harness cannot be enumerated at all (missing, skipped, single-file
+    /// store whose schema we do not recognise) — never a fabricated zero.
     pub record_count: Option<u64>,
     /// Candidate rows before a store-specific qualification rule. For Cursor
     /// this is the raw `composerData:%` count shown beside `record_count`.
@@ -655,9 +658,11 @@ pub struct ScanReport {
     pub probes: Vec<HarnessProbe>,
 }
 
-/// A harness probe recognised sessions, but the scanner produced fewer
-/// `SessionRecord`s for it. `collect` consumes only those records, so the
-/// difference is currently not archivable by this build.
+/// A harness probe recognised more distinct sessions than the scanner
+/// produced distinct `SessionRecord` ids for. `collect` consumes only those
+/// records, so the difference is currently not archivable by this build.
+/// Both counts are of distinct ids — several source files aliasing onto one
+/// id is a slot merge the archive records elsewhere, not a gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveGap {
     pub harness_id: String,
@@ -668,9 +673,12 @@ pub struct ArchiveGap {
 
 impl ScanReport {
     /// Return installed harnesses whose recognised session count is greater
-    /// than the number of records that `collect` can consume. The comparison
-    /// is deliberately made against the records actually produced by this
-    /// scan; no harness allowlist is involved.
+    /// than the number of records that `collect` can consume. Both sides
+    /// count **distinct session ids** — mirroring the multi-root aggregation
+    /// — so files that alias onto one id never fabricate a gap out of the
+    /// missing file-to-record difference; the comparison is deliberately
+    /// made against the records actually produced by this scan, and no
+    /// harness allowlist is involved.
     pub fn archive_gaps(&self) -> Vec<ArchiveGap> {
         self.probes
             .iter()
@@ -723,9 +731,20 @@ impl ScanReport {
 /// Render the same metadata-only warning for every CLI surface that reports
 /// scanner results. The counts come from the `ArchiveGap`, not from a harness
 /// name list.
+///
+/// Both counts name **distinct session ids** — the probe's recognized count
+/// and the record ids collect consumes — so a difference is a real shortfall
+/// of this build, never an artifact of aliased ids. The reason names what the
+/// two shapes of `recognized_sessions` actually mean instead of claiming a
+/// store-format refusal, which was untrue whenever the difference came from
+/// id aliasing (GB-2).
 pub fn format_archive_gap(gap: &ArchiveGap) -> String {
+    let reason = match gap.recognized_sessions {
+        Some(_) => "the scanner recognised more sessions than it produced SessionRecords for, so collect archives only the session_records side — an enumeration failure of this build, not a configuration problem and not a verdict on the harness's store format",
+        None => "an installed single-file store whose sessions this build could not enumerate, so collect produced no SessionRecords for it — not a configuration problem, and there is no switch to enable it",
+    };
     format!(
-        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — this build cannot archive this harness's store format (not a configuration problem, and there is no switch to enable it)",
+        "  ! harness={} identified_sessions={} session_records={} source_not_collected=true — {reason}",
         gap.harness_id,
         gap.recognized_sessions
             .map(|count| count.to_string())
@@ -1708,7 +1727,23 @@ fn probe_harness_single(
             cell.session_pattern.as_deref(),
             cell.session_dir.as_ref(),
         );
-        let count = recs.records.len() as u64;
+        // One archive slot addresses one session id, so the recognized count
+        // is the **distinct** ids this scan produced — the same quantity the
+        // multi-source-root aggregation counts as `known_count` and the
+        // quantity `archive_gaps` compares it against. Until some harness
+        // wrote the same filename stem in several directories, the raw file
+        // count and the distinct-id count were equal; comparing raw files
+        // here against collect's distinct record ids would turn pure id
+        // aliasing into an "identified but unarchivable" gap (GB-2: 2848
+        // files over 2840 ids read as 8 sessions this build could not
+        // archive). Candidate files keep the file census either way.
+        let count = recs
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64;
+        let file_count = recs.records.len() as u64;
         let recognized_files = recs
             .records
             .iter()
@@ -1735,7 +1770,7 @@ fn probe_harness_single(
             confidence,
             state: ProbeState::Scanned,
             record_count: Some(count),
-            candidate_count: Some(count + recs.unreadable_count),
+            candidate_count: Some(file_count + recs.unreadable_count),
             // Counted entry by entry by the directory walk: a real number.
             unreadable_count: Some(recs.unreadable_count),
             unreadable_entry_count: Some(recs.unreadable_entry_count),
@@ -3166,6 +3201,40 @@ fn detect_source(path: &Path) -> Option<HarnessSource> {
     None
 }
 
+/// Claude Code's Workflows runs write one journal per run at
+/// `…/<parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl`. The
+/// filename stem is the harness constant `journal` — identical for every run
+/// — so a stem id collapses every workflow run on the machine into one
+/// archive slot, and the raw file count standing against collect's distinct
+/// record ids made that aliasing masquerade as an unarchivable gap (GB-2).
+/// The workflow-run directory names the run structurally — `wf_` and the
+/// trailing run id are harness-generated constants, like the `subagents` and
+/// `workflows` segments above it — so for exactly this layout the directory
+/// name is the native id. Nothing else re-ids: ordinary `<uuid>.jsonl`
+/// session files, `agent-<hex>.jsonl` transcripts at any depth, and any
+/// `journal.jsonl` not directly inside a `wf_<…>` directory under
+/// `subagents/workflows` keep the filename-stem id.
+fn claude_code_workflow_journal_native_id(path: &Path, stem: &str) -> Option<String> {
+    if stem != "journal" {
+        return None;
+    }
+    let run_dir = path.parent()?;
+    let wf = run_dir.file_name()?.to_string_lossy().into_owned();
+    let run = wf.strip_prefix("wf_")?;
+    if run.is_empty() {
+        return None;
+    }
+    let workflows = run_dir.parent()?;
+    if workflows.file_name()?.to_string_lossy() != "workflows" {
+        return None;
+    }
+    let subagents = workflows.parent()?;
+    if subagents.file_name()?.to_string_lossy() != "subagents" {
+        return None;
+    }
+    Some(wf)
+}
+
 /// Turn one discovered path into a `SessionRecord`, or `None` if the file's
 /// name is not a session file at all.
 ///
@@ -3218,6 +3287,12 @@ fn build_record(
     // segment above the session directory (its container, when the layout
     // gives that segment a workspace meaning) and, for a harness that keeps
     // a per-session index, the working directory the index recorded.
+    //
+    // The record's own source detection runs before the id is chosen, so the
+    // claude-code structural rule below sees the same source the record will
+    // be labelled with — a harness_roots override relocates a tree without
+    // losing the rule, and a file detected as another harness never gains it.
+    let source = detect_source(path).unwrap_or(expected);
     let (native_id, container, indexed_cwd) = match (session_dir, scope) {
         (Some(rule), SessionScope::In { dir, id, container }) => {
             if !relpath_matches(dir, path, &rule.file) {
@@ -3227,10 +3302,17 @@ fn build_record(
             (id.clone(), container.clone(), cwd)
         }
         (Some(_), SessionScope::Outside) => return RecordBuild::NotSession,
+        // Claude Code's workflow journals sit at a fixed path whose stem is
+        // a constant, so exactly that layout ids by its workflow-run
+        // directory; every claude-code file outside it keeps the stem id.
+        (None, _) if source == HarnessSource::ClaudeCode => (
+            claude_code_workflow_journal_native_id(path, &stem).unwrap_or_else(|| stem.clone()),
+            None,
+            None,
+        ),
         (None, _) => (stem, None, None),
     };
 
-    let source = detect_source(path).unwrap_or(expected);
     let source_short = source.short();
 
     let meta = match fs::metadata(path) {
@@ -3297,6 +3379,30 @@ mod tests {
     /// Serialises tests that mutate process env vars — cargo runs tests in
     /// parallel threads and `set_var` is process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A one-harness claude-code cell whose declared root is the sandbox
+    /// home's `~/.claude/projects`, so the GB-2 tests can plant harness-shaped
+    /// trees and walk them through the same registry path production uses.
+    fn claude_code_directory_registry() -> HarnessRegistry {
+        let cell = serde_json::json!({
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let paths = match current_platform() {
+            "macos" => serde_json::json!({"macos": cell}),
+            "linux" => serde_json::json!({"linux": cell}),
+            "windows" => serde_json::json!({"windows": cell}),
+            platform => panic!("unexpected platform: {platform}"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{"id": "claude-code", "display_name": "synthetic", "paths": paths}]
+        }))
+        .unwrap()
+    }
 
     fn synthetic_grok_registry() -> HarnessRegistry {
         let cell = serde_json::json!({
@@ -3432,6 +3538,303 @@ mod tests {
             .collect();
         surfaces.sort_unstable();
         assert_eq!(surfaces, ["cli", "cli", "ide"]);
+    }
+
+    /// GB-2. Claude Code's Workflows feature writes one journal per workflow
+    /// run at
+    /// `~/.claude/projects/<project>/<parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl`.
+    /// The filename stem is the harness constant `journal`, identical for
+    /// every run, so a stem id collapses every workflow run into a single
+    /// archive slot and — worse — the raw file count standing against
+    /// collect's distinct record ids read the shortfall as an unarchivable
+    /// gap, blocking every run-once snapshot on the affected machine. The
+    /// workflow-run directory is the structural identity of a run, so this
+    /// regression says one journal per run under two different parents
+    /// yields two records, two distinct ids, and no gap.
+    #[test]
+    fn claude_code_workflow_journals_get_one_session_id_per_workflow_run() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let run_a = "wf_019d7a00-0000-7000-8000-00000000000a";
+        let run_b = "wf_019d7b00-0000-7000-8000-00000000000b";
+        for (project, parent, run) in [
+            (
+                "-fixture-proj-a",
+                "019d7a01-0000-7000-8000-000000000001",
+                run_a,
+            ),
+            (
+                "-fixture-proj-b",
+                "019d7b02-0000-7000-8000-000000000002",
+                run_b,
+            ),
+        ] {
+            let journal = projects
+                .join(project)
+                .join(parent)
+                .join("subagents")
+                .join("workflows")
+                .join(run)
+                .join("journal.jsonl");
+            fs::create_dir_all(journal.parent().unwrap()).unwrap();
+            fs::write(&journal, b"{\"synthetic\":\"workflow-journal\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{run_a}"),
+            format!("claude-code.synthetic-machine.{run_b}"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            report.records.len(),
+            2,
+            "one journal file per workflow run, each its own record; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ids, expected,
+            "the wf_<run-uuid> directory is the native id of a workflow journal"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(2),
+            "the probe counts the sessions collect can address"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "two journals with distinct ids are not an archive gap; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2. The ordinary claude-code tree keeps its ids: session transcripts
+    /// named `<uuid>.jsonl` and subagent transcripts named `agent-<hex>.jsonl`
+    /// (at either depth — directly under `subagents/` or inside a workflow
+    /// run's directory) still id by their own filename stem, on the m1max-style
+    /// tree that has no workflow journals at all.
+    #[test]
+    fn claude_code_ordinary_tree_keeps_filename_stem_ids() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let files = [
+            "-fixture-proj-a/019d7c01-0000-7000-8000-000000000001.jsonl",
+            "-fixture-proj-a/019d7c02-0000-7000-8000-000000000002/subagents/agent-0f1e2d3c4b5a6978.jsonl",
+            "-fixture-proj-a/019d7c02-0000-7000-8000-000000000002/subagents/workflows/wf_019d7c03-0000-7000-8000-000000000003/agent-1122334455667788.jsonl",
+            "-fixture-proj-b/019d7c04-0000-7000-8000-000000000004/subagents/agent-99aabbccddeeff00.jsonl",
+        ];
+        let expected: std::collections::BTreeSet<String> = files
+            .iter()
+            .map(|rel| {
+                let stem = rel
+                    .rsplit('/')
+                    .next()
+                    .expect("fixture path names a file")
+                    .trim_end_matches(".jsonl");
+                format!("claude-code.synthetic-machine.{stem}")
+            })
+            .collect();
+        for rel in files {
+            let path = projects.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"{\"synthetic\":\"ordinary\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(report.records.len(), expected.len());
+        assert_eq!(
+            ids.len(),
+            report.records.len(),
+            "no two stems alias on an ordinary tree"
+        );
+        assert_eq!(
+            ids.iter()
+                .map(|id| id.to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "ordinary sessions and agent transcripts id by filename stem"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(4),
+            "the recognized count still covers every record"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "an ordinary tree is gap-free; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2 counting. Two files with the same filename stem in different
+    /// directories alias to one session id. That is a real loss of
+    /// distinctness the archive should honestly show as one session — but it
+    /// is *not* an "identified but unarchivable" gap: collect consumes every
+    /// record, just under one slot. The recognized count must therefore be
+    /// the distinct ids on both sides of the comparison, exactly as the
+    /// multi-source-root aggregation counts them.
+    #[test]
+    fn aliased_filename_stems_warp_the_count_but_report_no_archive_gap() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        for project in ["-fixture-proj-a", "-fixture-proj-b"] {
+            let path = projects.join(project).join("dup-stem.jsonl");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"{\"synthetic\":\"aliased\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(report.records.len(), 2);
+        let distinct: std::collections::BTreeSet<_> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "the fixture really does alias: one stem shared by two files"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(1),
+            "the recognized count is the distinct session ids collect can address"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "pure id aliasing is not an archive gap: collect consumed both records; gaps={:?}",
+            report.archive_gaps()
+        );
+    }
+
+    /// GB-2 message. A gap with a concrete recognized count must name the
+    /// actual shortfall cause — sessions the scanner could not turn into
+    /// SessionRecords — and must never claim the build cannot archive the
+    /// harness's store format, which was untrue whenever the difference was
+    /// an artifact of aliased ids.
+    #[test]
+    fn archive_gap_message_names_the_shortfall_not_a_store_format_refusal() {
+        let counted = ArchiveGap {
+            harness_id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            recognized_sessions: Some(9),
+            session_records: 8,
+        };
+        let text = format_archive_gap(&counted);
+        assert!(
+            text.contains("harness=claude-code")
+                && text.contains("identified_sessions=9")
+                && text.contains("session_records=8")
+                && text.contains("source_not_collected=true"),
+            "the machine-readable fields stay: {text}"
+        );
+        assert!(
+            !text.contains("this build cannot archive this harness's store format"),
+            "the message must not claim a store-format refusal: {text}"
+        );
+        assert!(
+            text.contains("recognised more sessions than it produced SessionRecords for"),
+            "the counted shape says what the shortfall is: {text}"
+        );
+
+        let unread = ArchiveGap {
+            recognized_sessions: None,
+            harness_id: "opencode".to_string(),
+            display_name: "OpenCode".to_string(),
+            session_records: 0,
+        };
+        let text = format_archive_gap(&unread);
+        assert!(
+            text.contains("identified_sessions=unknown")
+                && text.contains("source_not_collected=true")
+                && text.contains("no switch to enable it"),
+            "the existing single-file-store shape keeps its own honest wording: {text}"
+        );
+    }
+
+    /// The workflow-journal id rule is structural, so its edges are decided by
+    /// the layout alone: the one matching shape is a `journal.jsonl` directly
+    /// inside a `wf_<run>` directory that sits inside `subagents/workflows`.
+    #[test]
+    fn claude_code_journal_rule_matches_only_the_workflows_layout() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            // The measured layout: one run of Claude Code's Workflows.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                Some("wf_019d7d00-0000-7000-8000-00000000000d"),
+            ),
+            // A subagent transcript inside the same run keeps the stem id.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/agent-0f1e2d3c4b5a6978.jsonl",
+                "agent-0f1e2d3c4b5a6978",
+                None,
+            ),
+            // A journal nested one level deeper than the run directory.
+            (
+                "projects/proj/parent/subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/deeper/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // The workflow directory without its wf_ marker.
+            (
+                "projects/proj/parent/subagents/workflows/run-no-prefix/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // The wf_ marker with nothing after it.
+            (
+                "projects/proj/parent/subagents/workflows/wf_/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // Missing the workflows segment between parent and run.
+            (
+                "projects/proj/parent/subagents/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+            // Missing the subagents segment above the run.
+            (
+                "projects/proj/parent/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+        ];
+        for (path, stem, expected) in cases {
+            assert_eq!(
+                claude_code_workflow_journal_native_id(Path::new(path), stem).as_deref(),
+                *expected,
+                "layout `{path}` id must be {expected:?}"
+            );
+        }
     }
 
     #[test]
