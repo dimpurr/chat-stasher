@@ -270,16 +270,17 @@ under its own heading below.
   out of a stage nobody pointed it at, and a stage that is not there is refused
   rather than created. Every platform this build knows is offered by
   `--platform`, so a platform whose importer is a later slice is a refusal that
-  names it, and nothing is written; only Claude's `conversations.json` has a
-  parser yet. The exit code keeps the kinds of "no" apart: `3` the file was never
-  read to the end, `2` it was read and is not importable (a manifest, invalid
-  JSON, a platform with no parser), `1` it was read and then a conversation or a
-  write failed — a read that was refused is not a zero-conversation success. Two
-  limits are stated rather than hidden: unlike the `export-files/` object above,
-  this namespace is local for now, not yet wired into `push` or readback, and the
-  archive probe that would suppress a body the archive already holds is not wired
-  either, so every conversation currently gets a body and the run prints the
-  probe's own answer.
+  names it, and nothing is written; Claude's `conversations.json` and Grok's
+  `prod-grok-backend.json` have parsers in this build. The exit code keeps the
+  kinds of "no" apart: `3` the file was never read to the end, `2` it was read
+  and is not importable (a manifest, invalid JSON, a platform with no parser),
+  `1` it was read and then a conversation or a write failed — a read that was
+  refused is not a zero-conversation success. Two limits are stated rather
+  than hidden: unlike the `export-files/` object above, this namespace is
+  local for now, not yet wired into `push` or readback, and the archive probe
+  that would suppress a body the archive already holds is not wired either,
+  so every conversation currently gets a body and the run prints the probe's
+  own answer.
 
 #### Changed
 

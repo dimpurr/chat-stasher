@@ -73,19 +73,18 @@ holds, and it is the next step. Whether the list endpoint enumerates
 the account's full history or only a recent window is itself
 unverified; the threat model already records the Grok backfill as
 implemented but not yet observed completing in a real browser
-(`docs-dev/threat-model.md:329`).
+(`docs-dev/threat-model.md:331`).
 
 ## The remedy, and its state
 
 - **The historical gap closes by importing the official export** — the
   same `prod-grok-backend.json` the oracle measured against. The
   import seam already names Grok as a platform
-  (`crates/chat-stasher/src/import.rs:128`, `:140`); the parser that
-  makes `has_parser()` true for it (`import.rs:148-150`) lands on
-  branch `w934-tko2-grok-export-parser`, not yet merged. Until it
-  merges, `chat-stasher import --platform grok` is a named refusal,
-  and the 251 are recoverable only by that merge or by a completed
-  backfill.
+  (`crates/chat-stasher/src/import.rs:132`, `:144`); the parser that
+  makes `has_parser()` true for it (`import.rs:164-170`) is in this
+  build, so `chat-stasher import grok` reads the export rather than
+  refusing, and the 251 are recoverable only by that import or by a
+  completed backfill.
 - **The live leg needs no fix**: its captures are whole. The backfill
   is the designed path for history, and its cursor shape needs a
   logged-in session to verify — the same verification the threat model
