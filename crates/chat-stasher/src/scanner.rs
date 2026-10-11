@@ -1542,19 +1542,28 @@ fn probe_harness_single(
                                                 )
                                             };
                                             let record_count = records.len();
-                                            let usage =
-                                                grok_usage_records(&root, &records, machine);
+                                            let (session_dirs, walk_unreadable) =
+                                                grok_session_dirs(&root);
+                                            let usage = grok_usage_records(
+                                                &session_dirs,
+                                                &records,
+                                                machine,
+                                            );
+                                            let history =
+                                                grok_history_records(&session_dirs, machine);
                                             report.records.extend(records);
                                             let usage_count = usage.records.len();
                                             report.records.extend(usage.records);
+                                            let history_count = history.records.len();
+                                            report.records.extend(history.records);
                                             probe.unreadable_count = enumeration_gap(
                                                 count,
                                                 record_count,
                                                 info.unreadable_count,
                                             );
-                                            if usage.unreadable_entries > 0 {
+                                            if walk_unreadable > 0 {
                                                 probe.unreadable_entry_count =
-                                                    Some(usage.unreadable_entries);
+                                                    Some(walk_unreadable);
                                             }
                                             if usage.unreadable_files > 0 {
                                                 probe.note.push_str(&format!(
@@ -1562,8 +1571,14 @@ fn probe_harness_single(
                                                     usage.unreadable_files
                                                 ));
                                             }
+                                            if history.unreadable_files > 0 {
+                                                probe.note.push_str(&format!(
+                                                    "; chat_history.jsonl unreadable={}",
+                                                    history.unreadable_files
+                                                ));
+                                            }
                                             probe.note.push_str(&format!(
-                                                "; SessionRecord={record_count}; usage files={usage_count}"
+                                                "; SessionRecord={record_count}; usage files={usage_count}; history files={history_count}"
                                             ));
                                         }
                                         Err(error) => {
@@ -1953,6 +1968,83 @@ fn sqlite_records_from_rows(
         .collect()
 }
 
+/// One Grok session directory: `sessions/<working-directory>/<session-id>/`.
+struct GrokSessionDir {
+    path: std::path::PathBuf,
+    session_id: String,
+}
+
+/// Walk the session directories that sit beside the search DB:
+/// `~/.grok/sessions/<sanitized-cwd>/<session-uuid>/`. Both sidecar
+/// collectors — the `usage.json` manifest and the native
+/// `chat_history.jsonl` transcript — must see the very same set of session
+/// directories, so the walk is shared rather than repeated: a collector that
+/// walked on its own could drift from its sibling and, one day, associate a
+/// sidecar with the wrong session population.
+///
+/// Returns the directories plus the count of directory entries the walk could
+/// not read. A non-directory entry is not an unreadable one — it is measured
+/// and skipped, the same three-state rule every scanner walk keeps.
+fn grok_session_dirs(db: &Path) -> (Vec<GrokSessionDir>, u64) {
+    let Some(root) = db.parent() else {
+        return (Vec::new(), 0);
+    };
+    let mut dirs = Vec::new();
+    let mut unreadable_entries = 0;
+    let cwd_dirs = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return (Vec::new(), 1);
+        }
+    };
+    for cwd_entry in cwd_dirs {
+        let cwd_entry = match cwd_entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        match cwd_entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        }
+        let session_dirs = match fs::read_dir(cwd_entry.path()) {
+            Ok(entries) => entries,
+            Err(_) => {
+                unreadable_entries += 1;
+                continue;
+            }
+        };
+        for session_entry in session_dirs {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+            match session_entry.file_type() {
+                Ok(kind) if kind.is_dir() => {}
+                Ok(_) => continue,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            }
+            dirs.push(GrokSessionDir {
+                path: session_entry.path(),
+                session_id: session_entry.file_name().to_string_lossy().into_owned(),
+            });
+        }
+    }
+    (dirs, unreadable_entries)
+}
+
 /// Additional raw usage files stored under
 /// `sessions/<working-directory>/<session-id>/usage.json`. A usage record gets
 /// a stable `.usage` identity suffix and retains the original JSON bytes
@@ -1961,105 +2053,118 @@ fn sqlite_records_from_rows(
 struct GrokUsageScan {
     records: Vec<SessionRecord>,
     unreadable_files: u64,
-    unreadable_entries: u64,
 }
 
-fn grok_usage_records(db: &Path, sessions: &[SessionRecord], machine: &str) -> GrokUsageScan {
-    let Some(root) = db.parent() else {
-        return GrokUsageScan::default();
-    };
+fn grok_usage_records(
+    dirs: &[GrokSessionDir],
+    sessions: &[SessionRecord],
+    machine: &str,
+) -> GrokUsageScan {
     let known: BTreeSet<String> = sessions
         .iter()
         .filter_map(|record| record.id.splitn(3, '.').nth(2).map(str::to_owned))
         .collect();
     let mut scan = GrokUsageScan::default();
-    let cwd_dirs = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => {
-            scan.unreadable_entries = 1;
-            return scan;
+    for dir in dirs {
+        if !known.contains(&dir.session_id) {
+            continue;
         }
-    };
-
-    for cwd_entry in cwd_dirs {
-        let cwd_entry = match cwd_entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                scan.unreadable_entries += 1;
-                continue;
-            }
-        };
-        match cwd_entry.file_type() {
-            Ok(kind) if kind.is_dir() => {}
+        let path = dir.path.join("usage.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => {
-                scan.unreadable_entries += 1;
-                continue;
-            }
-        }
-        let session_dirs = match fs::read_dir(cwd_entry.path()) {
-            Ok(entries) => entries,
-            Err(_) => {
-                scan.unreadable_entries += 1;
+                scan.unreadable_files += 1;
                 continue;
             }
         };
-        for session_entry in session_dirs {
-            let session_entry = match session_entry {
-                Ok(entry) => entry,
-                Err(_) => {
-                    scan.unreadable_entries += 1;
-                    continue;
-                }
-            };
-            let session_id = session_entry.file_name().to_string_lossy().into_owned();
-            if !known.contains(&session_id) {
+        let mtime = match metadata.modified() {
+            Ok(mtime) => mtime,
+            Err(_) => {
+                scan.unreadable_files += 1;
                 continue;
             }
-            match session_entry.file_type() {
-                Ok(kind) if kind.is_dir() => {}
-                Ok(_) => continue,
-                Err(_) => {
-                    scan.unreadable_entries += 1;
-                    continue;
-                }
-            }
-            let path = session_entry.path().join("usage.json");
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_file() => metadata,
-                Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    scan.unreadable_files += 1;
-                    continue;
-                }
-            };
-            let mtime = match metadata.modified() {
-                Ok(mtime) => mtime,
-                Err(_) => {
-                    scan.unreadable_files += 1;
-                    continue;
-                }
-            };
-            let usage_id = crate::id::SessionIdentity {
-                source_short: "grok",
-                machine: machine.to_string(),
-                native_id: format!("{session_id}.usage"),
-            }
-            .id();
-            // The native suffix associates usage with its source session; the
-            // composed ID may be bounded when that suffix exceeds NAME_MAX.
-            scan.records.push(SessionRecord {
-                id: usage_id,
-                absolute_path: absolutize(&path),
-                byte_size: metadata.len(),
-                mtime,
-                source: HarnessSource::Grok,
-                compressed: false,
-                sqlite_layout: None,
-                provenance: Default::default(),
-            });
+        };
+        let usage_id = crate::id::SessionIdentity {
+            source_short: "grok",
+            machine: machine.to_string(),
+            native_id: format!("{}.usage", dir.session_id),
         }
+        .id();
+        // The native suffix associates usage with its source session; the
+        // composed ID may be bounded when that suffix exceeds NAME_MAX.
+        scan.records.push(SessionRecord {
+            id: usage_id,
+            absolute_path: absolutize(&path),
+            byte_size: metadata.len(),
+            mtime,
+            source: HarnessSource::Grok,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+        });
+    }
+    scan
+}
+
+/// The native Grok CLI transcripts — `chat_history.jsonl`, one directory per
+/// session under the same sessions root the usage sidecars live in.
+///
+/// Every session that holds the file produces a record, including sessions
+/// the `session_docs` store has no row for: a session with no row was
+/// previously invisible to the archive entirely, and the native transcript is
+/// then the session's only observation. The record's id is the session's own
+/// identity — the same id a `session_docs` row record gets — so a session
+/// with both producers seals both observations into ONE body, which is the
+/// shape the reader expects (a body that renders a native turn must not
+/// append the legacy plain-text summary again, while the raw body keeps
+/// both). The record is an ordinary JSONL file record (no SQLite layout), so
+/// the collector gives it the same append-only, byte-accurate cursor every
+/// other file source gets: the first pass archives the file whole, and a pass
+/// after the CLI appended to it archives only the new bytes.
+#[derive(Debug, Default)]
+struct GrokHistoryScan {
+    records: Vec<SessionRecord>,
+    unreadable_files: u64,
+}
+
+fn grok_history_records(dirs: &[GrokSessionDir], machine: &str) -> GrokHistoryScan {
+    let mut scan = GrokHistoryScan::default();
+    for dir in dirs {
+        let path = dir.path.join("chat_history.jsonl");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                scan.unreadable_files += 1;
+                continue;
+            }
+        };
+        let mtime = match metadata.modified() {
+            Ok(mtime) => mtime,
+            Err(_) => {
+                scan.unreadable_files += 1;
+                continue;
+            }
+        };
+        let id = crate::id::SessionIdentity {
+            source_short: "grok",
+            machine: machine.to_string(),
+            native_id: dir.session_id.clone(),
+        }
+        .id();
+        scan.records.push(SessionRecord {
+            id,
+            absolute_path: absolutize(&path),
+            byte_size: metadata.len(),
+            mtime,
+            source: HarnessSource::Grok,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+        });
     }
     scan
 }
@@ -4069,6 +4174,101 @@ mod tests {
             );
         assert_eq!(usage_record.id, format!("{sqlite_id}.usage"));
         assert_eq!(usage_record.sqlite_layout, None);
+    }
+
+    #[test]
+    fn grok_chat_history_files_are_scanned_including_sessions_without_a_row() {
+        let sandbox = Sandbox::new();
+        let sessions = sandbox.home().join(".grok/sessions");
+        let db = sessions.join("session_search.sqlite");
+        fs::create_dir_all(&sessions).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_docs (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL, updated_at INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_docs VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "synthetic-session-005",
+                "/synthetic/work",
+                1_780_000_000_i64,
+                "synthetic title",
+                "synthetic body",
+                "synthetic hash"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let history_with_row = sessions
+            .join("synthetic-cwd")
+            .join("synthetic-session-005")
+            .join("chat_history.jsonl");
+        fs::create_dir_all(history_with_row.parent().unwrap()).unwrap();
+        fs::write(
+            &history_with_row,
+            br#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"}]}"#,
+        )
+        .unwrap();
+        let history_native_only = sessions
+            .join("synthetic-cwd")
+            .join("synthetic-session-006")
+            .join("chat_history.jsonl");
+        fs::create_dir_all(history_native_only.parent().unwrap()).unwrap();
+        fs::write(
+            &history_native_only,
+            br#"{"type":"assistant","content":"synthetic answer"}"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            harness_roots: [("grok".to_string(), db.to_string_lossy().into())]
+                .into_iter()
+                .collect(),
+            ..Config::default()
+        };
+        let report = scan_with_registry_and_machine(
+            &config,
+            &synthetic_grok_registry(),
+            "synthetic-machine",
+        )
+        .unwrap();
+
+        // One record for a session whose row exists: the shared id means the
+        // transcript seals into the session's own body.
+        let with_row_id = "grok.synthetic-machine.synthetic-session-005";
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .filter(|record| record.id == with_row_id && record.sqlite_layout.is_none())
+                .count(),
+            1
+        );
+        let history_record = report
+            .records
+            .iter()
+            .find(|record| record.id == with_row_id && record.sqlite_layout.is_none())
+            .expect("the chat_history.jsonl record shares the row session id");
+        assert_eq!(history_record.absolute_path, history_with_row);
+
+        // A session the store has no row for still yields its record: the
+        // native transcript is then the session's only observation.
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .filter(|record| record.id == "grok.synthetic-machine.synthetic-session-006")
+                .count(),
+            1
+        );
+
+        // The probe note reports every population collect will archive.
+        let probe = &report.probes[0];
+        assert!(probe
+            .note
+            .contains("SessionRecord=1; usage files=0; history files=2"));
     }
 
     #[test]
