@@ -2790,8 +2790,10 @@ mod tests {
                 Expected::Text("synthetic question"),
             ),
             (
-                // The desktop replica is JSON persistence, but this change
-                // does not implement a reader for it.
+                // The desktop replica's records are read by the normalize
+                // reader, but this fixture is not one: no `seq`/`kind`
+                // anywhere, so the reader counts it unrecognized and the
+                // shard is reported by its format, not guessed into text.
                 "grok-bot",
                 br#"{"replica":{"sequence":1,"entries":[]}}"#,
                 Expected::Format(FORMAT_JSON),
@@ -2899,11 +2901,20 @@ mod tests {
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
     }
 
+    /// A grok-bot `message` record with no transcript text is read as the
+    /// measured empty it is: the reader knows the kind and skips the record
+    /// with no count, so the shard is indexed-with-no-text — `body` empty,
+    /// no unread lines — rather than `not indexable: json`. The previous
+    /// state, reported by format because no reader existed, is what this
+    /// test used to pin before the reader landed.
     #[test]
-    fn grok_bot_message_records_without_transcript_text_remain_unindexable() {
+    fn grok_bot_message_record_without_transcript_text_is_a_measured_empty() {
         let extracted =
             extract_index_document_for("grok-bot", br#"{"seq":1,"kind":"message"}"#).unwrap();
-        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.is_empty());
+        assert!(extracted.message_offsets.is_empty());
+        assert_eq!(extracted.unread_lines, 0);
     }
 
     /// A native Grok transcript body is indexed from its native
