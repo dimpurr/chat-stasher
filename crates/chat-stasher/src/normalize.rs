@@ -186,10 +186,10 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
     if harness == "grok" {
         // The `grok` id covers two producers (W911): the SQLite
         // `session_docs` export and the native JSONL transcript. Which one
-        // a body holds is a per-body fact — a mixed body prefers the
-        // native records and must not append the legacy summary again as
-        // another turn — so the harness owns its line walk, as `kimi-code`
-        // does.
+        // a body holds is a per-body fact — a mixed body whose native
+        // records render prefers them and must not append the legacy
+        // summary again as another turn — so the harness owns its line
+        // walk, as `kimi-code` does.
         grok_cli::normalize_body(body, &mut conversation);
         return conversation;
     }

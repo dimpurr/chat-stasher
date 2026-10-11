@@ -8,9 +8,12 @@
 //! one text block with an explicitly unknown speaker. The native
 //! transcript carries typed records (`system`, `user`, `reasoning`,
 //! `assistant`, `tool_result`) and no timestamp field at all. A body
-//! that holds recognized native records is read from them, and the
-//! legacy summary is not appended again as another turn (ADR-056 D7);
-//! the raw route keeps both observations either way.
+//! from which the native records render at least one message is read
+//! from them, and the legacy summary is not appended again as another
+//! turn (ADR-056 D7); a body whose native records are all recognized
+//! but render nothing keeps the summary as its reading, because the
+//! summary is then the only readable text the body holds. The raw
+//! route keeps both observations either way.
 
 use super::{Block, Conversation, Message, MessageTime, Role};
 use serde_json::Value;
@@ -23,19 +26,30 @@ const EXPORT_TABLE: &str = "session_docs";
 /// transcript records, or both.
 ///
 /// Which view the derived reading takes is a per-body fact, so the
-/// body is scanned once for recognized native records before any line
-/// is rendered: with native records present, the export's plain-text
-/// summary is the same session observed the old way and must not
-/// become another turn, while a legacy-only body keeps rendering its
-/// summary exactly as before. Lines that are neither are served the
+/// body is scanned once for a native record this reader will actually
+/// render before any line is handled: with such a record present, the
+/// export's plain-text summary is the same session observed the old
+/// way and must not become another turn, while a body whose native
+/// records all render nothing keeps rendering its summary exactly as
+/// before — with no native reading to prefer, the summary stays the
+/// body's only readable text. Lines that are neither are served the
 /// harness's existing reader path (the web-platform bundle shape), so
 /// no line's accounting changes with the format it turns out to be.
 pub(super) fn normalize_body(body: &str, conversation: &mut Conversation) {
-    let native_present = body
+    // Whether the native records render at least one message is a
+    // per-body fact, so the body is scanned once before any line is
+    // handled. Recognition alone would be too weak a condition: a
+    // body of records this reader recognizes but renders nothing
+    // holds no native reading to prefer, and its legacy summary is
+    // the only readable text it has — suppressing that would show
+    // the session as empty where the reader in fact read a summary.
+    let native_renderable = body
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|value| is_native_record(&value));
+        .any(|value| {
+            native_record_kind(&value).is_some_and(|kind| !native_blocks(&value, kind).is_empty())
+        });
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -47,13 +61,13 @@ pub(super) fn normalize_body(body: &str, conversation: &mut Conversation) {
                 continue;
             }
         };
-        normalize_line(&value, native_present, conversation);
+        normalize_line(&value, native_renderable, conversation);
     }
 }
 
-fn normalize_line(value: &Value, native_present: bool, conversation: &mut Conversation) {
+fn normalize_line(value: &Value, native_renderable: bool, conversation: &mut Conversation) {
     if is_session_docs_record(value) {
-        if native_present {
+        if native_renderable {
             // Recognized and deliberately not rendered: the summary is
             // the legacy observation of this same session, and the
             // native records are the reading's source. It is neither an
@@ -65,8 +79,8 @@ fn normalize_line(value: &Value, native_present: bool, conversation: &mut Conver
         normalize_session(value, conversation);
         return;
     }
-    if is_native_record(value) {
-        normalize_native_record(value, conversation);
+    if let Some(kind) = native_record_kind(value) {
+        normalize_native_record(value, kind, conversation);
         return;
     }
     // Every other line keeps the harness's existing reader path: the
@@ -77,80 +91,55 @@ fn normalize_line(value: &Value, native_present: bool, conversation: &mut Conver
     }
 }
 
-/// Whether a value is one of the native transcript records this build
-/// reads (`system`, `user`, `reasoning`, `assistant`, `tool_result`),
-/// in the shape the installed format writes.
+/// The record type a value is, or `None` when it is not one of the
+/// native transcript records this build reads (`system`, `user`,
+/// `reasoning`, `assistant`, `tool_result`).
 ///
-/// Recognition is deliberately strict — a `type` key alone claims
-/// nothing, and a record whose evidenced shape does not match is
-/// counted by the generic reader rather than rendered as a message
-/// with no text. The format's other record type (`backend_tool_call`)
-/// is harness tool traffic and is not claimed here.
-fn is_native_record(value: &Value) -> bool {
-    let Some(kind) = value.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    match kind {
+/// Recognition grants the record type, and it rests on the field that
+/// carries that type's content — a `type` key alone claims nothing,
+/// and a record whose content container is not the evidenced shape is
+/// counted by the generic reader rather than rendered. Every other
+/// field is rendered per part instead of gating the whole record: a
+/// user content array may mix text parts with parts this reader
+/// cannot name, and assistant `tool_calls` hold whatever calls they
+/// hold — one deviating part must not cost the record its text, so
+/// the recognized parts render and the rest stay raw. A recognized
+/// record that renders nothing is a measured unrendered line (see
+/// [`normalize_native_record`]). The format's other record type
+/// (`backend_tool_call`) is harness tool traffic and is not claimed
+/// here.
+fn native_record_kind(value: &Value) -> Option<&str> {
+    let kind = value.get("type").and_then(Value::as_str)?;
+    let recognized = match kind {
         "system" => value.get("content").and_then(Value::as_str).is_some(),
-        "user" => is_text_part_array(value.get("content")),
+        "user" => value.get("content").and_then(Value::as_array).is_some(),
         "reasoning" => {
             value
                 .get("encrypted_content")
                 .and_then(Value::as_str)
                 .is_some()
-                && value.get("summary").map_or(true, is_summary_part_array)
+                && value
+                    .get("summary")
+                    .is_none_or(|summary| summary.as_array().is_some())
         }
-        "assistant" => {
-            value.get("content").and_then(Value::as_str).is_some()
-                && value.get("tool_calls").map_or(true, is_tool_call_array)
-        }
+        "assistant" => value.get("content").and_then(Value::as_str).is_some(),
         "tool_result" => {
             value.get("content").and_then(Value::as_str).is_some()
                 && value.get("tool_call_id").and_then(Value::as_str).is_some()
         }
         _ => false,
-    }
-}
-
-/// A user record's content: an array of `{"type":"text","text":…}`
-/// parts, the only content shape the installed format writes for the
-/// type.
-fn is_text_part_array(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_array).map_or(false, |parts| {
-        parts.iter().all(|part| {
-            part.get("type").and_then(Value::as_str) == Some("text")
-                && part.get("text").and_then(Value::as_str).is_some()
-        })
-    })
-}
-
-/// A reasoning record's `summary`: an array of
-/// `{"type":"summary_text","text":…}` parts, or no summary at all.
-fn is_summary_part_array(value: &Value) -> bool {
-    value.as_array().map_or(false, |parts| {
-        parts.iter().all(|part| {
-            part.get("type").and_then(Value::as_str) == Some("summary_text")
-                && part.get("text").and_then(Value::as_str).is_some()
-        })
-    })
-}
-
-/// An assistant record's `tool_calls`: an array of
-/// `{"name":…,"arguments":…,"id":…}` objects.
-fn is_tool_call_array(value: &Value) -> bool {
-    value.as_array().map_or(false, |calls| {
-        calls.iter().all(|call| {
-            call.get("name").and_then(Value::as_str).is_some()
-                && call.get("arguments").and_then(Value::as_str).is_some()
-        })
-    })
-}
-
-fn normalize_native_record(value: &Value, conversation: &mut Conversation) {
-    let Some(kind) = value.get("type").and_then(Value::as_str) else {
-        conversation.unrendered_lines += 1;
-        return;
     };
+    recognized.then_some(kind)
+}
+
+/// Render one native record [`native_record_kind`] recognized.
+///
+/// A record that renders at least one block becomes one message; a
+/// record that renders nothing — recognized, with no content this
+/// reader can show — is a measured unrendered line, not an empty
+/// message. `kind` is the arm recognition granted, so the match
+/// below never meets a type it did not clear.
+fn normalize_native_record(value: &Value, kind: &str, conversation: &mut Conversation) {
     let blocks = native_blocks(value, kind);
     if blocks.is_empty() {
         conversation.unrendered_lines += 1;
@@ -215,10 +204,17 @@ fn native_blocks(value: &Value, kind: &str) -> Vec<Block> {
             if let Some(calls) = value.get("tool_calls").and_then(Value::as_array) {
                 blocks.extend(calls.iter().filter_map(|call| {
                     let name = call.get("name").and_then(Value::as_str)?;
-                    let arguments = call.get("arguments").and_then(Value::as_str)?;
                     Some(Block::ToolCall {
                         name: Some(name.to_string()),
-                        input_summary: arguments.to_string(),
+                        // `tool_calls` did not gate the record's
+                        // recognition, so a call arguing with the
+                        // measured shape must not cost the record's
+                        // answer text either: an arguments value is
+                        // summarized the way the web-bundle reader
+                        // summarizes one — a recorded string verbatim,
+                        // any other recorded shape compacted — and a
+                        // call with no name at all stays raw.
+                        input_summary: super::compact_json(call.get("arguments")),
                         // The call record names the call; what came
                         // back is in the `tool_result` that follows
                         // it, if one was archived. Writing 0 here
@@ -255,7 +251,11 @@ fn text_part(value: Option<&Value>) -> Vec<Block> {
     }
 }
 
-/// One text block per part of a user record's content array.
+/// One text block per text part of a user record's content array. The
+/// array may mix part kinds; parts this reader cannot render as text
+/// (inline image bytes are neither conversation text nor an attachment
+/// this build can name) stay raw rather than costing the record its
+/// text — the tool-result arm keeps its own `images` raw the same way.
 fn text_parts(value: Option<&Value>) -> Vec<Block> {
     match value.and_then(Value::as_array) {
         Some(parts) => parts
@@ -274,7 +274,9 @@ fn text_parts(value: Option<&Value>) -> Vec<Block> {
     }
 }
 
-/// One thinking block per part of a reasoning record's summary.
+/// One thinking block per summary part of a reasoning record's
+/// summary. A summary that mixes part kinds renders the summary parts
+/// it holds; the rest stay raw, same as a user record's mixed parts.
 fn summary_parts(value: Option<&Value>) -> Vec<Block> {
     match value.and_then(Value::as_array) {
         Some(parts) => parts
@@ -381,7 +383,10 @@ mod tests {
     // `encrypted_content` string plus a `summary` array of
     // `{"type":"summary_text","text":…}` items, assistant tool calls
     // as `{"name":…,"arguments":…,"id":…}`, and tool results carrying
-    // `content` plus the `tool_call_id` they answer.
+    // `content` plus the `tool_call_id` they answer. The mixed-part
+    // fixtures are deliberately wider than the measurement (the format
+    // demonstrably carries image parts), because recognition rests on
+    // each type's content container and parts render per part.
 
     #[test]
     fn a_full_native_history_renders_every_recorded_type_in_order() {
@@ -575,7 +580,7 @@ mod tests {
         assert!(rendered.contains(&"synthetic user turn"));
         assert!(rendered.contains(&"synthetic answer"));
         // The summary is the same session observed the legacy way:
-        // with native records present it must not become another
+        // with a native reading present it must not become another
         // turn. The raw route still keeps both observations.
         assert!(!rendered.contains(&"synthetic legacy summary"));
     }
@@ -593,6 +598,44 @@ mod tests {
         let rendered = rendered_texts(&conversation);
         assert!(rendered.contains(&"synthetic user turn"));
         assert!(!rendered.contains(&"synthetic legacy summary"));
+    }
+
+    #[test]
+    fn a_body_whose_native_records_render_nothing_keeps_the_legacy_summary() {
+        // Recognition alone must not suppress the summary: native
+        // records that are all recognized but render nothing leave no
+        // native reading to prefer, and the summary is then the body's
+        // only readable text. The native lines are still counted for
+        // what they are — recognized, nothing renderable.
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"opaque","updated_at":1789384914,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[]}"#,
+            "\n",
+        );
+        let conversation = normalize("grok", body);
+        assert_eq!(conversation.messages.len(), 1);
+        let rendered = rendered_texts(&conversation);
+        assert!(rendered.contains(&"synthetic legacy summary"));
+        assert_eq!(conversation.unrendered_lines, 1);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    #[test]
+    fn a_legacy_only_body_with_a_trailing_unparseable_line_keeps_summary_and_count() {
+        // An unparseable line is never a native record, so it cannot
+        // turn suppression on: the summary stays the reading and the
+        // line stays counted as unrecognized.
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"opaque","updated_at":1789384914,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\nnot json\n",
+        );
+        let conversation = normalize("grok", body);
+        assert_eq!(conversation.messages.len(), 1);
+        let rendered = rendered_texts(&conversation);
+        assert!(rendered.contains(&"synthetic legacy summary"));
+        assert_eq!(conversation.unrecognized_lines, 1);
+        assert_eq!(conversation.unrendered_lines, 0);
     }
 
     #[test]
@@ -623,11 +666,114 @@ mod tests {
     }
 
     #[test]
-    fn native_user_record_with_a_non_text_content_item_is_counted_not_claimed() {
+    fn native_user_record_with_only_unrenderable_parts_is_counted_not_emptied() {
         let line = r#"{"type":"user","content":[{"type":"image","url":"data:synthetic"}]}"#;
         let conversation = normalize("grok", line);
         assert!(conversation.messages.is_empty());
+        // The record is native and recognized, but its only content is
+        // parts this reader cannot render as text — a line the reader
+        // could not use, not an empty message.
         assert_eq!(conversation.unrendered_lines, 1);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    #[test]
+    fn native_user_record_with_mixed_parts_renders_its_text_and_keeps_the_rest_raw() {
+        // The format demonstrably carries image parts; a user record
+        // that mixes one into its content array must not cost the
+        // prose its text parts carry. The text parts render, the image
+        // part stays raw, and the line is read, not counted.
+        let line = concat!(
+            r#"{"type":"user","content":["#,
+            r#"{"type":"text","text":"synthetic user turn"},"#,
+            r#"{"type":"image","url":"data:synthetic"},"#,
+            r#"{"type":"text","text":"synthetic user follow-up"}"#,
+            r#"]}"#,
+        );
+        let conversation = normalize("grok", line);
+        assert_eq!(conversation.messages.len(), 1);
+        let rendered = rendered_texts(&conversation);
+        assert_eq!(
+            rendered,
+            vec!["synthetic user turn", "synthetic user follow-up"]
+        );
+        // Inline image bytes are neither text nor an attachment this
+        // build can name; they reach no block and no attachment list.
+        assert!(conversation.attachments.is_empty());
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    #[test]
+    fn native_user_record_with_mixed_parts_is_a_renderable_reading_for_suppression() {
+        // The scan that decides whether the legacy summary stays must
+        // count a mixed-parts record, not only perfectly shaped ones:
+        // its text parts render, so the native reading exists.
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"opaque","updated_at":1789384914,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"},{"type":"image","url":"data:synthetic"}]}"#,
+            "\n",
+        );
+        let conversation = normalize("grok", body);
+        let rendered = rendered_texts(&conversation);
+        assert!(rendered.contains(&"synthetic user turn"));
+        assert!(!rendered.contains(&"synthetic legacy summary"));
+    }
+
+    #[test]
+    fn native_reasoning_record_with_mixed_summary_parts_renders_the_summary_parts() {
+        let line = r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext","summary":[{"type":"summary_text","text":"synthetic reasoning"},{"type":"image","url":"data:synthetic"},{"type":"summary_text","text":"synthetic reasoning tail"}]}"#;
+        let conversation = normalize("grok", line);
+        assert_eq!(conversation.messages.len(), 1);
+        let thinking = conversation.messages[0]
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Thinking(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            thinking,
+            vec!["synthetic reasoning", "synthetic reasoning tail"]
+        );
+        assert_eq!(conversation.unrendered_lines, 0);
+    }
+
+    #[test]
+    fn native_reasoning_record_without_a_summary_key_is_counted_not_emptied() {
+        // The shape the format writes when it recorded no thinking
+        // summary at all: the `summary` key is absent, and the record
+        // is native while carrying nothing this reader can render.
+        let line = r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed"}"#;
+        let conversation = normalize("grok", line);
+        assert!(conversation.messages.is_empty());
+        assert_eq!(conversation.unrendered_lines, 1);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    #[test]
+    fn native_assistant_record_with_object_shaped_arguments_keeps_its_answer_text() {
+        // A tool call whose `arguments` is recorded as an object
+        // rather than the measured string must not cost the record
+        // its answer text: the call renders with its arguments
+        // compacted, the way the web-bundle reader summarizes one.
+        let line = r#"{"type":"assistant","content":"synthetic answer","tool_calls":[{"name":"synthetic_tool","arguments":{"q":"x"},"id":"call-1"}]}"#;
+        let conversation = normalize("grok", line);
+        assert_eq!(conversation.messages.len(), 1);
+        assert!(matches!(
+            &conversation.messages[0].blocks[0],
+            Block::Text(text) if text == "synthetic answer"
+        ));
+        assert!(matches!(
+            &conversation.messages[0].blocks[1],
+            Block::ToolCall { name, input_summary, output_bytes }
+                if name.as_deref() == Some("synthetic_tool")
+                    && input_summary == "{\"q\":\"x\"}"
+                    && output_bytes.is_none()
+        ));
+        assert_eq!(conversation.unrendered_lines, 0);
     }
 
     #[test]

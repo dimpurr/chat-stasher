@@ -2959,6 +2959,42 @@ mod tests {
         assert!(extracted.body.is_empty());
     }
 
+    /// A mixed body whose native records are all recognized but render
+    /// nothing keeps the legacy `session_docs` summary as its reading,
+    /// so the summary — the body's only readable text — is what the
+    /// index gets. Suppression needs a native reading that actually
+    /// rendered; recognition alone would have turned this into a
+    /// session with nothing indexable in it.
+    #[test]
+    fn a_grok_mixed_body_of_unrenderable_native_records_indexes_the_legacy_summary() {
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic legacy summary"));
+        assert!(!extracted.body.contains("synthetic-ciphertext-blob"));
+    }
+
+    /// A user record that mixes renderable and unrenderable parts is
+    /// indexed from its text parts only: inline image bytes are not
+    /// conversation text, and their presence must not cost the turn
+    /// its indexable prose.
+    #[test]
+    fn a_grok_mixed_user_record_with_unrenderable_parts_is_indexed_from_its_text_parts() {
+        let body = concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"},{"type":"image","url":"data:synthetic"}]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic user turn"));
+        assert!(!extracted.body.contains("data:synthetic"));
+    }
+
     /// The registry ids, read from the same file the scanner loads.
     fn registry_harness_ids() -> Vec<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/harness-registry-v1.json");
