@@ -336,15 +336,44 @@ export interface ChatPlatform {
   eventSourceCapture?: boolean;
   /**
    * 🔴 The editorial facts of the generated support tables (SB-1). None of the
-   * three fields below is read by the extension's own code; they live in this
-   * table because `scripts/gen-support-matrix.py` derives the public README and
-   * docs tables from it, and editorial data kept beside the capture rows cannot
-   * drift from the row it describes. Absent means "nothing recorded", which
-   * the tables render as a dash — never as a guess.
+   * fields in this group is read by the extension's own code; they live in
+   * this table because `scripts/gen-support-matrix.py` derives the public
+   * README and docs tables from it, and editorial data kept beside the
+   * capture rows cannot drift from the row it describes. Absent means
+   * "nothing recorded", which the tables render as a dash — never as a guess.
    */
   devPriority?: DevPriority;
   /** One short public-safe caveat with a pointer (issue number, commit, doc). */
   knownIssue?: string;
+  /**
+   * 🔴 W960 · The account-switch risk (issue #4), as a SECOND caveat, for the
+   * rows whose single `knownIssue` slot above is already spent on a different
+   * issue (W944 §H item 4). The slot holds one issue, and a row could say only
+   * one thing: `gemini` and `grok` spent theirs on a detail-completeness
+   * caveat, so the risk the W126 audit records for them — after a switch to
+   * account B inside the same profile, B's list ids can land in A's run scope
+   * and a same-id B body can be accepted as A (mis-attribution, not deletion)
+   * — stayed invisible from this table while other rows named it.
+   *
+   * Discipline, so this is a scalpel and never a blanket flag:
+   *  · set it only on a row that is actually UNGUARDED on account switch — no
+   *    account identity this build can actually read fires for it. Today that
+   *    fires for `chatgpt` (W303's workspace header lease) and `claude`
+   *    (W239's organization guard + W337's person fingerprint) and nothing
+   *    else: `deepseek`/`perplexity`/`gemini`/`grok` declare a lease
+   *    (`ACCOUNT_LEASE_PLATFORMS`) but no verified account id arrives on
+   *    their wire, so it stays inert (W944 §E).
+   *  · a row whose `knownIssue` already names the account gap must NOT carry
+   *    this field — one fact, one place. (`deepseek`, `perplexity` and `kimi`
+   *    name the gap in their slot; `chatgpt` and `claude` name their residual
+   *    of it, which is the honest state of a platform whose guard fires.)
+   *  · this records the RISK; it does not claim a guard or a fingerprint. The
+   *    real account field names for grok and the other body-scan platforms
+   *    are unverified conjecture (`IDENTITY_KEY_CANDIDATES` below) — when one
+   *    is measured and wired, remove this field from that row: absent is then
+   *    the truth.
+   */
+  accountSwitchRisk?: string;
   /** Present only where a dated end-to-end run of a real conversation exists. */
   lastVerified?: PlatformVerification;
 }
@@ -578,6 +607,15 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
     },
     knownIssue: 'a conversation needing more than 20 detail pages is refused and not archived in part (see docs-dev/privacy.md)',
+    // W960 · The slot above is spent on the completeness caveat, so the
+    // account-switch risk — the same issue #4 path this table shows for every
+    // other unguarded row — lives in the second field. Same sentence the
+    // unguarded-by-default rows carry, because it is the same failure: no
+    // account id gemini's capture exposes is reachable by the identity scan,
+    // so after a switch B's list can enumerate into A's scope and a same-id B
+    // body is accepted as A (W126's gemini row; the lease in
+    // ACCOUNT_LEASE_PLATFORMS cannot fire — it names no account).
+    accountSwitchRisk: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
   {
     id: 'claude',
@@ -869,6 +907,13 @@ export const ALL_PLATFORMS: readonly ChatPlatform[] = [
       scope: 'live acceptance: real conversations archived end to end on a real machine (main e71eb33)',
     },
     knownIssue: 'the body endpoint is not paged; whether a long conversation comes back complete is unverified (see docs-dev/threat-model.md)',
+    // W960 · Same reasoning as gemini's row above: the slot is spent on the
+    // completeness caveat, and the account-switch risk (issue #4) needs its
+    // own place. No verified account field is on grok's wire — the identity
+    // scan's key names are conjecture for this platform — so a lease cannot
+    // fire, and after a switch B's list can enumerate into A's scope and a
+    // same-id B body is accepted as A (W126's grok row).
+    accountSwitchRisk: 'an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4)',
   },
 ];
 
