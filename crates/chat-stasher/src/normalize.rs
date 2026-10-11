@@ -183,6 +183,16 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         kimi_code::normalize_body(body, &mut conversation);
         return conversation;
     }
+    if harness == "grok" {
+        // The `grok` id covers two producers (W911): the SQLite
+        // `session_docs` export and the native JSONL transcript. Which one
+        // a body holds is a per-body fact — a mixed body whose native
+        // records render prefers them and must not append the legacy
+        // summary again as another turn — so the harness owns its line
+        // walk, as `kimi-code` does.
+        grok_cli::normalize_body(body, &mut conversation);
+        return conversation;
+    }
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -316,9 +326,6 @@ fn normalize_value(harness: &str, value: &Value, conversation: &mut Conversation
         "hermes-agent" => hermes_agent::normalize_session(value, conversation),
         "cursor" => cursor::normalize_session(value, conversation),
         "zed" => zed::normalize_session(value, conversation),
-        "grok" if grok_cli::is_session_docs_record(value) => {
-            grok_cli::normalize_session(value, conversation)
-        }
         "chatgpt" => normalize_chatgpt(value, conversation),
         "claude" => normalize_claude_web(value, conversation),
         "deepseek" => normalize_deepseek(value, conversation),
@@ -686,7 +693,7 @@ fn normalize_deepseek(value: &Value, conversation: &mut Conversation) {
 /// is read rather than counted as one unreadable line. Records the reader
 /// cannot turn into a message stay counted, one per record — the array's own
 /// arithmetic, not a claim about the whole body.
-fn normalize_generic(value: &Value, conversation: &mut Conversation) {
+pub(super) fn normalize_generic(value: &Value, conversation: &mut Conversation) {
     let messages = match value {
         Value::Array(messages) => messages,
         _ => match value.get("messages").and_then(Value::as_array) {
@@ -862,7 +869,7 @@ fn attachment_from_map(map: &serde_json::Map<String, Value>) -> AttachmentRef {
     }
 }
 
-fn payload(value: &Value) -> Option<Value> {
+pub(super) fn payload(value: &Value) -> Option<Value> {
     match value.pointer("/raw/text").and_then(Value::as_str) {
         Some(text) => serde_json::from_str(text).ok(),
         None => Some(value.clone()),
