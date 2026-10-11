@@ -554,3 +554,162 @@ impl Drop for HomeReset {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// GB-2: claude-code workflow journals
+// ---------------------------------------------------------------------------
+
+/// Scan a claude-code projects tree as the fixed `fixture-machine`, so the
+/// scanned record ids embed the same machine name collect stages under.
+fn scan_journals(root: &Path) -> scanner::ScanReport {
+    let config = Config {
+        claude_projects_dir: Some(root.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+    scanner::scan_with_registry_and_machine(&config, &registry(), "fixture-machine").unwrap()
+}
+
+/// GB-2 regression. Two workflow journals below different parent sessions
+/// are two sessions, not one: each stages under its own workflow-run id, and
+/// neither slot ever receives the other run's bytes. Before the structural
+/// id, both journals shared the constant `journal` filename stem, so collect
+/// sealed both into a single merged slot under one session id.
+#[test]
+fn workflow_journals_stage_as_separate_sessions() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("projects");
+    let run_a = "wf_019d7a00-0000-7000-8000-00000000000a";
+    let run_b = "wf_019d7b00-0000-7000-8000-00000000000b";
+    let journal_a = root
+        .join("-fixture-proj-a/019d7a01-0000-7000-8000-000000000001")
+        .join("subagents/workflows")
+        .join(run_a)
+        .join("journal.jsonl");
+    let journal_b = root
+        .join("-fixture-proj-b/019d7b02-0000-7000-8000-000000000002")
+        .join("subagents/workflows")
+        .join(run_b)
+        .join("journal.jsonl");
+    for (journal, body) in [
+        (&journal_a, &b"{\"synthetic\":\"a\"}\n"[..]),
+        (&journal_b, &b"{\"synthetic\":\"b\"}\n"[..]),
+    ] {
+        fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        fs::write(journal, body).unwrap();
+    }
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+
+    let scan_report = scan_journals(&root);
+    assert_eq!(
+        scan_report.records.len(),
+        2,
+        "one record per workflow journal"
+    );
+    let id_a = format!("claude-code.fixture-machine.{run_a}");
+    let id_b = format!("claude-code.fixture-machine.{run_b}");
+    let scanned_ids: std::collections::BTreeSet<_> = scan_report
+        .records
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect();
+    assert_eq!(
+        scanned_ids,
+        [id_a.as_str(), id_b.as_str()].into_iter().collect(),
+        "each journal ids by its workflow-run directory"
+    );
+
+    let collected =
+        collect::collect_scan_report(&scan_report, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert_eq!(
+        collected.changed_records, 2,
+        "both journals delivered content in this pass"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &id_a).unwrap(),
+        b"{\"synthetic\":\"a\"}\n",
+        "run a's slot holds only run a's journal"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &id_b).unwrap(),
+        b"{\"synthetic\":\"b\"}\n",
+        "run b's slot holds only run b's journal"
+    );
+}
+
+/// GB-2 handover. A pre-W978 stage holds a journal under the shared stem id
+/// `claude-code.<machine>.journal` (on m3 every workflow run had collapsed
+/// into that one slot). The id rule changes; what happens to the data already
+/// staged under the old id must be the append-only answer: the old slot is
+/// never rewritten, and the per-path cursor hands only the *new* bytes to the
+/// journal's own workflow-run id. The pass below rewrites the scanned ids to
+/// the shared shape collect used to produce — no real stage is involved, only
+/// this synthetic tree — which is why the first slot lands under a `~`-less
+/// stem id with the exact bytes that precede the id change.
+#[test]
+fn journal_id_change_hands_only_new_bytes_to_the_workflow_run_id() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("projects");
+    let run_a = "wf_019d7c00-0000-7000-8000-00000000000a";
+    let journal = root
+        .join("-fixture-proj/019d7c01-0000-7000-8000-000000000001")
+        .join("subagents/workflows")
+        .join(run_a)
+        .join("journal.jsonl");
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let first_line = &b"{\"synthetic\":\"1\"}\n"[..];
+    fs::write(&journal, first_line).unwrap();
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+
+    // The pass a pre-W978 build would have run: the record id is the
+    // filename stem, shared by every workflow journal on the machine.
+    let shared_id = "claude-code.fixture-machine.journal".to_string();
+    let mut pre = scan_journals(&root);
+    assert_eq!(pre.records.len(), 1);
+    for record in &mut pre.records {
+        record.id = shared_id.clone();
+    }
+    collect::collect_scan_report(&pre, &stage, "fixture-machine", &state, 20, &dest()).unwrap();
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &shared_id).unwrap(),
+        first_line,
+        "the pre-change pass staged the whole journal under the shared id"
+    );
+
+    // The journal gains one more synthetic event; the scan now ids it by its
+    // workflow run.
+    let second_line = &b"{\"synthetic\":\"2\"}\n"[..];
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap()
+        .write_all(second_line)
+        .unwrap();
+    let post = scan_journals(&root);
+    let run_id = format!("claude-code.fixture-machine.{run_a}");
+    assert_eq!(
+        post.records[0].id, run_id,
+        "the journal now ids by its workflow-run directory"
+    );
+    let second =
+        collect::collect_scan_report(&post, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert_eq!(
+        second.reset_records, 0,
+        "the per-path cursor survives the id change: no full reread"
+    );
+    assert_eq!(second.delta_bytes_read, second_line.len() as u64);
+    assert_eq!(second.changed_records, 1);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &shared_id).unwrap(),
+        first_line,
+        "the old shared slot is frozen exactly as the pre-change pass sealed it"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &run_id).unwrap(),
+        second_line,
+        "only the bytes after the id change land under the workflow-run id"
+    );
+}
