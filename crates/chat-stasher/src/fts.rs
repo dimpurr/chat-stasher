@@ -2906,6 +2906,59 @@ mod tests {
         assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
     }
 
+    /// A native Grok transcript body is indexed from its native
+    /// records, and a legacy `session_docs` summary in the same body
+    /// is not appended again as another turn (ADR-056 D7): the two
+    /// are observations of one session, not two conversations.
+    #[test]
+    fn a_grok_native_transcript_indexes_native_text_without_the_legacy_summary() {
+        let body = concat!(
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"session_docs","session":{"session_id":"s1","updated_at":1784924765,"title":"synthetic title","content":"synthetic legacy summary"}}"#,
+            "\n",
+            r#"{"type":"user","content":[{"type":"text","text":"synthetic user turn"}]}"#,
+            "\n",
+            r#"{"type":"assistant","content":"synthetic answer"}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic user turn"));
+        assert!(extracted.body.contains("synthetic answer"));
+        assert!(!extracted.body.contains("synthetic legacy summary"));
+    }
+
+    /// The recorded reasoning summary is plaintext the source itself
+    /// kept, so it is indexed like any thinking block — while the
+    /// encrypted reasoning it summarizes never reaches the index as
+    /// text.
+    #[test]
+    fn a_grok_native_reasoning_summary_is_indexed_without_the_encrypted_content() {
+        let body = concat!(
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[{"type":"summary_text","text":"synthetic reasoning summary"}]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        assert!(extracted.body.contains("synthetic reasoning summary"));
+        assert!(!extracted.body.contains("synthetic-ciphertext-blob"));
+    }
+
+    /// A native transcript whose every record carries only encrypted
+    /// reasoning has no plaintext this build can read: it is reported
+    /// by format, never indexed as an empty body.
+    #[test]
+    fn a_grok_native_transcript_of_encrypted_reasoning_only_is_reported_by_format() {
+        let body = concat!(
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r1","status":"completed","summary":[]}"#,
+            "\n",
+            r#"{"type":"reasoning","encrypted_content":"synthetic-ciphertext-blob","id":"r2","status":"completed","summary":[]}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok", body.as_bytes()).unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSONL));
+        assert!(extracted.body.is_empty());
+    }
+
     /// The registry ids, read from the same file the scanner loads.
     fn registry_harness_ids() -> Vec<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/harness-registry-v1.json");
