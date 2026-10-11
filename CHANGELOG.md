@@ -274,13 +274,13 @@ under its own heading below.
   `prod-grok-backend.json` have parsers in this build. The exit code keeps the
   kinds of "no" apart: `3` the file was never read to the end, `2` it was read
   and is not importable (a manifest, invalid JSON, a platform with no parser),
-  `1` it was read and then a conversation or a
-  write failed — a read that was refused is not a zero-conversation success. Two
-  limits are stated rather than hidden: unlike the `export-files/` object above,
-  this namespace is local for now, not yet wired into `push` or readback, and the
-  archive probe that would suppress a body the archive already holds is not wired
-  either, so every conversation currently gets a body and the run prints the
-  probe's own answer.
+  `1` it was read and then a conversation or a write failed — a read that was
+  refused is not a zero-conversation success. Two limits are stated rather
+  than hidden: unlike the `export-files/` object above, this namespace is
+  local for now, not yet wired into `push` or readback, and the archive probe
+  that would suppress a body the archive already holds is not wired either,
+  so every conversation currently gets a body and the run prints the probe's
+  own answer.
 
 #### Changed
 
