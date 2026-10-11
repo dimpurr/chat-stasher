@@ -9,8 +9,9 @@
 //! every record, of seven kinds — `message`, `notice`, `send-message`,
 //! `event`, `user-attachment`, `at`, `voice-call`.
 //!
-//! This file is the transcript slice of the approved GB-5 reader plan
-//! (Slice A, §10; 2026-10-11). What renders here and why:
+//! This file is the approved GB-5 reader plan's slices A and B (§10;
+//! 2026-10-11) — the transcript kinds plus the tool-shaped kinds. What
+//! renders here and why:
 //!
 //! * **Variants** — the app rewrites a row while streaming, and the
 //!   append-only union keeps every observation, so one seq can arrive as
@@ -32,9 +33,33 @@
 //! * `at` — a sync cursor ("N newer rows exist"), a record of nothing said:
 //!   skipped with zero counts, the same known-empty treatment the chatgpt
 //!   reader gives a null mapping node.
-//! * `send-message` / `voice-call` — kinds whose per-field mapping is the
-//!   next slice of the same plan (GB-5 §10 Slice B): each record is counted
-//!   as understood-but-not-yet-rendered, never silently dropped.
+//! * `send-message` — the bot→user direction: base role `Assistant`, one
+//!   record → one message, its own words from `message.content` or — only
+//!   when content carries nothing — `message.alt`, never both. The rest of
+//!   the record joins the same message as further blocks: the question it
+//!   asked (`message.widget` → one text block of prompt, help text, option
+//!   labels and the answered/skipped resolution), its tool traffic
+//!   (`message.approval`, `message.ask` and the record-level `box`
+//!   request/resolution, each a `ToolCall` named after its gate), and what
+//!   it delivered (`message.images[]`, `file_name`, `url` as attachment
+//!   references). Threading and routing metadata is recognised, raw-only
+//!   and uncounted (GB-5 §3).
+//! * the **secret rule** — a record naming a credential exchange (a
+//!   `secretRequest` or `secretProvided` key anywhere in it) renders **no**
+//!   message and contributes no text at all, not even its own content or
+//!   the `label`/`target`/`description` strings, which name the credential.
+//!   It is counted unrendered — understood, deliberately withheld — never
+//!   unrecognized. The raw record stays archived untouched; the reader
+//!   withholds it from every rendered surface only (GB-5 §3).
+//! * `voice-call` — one spoken call expanded into messages: the call
+//!   description first with its speaker unknown, then the turns and nudges
+//!   merged in the order the call stamped them (`atMs`); a turn's speaker
+//!   is read with the shared role vocabulary and any other speaker label
+//!   stays speaker-unknown, each nudge is an `Assistant` message whose
+//!   `answer` — null in every observation — adds no block rather than an
+//!   empty claim. The call's bookkeeping (ids, durations, counts, the
+//!   always-empty `events`/`toolCalls`/`overheard` arrays) is raw-only
+//!   (GB-5 §4).
 //! * an unknown kind, a record missing `seq` or `kind`, or a line that does
 //!   not parse — `unrecognized_lines`, and the rest of the session still
 //!   renders (one bad line never kills a session, GB-5 §2).
@@ -139,21 +164,32 @@ fn render_record(record: &Value, conversation: &mut Conversation) {
         conversation.unrecognized_lines += 1;
         return;
     };
+    if names_a_secret_exchange(record) {
+        // The secret rule, ahead of every kind mapping (GB-5 §3): a record
+        // that names a credential exchange renders no message at all — not
+        // its content, not the label/target/description that name the
+        // credential. Counted unrendered, understood and deliberately
+        // withheld, never unrecognized: the shape is known; this is the one
+        // place the reader refuses to render a known shape.
+        conversation.unrendered_lines += 1;
+        return;
+    }
     match kind {
         "message" => render_message(record, conversation),
         "notice" => render_notice(record, conversation),
         "user-attachment" => render_user_attachment(record, conversation),
+        "send-message" => render_send_message(record, conversation),
+        "voice-call" => render_voice_call(record, conversation),
         // A sync cursor: "N newer rows exist", a record of nothing said.
         // Known-empty like the chatgpt reader's null mapping node — no
         // message, no count (GB-5 §2/§6).
         "at" => {}
         // `event` is understood automation bookkeeping with no message in
-        // it; `send-message` and `voice-call` are the kinds the next slice
-        // of this reader's plan maps, and until then each record is counted
-        // as understood-but-not-yet-rendered. None of the three may be
-        // dropped: the count is what keeps the archive's lines visible while
-        // their renderers are written.
-        "event" | "send-message" | "voice-call" => conversation.unrendered_lines += 1,
+        // it; the sub-agent identity around `event.from`/`to` is a later
+        // slice of the same plan (GB-5 §5), and until then the record is
+        // counted as understood-but-unrendered. It may not be dropped: the
+        // count is what keeps the archive's lines visible.
+        "event" => conversation.unrendered_lines += 1,
         _ => conversation.unrecognized_lines += 1,
     }
 }
@@ -212,6 +248,244 @@ fn render_user_attachment(record: &Value, conversation: &mut Conversation) {
         time: message_time(record.get("timestampMs")),
         blocks: vec![Block::AttachmentRef(attachment)],
     });
+}
+
+/// Whether a record names a credential exchange anywhere in its JSON: a
+/// `secretRequest` or `secretProvided` key at any depth.
+///
+/// The measured shape puts them at `message.secretRequest` and the record's
+/// top level, but the rule is keyed on the names, not the nesting: the
+/// strings around such a key name a credential, and where the app puts them
+/// next is not a fact this withhold should depend on. Over-triggering is
+/// also cheap and one-sided — it can only withhold a record that names a
+/// secret exchange, which is exactly what the rule exists to do.
+fn names_a_secret_exchange(record: &Value) -> bool {
+    match record {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            (key == "secretRequest" || key == "secretProvided") || names_a_secret_exchange(value)
+        }),
+        Value::Array(items) => items.iter().any(names_a_secret_exchange),
+        _ => false,
+    }
+}
+
+/// `kind: send-message` — the bot→user direction, one message per record
+/// with base role `Assistant` (GB-5 §3).
+///
+/// The message carries the record's own words, its widget question, its
+/// tool traffic and its delivered files as blocks, in that order. A record
+/// none of whose fields held anything readable is a known-empty — skipped
+/// with no count, never rendered as an empty message (the §2 common rule).
+/// Threading and routing metadata (`reply_to`/`replyTo`, `serverId`,
+/// `requestId`, `boxRequestId`, `intent`, `provider`, `variant`, `channel`,
+/// `connector`) is recognised and raw-only: position in the thread and the
+/// channel that carried it never become display text.
+fn render_send_message(record: &Value, conversation: &mut Conversation) {
+    let message = record.get("message").filter(|message| !message.is_null());
+    let mut blocks: Vec<Block> = Vec::new();
+    if let Some(message) = message {
+        // Words first: `content`, or `alt` only when content carries
+        // nothing — the same never-both rule the `message` kind applies to
+        // its content/richText pair.
+        if let Some(text) =
+            text_field(message.get("content")).or_else(|| text_field(message.get("alt")))
+        {
+            blocks.push(Block::Text(text));
+        }
+        if let Some(widget) = message.get("widget").filter(|widget| !widget.is_null()) {
+            if let Some(text) = widget_text(record, widget) {
+                blocks.push(Block::Text(text));
+            }
+        }
+        if let Some(approval) = message.get("approval").filter(|value| !value.is_null()) {
+            blocks.push(tool_call(
+                "approval",
+                joined_fields(approval, APPROVAL_FIELDS),
+            ));
+        }
+        if let Some(ask) = message.get("ask").filter(|value| !value.is_null()) {
+            blocks.push(tool_call("ask", joined_fields(ask, ASK_FIELDS)));
+        }
+        for image in message
+            .get("images")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            // An image is named by its `alt` text or, when it has none, by
+            // its `url`; width/height are pixels, not bytes, and no media
+            // type exists in the observed shape, so none is claimed.
+            let name = text_field(image.get("alt")).or_else(|| text_field(image.get("url")));
+            blocks.push(Block::AttachmentRef(AttachmentRef {
+                name,
+                media_type: None,
+                bytes: None,
+            }));
+        }
+        for delivery in [message.get("file_name"), message.get("url")] {
+            if let Some(name) = text_field(delivery) {
+                blocks.push(Block::AttachmentRef(AttachmentRef {
+                    name: Some(name),
+                    media_type: None,
+                    bytes: None,
+                }));
+            }
+        }
+    }
+    // The `box` fields live at the record's top level, so a command request
+    // and resolution render even from a record whose `message` object is
+    // absent. `boxRequestId` is an id and stays raw-only.
+    if record.get("boxInstruction").is_some() || record.get("boxResolution").is_some() {
+        blocks.push(tool_call("box", joined_fields(record, BOX_FIELDS)));
+    }
+    if blocks.is_empty() {
+        // Known-empty (GB-5 §2): every text field empty, no tool traffic,
+        // nothing delivered. No message and no count.
+        return;
+    }
+    conversation.push_message(Message {
+        role: Role::Assistant,
+        time: message_time(record.get("timestampMs")),
+        blocks,
+    });
+}
+
+/// The `ToolCall` block for one of a send-message's gates: the name the plan
+/// fixes, and the joined readable fields, falling back to the shared "no
+/// input recorded" phrasing when the object holds no readable field at all —
+/// the gate still happened, and its presence is the block's claim. No
+/// output-size claim is invented either way.
+fn tool_call(name: &str, summary: Option<String>) -> Block {
+    Block::ToolCall {
+        name: Some(name.to_string()),
+        input_summary: summary.unwrap_or_else(|| super::compact_json(None)),
+        output_bytes: None,
+    }
+}
+
+/// The readable fields a summary joins, in the order each gate fixes
+/// (GB-5 §3). Ids (`approval.requestId`, `ask.machineId`/`requestId`,
+/// `boxRequestId`) are deliberately absent: they identify the exchange, and
+/// §8 keeps ids out of every rendered surface.
+const APPROVAL_FIELDS: &[&str] = &["summary", "reason", "command", "status"];
+const ASK_FIELDS: &[&str] = &["action", "target", "status"];
+const BOX_FIELDS: &[&str] = &["boxInstruction", "boxResolution"];
+
+/// The joined readable fields of one object: the named keys, empty ones
+/// absent rather than rendered as gaps. `None` when nothing was readable.
+fn joined_fields(value: &Value, keys: &[&str]) -> Option<String> {
+    let parts: Vec<String> = keys
+        .iter()
+        .filter_map(|key| text_field(value.get(*key)))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The one text block a widget record renders (GB-5 §3): the prompt, the
+/// help text, the option labels — a description is not a label and stays
+/// raw-only — and the resolution. `respondedValue` (record-level) resolves
+/// the question as `answered: <value>`; `widgetSkipped` marks it `(skipped)`;
+/// a record carrying both keeps the answer and drops the skip.
+fn widget_text(record: &Value, widget: &Value) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(prompt) = text_field(widget.get("prompt")) {
+        lines.push(prompt);
+    }
+    if let Some(help) = text_field(widget.get("helpText")) {
+        lines.push(help);
+    }
+    for option in widget
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(label) = text_field(option.get("label")) {
+            lines.push(label);
+        }
+    }
+    if let Some(answer) = text_field(record.get("respondedValue")) {
+        lines.push(format!("answered: {answer}"));
+    } else if record.get("widgetSkipped").and_then(Value::as_bool) == Some(true) {
+        lines.push("(skipped)".to_string());
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// `kind: voice-call` — one spoken call, expanded into messages
+/// (GB-5 §4).
+///
+/// The description, when the call recorded one, is the first message: what
+/// the call was about, speaker unknown — the record names no speaker for
+/// its own summary. The turns and nudges then follow in the order the call
+/// stamped on them, merged: a turn keeps the speaker its label spells (read
+/// with the shared role vocabulary; any other label is speaker-unknown, the
+/// `Role` variant carrying no `why` of its own) and a nudge is an
+/// `Assistant` message, because a nudge is system-initiated. The nudge's
+/// `answer` is null in every observation and renders no block — the
+/// absence of an answer is not rendered as an empty claim. Call
+/// bookkeeping (`callId`, `realtimeConversationId`, `durationMs`,
+/// `endedAtMs`, `turnCount`, `nudgeCount`, the always-empty
+/// `events`/`toolCalls`/`overheard` arrays) is recognised, raw-only and
+/// uncounted: a duration is not a turn, and fabricating a "call ended"
+/// message would invent a speaker to display a number.
+fn render_voice_call(record: &Value, conversation: &mut Conversation) {
+    if let Some(description) = text_field(record.pointer("/call/description")) {
+        conversation.push_message(Message {
+            role: Role::Unknown,
+            time: message_time(record.get("timestampMs")),
+            blocks: vec![Block::Text(description)],
+        });
+    }
+    let mut spoken: Vec<(Option<i64>, Message)> = Vec::new();
+    let turns = record
+        .pointer("/conversation/turns")
+        .and_then(Value::as_array);
+    for turn in turns.into_iter().flatten() {
+        // An empty-text turn is a known-empty (the §2 common rule): no
+        // message and no count, never an empty message.
+        let Some(text) = text_field(turn.get("text")) else {
+            continue;
+        };
+        let role = turn
+            .get("speaker")
+            .and_then(Value::as_str)
+            .and_then(Role::from_str)
+            .unwrap_or(Role::Unknown);
+        spoken.push((
+            turn.get("atMs").and_then(Value::as_i64),
+            Message {
+                role,
+                time: message_time(turn.get("atMs")),
+                blocks: vec![Block::Text(text)],
+            },
+        ));
+    }
+    let nudges = record
+        .pointer("/conversation/nudges")
+        .and_then(Value::as_array);
+    for nudge in nudges.into_iter().flatten() {
+        // An empty-request nudge is the same known-empty as a turn.
+        let Some(text) = text_field(nudge.get("request")) else {
+            continue;
+        };
+        spoken.push((
+            nudge.get("atMs").and_then(Value::as_i64),
+            Message {
+                role: Role::Assistant,
+                time: message_time(nudge.get("atMs")),
+                blocks: vec![Block::Text(text)],
+            },
+        ));
+    }
+    // `atMs` order, the call's own stamp. The sort is stable, so turns and
+    // nudges sharing a timestamp keep the order the record listed them in;
+    // a turn or nudge with no readable `atMs` sorts first and keeps the
+    // time-unknown state the §2 common rule gives it.
+    spoken.sort_by_key(|(at_ms, _)| *at_ms);
+    for (_, message) in spoken {
+        conversation.push_message(message);
+    }
 }
 
 /// The speaker of a `message` record (GB-5 §2).
@@ -564,21 +838,348 @@ mod tests {
         assert_eq!(conversation.unrecognized_lines, 5);
     }
 
-    /// The two kinds whose field mapping is the next slice of this reader's
-    /// plan: each record is counted understood-but-not-yet-rendered, never
-    /// silently dropped, so the archive's line accounting stays complete
-    /// while their renderers are written (GB-5 §10).
+    /// `send-message` is the bot→user/toolbox direction: base role
+    /// `Assistant`, one record → one message, its text from `message.content`
+    /// or — only when content carries nothing — `message.alt`, never both
+    /// (GB-5 §3).
     #[test]
-    fn send_message_and_voice_call_are_counted_as_not_yet_rendered() {
+    fn send_message_renders_assistant_text_from_content_else_alt() {
         let body = concat!(
-            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","content":"synthetic bot content"}}"#,
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","content":"synthetic bot words"}}"#,
             "\n",
-            r#"{"id":"synthetic-id-2","kind":"voice-call","seq":2,"timestampMs":1780000001000,"call":{"callId":"synthetic-call-1","turnCount":1,"nudgeCount":0},"conversation":{"turns":[],"nudges":[]}}"#,
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000500,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic main words","alt":"synthetic alternate words"}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"send-message","seq":3,"timestampMs":1780000001000,"requestId":"synthetic-request-3","message":{"type":"synthetic-type","content":"","alt":"synthetic alternate words"}}"#,
             "\n",
         );
         let conversation = normalize("grok-bot", body);
-        assert_eq!(conversation.messages.len(), 0);
+        assert_eq!(conversation.messages.len(), 3);
+        for message in &conversation.messages {
+            assert!(matches!(message.role, Role::Assistant));
+        }
+        assert!(matches!(
+            &conversation.messages[0].blocks[0],
+            Block::Text(text) if text == "synthetic bot words"
+        ));
+        // A record holding both renders its words once: `alt` is a fallback,
+        // not a second text nor something glued onto the content.
+        assert_eq!(conversation.messages[1].blocks.len(), 1);
+        assert!(matches!(
+            &conversation.messages[1].blocks[0],
+            Block::Text(text) if text == "synthetic main words"
+        ));
+        assert!(matches!(
+            &conversation.messages[2].blocks[0],
+            Block::Text(text) if text == "synthetic alternate words"
+        ));
+        assert!(matches!(
+            conversation.messages[0].time,
+            MessageTime::Known {
+                source: TimeSource::Inferred { .. },
+                ..
+            }
+        ));
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    /// `message.widget` — the question the bot asked — renders as **one**
+    /// text block: prompt, help text, the option labels, and the resolution
+    /// line (`answered: <value>`, or `(skipped)` when `widgetSkipped`).
+    /// Two messages would invent an intra-seq turn order the record does not
+    /// carry, and a tool call would hide a question behind a call name; an
+    /// option `description` is not a label and stays raw-only (GB-5 §3).
+    #[test]
+    fn a_send_message_widget_renders_one_text_with_labels_and_resolution() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","widget":{"prompt":"synthetic pick a file","helpText":"synthetic pick exactly one","options":[{"label":"synthetic option one","value":"synthetic-value-1","description":"synthetic option one description","style":"default"},{"label":"synthetic option two","value":"synthetic-value-2"}],"allowCustom":true,"multiSelect":false,"dismissOnMoveOn":false}},"respondedValue":"synthetic-value-1"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000010000,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","widget":{"prompt":"synthetic pick again","options":[{"label":"synthetic option three","value":"synthetic-value-3"}]}},"widgetSkipped":true}"#,
+            "\n",
+            // Both a resolution and the skip flag: the answered line wins and
+            // the skipped one is not glued next to it.
+            r#"{"id":"synthetic-id-3","kind":"send-message","seq":3,"timestampMs":1780000020000,"requestId":"synthetic-request-3","message":{"type":"synthetic-type","widget":{"prompt":"synthetic choose a path","options":[{"label":"synthetic option four","value":"synthetic-value-4"}]}},"respondedValue":"synthetic-value-4","widgetSkipped":true}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        assert_eq!(conversation.messages.len(), 3);
+        for message in &conversation.messages {
+            assert!(matches!(message.role, Role::Assistant));
+            assert_eq!(message.blocks.len(), 1);
+        }
+        assert!(matches!(
+            &conversation.messages[0].blocks[0],
+            Block::Text(text) if text
+                == "synthetic pick a file\nsynthetic pick exactly one\nsynthetic option one\nsynthetic option two\nanswered: synthetic-value-1"
+        ));
+        assert!(matches!(
+            &conversation.messages[1].blocks[0],
+            Block::Text(text) if text
+                == "synthetic pick again\nsynthetic option three\n(skipped)"
+        ));
+        assert!(matches!(
+            &conversation.messages[2].blocks[0],
+            Block::Text(text) if text
+                == "synthetic choose a path\nsynthetic option four\nanswered: synthetic-value-4"
+        ));
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    /// The tool traffic of a `send-message`: `message.approval`,
+    /// `message.ask` and the record-level `box` request/resolution each
+    /// become one `ToolCall` block — a name the gate is known by, and the
+    /// joined readable fields of the object. Ids never reach a summary
+    /// (`approval.requestId`, `ask.machineId`/`requestId`,
+    /// `boxRequestId`), and a record-level `box` pair renders even when the
+    /// record's `message` object holds no text of its own (GB-5 §3).
+    #[test]
+    fn send_message_approval_ask_and_box_become_tool_calls() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","approval":{"summary":"synthetic approval summary","reason":"synthetic approval reason","command":"synthetic approval command","proposedRule":"synthetic proposed rule","status":"approved","requestId":"synthetic-approval-request","surface":"sync"}}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000001000,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","ask":{"action":"synthetic ask action","target":"synthetic ask target","status":"pending","machineId":"synthetic-machine","requestId":"synthetic-ask-request"}}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"send-message","seq":3,"timestampMs":1780000002000,"requestId":"synthetic-request-3","boxInstruction":"synthetic box instruction","boxRequestId":"synthetic-box-request","boxResolution":"synthetic box resolution","message":{"type":"synthetic-type"}}"#,
+            "\n",
+            // The `box` fields are record-level: a record with no `message`
+            // object at all still renders its command request and resolution.
+            r#"{"id":"synthetic-id-4","kind":"send-message","seq":4,"timestampMs":1780000003000,"boxInstruction":"synthetic box instruction two","boxResolution":"synthetic box resolution two"}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        assert_eq!(conversation.messages.len(), 4);
+        for message in &conversation.messages {
+            assert!(matches!(message.role, Role::Assistant));
+            assert_eq!(message.blocks.len(), 1);
+        }
+        for (message, (name, summary)) in conversation.messages.iter().zip([
+            (
+                "approval",
+                "synthetic approval summary · synthetic approval reason · synthetic approval command · approved",
+            ),
+            ("ask", "synthetic ask action · synthetic ask target · pending"),
+            ("box", "synthetic box instruction · synthetic box resolution"),
+            (
+                "box",
+                "synthetic box instruction two · synthetic box resolution two",
+            ),
+        ]) {
+            match &message.blocks[0] {
+                Block::ToolCall {
+                    name: block_name,
+                    input_summary,
+                    output_bytes,
+                } => {
+                    assert_eq!(block_name.as_deref(), Some(name));
+                    assert_eq!(input_summary, summary);
+                    // The record names the call; no output field exists, so
+                    // no output size is claimed.
+                    assert_eq!(*output_bytes, None);
+                }
+                other => panic!("expected a tool call, got {other:?}"),
+            }
+        }
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+        // Ids stayed raw-only: no request id the record carried is in the
+        // whole rendered model.
+        let serialized = format!("{conversation:?}");
+        for id in [
+            "synthetic-approval-request",
+            "synthetic-ask-request",
+            "synthetic-box-request",
+        ] {
+            assert!(!serialized.contains(id), "`{id}` reached the model");
+        }
+    }
+
+    /// What the bot delivered: `message.images[]`, `message.file_name` and
+    /// `message.url` become attachment reference blocks inside the one
+    /// message the record renders. An image is named by its `alt` text, or
+    /// by its `url` when it has none; no media type or byte size exists in
+    /// the observed shape, so none is claimed. Unlike the person's upload
+    /// (§2), a bot-sent file is not pushed to `conversation.attachments`.
+    #[test]
+    fn send_message_images_files_and_urls_render_as_attachment_refs() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","content":"synthetic report delivered","images":[{"alt":"synthetic chart alt text","url":"synthetic://chart.png","width":4,"height":3},{"alt":"","url":"synthetic://plain.png","width":2,"height":1}],"file_name":"synthetic-report.txt","url":"synthetic://synthetic-report.txt"}}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        assert_eq!(conversation.messages.len(), 1);
+        let blocks = &conversation.messages[0].blocks;
+        assert_eq!(blocks.len(), 5);
+        assert!(matches!(
+            &blocks[0],
+            Block::Text(text) if text == "synthetic report delivered"
+        ));
+        for (block, name) in blocks[1..].iter().zip([
+            "synthetic chart alt text",
+            "synthetic://plain.png",
+            "synthetic-report.txt",
+            "synthetic://synthetic-report.txt",
+        ]) {
+            match block {
+                Block::AttachmentRef(attachment) => {
+                    assert_eq!(attachment.name.as_deref(), Some(name));
+                    assert_eq!(attachment.media_type, None);
+                    assert_eq!(attachment.bytes, None);
+                }
+                other => panic!("expected an attachment ref, got {other:?}"),
+            }
+        }
+        // The bot's delivery stays inside its message; §2's push to
+        // `conversation.attachments` is the user's upload, not this.
+        assert!(conversation.attachments.is_empty());
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
+    /// The secret rule (GB-5 §3): a record naming a credential exchange — a
+    /// `secretRequest` anywhere in it, or a `secretProvided` key — renders
+    /// zero messages and contributes zero text, including its own `content`
+    /// and the `label`/`target`/`description` strings, which name the
+    /// credential. Counted unrendered (understood, deliberately withheld),
+    /// never unrecognized. The raw record stays archived untouched — the
+    /// reader withholds it from every rendered surface only, and here that
+    /// includes the whole serialized conversation, which must lack every
+    /// secret-adjacent string the fixture wrote.
+    #[test]
+    fn send_message_secret_records_render_nothing_and_reach_no_text() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","content":"synthetic secret adjacent words","secretRequest":{"label":"synthetic-secret-label","description":"synthetic secret description","target":{"name":"synthetic-secret-target","kind":"token","field":"value","platform":"synthetic"}}},"secretProvided":true}"#,
+            "\n",
+            // The key decides, not the value: a recorded "not provided"
+            // still names the credential exchange, so the record renders
+            // nothing even though it also carries plain content.
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000001000,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic second secret adjacent words"},"secretProvided":false}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"send-message","seq":3,"timestampMs":1780000002000,"requestId":"synthetic-request-3","message":{"type":"synthetic-type","content":"synthetic open bot words"}}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        // Only the record with no secret shape renders.
+        assert_eq!(conversation.messages.len(), 1);
+        assert!(matches!(
+            &conversation.messages[0].blocks[0],
+            Block::Text(text) if text == "synthetic open bot words"
+        ));
         assert_eq!(conversation.unrendered_lines, 2);
+        assert_eq!(conversation.unrecognized_lines, 0);
+        let serialized = format!("{conversation:?}");
+        for secret in [
+            "synthetic-secret-label",
+            "synthetic secret description",
+            "synthetic-secret-target",
+            "synthetic secret adjacent words",
+            "synthetic second secret adjacent words",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "the secret record's string {secret:?} reached the rendered model"
+            );
+        }
+    }
+
+    /// `kind: voice-call` — one spoken call expanded into messages (GB-5
+    /// §4): `call.description` first with its speaker unknown, then the
+    /// turns and nudges merged in the order the call stamped them
+    /// (`atMs`), a turn's speaker read with the shared role vocabulary and
+    /// any other speaker label left speaker-unknown, each nudge an
+    /// `Assistant` message whose `answer` — null in every observation —
+    /// adds no block rather than an empty claim. The call's bookkeeping
+    /// (ids, durations, counts, the always-empty
+    /// `events`/`toolCalls`/`overheard` arrays) is raw-only and uncounted.
+    #[test]
+    fn a_voice_call_expands_description_turns_and_nudges_in_atms_order() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"voice-call","seq":1,"timestampMs":1780000000000,"call":{"callId":"synthetic-call-1","realtimeConversationId":"synthetic-realtime-1","description":"synthetic call description","durationMs":90000,"endedAtMs":1780000090000,"turnCount":4,"nudgeCount":2,"answeredNudgeCount":1,"ending":"synthetic-ending"},"conversation":{"events":[],"toolCalls":[],"overheard":[],"turns":[{"id":"synthetic-turn-3","speaker":"assistant","text":"synthetic spoken answer","atMs":1780000030000},{"id":"synthetic-turn-1","speaker":"user","text":"synthetic spoken question","atMs":1780000010000},{"id":"synthetic-turn-2","speaker":"sprocket","text":"synthetic spoken unknown-speaker words","atMs":1780000020000},{"id":"synthetic-turn-4","speaker":"user","text":"","atMs":1780000040000}],"nudges":[{"id":"synthetic-nudge-2","request":"","atMs":1780000060000,"answer":null},{"id":"synthetic-nudge-1","request":"synthetic nudge request","atMs":1780000025000,"answer":null}]}}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        // Description, three spoken turns, one nudge; the empty-text turn
+        // and the empty-request nudge are measured empties — no message, no
+        // count.
+        assert_eq!(conversation.messages.len(), 5);
+        assert!(matches!(conversation.messages[0].role, Role::Unknown));
+        assert!(matches!(
+            &conversation.messages[0].blocks[0],
+            Block::Text(text) if text == "synthetic call description"
+        ));
+        // The description keeps the record's own `timestampMs`, not a
+        // turn's `atMs`.
+        match &conversation.messages[0].time {
+            MessageTime::Known { unix, .. } => assert_eq!(*unix, 1_780_000_000),
+            other => panic!("expected a known time, got {other:?}"),
+        }
+        let spoken = &conversation.messages[1..];
+        let expected: &[(Role, &str, i64)] = &[
+            (Role::User, "synthetic spoken question", 1_780_000_010),
+            (
+                Role::Unknown,
+                "synthetic spoken unknown-speaker words",
+                1_780_000_020,
+            ),
+            (Role::Assistant, "synthetic nudge request", 1_780_000_025),
+            (Role::Assistant, "synthetic spoken answer", 1_780_000_030),
+        ];
+        for (message, (role, text, unix)) in spoken.iter().zip(expected) {
+            assert_eq!(message.role, *role);
+            assert_eq!(message.blocks.len(), 1);
+            assert!(matches!(
+                &message.blocks[0],
+                Block::Text(actual) if actual == text
+            ));
+            match &message.time {
+                MessageTime::Known {
+                    unix: actual,
+                    source: TimeSource::Inferred { .. },
+                } => assert_eq!(*actual, *unix),
+                other => panic!("expected an inferred time, got {other:?}"),
+            }
+        }
+        // The nudge carries no answer block: a null answer is not rendered
+        // as an empty claim.
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+        let serialized = format!("{conversation:?}");
+        for raw_only in [
+            "synthetic-call-1",
+            "synthetic-realtime-1",
+            "synthetic-ending",
+        ] {
+            assert!(
+                !serialized.contains(raw_only),
+                "call bookkeeping {raw_only:?} reached the rendered model"
+            );
+        }
+    }
+
+    /// A `send-message` whose every text field is empty and a `voice-call`
+    /// whose transcript is empty are measured empties (GB-5 §2): zero
+    /// messages, zero counts — known-empty, not unreadable, and since the
+    /// Slice B mapping landed, no longer counted as not-yet-rendered either.
+    #[test]
+    fn empty_send_message_and_voice_call_records_are_measured_empties() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"send-message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","message":{"type":"synthetic-type","content":"","alt":"","widget":{"options":[]}}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000001000,"requestId":"synthetic-request-2","message":{}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"send-message","seq":3,"timestampMs":1780000002000,"requestId":"synthetic-request-3"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-4","kind":"voice-call","seq":4,"timestampMs":1780000003000,"call":{"callId":"synthetic-call-1","durationMs":0,"turnCount":0,"nudgeCount":0},"conversation":{"events":[],"toolCalls":[],"overheard":[],"turns":[],"nudges":[]}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-5","kind":"voice-call","seq":5,"timestampMs":1780000004000}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        // The provenance pins that the zeros below were *measured* by this
+        // reader — against a raw-view-only build the same zeros are unread.
+        assert!(matches!(conversation.provenance, Provenance::Known { .. }));
+        assert_eq!(conversation.messages.len(), 0);
+        assert_eq!(conversation.unrendered_lines, 0);
         assert_eq!(conversation.unrecognized_lines, 0);
     }
 
