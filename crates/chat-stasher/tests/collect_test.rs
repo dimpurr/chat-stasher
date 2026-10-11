@@ -569,6 +569,32 @@ fn scan_journals(root: &Path) -> scanner::ScanReport {
     scanner::scan_with_registry_and_machine(&config, &registry(), "fixture-machine").unwrap()
 }
 
+/// The sealed shard bodies of one session slot, in global sequence order.
+fn sealed_shard_bodies(stage: &Path, machine: &str, session_id: &str) -> Vec<Vec<u8>> {
+    let mut entries =
+        store::sealed_shard_entries(&store::session_shard_dir(stage, machine, session_id)).unwrap();
+    entries.sort_by_key(|(sequence, _)| *sequence);
+    entries
+        .iter()
+        .map(|(_, path)| fs::read(path).unwrap())
+        .collect()
+}
+
+/// The session slots the stage holds for one machine partition, so a test
+/// can prove a record's bytes went nowhere else.
+fn staged_session_slots(stage: &Path, machine: &str) -> std::collections::BTreeSet<String> {
+    let machine_root = store::session_shard_dir(stage, machine, "-");
+    let machine_dir = machine_root.parent().unwrap();
+    fs::read_dir(machine_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn run_id(run: &str) -> String {
+    format!("claude-code.fixture-machine.{run}")
+}
+
 /// GB-2 regression. Two workflow journals below different parent sessions
 /// are two sessions, not one: each stages under its own workflow-run id, and
 /// neither slot ever receives the other run's bytes. Before the structural
@@ -711,5 +737,339 @@ fn journal_id_change_hands_only_new_bytes_to_the_workflow_run_id() {
         store::concat_shards(&stage, "fixture-machine", &run_id).unwrap(),
         second_line,
         "only the bytes after the id change land under the workflow-run id"
+    );
+}
+
+/// GB-2 handover, many-runs shape (W980). The single-journal test above pins
+/// the id change for one run; the machine the diagnosis measured had many
+/// journals — nine runs, three here — whose shared `journal` stem had fused
+/// every run's pre-upgrade bytes into one merged slot, one sealed shard per
+/// journal and one cursor per journal path. The first post-W978 pass must
+/// hand that whole shape over without rewriting or losing anything: the
+/// merged slot stays frozen exactly as the old build sealed it, each
+/// per-path cursor still proves itself against that shared slot, and only
+/// the bytes appended after the upgrade land under each run's own
+/// workflow-run id. A pass that changed nothing adds nothing anywhere.
+#[test]
+fn journal_id_change_hands_over_many_runs_from_one_merged_slot() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("projects");
+    // One journal per run, one run per project directory; the project
+    // directories sort a, b, c, which fixes the order collect seals the
+    // per-path shards in.
+    let runs = [
+        (
+            "wf_019d7f00-0000-7000-8000-00000000000a",
+            "-fixture-proj-a",
+            "019d7f01-0000-7000-8000-000000000001",
+            "{\"synthetic\":\"pre-a\"}\n",
+            "{\"synthetic\":\"post-a\"}\n",
+        ),
+        (
+            "wf_019d7f00-0000-7000-8000-00000000000b",
+            "-fixture-proj-b",
+            "019d7f02-0000-7000-8000-000000000002",
+            "{\"synthetic\":\"pre-b\"}\n",
+            "{\"synthetic\":\"post-b\"}\n",
+        ),
+        (
+            "wf_019d7f00-0000-7000-8000-00000000000c",
+            "-fixture-proj-c",
+            "019d7f03-0000-7000-8000-000000000003",
+            "{\"synthetic\":\"pre-c\"}\n",
+            "{\"synthetic\":\"post-c\"}\n",
+        ),
+    ];
+    let mut journals = Vec::new();
+    for (run, project, parent, pre_body, post_body) in &runs {
+        let journal = root
+            .join(project)
+            .join(parent)
+            .join("subagents/workflows")
+            .join(run)
+            .join("journal.jsonl");
+        fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        fs::write(&journal, pre_body.as_bytes()).unwrap();
+        journals.push((run, journal, pre_body, post_body));
+    }
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+
+    // The pass a pre-W978 build ran: every journal carries the shared stem
+    // id, so every journal's whole body seals into the one merged slot,
+    // behind one cursor per journal path.
+    let shared_id = "claude-code.fixture-machine.journal".to_string();
+    let mut pre = scan_journals(&root);
+    assert_eq!(pre.records.len(), 3, "one record per workflow journal");
+    for record in &mut pre.records {
+        record.id = shared_id.clone();
+    }
+    let first =
+        collect::collect_scan_report(&pre, &stage, "fixture-machine", &state, 20, &dest()).unwrap();
+    assert_eq!(
+        first.changed_records, 3,
+        "the old shared slot received every journal's bytes"
+    );
+    let expected_pre_bodies: Vec<Vec<u8>> = journals
+        .iter()
+        .map(|(_, _, pre_body, _)| pre_body.as_bytes().to_vec())
+        .collect();
+    assert_eq!(
+        sealed_shard_bodies(&stage, "fixture-machine", &shared_id),
+        expected_pre_bodies,
+        "the merged slot holds one sealed shard per journal, no loss and no fusion"
+    );
+    let frozen: Vec<u8> = store::concat_shards(&stage, "fixture-machine", &shared_id).unwrap();
+
+    // Each journal gains one more synthetic event; the scan now ids each
+    // journal by its workflow run.
+    for (_, journal, _, post_body) in &journals {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(journal)
+            .unwrap()
+            .write_all(post_body.as_bytes())
+            .unwrap();
+    }
+    let post = scan_journals(&root);
+    assert_eq!(post.records.len(), 3);
+    let post_ids: std::collections::BTreeSet<String> = post
+        .records
+        .iter()
+        .map(|record| record.id.as_str().to_string())
+        .collect();
+    let expected_post_ids: std::collections::BTreeSet<String> = journals
+        .iter()
+        .map(|(run, _, _, _)| format!("claude-code.fixture-machine.{run}"))
+        .collect();
+    assert_eq!(
+        post_ids, expected_post_ids,
+        "each journal ids by its workflow-run directory"
+    );
+    assert!(
+        post.archive_gaps().is_empty(),
+        "many distinct run ids are gap-free; gaps={:?}",
+        post.archive_gaps()
+    );
+
+    let second =
+        collect::collect_scan_report(&post, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert!(second.errors.is_empty());
+    assert!(second.archive_gaps.is_empty());
+    assert_eq!(
+        second.reset_records, 0,
+        "every per-path cursor proved itself against the old shared slot: no full reread"
+    );
+    assert_eq!(second.changed_records, 3);
+    let expected_delta: u64 = journals
+        .iter()
+        .map(|(_, _, _, post_body)| post_body.len() as u64)
+        .sum();
+    assert_eq!(
+        second.delta_bytes_read, expected_delta,
+        "only the appended bytes were read"
+    );
+    assert_eq!(second.unchanged_records, 0);
+
+    // The frozen merged slot: byte-identical, still exactly its three
+    // pre-upgrade shards.
+    assert_eq!(
+        sealed_shard_bodies(&stage, "fixture-machine", &shared_id),
+        expected_pre_bodies,
+        "the merged slot is frozen: no run's delta was appended to it"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &shared_id).unwrap(),
+        frozen,
+        "the merged slot was not rewritten"
+    );
+    // Each run's own slot: exactly the post-upgrade bytes, once — the
+    // exact shard-body equality above is also the no-duplication proof,
+    // because a reread cursor would have sealed the pre-upgrade prefix
+    // there too.
+    for (run, _, _, post_body) in &journals {
+        let run_id = format!("claude-code.fixture-machine.{run}");
+        assert_eq!(
+            sealed_shard_bodies(&stage, "fixture-machine", &run_id),
+            vec![post_body.as_bytes().to_vec()],
+            "run {run}'s slot holds exactly its post-upgrade bytes"
+        );
+    }
+    // Nothing went anywhere else: the machine partition holds exactly the
+    // frozen slot and the three per-run slots.
+    assert_eq!(
+        staged_session_slots(&stage, "fixture-machine"),
+        journals
+            .iter()
+            .map(|(run, _, _, _)| format!("claude-code.fixture-machine.{run}"))
+            .chain([shared_id.clone()])
+            .collect(),
+        "no record was duplicated or lost across slots"
+    );
+
+    // A pass that changed nothing adds nothing anywhere.
+    let third = collect::collect_scan_report(&post, &stage, "fixture-machine", &state, 20, &dest())
+        .unwrap();
+    assert_eq!(third.changed_records, 0);
+    assert_eq!(third.unchanged_records, 3);
+    assert_eq!(third.delta_bytes_read, 0);
+    assert_eq!(third.reset_records, 0);
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &shared_id).unwrap(),
+        frozen,
+        "a re-run leaves the merged slot frozen"
+    );
+    for (run, _, _, post_body) in &journals {
+        assert_eq!(
+            store::concat_shards(&stage, "fixture-machine", &run_id(run)).unwrap(),
+            post_body.as_bytes().to_vec(),
+            "a re-run adds nothing to run {run}'s slot"
+        );
+    }
+}
+
+/// GB-2, collect level (W980). The scan-only aliasing tests prove no gap
+/// fires when two files resolve to one session id; this end-to-end pass
+/// proves what that claim rests on: collect archives **both** paths' bytes
+/// into the merged slot and drops nothing — if a future collect ever
+/// treated the second same-id path as already covered, the missing body
+/// fails here while no gap signal fires anywhere. Two aliasing shapes run
+/// side by side: a workflow journal beside an ordinary transcript whose
+/// filename stem spells the same run id (the collision the structural
+/// journal id rule can itself produce), and the plain same-stem pair that
+/// predates the rule. Per-path cursors keep each source distinct, so a
+/// re-run adds nothing.
+#[test]
+fn aliased_session_id_pairs_collect_every_byte_into_the_merged_slots() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("projects");
+    let run = "wf_019d7g00-0000-7000-8000-00000000000a";
+    let journal_body = &b"{\"synthetic\":\"journal-body\"}\n"[..];
+    let transcript_body = &b"{\"synthetic\":\"transcript-body\"}\n"[..];
+    let dup_body_a = &b"{\"synthetic\":\"dup-a\"}\n"[..];
+    let dup_body_b = &b"{\"synthetic\":\"dup-b\"}\n"[..];
+    let files = [
+        // An ordinary session transcript whose filename stem is the same
+        // string as the workflow run id: it and the journal resolve to one
+        // session id.
+        (
+            format!("-fixture-proj-a/{run}.jsonl"),
+            transcript_body.to_vec(),
+        ),
+        (
+            format!(
+                "-fixture-proj-a/019d7g01-0000-7000-8000-000000000001/subagents/workflows/{run}/journal.jsonl"
+            ),
+            journal_body.to_vec(),
+        ),
+        // The plain same-stem pair: one stem in two project directories.
+        (
+            "-fixture-proj-b/dup-stem.jsonl".to_string(),
+            dup_body_a.to_vec(),
+        ),
+        (
+            "-fixture-proj-c/dup-stem.jsonl".to_string(),
+            dup_body_b.to_vec(),
+        ),
+    ];
+    for (rel, body) in &files {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body).unwrap();
+    }
+    let stage = dir.path().join("stage");
+    let state = dir.path().join("state");
+
+    let report = scan_journals(&root);
+    assert_eq!(report.records.len(), 4, "every aliased file is a record");
+    let scanned_ids: std::collections::BTreeSet<String> = report
+        .records
+        .iter()
+        .map(|record| record.id.as_str().to_string())
+        .collect();
+    let collided_id = run_id(run);
+    let dup_id = "claude-code.fixture-machine.dup-stem".to_string();
+    assert_eq!(
+        scanned_ids,
+        [collided_id.clone(), dup_id.clone()].into_iter().collect(),
+        "two aliased pairs, each resolving to one session id"
+    );
+    assert_eq!(
+        report.probes[0].record_count,
+        Some(2),
+        "the recognized count is the distinct ids collect can address"
+    );
+    assert!(
+        report.archive_gaps().is_empty(),
+        "aliasing is not a gap: collect consumes every record; gaps={:?}",
+        report.archive_gaps()
+    );
+
+    let collected =
+        collect::collect_scan_report(&report, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert!(collected.errors.is_empty());
+    assert!(collected.archive_gaps.is_empty());
+    assert_eq!(
+        collected.changed_records, 4,
+        "every file delivered its bytes this pass"
+    );
+
+    let mut expected_collided = vec![journal_body.to_vec(), transcript_body.to_vec()];
+    expected_collided.sort();
+    let mut collided = sealed_shard_bodies(&stage, "fixture-machine", &collided_id);
+    collided.sort();
+    assert_eq!(
+        collided, expected_collided,
+        "the collided run's merged slot holds the journal and the transcript, each exactly once"
+    );
+    let mut expected_dup = vec![dup_body_a.to_vec(), dup_body_b.to_vec()];
+    expected_dup.sort();
+    let mut dup = sealed_shard_bodies(&stage, "fixture-machine", &dup_id);
+    dup.sort();
+    assert_eq!(
+        dup, expected_dup,
+        "the dup-stem merged slot holds both files' bodies, each exactly once"
+    );
+    let collided_concat = store::concat_shards(&stage, "fixture-machine", &collided_id).unwrap();
+    assert!(
+        collided_concat == [journal_body, transcript_body].concat()
+            || collided_concat == [transcript_body, journal_body].concat(),
+        "the merged slot reads back both bodies exactly once"
+    );
+    assert_eq!(
+        store::concat_shards(&stage, "fixture-machine", &dup_id)
+            .unwrap()
+            .len(),
+        dup_body_a.len() + dup_body_b.len(),
+        "nothing was dropped from the dup-stem slot"
+    );
+    // No byte went anywhere else: the machine partition holds exactly the
+    // two merged slots.
+    assert_eq!(
+        staged_session_slots(&stage, "fixture-machine"),
+        [collided_id.clone(), dup_id.clone()].into_iter().collect(),
+        "neither pair member staged a slot of its own"
+    );
+
+    // A pass that changed nothing adds nothing: each path kept its own
+    // cursor, so no file of a pair hides behind its same-id sibling.
+    let second =
+        collect::collect_scan_report(&report, &stage, "fixture-machine", &state, 20, &dest())
+            .unwrap();
+    assert_eq!(second.changed_records, 0);
+    assert_eq!(second.unchanged_records, 4);
+    assert_eq!(second.delta_bytes_read, 0);
+    assert_eq!(second.reset_records, 0);
+    let mut collided_again = sealed_shard_bodies(&stage, "fixture-machine", &collided_id);
+    collided_again.sort();
+    assert_eq!(collided_again, expected_collided);
+    let mut dup_again = sealed_shard_bodies(&stage, "fixture-machine", &dup_id);
+    dup_again.sort();
+    assert_eq!(dup_again, expected_dup);
+    assert_eq!(
+        staged_session_slots(&stage, "fixture-machine"),
+        [collided_id, dup_id].into_iter().collect()
     );
 }
