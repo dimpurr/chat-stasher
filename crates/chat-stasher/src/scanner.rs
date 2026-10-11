@@ -3827,6 +3827,19 @@ mod tests {
                 "journal",
                 None,
             ),
+            // The harness-generated segment names are lowercase on every
+            // measured platform; a recased tree is not the measured layout
+            // and its journal falls back to the stem id.
+            (
+                "projects/proj/parent/Subagents/workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
+            (
+                "projects/proj/parent/subagents/Workflows/wf_019d7d00-0000-7000-8000-00000000000d/journal.jsonl",
+                "journal",
+                None,
+            ),
         ];
         for (path, stem, expected) in cases {
             assert_eq!(
@@ -3835,6 +3848,90 @@ mod tests {
                 "layout `{path}` id must be {expected:?}"
             );
         }
+    }
+
+    /// GB-2 (W980 Low). The workflow-journal rule's layout match is
+    /// exact-case: the segment names `subagents` and `workflows` are
+    /// harness-generated constants, lowercase on every measured platform,
+    /// and a recased tree (`Subagents`, `Workflows`) is not the measured
+    /// layout. Its journal must fall back to the filename-stem id — the
+    /// honest pre-W978 behavior — rather than guessing at a renamed
+    /// segment, while the lowercase runs in the same tree keep their
+    /// workflow-run ids, which is what makes this scan contrast the two
+    /// spellings end to end.
+    #[test]
+    fn recased_workflow_segments_fall_back_to_the_stem_id() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let projects = sandbox.home().join(".claude").join("projects");
+        let run_a = "wf_019d7e00-0000-7000-8000-00000000000a";
+        let run_b = "wf_019d7e00-0000-7000-8000-00000000000b";
+        let run_c = "wf_019d7e00-0000-7000-8000-00000000000c";
+        for (project, parent, segments, run) in [
+            (
+                "-fixture-proj-a",
+                "019d7e01-0000-7000-8000-000000000001",
+                "subagents/workflows",
+                run_a,
+            ),
+            (
+                "-fixture-proj-b",
+                "019d7e02-0000-7000-8000-000000000002",
+                "subagents/workflows",
+                run_b,
+            ),
+            (
+                "-fixture-proj-c",
+                "019d7e03-0000-7000-8000-000000000003",
+                "Subagents/Workflows",
+                run_c,
+            ),
+        ] {
+            let journal = projects
+                .join(project)
+                .join(parent)
+                .join(segments)
+                .join(run)
+                .join("journal.jsonl");
+            fs::create_dir_all(journal.parent().unwrap()).unwrap();
+            fs::write(&journal, b"{\"synthetic\":\"workflow-journal\"}\n").unwrap();
+        }
+        let registry = claude_code_directory_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{run_a}"),
+            format!("claude-code.synthetic-machine.{run_b}"),
+            "claude-code.synthetic-machine.journal".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            report.records.len(),
+            3,
+            "the recased tree is still scanned; every journal is a record"
+        );
+        assert_eq!(
+            ids, expected,
+            "the lowercase measured layout ids by its run directories; the recased tree falls back to the stem"
+        );
+        assert_eq!(
+            report.probes[0].record_count,
+            Some(3),
+            "the fallback stem is a distinct id, so the probe still counts every session"
+        );
+        assert!(
+            report.archive_gaps().is_empty(),
+            "the fallback stem is honest, not an archive gap; gaps={:?}",
+            report.archive_gaps()
+        );
     }
 
     #[test]
