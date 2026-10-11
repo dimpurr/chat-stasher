@@ -17,6 +17,7 @@ mod codex;
 mod cursor;
 mod deepseek_harness;
 mod gemini_cli;
+mod grok_bot;
 mod grok_cli;
 mod hermes_agent;
 mod kimi_code;
@@ -133,6 +134,19 @@ pub struct Conversation {
     pub canonical_follows_active: bool,
     pub attachments: Vec<AttachmentRef>,
     pub provenance: Provenance,
+    /// Missing replica sequence positions as inclusive runs, from the
+    /// harness's own measurement line — never recomputed from the rendered
+    /// seqs, which share positions (variants) and prove nothing about
+    /// completeness. A head run ("rows 1–34 missing") is in the list: the
+    /// measurement starts at one. Empty is the no-claim default of a body
+    /// whose harness records no gap measurement, not a measured "no gaps".
+    pub sequence_gap_runs: Vec<(u64, u64)>,
+    /// Whether the source recorded itself partial (grok-bot's
+    /// `partial_replica`): an observed window, not a promise of complete
+    /// history. `false` is both "the source said complete" and "the source
+    /// said nothing"; there is no signal to tell apart today, so the reader
+    /// records what the one existing measurement line says.
+    pub partial: bool,
 }
 
 impl Conversation {
@@ -155,6 +169,8 @@ impl Conversation {
             canonical_follows_active: true,
             attachments: Vec::new(),
             provenance,
+            sequence_gap_runs: Vec::new(),
+            partial: false,
         }
     }
 
@@ -191,6 +207,13 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         // summary again as another turn — so the harness owns its line
         // walk, as `kimi-code` does.
         grok_cli::normalize_body(body, &mut conversation);
+        return conversation;
+    }
+    if harness == "grok-bot" {
+        // The replica reader renders one message per sequence position, and
+        // which variant of a position is final is only knowable after the
+        // whole body is read, so it owns its own line walk like kimi-code.
+        grok_bot::normalize_body(body, &mut conversation);
         return conversation;
     }
     for line in body.lines() {
@@ -274,6 +297,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             | "cursor"
             | "zed"
             | "grok"
+            | "grok-bot"
             | "chatgpt"
             | "deepseek"
             // The local DeepSeek Harness (`dsh`) is a different harness from the
