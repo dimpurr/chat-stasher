@@ -286,6 +286,22 @@ pub struct RegistryHarness {
     /// records still share the same `<harness>.<machine>.<session>` identity.
     #[serde(default)]
     pub source_roots: Vec<RegistrySourceRoot>,
+    /// Declared **session indexes**: roots that hold a platform's own index of
+    /// sessions rather than transcript bodies (ADR-056 D1).
+    ///
+    /// Additive by design. One harness may declare body roots, index roots, or
+    /// both, and there is no `capture_kind` choosing between them — a
+    /// classification at the software level would force a new enum value the
+    /// first time a real source produces both, and would make the pair
+    /// mutually exclusive in the schema when they are not in life.
+    ///
+    /// Empty means the harness declares no index, which is every registry entry
+    /// written before this existed. A declaration that cannot be honoured is a
+    /// parse error (see [`validate_session_indexes`]) rather than an empty
+    /// list: an unreadable declaration and a source with nothing in it are
+    /// different states, and collapsing them is invariant 1.
+    #[serde(default)]
+    pub session_indexes: Vec<RegistrySessionIndex>,
     /// Dimensions this harness can record. Values are declared at the source
     /// root or measured from the source; this block is descriptive only.
     #[serde(default)]
@@ -326,6 +342,36 @@ pub struct RegistrySourceRoot {
     #[serde(default)]
     pub provenance: crate::provenance::SessionProvenance,
 }
+
+/// One declared session index of one harness (ADR-056 D1).
+///
+/// `paths` is ordinary [`RegistryPaths`] — the same three platform cells, the
+/// same template expansion and the same confidence gate a body root uses — so
+/// an index root gains nothing new in resolution rules and cannot drift from
+/// them. What makes an index an index is the `adapter`, which names the reader
+/// for the format sitting inside that root.
+///
+/// `id` is stable within its harness: it is the name a report cites
+/// (`harness/index`) and the name a later cursor would key on, so it must be
+/// non-empty and unique per harness. It is *not* globally unique — two harnesses
+/// each having an `agents` index is ordinary, not a clash.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistrySessionIndex {
+    pub id: String,
+    /// Which reader reads this root. Must be one of
+    /// [`KNOWN_SESSION_INDEX_ADAPTERS`]; anything else, including an absent or
+    /// empty value, stops the registry from loading.
+    pub adapter: String,
+    pub paths: RegistryPaths,
+}
+
+/// The adapters this build can actually read a session index with.
+///
+/// A declaration naming anything else is refused at parse time rather than
+/// scanned with no reader: the alternative is a harness that reports "nothing
+/// found" while the registry says it has an index, which is invariant 1 seen
+/// from the other side.
+pub const KNOWN_SESSION_INDEX_ADAPTERS: &[&str] = &[crate::paseo::AGENT_INDEX_ADAPTER];
 
 /// The three platform cells. Missing keys deserialize to `None`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -475,12 +521,69 @@ pub fn load_registry(path: &Path) -> io::Result<HarnessRegistry> {
 }
 
 fn parse_registry(raw: &str, source: &str) -> io::Result<HarnessRegistry> {
-    serde_json::from_str(raw).map_err(|e| {
+    let registry: HarnessRegistry = serde_json::from_str(raw).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("harness registry {source} is not valid JSON: {e}"),
         )
-    })
+    })?;
+    validate_session_indexes(&registry, source)?;
+    Ok(registry)
+}
+
+/// Check every declared session index against what this build can honour.
+///
+/// Runs after deserialisation because what it rejects is *shape that parses*:
+/// serde accepts an index with an empty id, a duplicated id, or an adapter no
+/// reader exists for, and each of those would otherwise reach the scanner as a
+/// well-formed-looking declaration.
+///
+/// Only the session-index half is checked. Unknown registry metadata of any
+/// other kind stays tolerated, exactly as it was before this key existed:
+/// a registry written by a newer generator must still load here, and turning
+/// the registry types closed would make every additive edit a version gate.
+fn validate_session_indexes(registry: &HarnessRegistry, source: &str) -> io::Result<()> {
+    for harness in &registry.harnesses {
+        let mut seen = BTreeSet::new();
+        for index in &harness.session_indexes {
+            if index.id.trim().is_empty() {
+                return Err(registry_error(source, &format!(
+                    "harness {} declares a session index with an empty id; the id is the stable name a \
+                     report cites and a later cursor keys on",
+                    harness.id
+                )));
+            }
+            if index.adapter.trim().is_empty() {
+                return Err(registry_error(source, &format!(
+                    "harness {} session index {} declares an empty adapter; which reader reads a root is \
+                     not something this build may guess",
+                    harness.id, index.id
+                )));
+            }
+            if !KNOWN_SESSION_INDEX_ADAPTERS.contains(&index.adapter.as_str()) {
+                return Err(registry_error(source, &format!(
+                    "harness {} session index {} names adapter {} (this build reads only {:?}); refusing \
+                     rather than scanning a root with no reader for its format",
+                    harness.id, index.id, index.adapter, KNOWN_SESSION_INDEX_ADAPTERS
+                )));
+            }
+            if !seen.insert(index.id.as_str()) {
+                return Err(registry_error(source, &format!(
+                    "harness {} declares session index id {} twice; two indexes under one name cannot be \
+                     told apart in a report or a cursor",
+                    harness.id, index.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn registry_error(source: &str, message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("harness registry {source} is not usable: {message}"),
+    )
 }
 
 /// Locate the registry by walking **up from the cwd and the package manifest

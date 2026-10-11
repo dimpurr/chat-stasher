@@ -35,6 +35,7 @@ pub mod normalize;
 pub mod orphans;
 pub mod overview;
 pub mod packcheck;
+pub mod paseo;
 pub mod provenance;
 pub mod prune_orphans;
 pub mod push_progress;
