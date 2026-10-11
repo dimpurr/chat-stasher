@@ -2791,12 +2791,12 @@ mod tests {
             ),
             (
                 // The desktop replica's records are read by the normalize
-                // reader, but this fixture is not one: no `seq`/`kind`
-                // anywhere, so the reader counts it unrecognized and the
-                // shard is reported by its format, not guessed into text.
+                // reader, so an archived shard in the replica's own shape
+                // contributes the text the reader rendered.
                 "grok-bot",
-                br#"{"replica":{"sequence":1,"entries":[]}}"#,
-                Expected::Format(FORMAT_JSON),
+                br#"{"kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic question"}
+{"kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic answer"}"#,
+                Expected::Text("synthetic question"),
             ),
             (
                 "google-antigravity",
@@ -2915,6 +2915,132 @@ mod tests {
         assert!(extracted.body.is_empty());
         assert!(extracted.message_offsets.is_empty());
         assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// The GB-5 §8/§9 rows over the grok-bot reader: exactly the rendered
+    /// text is indexed — a human turn, a bot record's words, its widget
+    /// question with the answered resolution, a voice call's description
+    /// and spoken turns — while the never-indexed classes stay out of the
+    /// body: the secret record's strings (the §3 rule holds in the index
+    /// too), ids and nonces, `event` bookkeeping, and file names, which
+    /// render as attachment references rather than text.
+    #[test]
+    fn grok_bot_rendered_text_is_indexed_and_secret_id_and_file_strings_are_not() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"message","seq":1,"timestampMs":1780000000000,"requestId":"synthetic-request-1","isStreaming":false,"role":"user","content":"synthetic searchable question"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000100,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic searchable bot words","widget":{"prompt":"synthetic pick a report","options":[{"label":"synthetic option one","value":"synthetic-value-1"}]}},"respondedValue":"synthetic-value-1"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"event","seq":3,"timestampMs":1780000000200,"event":{"type":"synthetic-event-type","automationName":"synthetic automation name"}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-4","kind":"voice-call","seq":4,"timestampMs":1780000000300,"call":{"callId":"synthetic-call-1","description":"synthetic described call"},"conversation":{"turns":[{"speaker":"user","text":"synthetic spoken turn words","atMs":1780000000400}],"nudges":[{"request":"synthetic nudge words","atMs":1780000000500,"answer":null}]}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-5","kind":"user-attachment","seq":5,"timestampMs":1780000000600,"clientNonce":"synthetic-nonce-1","file_name":"synthetic-report.txt","byteSize":128}"#,
+            "\n",
+            r#"{"id":"synthetic-id-6","kind":"send-message","seq":6,"timestampMs":1780000000700,"requestId":"synthetic-request-6","message":{"type":"synthetic-type","content":"synthetic secret adjacent words","secretRequest":{"label":"synthetic-secret-label","target":{"name":"synthetic-secret-target"}}},"secretProvided":true}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        for needle in [
+            "synthetic searchable question",
+            "synthetic searchable bot words",
+            "synthetic pick a report",
+            "synthetic option one",
+            "answered: synthetic-value-1",
+            "synthetic described call",
+            "synthetic spoken turn words",
+            "synthetic nudge words",
+        ] {
+            assert!(
+                extracted.body.contains(needle),
+                "rendered text {needle:?} is not in the index body"
+            );
+        }
+        for withheld in [
+            // The secret rule reaches the index: every string of the
+            // record that named the credential exchange is absent.
+            "synthetic-secret-label",
+            "synthetic-secret-target",
+            "synthetic secret adjacent words",
+            // Ids and nonces are not conversation text.
+            "synthetic-request-1",
+            "synthetic-nonce-1",
+            "synthetic-call-1",
+            // `event` bookkeeping and file names never become text.
+            "synthetic automation name",
+            "synthetic-report.txt",
+        ] {
+            assert!(
+                !extracted.body.contains(withheld),
+                "never-indexed string {withheld:?} reached the index body"
+            );
+        }
+        assert!(!extracted.message_offsets.is_empty());
+        // Every line parsed, so nothing was silently unread.
+        assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// A grok-bot shard that is JSON but holds no record the reader knows
+    /// — no `seq`/`kind` anywhere — is the shape the registry row pinned
+    /// before Slice C put a reader-shaped shard there and asked for
+    /// `Expected::Text`. Every line counts unrecognized and none renders,
+    /// so the shard is reported by its format, never guessed into an
+    /// indexed empty body.
+    #[test]
+    fn grok_bot_json_the_reader_cannot_parse_is_still_reported_by_format() {
+        let extracted =
+            extract_index_document_for("grok-bot", br#"{"replica":{"sequence":1,"entries":[]}}"#)
+                .unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+        assert!(extracted.body.is_empty());
+    }
+
+    /// The secret rule must hold in the built index, not only in the
+    /// extractor's answer (GB-5 §3): a grok-bot session that carried a
+    /// secret record is still searchable — its plainly rendered phrase is
+    /// found — but the strings of the withheld record are findable by no
+    /// query, because they were never stored as text at all. The queries
+    /// are three characters or longer, so each zero is a measurement the
+    /// trigram index can actually make, not a refusal to answer.
+    #[test]
+    fn grok_bot_secret_strings_are_not_findable_by_search() {
+        let body = concat!(
+            r#"{"id":"synthetic-id-1","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic hedgehog question"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000100,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","content":"synthetic open bot words","secretRequest":{"label":"synthetic-secret-label","target":{"name":"synthetic-secret-target"}}},"secretProvided":true}"#,
+            "\n",
+        );
+        let text = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(text.is_indexable());
+        assert!(text.body.contains("synthetic hedgehog question"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::at(dir.path().join("index"));
+        let sources = [SourceDoc::fingerprinted(
+            "machine/grok-bot.machine.synthetic-agent",
+            "synthetic-sha",
+        )];
+        index
+            .build(&sources, |_| Ok(the(text.clone(), 64)))
+            .unwrap();
+        let set = index.matches("hedgehog").unwrap().unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(
+            set.matches[0].id,
+            "machine/grok-bot.machine.synthetic-agent"
+        );
+        for withheld in [
+            "synthetic-secret-label",
+            "synthetic-secret-target",
+            "synthetic open bot words",
+        ] {
+            let set = index.matches(withheld).unwrap().unwrap();
+            assert!(
+                set.is_empty(),
+                "the secret record's string {withheld:?} was found by search"
+            );
+        }
     }
 
     /// A native Grok transcript body is indexed from its native

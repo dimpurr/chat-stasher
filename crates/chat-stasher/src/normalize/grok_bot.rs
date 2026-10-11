@@ -9,9 +9,9 @@
 //! every record, of seven kinds — `message`, `notice`, `send-message`,
 //! `event`, `user-attachment`, `at`, `voice-call`.
 //!
-//! This file is the approved GB-5 reader plan's slices A and B (§10;
-//! 2026-10-11) — the transcript kinds plus the tool-shaped kinds. What
-//! renders here and why:
+//! This file is the approved GB-5 reader plan, all three slices (§10;
+//! 2026-10-11) — the transcript kinds, the tool-shaped kinds, and the
+//! sub-agent association rules. What renders here and why:
 //!
 //! * **Variants** — the app rewrites a row while streaming, and the
 //!   append-only union keeps every observation, so one seq can arrive as
@@ -60,6 +60,16 @@
 //!   empty claim. The call's bookkeeping (ids, durations, counts, the
 //!   always-empty `events`/`toolCalls`/`overheard` arrays) is raw-only
 //!   (GB-5 §4).
+//! * **Sub-agents** (GB-5 §5) — a delegation an approval carried
+//!   (`message.approval.subagent`) renders inside the parent agent's
+//!   conversation, as that approval gate's own `ToolCall` with the
+//!   delegation's `title` in the summary: delegation is tool traffic. The
+//!   archive's identity is machine + agent uuid and no replica exists
+//!   behind a child's id, so the one conversation stays whole — no child
+//!   conversation is invented, and nothing is merged from anywhere else.
+//!   `subagent.id`/`parentAgentId` are ids and stay raw-only; an
+//!   `event.from`/`to` transfer record around a delegation is the `event`
+//!   bookkeeping counted unrendered, never dropped.
 //! * an unknown kind, a record missing `seq` or `kind`, or a line that does
 //!   not parse — `unrecognized_lines`, and the rest of the session still
 //!   renders (one bad line never kills a session, GB-5 §2).
@@ -185,10 +195,12 @@ fn render_record(record: &Value, conversation: &mut Conversation) {
         // message, no count (GB-5 §2/§6).
         "at" => {}
         // `event` is understood automation bookkeeping with no message in
-        // it; the sub-agent identity around `event.from`/`to` is a later
-        // slice of the same plan (GB-5 §5), and until then the record is
-        // counted as understood-but-unrendered. It may not be dropped: the
-        // count is what keeps the archive's lines visible.
+        // it — including the `from`/`to` transfer records around a
+        // sub-agent delegation, which associate with the parent session
+        // only (GB-5 §5): the transfer is not speech, no replica exists
+        // behind a child conversation to move it into, and the record may
+        // not be dropped — the count is what keeps the archive's lines
+        // visible.
         "event" => conversation.unrendered_lines += 1,
         _ => conversation.unrecognized_lines += 1,
     }
@@ -276,10 +288,13 @@ fn names_a_secret_exchange(record: &Value) -> bool {
 /// tool traffic and its delivered files as blocks, in that order. A record
 /// none of whose fields held anything readable is a known-empty — skipped
 /// with no count, never rendered as an empty message (the §2 common rule).
-/// Threading and routing metadata (`reply_to`/`replyTo`, `serverId`,
-/// `requestId`, `boxRequestId`, `intent`, `provider`, `variant`, `channel`,
-/// `connector`) is recognised and raw-only: position in the thread and the
-/// channel that carried it never become display text.
+/// An approval that names a sub-agent delegation carries the delegation's
+/// title in its summary — the delegation is tool traffic, and it stays
+/// inside this, the parent's, conversation (GB-5 §5). Threading and routing
+/// metadata (`reply_to`/`replyTo`, `serverId`, `requestId`, `boxRequestId`,
+/// `intent`, `provider`, `variant`, `channel`, `connector`) is recognised
+/// and raw-only: position in the thread and the channel that carried it
+/// never become display text.
 fn render_send_message(record: &Value, conversation: &mut Conversation) {
     let message = record.get("message").filter(|message| !message.is_null());
     let mut blocks: Vec<Block> = Vec::new();
@@ -298,10 +313,7 @@ fn render_send_message(record: &Value, conversation: &mut Conversation) {
             }
         }
         if let Some(approval) = message.get("approval").filter(|value| !value.is_null()) {
-            blocks.push(tool_call(
-                "approval",
-                joined_fields(approval, APPROVAL_FIELDS),
-            ));
+            blocks.push(tool_call("approval", approval_summary(approval)));
         }
         if let Some(ask) = message.get("ask").filter(|value| !value.is_null()) {
             blocks.push(tool_call("ask", joined_fields(ask, ASK_FIELDS)));
@@ -365,11 +377,33 @@ fn tool_call(name: &str, summary: Option<String>) -> Block {
 
 /// The readable fields a summary joins, in the order each gate fixes
 /// (GB-5 §3). Ids (`approval.requestId`, `ask.machineId`/`requestId`,
-/// `boxRequestId`) are deliberately absent: they identify the exchange, and
-/// §8 keeps ids out of every rendered surface.
+/// `boxRequestId`, `approval.subagent.id`/`parentAgentId`) are deliberately
+/// absent: they identify the exchange or a session, and §8 keeps ids out of
+/// every rendered surface. A sub-agent's `title` is not an id — it is the
+/// delegation's own words — and joins the approval summary separately
+/// (see [`approval_summary`], GB-5 §5).
 const APPROVAL_FIELDS: &[&str] = &["summary", "reason", "command", "status"];
 const ASK_FIELDS: &[&str] = &["action", "target", "status"];
 const BOX_FIELDS: &[&str] = &["boxInstruction", "boxResolution"];
+
+/// The joined readable fields of the approval gate: the §3 fields in their
+/// fixed order, plus — when the approval names a sub-agent (GB-5 §5) — the
+/// delegation's own `title`, the only child-identity string that renders:
+/// a delegation is tool traffic inside the parent agent's conversation, and
+/// `subagent.id`/`parentAgentId` are ids, which every rendered surface
+/// keeps out. The whole anchor: spawning a child conversation would forge a
+/// session no replica stands behind, so the delegation is read here, where
+/// the parent's transcript already places it.
+fn approval_summary(approval: &Value) -> Option<String> {
+    let summary = joined_fields(approval, APPROVAL_FIELDS);
+    match text_field(approval.pointer("/subagent/title")) {
+        Some(title) => match summary {
+            Some(joined) => Some(format!("{joined} · {title}")),
+            None => Some(title),
+        },
+        None => summary,
+    }
+}
 
 /// The joined readable fields of one object: the named keys, empty ones
 /// absent rather than rendered as gaps. `None` when nothing was readable.
@@ -990,6 +1024,65 @@ mod tests {
             "synthetic-ask-request",
             "synthetic-box-request",
         ] {
+            assert!(!serialized.contains(id), "`{id}` reached the model");
+        }
+    }
+
+    /// The sub-agent association rule (GB-5 §5): a delegation renders
+    /// inside the parent agent's conversation — the approval gate that
+    /// carried it, with the delegation's own `title` joined to the
+    /// summary's end — and nothing is split off or merged in: the archive
+    /// keeps no replica behind a child's id, so no child conversation is
+    /// invented. `subagent.id`/`parentAgentId` are session ids and stay
+    /// raw-only, and the `event.from`/`to` transfer record around a
+    /// delegation is `event` bookkeeping: counted unrendered, never
+    /// dropped.
+    #[test]
+    fn a_subagent_approval_renders_inline_in_the_parent_conversation() {
+        let body = concat!(
+            r#"{"kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic delegate a task request"}"#,
+            "\n",
+            r#"{"id":"synthetic-id-2","kind":"send-message","seq":2,"timestampMs":1780000000000,"requestId":"synthetic-request-2","message":{"type":"synthetic-type","approval":{"summary":"synthetic delegation summary","reason":"synthetic delegation reason","command":"synthetic delegation command","proposedRule":"synthetic delegated rule","status":"approved","requestId":"synthetic-approval-request","surface":"sync","subagent":{"id":"synthetic-subagent-id","parentAgentId":"synthetic-parent-agent-id","title":"synthetic delegated subagent title","type":"subagent"}}}}"#,
+            "\n",
+            r#"{"id":"synthetic-id-3","kind":"event","seq":3,"timestampMs":1780000000100,"event":{"type":"synthetic-transfer-type","from":"synthetic-parent-agent-id","to":"synthetic-subagent-id"}}"#,
+            "\n",
+            r#"{"kind":"message","seq":4,"isStreaming":false,"role":"assistant","content":"synthetic parent agent answer"}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        // The parent's own conversation, with the delegation inline: one
+        // session, no child split off, nothing merged in.
+        assert_eq!(conversation.messages.len(), 3);
+        assert!(matches!(conversation.messages[0].role, Role::User));
+        assert!(matches!(conversation.messages[1].role, Role::Assistant));
+        assert!(matches!(conversation.messages[2].role, Role::Assistant));
+        assert_eq!(conversation.messages[1].blocks.len(), 1);
+        match &conversation.messages[1].blocks[0] {
+            Block::ToolCall {
+                name,
+                input_summary,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("approval"));
+                // The delegation rides the approval gate: the §3 fields in
+                // their fixed order, the delegation's title the last part.
+                // `proposedRule` is §3 raw-only and stays out.
+                assert_eq!(
+                    input_summary,
+                    "synthetic delegation summary · synthetic delegation reason · \
+                     synthetic delegation command · approved · synthetic delegated subagent title"
+                );
+            }
+            other => panic!("expected the delegation's approval tool call, got {other:?}"),
+        }
+        // The transfer record around the delegation: understood, counted
+        // unrendered, and the session's own transcript continues.
+        assert_eq!(conversation.unrendered_lines, 1);
+        assert_eq!(conversation.unrecognized_lines, 0);
+        // Session identity is raw-only: neither agent id reaches the
+        // rendered model.
+        let serialized = format!("{conversation:?}");
+        for id in ["synthetic-subagent-id", "synthetic-parent-agent-id"] {
             assert!(!serialized.contains(id), "`{id}` reached the model");
         }
     }
