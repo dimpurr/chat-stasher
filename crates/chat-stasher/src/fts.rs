@@ -2977,8 +2977,23 @@ mod tests {
             );
         }
         assert!(!extracted.message_offsets.is_empty());
-        // Every line parsed, so nothing was silently left unread.
+        // Every line parsed, so nothing was silently unread.
         assert_eq!(extracted.unread_lines, 0);
+    }
+
+    /// A grok-bot shard that is JSON but holds no record the reader knows
+    /// — no `seq`/`kind` anywhere — is the shape the registry row pinned
+    /// before Slice C put a reader-shaped shard there and asked for
+    /// `Expected::Text`. Every line counts unrecognized and none renders,
+    /// so the shard is reported by its format, never guessed into an
+    /// indexed empty body.
+    #[test]
+    fn grok_bot_json_the_reader_cannot_parse_is_still_reported_by_format() {
+        let extracted =
+            extract_index_document_for("grok-bot", br#"{"replica":{"sequence":1,"entries":[]}}"#)
+                .unwrap();
+        assert_eq!(extracted.not_indexable.as_deref(), Some(FORMAT_JSON));
+        assert!(extracted.body.is_empty());
     }
 
     /// The secret rule must hold in the built index, not only in the
