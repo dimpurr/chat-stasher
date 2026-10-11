@@ -159,7 +159,7 @@ class _Scanner:
             close = '"' + "#" * hashes
             end = t.find(close, j)
             if end == -1:
-                return i, None, None
+                return None, None, None
             raw = t[j:end]
             display = 'r' + "#" * hashes + '"' + raw.replace("\n", "\\n") + '"' + "#" * hashes
             return end + len(close), display, raw
