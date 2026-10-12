@@ -4,8 +4,8 @@
 //! Every fixture is synthetic: no real conversation text, no real ids, no
 //! real stage/archive/state, and the "backups" are sandbox directories the
 //! test itself names — never a copy of a real cache. The properties pinned
-//! here are the ones the GB-3 rescue made necessary (nm/GB3V-OUT.md) and the
-//! ones W986's session-keyed delivered set (nm/W986-OUT.md) made possible:
+//! here are the ones the GB-3 rescue made necessary and the ones W986's
+//! session-keyed delivered set made possible:
 //! a backup that overlaps the live cache, another backup, or a previous
 //! import delivers exactly its new rows, once; the live collector's own
 //! delivery stays incremental afterwards; and a pass with nothing new writes
