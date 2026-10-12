@@ -17,6 +17,12 @@ safe to reproduce without access to anyone's private conversations.
 - Keep changes focused, explain observable behavior, and add or update tests
   for behavior changes. Documentation-only changes should still state what a
   new user can verify locally.
+- A change that fixes or changes a source's behaviour updates that source
+  page's *Known issues* and *Changelog* under `docs/sources/` in the same PR.
+  A recorded end-to-end verification updates "last verified" through its
+  existing data source (the harness registry or the extension contract, then
+  re-derived with `python3 scripts/gen-source-pages.py --apply`), never by hand
+  in the generated block.
 
 ## Commit messages
 
@@ -384,7 +390,12 @@ Seven of these checks guard properties that are easy to break without noticing:
   index drifted, or when a hand-written body lost or reordered one of its
   fixed headings. Like the support-matrix check it never decides whether a
   page's prose is true; it holds exactly the boundary between the generated
-  half and the written half.
+  half and the written half. A change that fixes or changes a source's
+  behaviour updates that source page's *Known issues* and *Changelog* in the
+  same PR; a recorded end-to-end verification updates "last verified" through
+  its existing data source (the registry or extension contract, then
+  re-derived with `python3 scripts/gen-source-pages.py --apply`), never by hand
+  in the generated block.
 - `check-doc-links.py` resolves every link between our own Markdown files,
   including the `#fragment` on each one. A link to a file that moved, or to a
   heading that was renamed under it, renders perfectly and fails silently, and
