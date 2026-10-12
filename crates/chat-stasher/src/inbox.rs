@@ -462,6 +462,17 @@ struct Bundle {
     #[serde(rename = "provenanceSupplement")]
     provenance_supplement: Option<serde_json::Value>,
     dimensions: Option<crate::provenance::SessionProvenance>,
+    /// 🔴 W984 · The conversation-level facts the extension's enumeration read
+    /// from the platform's conversation-list response (title / starred /
+    /// createTime / modifyTime on grok — `ConversationListing` in
+    /// apps/extension/lib/contract.ts). Like `identity` and `account`, this is
+    /// **not inside `raw.text`** — the content route's own response holds none
+    /// of it, and the reference-corpus oracle measured `created_at` as not
+    /// derivable from message times — so a drop here is permanent. Held as the
+    /// bundle's own JSON rather than a typed struct for the same reason
+    /// `account` is: a newer extension's field is data to preserve verbatim,
+    /// and the shape check is only "is it an object".
+    listing: Option<serde_json::Value>,
 }
 
 /// Record stored inside each sealed shard (one JSONL line per bundle).
@@ -557,6 +568,27 @@ struct ShardRecord {
     /// entirely when absent, so those shard lines keep their existing bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
+    /// 🔴 W984 · The conversation-level facts the bundle's enumeration read
+    /// from the platform's conversation-list response (`title` / `starred` /
+    /// `createTime` / `modifyTime` on grok), preserved **verbatim** from the
+    /// bundle when it carried an object.
+    ///
+    /// 🔴 Why stored and not re-derived: `raw.text` — the content route's own
+    ///    response — holds none of these, and the reference-corpus oracle
+    ///    measured `created_at` as not derivable from per-message times
+    ///    (27-ORACLE §5.1 finding 3: the conversation exists before its first
+    ///    message). Like `identity` and `account`, an unparsed drop here loses
+    ///    it permanently, which is why it has to travel onto the shard record.
+    ///
+    /// 🔴 `None` means the bundle carried no `listing` — every bundle produced
+    ///    before this change, and every capture of a conversation this
+    ///    install's enumeration never listed (a live capture of an open
+    ///    conversation; the list route is outside the platform row's `pathHints`
+    ///    on purpose). Omitted entirely when absent, so old shard lines and new
+    ///    metadata-less ones keep their existing bytes. Takes no part in the id
+    ///    or the dedup key — those remain `platform.sessionId` / `file_sha256`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listing: Option<serde_json::Value>,
 }
 
 /// The `identity` envelope — the account axis an `inbox@2` bundle carries.
@@ -935,6 +967,7 @@ pub fn seal_payload(
         provenance_supplement: parsed.provenance_supplement,
         dimensions: parsed.dimensions,
         fingerprint: fingerprint.map(str::to_string),
+        listing: parsed.listing,
     };
     let line = serde_json::to_string(&record)
         .context("serialise shard record")
@@ -1457,6 +1490,10 @@ struct ParseOutcome {
     provenance: Option<serde_json::Value>,
     provenance_supplement: Option<serde_json::Value>,
     dimensions: Option<crate::provenance::SessionProvenance>,
+    /// W984 · the conversation-level listing as written, or `None` when the
+    /// bundle carried no object — pre-W984 bundles, and captures whose
+    /// conversation the enumeration never named metadata for.
+    listing: Option<serde_json::Value>,
 }
 
 /// Parse a bundle; a total failure degrades to a `kind=raw` record whose raw
@@ -1489,6 +1526,7 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         provenance: None,
         provenance_supplement: None,
         dimensions: None,
+        listing: None,
     };
 
     let incoming: Option<serde_json::Value> = serde_json::from_slice(bytes).ok();
@@ -1644,6 +1682,15 @@ fn parse_bundle(name: &str, bytes: &[u8]) -> anyhow::Result<ParseOutcome> {
         }
     }
     out.dimensions = bundle.dimensions.clone();
+    // 🔴 W984 · The conversation-level listing, kept as written when it is an
+    //    object and dropped when it is not — the same one-property shape check
+    //    `provenance` and `provenanceSupplement` above apply. It is not inside
+    //    `raw.text`, so this is the one moment the field survives or dies.
+    if let Some(v) = bundle.listing.as_ref() {
+        if v.is_object() {
+            out.listing = Some(v.clone());
+        }
+    }
     Ok(out)
 }
 
@@ -2889,6 +2936,126 @@ mod tests {
             record.get("fingerprint").is_none(),
             "the drop box channel must keep sealing without a fingerprint"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // W984 · the bundle's `listing` — the conversation-level facts the
+    // extension reads out of the platform's conversation-LIST response at
+    // enumeration time (title / starred / createTime / modifyTime on grok;
+    // the reference-corpus oracle measured them missing from every capture:
+    // the content route's body carries none of them, and `created_at` is not
+    // derivable from per-message times). Like `identity` and `account`, the
+    // field is **not inside `raw.text`**, so an unparsed drop here is a
+    // permanent loss — the shard record is the only place it survives.
+    // ------------------------------------------------------------------
+
+    /// A grok-shaped `inbox@2` bundle whose `listing` is the source-backed
+    /// four-field set the extension's `parseGrokListPage` now reads. Values
+    /// are invented; only the names are the source-backed ones.
+    fn synthetic_grok_listing_line(session_id: &str) -> String {
+        serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "grok",
+            "sessionId": session_id,
+            "install_id": "7d3e9f21-1111-4222-8333-444444444454",
+            "browser": "Chrome",
+            "profile_label": "Unnamed profile",
+            "listing": {
+                "title": "synthetic-conversation-title",
+                "starred": false,
+                "createTime": "2026-07-01T09:59:00.000000Z",
+                "modifyTime": "2026-07-01T10:01:10.000Z",
+            },
+            "raw": {"text": "{\"responses\":[]}", "bytes": 16},
+        })
+        .to_string()
+    }
+
+    /// W984 · A bundle's `listing` reaches the sealed shard verbatim — the
+    /// four facts the live seal would otherwise drop permanently, because the
+    /// shard's `raw.text` (the content route's own body) cannot re-derive
+    /// them. The channel exercised here is the user's `*.json` drop box; the
+    /// parse it drives (`parse_bundle` → `seal_payload`) is the same core a
+    /// live `deliver` and an §8 export line take, and unlike a `fingerprint`
+    /// (which proves an identity, so the drop box seals without one) a
+    /// listing is data about the conversation being archived, carried on
+    /// every channel alike.
+    #[test]
+    fn w984_bundle_listing_is_sealed_verbatim() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("grok-sess-w984.json"),
+            synthetic_grok_listing_line("sess-w984"),
+        )
+        .unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        let record = only_shard_record(&stage, "mbp-test", "grok.sess-w984");
+        assert_eq!(
+            record["listing"],
+            serde_json::json!({
+                "title": "synthetic-conversation-title",
+                "starred": false,
+                "createTime": "2026-07-01T09:59:00.000000Z",
+                "modifyTime": "2026-07-01T10:01:10.000Z",
+            }),
+            "the conversation-level facts the enumeration read must survive the seal unchanged"
+        );
+    }
+
+    /// W984 · Every bundle produced before this change — and every capture of a
+    /// conversation the enumeration never listed (live capture) — carries no
+    /// `listing`, and that absence must stay an absence: no key may appear on
+    /// the shard, so old shard lines and new metadata-less ones stay
+    /// byte-identical (`ShardRecord.listing` skips absent).
+    #[test]
+    fn w984_bundle_without_a_listing_seals_without_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inbox = dir.path().join("inbox");
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(&inbox).unwrap();
+        let line = serde_json::json!({
+            "schema": SCHEMA,
+            "platform": "grok",
+            "sessionId": "sess-w984b",
+            "raw": {"text": "{\"responses\":[]}", "bytes": 16},
+        })
+        .to_string();
+        fs::write(inbox.join("grok-sess-w984b.json"), line).unwrap();
+
+        let report = ingest(&inbox, &stage, "mbp-test").unwrap();
+        assert_eq!(report.consumed.len(), 1);
+        let record = only_shard_record(&stage, "mbp-test", "grok.sess-w984b");
+        assert!(
+            record.get("listing").is_none(),
+            "an absent listing must stay absent, not become a value"
+        );
+    }
+
+    /// W984 · The published contract declares the field this parser keeps, so
+    /// a schema-conforming producer may send it — the same two-sides test the
+    /// `dimensions` naming runs, stated for this field.
+    #[test]
+    fn w984_committed_inbox_schema_declares_the_listing_field() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/inbox.schema.json");
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(root).unwrap()).unwrap();
+        let listing = &schema["properties"]["listing"];
+        assert!(
+            listing.is_object(),
+            "the committed schema must declare the `listing` property the parser seals"
+        );
+        // The four conversation-level field names, exactly as the extension
+        // writes them: the schema and `ConversationListing` change together.
+        for field in ["title", "starred", "createTime", "modifyTime"] {
+            assert!(
+                listing["properties"][field].is_object(),
+                "`listing.{field}` must be declared in the committed schema"
+            );
+        }
     }
 }
 

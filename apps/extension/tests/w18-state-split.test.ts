@@ -568,7 +568,7 @@ describe('W18-4 · a record that cannot be read is never an empty debt set', () 
     // And not one byte written anywhere else.
     expect(store.data[stateKey(PLATFORM, SCOPE)]).toBeUndefined();
     // 🔴 W113 · `times` joins the snapshot; nothing was enumerated here, so nothing has a recorded time.
-    expect(await readDebtSet(PLATFORM, SCOPE)).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map() });
+    expect(await readDebtSet(PLATFORM, SCOPE)).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map(), listings: new Map() });
   });
 
   it('🔴 the engine refuses to run against it, sends no request, and says why', async () => {

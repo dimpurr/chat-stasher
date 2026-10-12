@@ -203,6 +203,22 @@
         "source": { "enum": ["project-list", "project-enumeration-complete"] },
         "observedAt": { "type": "string", "format": "date-time" }
       }
+    },
+    "listing": {
+      "type": "object",
+      "description": "Since W984. Conversation-level facts this bundle's author read from the platform's conversation-LIST response — title / starred / createTime / modifyTime on grok — that the captured request's own response does not carry (for grok that response is {responses:[...]} only, and created_at is not derivable from per-message times; the field names are the source-backed ones every reviewed exporter types the list row with). Each subfield is carried verbatim and independently optional: absent stays absent, and no value is ever synthesised. Optional on the bundle: absent also on every bundle from a build before this change and on every capture whose conversation was never enumerated by the writing install (a live capture of an open conversation; the list route is outside the platform row's pathHints on purpose). Kept as written, takes no part in the id or the dedup key — those remain platform.sessionId and file_sha256 — and takes no part in any duplicate decision.",
+      "properties": {
+        "title": { "type": "string" },
+        "starred": { "type": "boolean" },
+        "createTime": {
+          "oneOf": [ { "type": "string" }, { "type": "number" } ],
+          "description": "The list row's own value, unconverted — the platform's clock and format are the reader's problem, never the writer's guess."
+        },
+        "modifyTime": {
+          "oneOf": [ { "type": "string" }, { "type": "number" } ],
+          "description": "The list row's own value, unconverted — the platform's clock and format are the reader's problem, never the writer's guess."
+        }
+      }
     }
   },
   "oneOf": [
