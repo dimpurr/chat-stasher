@@ -20,7 +20,7 @@ ChatGPT is OpenAI's web conversational interface, accessible at `https://chatgpt
 
 ## What we collect
 
-The extension captures the conversation content route: HTTP GET requests to `/backend-api/conversation/<uuid>` that return a 2xx response. The response must satisfy the JSON shape gate by containing both the `mapping` dictionary (the conversation message tree) and the `current_node` pointer (the leaf of the active thread). The conversation UUID is parsed directly from the request path. WebSocket frames are explicitly ignored (`webSocketCapture: false`) because complete message state is delivered over HTTP GET. When you open a conversation, the page hook requests the complete message graph. The delivered capture bundle preserves the full node tree along with conversation list metadata (title, create and update timestamps).
+The extension captures the conversation content route: HTTP GET requests to `/backend-api/conversation/<uuid>` that return a 2xx response. The response must satisfy the JSON shape gate by containing both the `mapping` dictionary (the conversation message tree) and the `current_node` pointer (the leaf of the active thread). The conversation UUID is parsed directly from the request path. WebSocket frames are explicitly ignored (`webSocketCapture: false`) because complete message state is delivered over HTTP GET. When you open a conversation, the page hook requests the complete message graph. The delivered capture bundle preserves that response whole: the detail body itself carries the conversation's title and its create and update timestamps alongside the node tree, so those travel with the capture rather than with a separate list request.
 
 ## Coverage and completeness
 
@@ -49,4 +49,3 @@ Load the extension in a Chromium browser, log into `https://chatgpt.com`, and op
 2026-08-17 — conversation detail route (`/backend-api/conversation/`) and tree response shape (`mapping`, `current_node`) specified from source.
 2026-09-24 — live acceptance: real conversations captured and archived end to end on a real machine by extension build 0.1.0.18 (commit e71eb33).
 2026-10-02 — workspace-scoped backfill ledgers introduced with fingerprinted HMAC account leases and migration support.
-2026-10-12 — delivered capture bundles now include conversation list metadata alongside the node mapping tree.

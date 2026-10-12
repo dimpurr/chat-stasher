@@ -20,7 +20,7 @@ claude.ai is Anthropic's web conversational AI platform. This page describes wha
 
 ## What we collect
 
-The extension intercepts the conversation detail route: HTTP GET requests matching `/chat_conversations/<uuid>` (under the `/api/organizations/<org>/` endpoint hierarchy) that succeed with a 2xx status. The response is validated against a strict JSON schema requiring the `chat_messages` array. The trailing slash on `/chat_conversations/` is deliberate: it captures individual conversation details while silently ignoring the `/chat_conversations` list endpoint (which returns only summary metadata, not transcript text). Org-level settings and project routes outside this hint are also ignored. Session UUIDs are extracted either from the API path or the browser address bar (`/chat/<uuid>`). WebSocket connections are ignored (`webSocketCapture: false`). The delivered bundle stores the full message tree along with conversation list metadata.
+The extension intercepts the conversation detail route: HTTP GET requests matching `/chat_conversations/<uuid>` (under the `/api/organizations/<org>/` endpoint hierarchy) that succeed with a 2xx status. The response is validated against a strict JSON schema requiring the `chat_messages` array. The trailing slash on `/chat_conversations/` is deliberate: it captures individual conversation details while silently ignoring the `/chat_conversations` list endpoint (which returns only summary metadata, not transcript text). Org-level settings and project routes outside this hint are also ignored. Session UUIDs are extracted either from the API path or the browser address bar (`/chat/<uuid>`). WebSocket connections are ignored (`webSocketCapture: false`). The delivered bundle stores the full response body, so the message tree travels with the name and create/update timestamps the detail body itself carries.
 
 ## Coverage and completeness
 
@@ -28,11 +28,11 @@ Live capture operates passively: whenever you view or load a conversation on cla
 
 A backfill mechanism is implemented to enumerate historical chats across an organization and request conversation bodies sequentially. An organization resolution step runs when neither request headers nor cookies supply the active organization UUID. However, a complete backfill pass has not yet been observed completing in a real browser.
 
-To archive historical conversations comprehensively without manually clicking every chat, users can import an official data takeout using `chat-stasher import --platform claude` (see [the official export page](import-claude.md)). The live leg was verified end to end on 2026-09-24 using extension build 0.1.0.18.
+To archive historical conversations comprehensively without manually clicking every chat, users can import an official data takeout with `chat-stasher import claude <export> --inbox <dir> --stage <dir>` (see [the official export page](import-claude.md)). The live leg was verified end to end on 2026-09-24 using extension build 0.1.0.18.
 
 ## Quirks
 
-The endpoint path was determined from open-source reference implementations and verified against live network observations. The query string tree parameter varies between platform implementations (`?tree=true` vs `?tree=True`), so the interceptor matches the path prefix without query string constraints.
+The capture row is source-backed: the endpoint path was read out of public open-source reference implementations, not from a logged-in claude.ai session — the contract row records that nobody on that change ever opened claude.ai — and was only then live-verified by the recorded end-to-end acceptance (2026-09-24, extension 0.1.0.18). The query string tree parameter varies between platform implementations (`?tree=true` vs `?tree=True`), so the interceptor matches the path prefix without query string constraints.
 
 The body validator mandates the presence of `chat_messages`. If the backend alters the response structure, the extension rejects the payload and emits a shape mismatch warning rather than creating a deceptively empty archive record.
 
@@ -48,4 +48,3 @@ Install the extension, log into claude.ai, and open an existing chat. The extens
 
 2026-08-17 — interceptor route (`/chat_conversations/`) and body gate (`chat_messages`) defined from reference implementations.
 2026-09-24 — live acceptance: real conversations archived end to end on a real machine by extension build 0.1.0.18 (commit e71eb33).
-2026-10-12 — delivered capture bundle upgraded to include conversation list metadata alongside the message history.

@@ -27,13 +27,13 @@ Google Antigravity is Google's agent platform spanning CLI, IDE, and desktop app
 
 ## What we collect
 
-The platform uses three distinct source roots under `~/.gemini/`:
+The platform uses three distinct source roots under `~/.gemini/`, one per surface:
 
-- `antigravity-cli`: `~/.gemini/antigravity-cli/brain/*/transcript.jsonl` (surface: `cli`)
-- `antigravity-ide`: `~/.gemini/antigravity-ide/brain/*/transcript.jsonl` (surface: `ide`)
-- `antigravity`: `~/.gemini/antigravity/brain/*/transcript.jsonl` (surface: `app`)
+- `antigravity-cli`: `~/.gemini/antigravity-cli/brain/` (surface: `cli`)
+- `antigravity-ide`: `~/.gemini/antigravity-ide/brain/` (surface: `ide`)
+- `antigravity`: `~/.gemini/antigravity/brain/` (surface: `app`)
 
-Inside each session directory, transcripts are stored at `.system_generated/logs/transcript.jsonl`.
+The registry holds each root as its session path template; inside each root, a session is one directory, and its transcript sits at `.system_generated/logs/transcript.jsonl` within that session directory.
 
 The log is an append-only JSONL event stream. The normalizer processes event types:
 - `USER_INPUT` records map to User messages.

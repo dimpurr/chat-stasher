@@ -24,7 +24,7 @@ The extension intercepts POST requests to `/_/BardChatUi/data/batchexecute`. Bec
 
 The extension extracts session IDs from the turn contents using the canonical `c_`-prefixed identifier format (`c_<id>`), which is the authoritative identity used by Google's backend. The bare identifier in the page URL (`/app/<id>`) is retained only as a fallback.
 
-To handle conversations spanning multiple pages, the live capture hook inspects continuation tokens and requests successive pages until all turns are fetched, attaching the necessary XSRF tokens from the page's `WIZ_global_data`. Delivered bundles include both the message transcript and conversation list metadata.
+To handle conversations spanning multiple pages, the live capture hook inspects continuation tokens and requests successive pages until all turns are fetched, attaching the necessary XSRF tokens from the page's `WIZ_global_data`. Delivered bundles carry the transcript parsed from those pages; the detail payload carries no title — titles live only in the conversation list — so none is added to the bundle.
 
 ## Coverage and completeness
 
@@ -55,4 +55,3 @@ Open `https://gemini.google.com` in a browser with the extension installed, then
 2026-08-17 — batchexecute route and XSRF extraction from `WIZ_global_data` established.
 2026-09-14 — canonical `c_` session identity handling and continuation token pagination implemented.
 2026-09-24 — live acceptance: real conversations archived end to end on a real machine by extension build 0.1.0.18 (commit e71eb33).
-2026-10-12 — delivered capture bundle enhanced to store conversation list metadata alongside parsed turns.

@@ -32,7 +32,7 @@ In modern Cursor releases, bubble text is frequently offloaded to external datab
 
 ## Coverage and completeness
 
-The harness was verified end to end on 2026-09-25: all real sessions from the local store were captured, sealed, and successfully read back and rendered (commit 41db2bf).
+The harness was verified end to end on 2026-09-25: all real sessions of the local store are held by the real archive and read back and rendered (commit 41db2bf).
 
 The macOS database path (`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`) is measured locally. Linux and Windows paths (`$XDG_CONFIG_HOME/Cursor/...` and `%APPDATA%\Cursor\...`) reflect community documentation and Electron conventions. The `CURSOR_USER_DIR` environment variable can override the base User directory on any platform.
 
