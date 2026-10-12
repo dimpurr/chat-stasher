@@ -777,6 +777,117 @@ mod tests {
         assert_eq!(conversation.unrecognized_lines, 0);
     }
 
+    /// W986: a body whose second shard replays the first whole — the
+    /// cross-shard duplicate a path-keyed delivered set once re-sealed —
+    /// renders and counts each distinct row once. Byte-identical rows across
+    /// shards are one observation delivered twice, collapsed by (sequence,
+    /// content) exactly as the union itself collapses them
+    /// (`grok_bot::merge_replica_records`); a real variant at one seq is
+    /// never dropped and still renders its final observation (GB-5 §1).
+    #[test]
+    fn a_full_cross_shard_replay_renders_and_counts_each_row_once() {
+        let body = concat!(
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic replayed question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic replayed answer"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"event","seq":3,"event":{"type":"synthetic-event-type"}}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+            // The second shard re-delivered every union row; only its
+            // metadata line differs, so the whole-shard replays the read
+            // view collapses cannot see (those compare whole bodies) stay.
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic replayed question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic replayed answer"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"event","seq":3,"event":{"type":"synthetic-event-type"}}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        assert_eq!(conversation.messages.len(), 2);
+        let texts: Vec<&str> = conversation
+            .messages
+            .iter()
+            .filter_map(|message| match message.blocks.first() {
+                Some(Block::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            ["synthetic replayed question", "synthetic replayed answer"]
+        );
+        // One duplicated `event` row is one unrendered line, not two: the
+        // count is a measurement of distinct observations, like the render.
+        assert_eq!(conversation.unrendered_lines, 1);
+        assert_eq!(conversation.unrecognized_lines, 0);
+        assert_eq!(conversation.sequence_gap_runs, []);
+    }
+
+    /// W986: the interleaved duplicate shape — the middle shard re-delivers
+    /// every earlier row mixed with new ones, and a later shard re-delivers
+    /// the new rows again — renders each row once as well. Rows re-delivered
+    /// by any shard collapse by (sequence, content); the union's real
+    /// variants keep their GB-5 §1 pick (the last complete observation).
+    #[test]
+    fn an_interleaved_cross_shard_replay_renders_each_row_once() {
+        let body = concat!(
+            // Shard A: two original rows.
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic interleaved one"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic interleaved two"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":2}}"#,
+            "\n",
+            // Shard B: the whole of shard A again, interleaved with rows a
+            // later generation of the source observed. One position changed
+            // content between the generations: that row is a variant, its
+            // first observation remains archived, and the pick still
+            // renders the later complete one.
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"isStreaming":false,"role":"user","content":"synthetic interleaved one"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic interleaved two"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic interleaved two revised"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"isStreaming":false,"role":"user","content":"synthetic interleaved three"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+            // Shard C: the new rows of shard B once more.
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"isStreaming":false,"role":"assistant","content":"synthetic interleaved two revised"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"isStreaming":false,"role":"user","content":"synthetic interleaved three"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+        );
+        let conversation = normalize("grok-bot", body);
+        assert_eq!(conversation.messages.len(), 3);
+        let texts: Vec<&str> = conversation
+            .messages
+            .iter()
+            .filter_map(|message| match message.blocks.first() {
+                Some(Block::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "synthetic interleaved one",
+                "synthetic interleaved two revised",
+                "synthetic interleaved three",
+            ]
+        );
+        assert_eq!(conversation.unrendered_lines, 0);
+        assert_eq!(conversation.unrecognized_lines, 0);
+    }
+
     /// The metadata line is skipped with no count, and its measurement is
     /// what the conversation exposes: the position list compressed to
     /// inclusive runs (head run included — a listed position, not an
