@@ -943,6 +943,8 @@ crates/chat-stasher/src/nativehost.rs:3605-3615  786bf407aaf2  lines=11
   <- docs-dev/install.md:342  :: };
 crates/chat-stasher/src/nativehost.rs:3990-4024  3348f34b33e2  lines=35
   <- docs-dev/privacy.md:1012, docs-dev/threat-model.md:174, docs-dev/threat-model.md:604  :: format!("cannot locate this binary to start the dashboard: …
+crates/chat-stasher/src/normalize/grok_cli.rs:24-66  2157cdfe73f3  lines=43
+  <- docs-dev/privacy.md:1071  :: /// Walk one archived Grok body, which may hold either obse…
 crates/chat-stasher/src/orphans.rs:271-309  23cfea028f95  lines=39
   <- docs-dev/orphan-packs.md:140  :: let listed = backends
 crates/chat-stasher/src/orphans.rs:327  3a21d2f444c5  lines=1
@@ -979,10 +981,12 @@ crates/chat-stasher/src/runstate.rs:287-335  036d69fcbd03  lines=49
   <- docs-dev/install.md:995  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:289-295  525f5b894e82  lines=7
   <- docs-dev/install.md:1290  :: }
-crates/chat-stasher/src/scanner.rs:1956-2065  a0af3dfb37e8  lines=110
+crates/chat-stasher/src/scanner.rs:2048-2109  0b0710539ae7  lines=62
   <- docs-dev/privacy.md:1071  :: /// Additional raw usage files stored under
-crates/chat-stasher/src/scanner.rs:2371-2380  f09925927335  lines=10
-  <- docs-dev/openclaw-scanner.md:32  :: }
+crates/chat-stasher/src/scanner.rs:2111-2198  5eff4d83ed1c  lines=88
+  <- docs-dev/privacy.md:1071  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
+crates/chat-stasher/src/scanner.rs:2511-2521  b1152915526a  lines=11
+  <- docs-dev/openclaw-scanner.md:32  :: let path = file.path();
 crates/chat-stasher/src/schedule.rs:208-243  31cde3d34520  lines=36
   <- docs-dev/install.md:939  :: /// Resolve the executable that a persistent scheduler may …
 crates/chat-stasher/src/schedule.rs:287-391  0146bafd68ef  lines=105
