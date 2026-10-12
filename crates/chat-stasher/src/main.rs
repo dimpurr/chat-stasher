@@ -6901,7 +6901,7 @@ fn print_collect_report(
         report.scanned_cursor_records
     );
     println!(
-        "[collect] grok records    : {} (session_docs rows plus linked usage.json files)",
+        "[collect] grok records    : {} (session_docs rows, linked usage.json files, and native chat_history.jsonl transcripts)",
         report.scanned_grok_records
     );
     println!(
