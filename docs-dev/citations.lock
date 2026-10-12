@@ -375,35 +375,35 @@ apps/extension/lib/contract.ts:966-979  ee0db2699c92  lines=14
   <- SECURITY.md:65  :: export function contentMatchesForChannel(channel: ReleaseCh…
 apps/extension/lib/contract.ts:999  93f15da49cac  lines=1
   <- docs-dev/privacy.md:923  :: export const MAX_RAW_BYTES = 16 * 1024 * 1024;
-apps/extension/lib/contract.ts:1217-1238  6ada7641acdc  lines=22
+apps/extension/lib/contract.ts:1220-1241  6ada7641acdc  lines=22
   <- docs-dev/privacy.md:921  :: }
-apps/extension/lib/contract.ts:1229-1294  91703b02cfc9  lines=66
+apps/extension/lib/contract.ts:1232-1297  91703b02cfc9  lines=66
   <- docs-dev/privacy.md:111, docs-dev/privacy.md:921  :: } catch {
-apps/extension/lib/contract.ts:1238-1322  3100d2efea99  lines=85
+apps/extension/lib/contract.ts:1241-1325  3100d2efea99  lines=85
   <- docs-dev/threat-model.md:572  :: (requiredAnyPaths.length === 0 || requiredAnyPaths.some((pa…
-apps/extension/lib/contract.ts:1277-1278  d72720cd403e  lines=2
+apps/extension/lib/contract.ts:1280-1281  d72720cd403e  lines=2
   <- docs-dev/privacy.md:458  :: //    **reject on sight** — a payload from a page should ne…
-apps/extension/lib/contract.ts:1334-1344  51bbe8d456a4  lines=11
+apps/extension/lib/contract.ts:1337-1347  51bbe8d456a4  lines=11
   <- docs-dev/threat-model.md:571  :: pageOrigin: string,
-apps/extension/lib/contract.ts:1358-1363  643e6c9dc88c  lines=6
+apps/extension/lib/contract.ts:1361-1366  643e6c9dc88c  lines=6
   <- docs-dev/threat-model.md:374  :: * Degradation chain (weakest protection for the CLI is 'def…
-apps/extension/lib/contract.ts:1431-1442  1e11e46c5e13  lines=12
+apps/extension/lib/contract.ts:1434-1445  1e11e46c5e13  lines=12
   <- docs-dev/threat-model.md:445  :: /**
-apps/extension/lib/contract.ts:1434-1442  be2ec6035f37  lines=9
+apps/extension/lib/contract.ts:1437-1445  be2ec6035f37  lines=9
   <- docs-dev/threat-model.md:430  :: *  · 'platform-not-recognized'          — the capture's URL…
-apps/extension/lib/contract.ts:1463-1472  e68fd0d3425c  lines=10
+apps/extension/lib/contract.ts:1466-1475  e68fd0d3425c  lines=10
   <- docs-dev/privacy.md:291, docs-dev/threat-model.md:418  :: *                                         Deliberately **no…
-apps/extension/lib/contract.ts:1492-1496  91a5d6065664  lines=5
+apps/extension/lib/contract.ts:1495-1499  91a5d6065664  lines=5
   <- docs-dev/privacy.md:573, docs-dev/threat-model.md:375, docs-dev/threat-model.md:415  :: *    readable: a `@1` bundle has no `account` key at all, a…
-apps/extension/lib/contract.ts:1500-1509  b3b4db645114  lines=10
+apps/extension/lib/contract.ts:1503-1512  b3b4db645114  lines=10
   <- docs-dev/privacy.md:287  :: *    `cs_account_salt_v1` all produce incomparable values, …
-apps/extension/lib/contract.ts:1523-1526  e5fee418c5c8  lines=4
+apps/extension/lib/contract.ts:1526-1529  e5fee418c5c8  lines=4
   <- docs-dev/threat-model.md:702  :: * the two kinds — see `AccountFingerprint`. An `@1` bundle …
-apps/extension/lib/contract.ts:1607-1686  74df7cf45831  lines=80
+apps/extension/lib/contract.ts:1610-1689  74df7cf45831  lines=80
   <- docs-dev/install.md:101  :: /**
-apps/extension/lib/contract.ts:1703-1706  5fd0f4ad0c7d  lines=4
+apps/extension/lib/contract.ts:1706-1709  5fd0f4ad0c7d  lines=4
   <- docs-dev/threat-model.md:357  :: * logged-in DeepSeek page during this spike (no live login …
-apps/extension/lib/contract.ts:1756-1772  10951d8dcdcd  lines=17
+apps/extension/lib/contract.ts:1759-1775  10951d8dcdcd  lines=17
   <- docs-dev/privacy.md:611, docs-dev/threat-model.md:357  :: out.push(val);
 apps/extension/lib/gemini-capture.ts:150-238  5f5cbc771ff4  lines=89
   <- docs-dev/privacy.md:781, docs-dev/privacy.md:842, docs-dev/threat-model.md:260  :: export async function completeGeminiLiveCapture(
