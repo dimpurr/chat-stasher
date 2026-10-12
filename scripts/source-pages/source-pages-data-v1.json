@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "generated": "2026-10-12",
+  "harness_surface": {
+    "claude-code": "cli",
+    "codex": "cli",
+    "gemini-cli": "cli",
+    "google-antigravity": "cli, ide, desktop app",
+    "opencode": "cli",
+    "openclaw": "cli",
+    "hermes-agent": "cli",
+    "cursor": "ide",
+    "grok-bot": "desktop app",
+    "grok": "cli",
+    "github-copilot-cli": "cli",
+    "aider": "cli",
+    "crush": "cli",
+    "zed": "ide",
+    "continue": "ide extension",
+    "kimi-code": "cli",
+    "deepseek-harness": "cli, desktop app, web"
+  },
+  "import_surfaces_note": "Official-export sources carry the fixed surface word `export`; their ids and parser states are read from crates/chat-stasher/src/import.rs at check time, never from this file.",
+  "import_sources": [
+    {
+      "id": "claude",
+      "display_name": "Claude (official export)",
+      "export_file": "conversations.json"
+    },
+    {
+      "id": "deepseek",
+      "display_name": "DeepSeek (official export)",
+      "export_file": "conversations.json"
+    },
+    {
+      "id": "chatgpt",
+      "display_name": "ChatGPT (official export)",
+      "export_file": null
+    },
+    {
+      "id": "grok",
+      "display_name": "Grok (official export)",
+      "export_file": "prod-grok-backend.json"
+    },
+    {
+      "id": "gemini",
+      "display_name": "Gemini (official export)",
+      "export_file": "My Activity/Gemini Apps/MyActivity.json"
+    }
+  ]
+}

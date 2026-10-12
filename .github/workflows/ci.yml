@@ -456,6 +456,24 @@ jobs:
       - name: Support matrix check self-test
         run: python3 scripts/check-support-matrix.py --selftest
 
+      # The per-source pages under docs/sources/ are half generated, half
+      # hand-written. The generated half (page set, id, surface, status, last
+      # verified, the per-OS cells, and the whole index) is derived from the
+      # same three inputs the support tables come from - the harness registry,
+      # the extension's platform table, and the import seam's TakeoutPlatform
+      # enum - so this fails when any of those moved without the pages being
+      # re-derived, when a page exists for no source, or when a hand-written
+      # body lost one of its fixed headings. The written half's prose is never
+      # judged, only its shape. The selftest is here for the same reason as the
+      # others: a gate that cannot prove it still catches staleness is not a
+      # gate. It builds its own throwaway tree under a temp directory, so it
+      # needs no history and cannot leave this checkout dirty.
+      - name: Source pages are up to date
+        run: python3 scripts/check-source-pages.py
+
+      - name: Source pages check self-test
+        run: python3 scripts/check-source-pages.py --selftest
+
       # This probe is synthetic-only. Keep its behavior checks in CI so the
       # input and output bounds and missing/null/empty distinctions stay pinned.
       - name: Takeout inventory self-test
