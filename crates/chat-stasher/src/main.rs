@@ -188,6 +188,28 @@ enum ScheduleAction {
     Uninstall,
 }
 
+/// A harness whose local-cache backup `import --harness` can feed in.
+///
+/// One variant today: Grok Bot, whose measured local cache (ADR-051 fidelity
+/// `partial`) is the one whose copies beside the live cache needed a
+/// first-class door (GB-3/GB-3b). The enum exists so the offered value is a
+/// named word, not a free string — a harness with no backup support answers
+/// with this build's list, not with a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BackupHarness {
+    /// Grok Bot desktop app: copies of its `sand-client-persistence` tree.
+    GrokBot,
+}
+
+impl BackupHarness {
+    /// The harness id, the same one the registry and session ids carry.
+    fn harness_id(self) -> &'static str {
+        match self {
+            Self::GrokBot => "grok-bot",
+        }
+    }
+}
+
 /// Subcommands. `push`/`read` are backed by the BackupStore
 /// (rustic_core); `doctor` answers one question — is a harness silently
 /// deleting your history?
@@ -876,41 +898,93 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
     },
-    /// Import one official export: archive the file byte-exact, and write one
-    /// inbox bundle per conversation into a local inbox.
+    /// Import an official export — or one harness's local-cache backup.
     ///
-    /// Reads `<export>` whole, stores it under
-    /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it
-    /// is in no session count — and writes one `chat-stasher/inbox@3`
+    /// Two modes share this command.
+    ///
+    /// **Takeout mode** (with a `<platform>` and `<export>`): archive the file
+    /// byte-exact, and write one inbox bundle per conversation into a local
+    /// inbox. Reads `<export>` whole, stores it under
+    /// `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`,
+    /// so it is in no session count — and writes one `chat-stasher/inbox@3`
     /// `web-capture` bundle per conversation into `--inbox`. A later
-    /// `ingest --inbox` is what seals them; this command never seals, never
-    /// pushes, never reads config, a destination or a machine identity, and never
-    /// modifies or moves the export file.
+    /// `ingest --inbox` is what seals them; this mode never seals, never
+    /// pushes, never reads the config, a destination or a machine identity,
+    /// and never modifies or moves the export file.
     ///
     /// Claude's `conversations.json` and Grok's `prod-grok-backend.json`
     /// have parsers in this build; naming any other platform is a
-    /// refusal, not a guess. The archive comparison that would
-    /// suppress a body already archived is behind a probe that this build ships
-    /// unwired, so every conversation currently gets a body.
+    /// refusal, not a guess.
     ///
-    /// Exit codes: 0 = the export was read whole and everything importable in it
-    /// was written; 3 = the export was never read to the end; 2 = it was read and
-    /// is not something this build imports; 1 = it was read, and a conversation or
-    /// a write failed.
+    /// **Backup-restore mode** (`--harness grok-bot --from <dir>`): feed a
+    /// copied Grok Bot cache — one backup directory, several, overlapping
+    /// ones, whatever was copied aside — into the archive once, as a
+    /// first-class pass instead of a `[harness_roots]` workaround. Each
+    /// session found in the backup is delivered through its own delivered-set
+    /// identity (machine + agent uuid), so only rows that session has never
+    /// archived are sealed: a backup that overlaps the live cache or an
+    /// earlier import adds exactly its new rows, once. Re-running the same
+    /// import delivers nothing. The backup is only ever read; the live cache
+    /// is never touched, and the ordinary collect after an import still
+    /// delivers only what is genuinely new. Each sealed shard's `_chat_stasher`
+    /// line records that it came from a backup import, the backup directory's
+    /// basename and the import time. `--dry-run` reports the per-session
+    /// counts and writes nothing anywhere.
+    ///
+    /// Exit codes (both modes): `0` = everything was read to the end and
+    /// imported (takeout mode: everything importable was written) ·
+    /// `3` = an input was never read to the end, so nothing about what it
+    /// holds is proven · `2` = it was read and is not something this build
+    /// imports · `1` = it was read, and a conversation, session or write
+    /// failed.
     Import {
         /// Which platform's export this is.
-        #[arg(value_enum)]
-        platform: chat_stasher::import::TakeoutPlatform,
+        #[arg(value_enum, required_unless_present = "harness")]
+        platform: Option<chat_stasher::import::TakeoutPlatform>,
         /// The export file, e.g. the unzipped Claude `conversations.json` or
         /// Grok `prod-grok-backend.json`.
         /// A manifest is refused: its download links are one-time-use credentials.
-        export: PathBuf,
+        #[arg(required_unless_present = "harness")]
+        export: Option<PathBuf>,
         /// Local inbox folder to write bundles into, for a later `ingest --inbox`.
-        #[arg(long)]
-        inbox: PathBuf,
-        /// Existing stage directory receiving the byte-exact export. Never created.
+        #[arg(long, required_unless_present = "harness")]
+        inbox: Option<PathBuf>,
+        /// Existing stage directory receiving the sealed shards (backup-restore
+        /// mode) or the byte-exact export (takeout mode). Never created.
         #[arg(long)]
         stage: PathBuf,
+        /// The harness whose local-cache backup this import reads.
+        /// Only `grok-bot` exists today.
+        #[arg(long, value_enum, requires = "from", conflicts_with_all = ["platform", "export", "inbox"])]
+        harness: Option<BackupHarness>,
+        /// Backup directory of the harness's local cache to import
+        /// (`--harness` mode). Repeatable; backups may overlap.
+        /// Read-only: nothing inside is moved or changed.
+        #[arg(long, value_name = "DIR", requires = "harness")]
+        from: Vec<PathBuf>,
+        /// Report the per-session counts without writing anything.
+        #[arg(long, requires = "harness")]
+        dry_run: bool,
+        /// Machine partition for `sessions/<machine>/…` (backup-restore mode).
+        /// Default: config `machine`, else this machine's identity (generated
+        /// on first use).
+        #[arg(long, requires = "harness")]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, requires = "harness", default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Named destination from the config (backup-restore mode). Read state
+        /// is kept per destination, so a different destination is a different
+        /// delivered set.
+        #[arg(long, requires = "harness")]
+        destination: Option<String>,
+        /// Destination repository to import for, instead of a named
+        /// destination.
+        #[arg(long, requires = "harness")]
+        repo: Option<String>,
+        /// Masterkey file override for the destination above.
+        #[arg(long, requires = "harness")]
+        key_file: Option<String>,
     },
     /// Consume ext inbox bundles into sealed staging shards.
     ///
@@ -1921,7 +1995,33 @@ fn run() -> ExitCode {
             export,
             inbox,
             stage,
-        } => cmd_import(platform, &export, &inbox, &stage),
+            harness,
+            from,
+            dry_run,
+            machine,
+            shard_bucket_cap,
+            destination,
+            repo,
+            key_file,
+        } => match harness {
+            Some(harness) => cmd_import_backup(
+                harness,
+                &from,
+                &stage,
+                dry_run,
+                machine.as_deref(),
+                shard_bucket_cap,
+                destination.as_deref(),
+                repo.as_deref(),
+                key_file.as_deref(),
+            ),
+            None => cmd_import(
+                platform.expect("clap requires a platform unless --harness was given"),
+                &export.expect("clap requires an export unless --harness was given"),
+                &inbox.expect("clap requires an inbox unless --harness was given"),
+                &stage,
+            ),
+        },
         Command::Ingest {
             inbox,
             stage,
@@ -6130,6 +6230,136 @@ fn cmd_import(
              in the inbox; a re-run after fixing the input writes the rest.",
             report.rejections.len()
         );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// `import --harness <id> --from <dir>`: feed copied local-cache backups in
+/// through the collector's own delivery state (GB-3b, W988).
+///
+/// Mirrors `collect`'s resolution rules — config, machine partition,
+/// destination — because the delivered set it extends is the live
+/// collector's; and the takeout import's stage rule: an existing `--stage`
+/// is required and never created for you.
+fn cmd_import_backup(
+    harness: BackupHarness,
+    from: &[std::path::PathBuf],
+    stage: &Path,
+    dry_run: bool,
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    destination: Option<&str>,
+    repo: Option<&str>,
+    key_file: Option<&str>,
+) -> ExitCode {
+    if !stage.is_dir() {
+        eprintln!(
+            "import: FAILED exit_code=2 — stage {} is not a directory; import never creates a stage",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    if from.is_empty() {
+        // Clap's `requires` already enforces --from; this is the same refusal
+        // stated once more for a caller that hand-builds the arguments.
+        eprintln!("import: FAILED exit_code=2 — no backup directory was given (--from <dir>)");
+        return ExitCode::from(2);
+    }
+    let config = match config_or_refuse("import") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("import", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let store_cfg = resolve_store_config(
+        &config,
+        destination,
+        repo.map(String::from),
+        key_file.map(String::from),
+        None,
+        &[],
+    );
+    let view = destination_view(&store_cfg, &machine);
+    let report = match chat_stasher::collect::import_grok_bot_backups(
+        from,
+        stage,
+        &machine,
+        &state_dir,
+        shard_bucket_cap,
+        &view,
+        dry_run,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!(
+                "import: FAILED exit_code=3 — a backup was never read to the end, so nothing \
+                 about what it holds is proven and nothing was imported: {error:#}"
+            );
+            return ExitCode::from(3);
+        }
+    };
+
+    println!("[import] harness         : {}", harness.harness_id());
+    println!(
+        "[import] mode            : {}",
+        if dry_run { "dry-run" } else { "import" }
+    );
+    println!("[import] backups         : {}", from.len());
+    for backup in &report.empty_backups {
+        println!("[import] backup {backup}        : holds no sessions; nothing to import");
+    }
+    println!("[import] stage           : {}", stage.display());
+    println!("[import] state           : {}", state_dir.display());
+    println!("[import] machine         : {machine}");
+    println!(
+        "[import] destination     : sha256={} (delivered state is kept per destination)",
+        report.destination_id
+    );
+    println!("[import] sessions seen   : {}", report.sessions_seen);
+    println!("[import] rows new        : {}", report.rows_new);
+    println!(
+        "[import] rows already    : {}",
+        report.rows_already_delivered
+    );
+    println!(
+        "[import] shards {}  : {}",
+        if dry_run { "to seal" } else { "written" },
+        report.shards_written
+    );
+    for session in &report.sessions {
+        println!(
+            "[import] session {} : rows_new={} rows_already_delivered={} shards_{}={}",
+            session.session_prefix,
+            session.rows_new,
+            session.rows_already_delivered,
+            if dry_run { "to_seal" } else { "written" },
+            session.shards_written,
+        );
+        if session.reread {
+            println!(
+                "[import]   {} could not be verified, so its whole union was re-delivered and is \
+                 measured from now on",
+                session.session_prefix
+            );
+        }
+    }
+    if dry_run {
+        println!("[import] dry-run        : nothing was written");
+    }
+    if !report.errors.is_empty() {
+        eprintln!(
+            "import: FAILED exit_code=1 — {} session(s) in the backups were read and could not be \
+             imported. The import above is real but incomplete; a re-run after fixing the input \
+             imports the rest.",
+            report.errors.len()
+        );
+        for error in &report.errors {
+            eprintln!("  - {error}");
+        }
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

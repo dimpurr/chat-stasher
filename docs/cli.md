@@ -33,7 +33,7 @@ chat-stasher <command> --help
 | [`prune-orphans`](#prune-orphans) | Reports the archive packs no index file names | No |
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
-| [`import`](#import) | Turns an official export (a takeout) into inbox bundles and a byte-exact raw archive object | An existing `--stage` and a named `--inbox` |
+| [`import`](#import) | Turns an official export (a takeout) into inbox bundles, or feeds a copied Grok Bot cache backup in as an archive pass | Takeout mode: an existing `--stage` and a named `--inbox`. Backup mode: `--stage` and one or more `--from` directories, read-only |
 
 Lower-level commands, used by the ones above or for repair, are listed under [Plumbing](#plumbing).
 
@@ -493,22 +493,35 @@ Archives extension export files, the ones the popup saves when you export undeli
 | `--inbox <dir>` | The folder holding the export files. Processed files move to `<inbox>/consumed/`. |
 | `--stage <dir>` | The stage. |
 
-## Importing an official export
+## Importing an official export or a local-cache backup
 
 ### `import`
 
-Turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: `import` never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
+Two modes share this command.
+
+With a `<platform>` and an `<export>` file, `import` turns an official export — a takeout **you** requested from the platform — into ordinary inbox bundles, so a conversation the browser extension never captured can still be archived. The export file is read whole and stored byte-exact under `<stage>/import-raw/<platform>/<sha256>` — a sibling of `sessions/`, so it enters no session count — and every conversation the platform's parser reads becomes one `chat-stasher/inbox@3` `web-capture` bundle in `--inbox`. A later `ingest --inbox` is what seals those bundles: this mode never seals, never pushes, never reads the config, a destination or a machine identity, and never modifies or moves the export file.
 
 Claude's `conversations.json` and Grok's `prod-grok-backend.json` have parsers in this build; naming any other platform is a named refusal, not a guess. The archive comparison that would suppress a body already archived sits behind a probe this build ships unwired, so every conversation currently gets a body.
 
 | Flag | Meaning |
 |---|---|
 | `--inbox <dir>` | Required. The local inbox folder the bundles are written into, for a later `ingest --inbox`. |
-| `--stage <dir>` | Required. An existing stage directory that receives the byte-exact export under `import-raw/`. Never created. |
+| `--stage <dir>` | Required in both modes. An existing stage directory that receives the byte-exact export under `import-raw/`, or the sealed shards of a backup import. Never created. |
 
 The export file is only ever read: it is not moved, renamed or deleted, so importing from it again is safe.
 
-Exit codes: `0` the export was read whole and everything importable in it was written · `1` it was read, and a conversation or a write failed · `2` it was read and is not something this build imports · `3` the export was never read to the end, so nothing is claimed about which conversations it holds.
+The other mode, `--harness grok-bot --from <dir>`, imports one folder at a time out of local caches you copied aside — backups that may overlap the live cache, each other, and be shaped either as the persistence directory itself or as a whole app-support tree above it. For each session found it delivers only rows that session has never archived (the identity is machine + agent uuid, never a file path), so overlaps deliver exactly their new rows once and re-running the same import delivers 0 rows. The backups are only ever read and the live cache is never touched; an ordinary `collect` after an import still delivers only what is genuinely new, because the delivered state the two share is kept per destination — name the same `--destination` your collector uses. Each sealed shard's measurement line records that it came from a backup import, the backup directory's name and the import time; no absolute path enters the archive.
+
+| Flag | Meaning |
+|---|---|
+| `--harness grok-bot` | Selects backup-restore mode. Only Grok Bot has a backup importer in this build; any other harness is a named refusal. |
+| `--from <dir>` | Required in this mode, repeatable. The backup directory to read, read-only. |
+| `--dry-run` | Report the per-session counts (rows new, rows already delivered) and write nothing — not even a state directory. |
+| `--machine <id>` | The machine partition, as for `collect`. Default: config `machine`, else this machine's identity. |
+| `--destination <name>` / `--repo` / `--key-file` | As for `collect` — the destination whose delivered state the import extends. |
+| `--shard-bucket-cap <n>` | Maximum sealed shards per bucket (default: 20). |
+
+Exit codes, both modes: `0` everything was read to the end and imported · `1` it was read, and a conversation, session or write failed — what was written is real but the run is incomplete · `2` usage (including a `--stage` that is not a directory) · `3` an input was never read to the end, so nothing about what it holds is proven and (for a backup import) nothing was imported.
 
 ## Plumbing
 
