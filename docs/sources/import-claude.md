@@ -6,7 +6,7 @@
 | Id | `claude` |
 | Surface | export |
 | Export file | `conversations.json` |
-| Parser | shipped in this build (`chat-stasher import --platform claude` parses it) |
+| Parser | shipped in this build (`chat-stasher import claude <export> --inbox <dir> --stage <dir>` parses it) |
 | Last verified end to end | not yet verified end to end |
 <!-- END GENERATED -->
 

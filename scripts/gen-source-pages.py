@@ -139,7 +139,7 @@ NOT_WRITTEN = "Not written yet."
 NOT_VERIFIED = "not yet verified end to end"
 
 # The noun every import page's header ends with, read from the Rust side.
-PARSER_SHIPPED = "shipped in this build (`chat-stasher import --platform {id}` parses it)"
+PARSER_SHIPPED = "shipped in this build (`chat-stasher import {id} <export> --inbox <dir> --stage <dir>` parses it)"
 PARSER_WRITTEN = "parser written, not yet offered by the command"
 PARSER_NONE = "no parser in this build"
 
@@ -705,7 +705,8 @@ def render_index(sources: list[dict[str, Any]], as_of: date | None = None) -> st
         import_rows,
         "An official export (a takeout you request from the platform) is the platform's "
         "own statement of what an account holds. The Parser column is read from the "
-        "import seam itself: `shipped` means `chat-stasher import --platform <id>` "
+        "import seam itself: `shipped` means "
+        "`chat-stasher import <id> <export> --inbox <dir> --stage <dir>` "
         "parses the export in this build, and no row claims a scan or capture. No "
         "official export has a recorded end-to-end run yet, so each page says so rather "
         "than carrying a date.",

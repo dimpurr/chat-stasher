@@ -52,13 +52,34 @@
  * lookup, so a missing entry does not turn every repaint into noise, but it
  * never becomes silent.
  *
+ * ## The shipped catalog floors the `auto` path too
+ *
+ * `auto` delegates to `browser.i18n.getMessage`, which this module used to
+ * treat as never returning a blank string. That belief was measured
+ * false: on a freshly loaded extension page the renderer can answer `''` for
+ * keys the shipped catalog verifiably holds (observed in CI: the coverage page
+ * painted its health line empty while its numbers rendered, and a popup card
+ * came out with no text at all — both from `t`, both stable, because a page
+ * that paints once at boot keeps whatever the seam answered at that moment).
+ * A blank user-visible string is exactly the "unknown recorded as empty" this
+ * project's first invariant forbids, wherever it comes from.
+ *
+ * So `initUiLocale` now also loads the catalog the browser would have served —
+ * the shipped file for the browser's own UI language when there is one, else
+ * the manifest's `default_locale` — and `t` consults that copy **only** when
+ * `browser.i18n` answers empty. A healthy `auto` lookup is untouched, so this
+ * never competes with the standard path; the catalog is the floor beneath it,
+ * not a second translator. The rescue is loud like every other fallback here,
+ * and the floor failing to load leaves the pre-existing behaviour (`''`, plus
+ * the package's own "Message not found" warning) rather than inventing text.
+ *
  * ## Sync by design
  *
  * `t` is synchronous. The catalog is fetched once by `initUiLocale` and cached,
  * which is the only way a pure render function (`renderPopup`) and a badge
  * title setter can both stay synchronous. Until the catalog has landed, `t`
- * behaves exactly like the `auto` path — so the worst case is the pre-existing
- * behaviour, never a blank string.
+ * behaves exactly like the `auto` path — so the worst case before init is the
+ * pre-existing behaviour; after init, the shipped catalog is the floor.
  */
 
 import { createI18n } from '@wxt-dev/i18n';
@@ -135,6 +156,50 @@ function extensionRuntime(): { getURL?: (path: string) => string } | null {
   return g.browser?.runtime ?? g.chrome?.runtime ?? null;
 }
 
+/** The `browser.i18n` members the locale resolution reads — none of them required to exist. */
+interface UiLanguageBits {
+  getUILanguage?: () => string;
+}
+
+function extensionUiLanguage(): UiLanguageBits | null {
+  const g = globalThis as { browser?: { i18n?: UiLanguageBits }; chrome?: { i18n?: UiLanguageBits } };
+  return g.browser?.i18n ?? g.chrome?.i18n ?? null;
+}
+
+/** The manifest member that names the locale the browser itself falls back to, when it is there. */
+function defaultCatalogLocale(): string | undefined {
+  interface ManifestBits { getManifest?: () => { default_locale?: unknown } }
+  const g = globalThis as { browser?: { runtime?: ManifestBits }; chrome?: { runtime?: ManifestBits } };
+  const runtime = g.browser?.runtime ?? g.chrome?.runtime ?? null;
+  try {
+    const locale = runtime?.getManifest?.().default_locale;
+    return typeof locale === 'string' ? locale : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Which shipped catalog the browser would have served a message from: the one
+ * matching the UI language's primary subtag when this build ships one (the same
+ * primary-subtag match Chrome's extension i18n uses to pick a directory), else
+ * the manifest's `default_locale` when that names one of ours. Neither found
+ * means the renderer's answer is all we have.
+ */
+function floorLocaleFor(uiLanguage: string | undefined): OverrideLocale | null {
+  const primary = uiLanguage?.split('-')[0]?.toLowerCase();
+  if (primary !== undefined && primary.length > 0) {
+    for (const locale of UI_LOCALES) {
+      // Separator-aware on both sides: a catalog directory is written with an
+      // underscore (`zh_CN`) where the browser's UI language uses a hyphen
+      // (`zh-CN`), so the primary-subtag match has to split on both.
+      if (locale !== 'auto' && locale.split(/[-_]/)[0]?.toLowerCase() === primary) return locale;
+    }
+  }
+  const fallback = normalizeUiLocale(defaultCatalogLocale());
+  return fallback === 'auto' ? null : fallback;
+}
+
 /**
  * Read one compiled catalog. Returns null on *any* failure — no URL, no fetch,
  * a non-OK response, unparseable JSON — because every one of those means the
@@ -158,10 +223,12 @@ async function loadCatalog(locale: OverrideLocale): Promise<Catalog | null> {
 // Module state
 // ---------------------------------------------------------------------------
 
-const state: { locale: UiLocale; catalog: Catalog | null; warned: boolean } = {
+const state: { locale: UiLocale; catalog: Catalog | null; warned: boolean; floor: Catalog | null; warnedFloor: boolean } = {
   locale: DEFAULT_UI_LOCALE,
   catalog: null,
   warned: false,
+  floor: null,
+  warnedFloor: false,
 };
 
 /** The locale the overlay is currently rendering in. `auto` means "the package". */
@@ -175,12 +242,33 @@ function warnOnce(message: string): void {
   console.warn(`[chat-stasher] i18n: ${message}`);
 }
 
+/**
+ * The one-shot warn for the floor rescue. Its own flag, so a screen where both
+ * kinds of fallback happen stays honest about each — a missing override entry
+ * and an empty renderer answer are two different facts.
+ */
+function warnFloorOnce(message: string): void {
+  if (state.warnedFloor) return;
+  state.warnedFloor = true;
+  console.warn(`[chat-stasher] i18n: ${message}`);
+}
+
 /** Switch the overlay's locale and load its catalog. Does not touch storage. */
 export async function applyUiLocale(locale: UiLocale): Promise<UiLocale> {
   state.locale = normalizeUiLocale(locale);
   state.catalog = null;
+  state.floor = null;
   state.warned = false;
-  if (state.locale === 'auto') return state.locale;
+  state.warnedFloor = false;
+  if (state.locale === 'auto') {
+    // The shipped copy of the language the browser would answer in, as the
+    // floor under `getMessage`'s fresh-page race. A read the floor needs is a
+    // read it cannot fail loudly about — loadCatalog can still answer null, and
+    // `t` keeps its own warning for the empty answer it then cannot rescue.
+    const floorLocale = floorLocaleFor(extensionUiLanguage()?.getUILanguage?.());
+    state.floor = floorLocale ? await loadCatalog(floorLocale) : null;
+    return state.locale;
+  }
   const catalog = await loadCatalog(state.locale);
   if (catalog === null) {
     warnOnce(
@@ -190,6 +278,10 @@ export async function applyUiLocale(locale: UiLocale): Promise<UiLocale> {
     return state.locale;
   }
   state.catalog = catalog;
+  // Same file, so the floor costs no second read: an override entry the catalog
+  // is missing still reaches `i18n.t`, and if that answers empty the floor has
+  // the chosen language's own wording for the rescue.
+  state.floor = catalog;
   return state.locale;
 }
 
@@ -352,11 +444,29 @@ const packageT = i18n.t as unknown as UntypedT;
  * Keys are dotted (`popup.running.active`); the catalog is flat, keyed with
  * underscores, exactly as the package looks them up
  * (`key.replaceAll(".", "_")`, dist/index.mjs:19-20).
+ *
+ * Lookup order: the chosen locale's catalog (when one was chosen and read),
+ * then `i18n.t` — and when that comes back empty, the shipped catalog of the
+ * language this selection renders in, which `initUiLocale` has already
+ * loaded. That last step is the floor: the renderer can answer `''` for a key
+ * the catalog verifiably holds on a freshly loaded page (see the header), and
+ * a blank string in the UI is never an acceptable rendering of a word we do
+ * have. The floor is consulted only on an empty answer, and its use is warned
+ * about once — like every other fallback in this module, it is visible, not a
+ * second translator silently winning.
  */
 export function t(key: string, ...args: unknown[]): string {
   const entry = state.catalog?.[key.replaceAll('.', '_')];
   if (typeof entry?.message === 'string' && entry.message.length > 0) {
     return renderMessage(entry.message, args);
+  }
+  const message = packageT(key, ...args);
+  if (message === '') {
+    const floored = state.floor?.[key.replaceAll('.', '_')];
+    if (typeof floored?.message === 'string' && floored.message.length > 0) {
+      warnFloorOnce(`browser.i18n answered empty for "${key}"; rendering it from the shipped catalog`);
+      return renderMessage(floored.message, args);
+    }
   }
   // Only an override can get here with a catalog loaded: in `auto` the package
   // owns the lookup, and it warns on its own for a missing message
@@ -365,5 +475,5 @@ export function t(key: string, ...args: unknown[]): string {
   if (state.locale !== 'auto') {
     warnOnce(`no entry "${key}" in ${catalogPath(state.locale)}; using browser.i18n for it`);
   }
-  return packageT(key, ...args);
+  return message;
 }

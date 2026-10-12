@@ -6,7 +6,7 @@
 | Id | `grok` |
 | Surface | export |
 | Export file | `prod-grok-backend.json` |
-| Parser | shipped in this build (`chat-stasher import --platform grok` parses it) |
+| Parser | shipped in this build (`chat-stasher import grok <export> --inbox <dir> --stage <dir>` parses it) |
 | Last verified end to end | not yet verified end to end |
 <!-- END GENERATED -->
 
