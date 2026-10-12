@@ -82,6 +82,17 @@ export class Ledger {
   private pending: Set<string>;
   private archived: Set<string>;
   private nextSeq: number;
+  /**
+   * 🔴 W984 · The conversation metadata that was on the rows when this ledger
+   * was opened — a read-only view of the store at one moment, which is
+   * exactly what the engine needs: a fresh copy of the listings seen by a
+   * later run than the enumeration that wrote them. Run-local observations
+   * (this run's own list pages) are merged into the **engine's** copy by the
+   * engine itself, so this map staying read-only is what keeps the ledger's
+   * "what the store said at open" from drifting into "what this run has
+   * seen" — two different facts.
+   */
+  private readonly listings: ReadonlyMap<string, import('../contract').ConversationListing>;
 
   constructor(
     private readonly store: BackfillStore,
@@ -92,6 +103,18 @@ export class Ledger {
     this.pending = new Set(snapshot.pending);
     this.archived = new Set(snapshot.archived);
     this.nextSeq = snapshot.nextSeq;
+    this.listings = snapshot.listings;
+  }
+
+  /**
+   * 🔴 W984 · The metadata recorded at open, as a fresh mutable copy the engine
+   *    owns. A copy rather than the map itself, because the engine merges this
+   *    run's own list pages into it (a row settled in the same run as its
+   *    listing arrives has no other source), and handing out the private map
+   *    would let that merge mutate "what the store said at open".
+   */
+  listingsAtOpen(): Map<string, import('../contract').ConversationListing> {
+    return new Map(this.listings);
   }
 
   /**
@@ -701,9 +724,16 @@ async function openFromLegacy(
     return {
       ok: true,
       state: fresh,
-      // 🔴 W113 · No times: this scope has never been enumerated, so the platform's list has never given
-      //    us a time for anything here. An empty map is the measurement, not a default.
-      ledger: new Ledger(store, platform, scope, { pending: [], archived: [], nextSeq: 1, times: new Map() }),
+      // 🔴 W113 · No times, and 🔴 W984 · no listings: this scope has never been
+      //    enumerated, so the platform's list has never given us either for
+      //    anything here. Empty maps are the measurement, not a default.
+      ledger: new Ledger(store, platform, scope, {
+        pending: [],
+        archived: [],
+        nextSeq: 1,
+        times: new Map(),
+        listings: new Map(),
+      }),
     };
   }
 
@@ -771,8 +801,9 @@ async function migrate(
     archived,
     nextSeq: pending.length + archived.length + 1,
     // 🔴 W113 · A pre-W18 record predates the time field, so it carries none — a fact about that layout,
-    //    not a value that was lost in the move.
+    //    not a value that was lost in the move. 🔴 W984 · The same is true of the conversation metadata.
     times: new Map(),
+    listings: new Map(),
   });
   if (!written) {
     return refusal(

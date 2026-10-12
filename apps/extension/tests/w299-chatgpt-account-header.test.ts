@@ -506,7 +506,7 @@ describe('W299-D · old workspace scopes are fingerprinted without losing pendin
     expect(JSON.stringify(store)).not.toContain(rawWorkspace);
     const targetRows = await storage.load(BACKFILL_TARGETS_KEY) as Array<{ scope: string }>;
     expect(targetRows.map((row) => row.scope)).toEqual([expectedScope]);
-    expect(await readDebtSet('chatgpt', oldScope)).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map() });
+    expect(await readDebtSet('chatgpt', oldScope)).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map(), listings: new Map() });
     const migratedDebt = await readDebtSet('chatgpt', expectedScope!);
     expect(migratedDebt?.pending).toEqual([id]);
     expect(JSON.stringify(migratedDebt)).not.toContain(rawWorkspace);

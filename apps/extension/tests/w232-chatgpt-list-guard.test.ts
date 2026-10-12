@@ -137,6 +137,8 @@ async function seed(store: BackfillStore, s: Seed): Promise<void> {
     archived: s.archived,
     nextSeq: s.pending.length + s.archived.length + 1,
     times: new Map(),
+    // 🔴 W984 · A pre-W984-shaped write: no conversation metadata on any row.
+    listings: new Map(),
   });
   const header: BackfillHeader = {
     v: 2,

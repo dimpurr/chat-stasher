@@ -95,6 +95,6 @@ compatibility and distinct archive generations.
 
 Implementation: `crates/chat-stasher/src/sqlite_probe.rs:382-437`,
 `crates/chat-stasher/src/id.rs:239-298`,
-`crates/chat-stasher/src/inbox.rs:603-632`,
+`crates/chat-stasher/src/inbox.rs:635-664`,
 `crates/chat-stasher/src/export.rs:962-979`, and
 `crates/chat-stasher/src/store.rs:1247-1250`.

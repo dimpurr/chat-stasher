@@ -242,7 +242,7 @@ describe('W36 · the migration preflight', () => {
     const second = await readDebtSet(PLATFORM, SCOPE);
     // 🔴 W113 · `times` is part of the snapshot now: no id here has a recorded conversation time, which
     //    is the same fact as "this scope's list never gave us one".
-    expect(second).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map() });
+    expect(second).toEqual({ pending: [], archived: [], nextSeq: 1, times: new Map(), listings: new Map() });
   });
 
   it('clears an orphaned pre-W18 key once its copy in the debt store is confirmed equal', async () => {

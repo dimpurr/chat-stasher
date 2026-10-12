@@ -1060,6 +1060,20 @@ export interface CapturedFetch {
   /** A later observation appended separately; it never rewrites provenance.project. */
   provenanceSupplement?: ChatGptProvenanceSupplement;
   /**
+   * 🔴 W984 · The conversation-level facts the enumeration read from the
+   * platform's conversation-list response about this conversation (see
+   * [`ConversationListing`]). Filled by the backfill engine only — the one leg
+   * that reads the list — and never by a page payload:
+   * `isCapturedFetchShape` **rejects on sight** a page payload carrying it,
+   * exactly like `sessionId` above, for exactly the same reason: naming the
+   * conversation's recorded metadata is choosing what the archive will trust.
+   *
+   * undefined ⇒ this capture's conversation was never enumerated by this
+   * install (a live capture, or a metadata-less list row), and the bundle this
+   * capture builds carries no `listing` key at all.
+   */
+  listing?: ConversationListing;
+  /**
    * 🔴 W299 · The `ChatGPT-Account-Id` value observed on **the exact request whose
    * response this capture is** — transient input to the worker, never a durable field.
    *
@@ -1106,6 +1120,55 @@ export interface ChatGptProvenanceSupplement {
   project: { id: string; name: string } | null;
   source: 'project-list' | 'project-enumeration-complete';
   observedAt: string;
+}
+
+/**
+ * 🔴 W984 · **The conversation-level facts a platform's conversation-LIST
+ * response holds about a conversation, that the captured request's own response
+ * does not.** On grok the list row is
+ * `conversations[].{conversationId, title, starred, createTime, modifyTime}`
+ * while the content response is `{ responses: [...] }` only — measured by the
+ * reference-corpus oracle (27-ORACLE §5.1 finding 3): `title` and `createTime`
+ * dropped on all 38 matched pairs, and `createTime` is **not derivable** from
+ * per-message times (min(response.createTime) == create_time on 0/38 — the
+ * conversation exists before its first message).
+ *
+ * The rules this shape is written under:
+ *  · **Source-backed, verbatim.** The four field names are the ones every
+ *    reviewed source's type declaration carries for the list row
+ *    (`GROK_PLAN`'s provenance). Values are carried byte-for-byte as read:
+ *    the time is **never** converted, re-typed or formatted here, so nothing
+ *    can drift in conversion — the reader gets the platform's own value.
+ *  · **Absent stays absent (invariant 1).** Every field is optional and is
+ *    written only when the list row named it readably; a row without a
+ *    readable `title` yields a listing without a `title` key, never `''`.
+ *    `createTime` is **never synthesised** — not from message times, not from
+ *    the capture time, not from anything else; if the list did not name it,
+ *    the bundle does not have it.
+ *  · **Additive and take-no-part.** On the bundle this is an optional key
+ *    (`InboxBundle.listing`) absent on every older bundle, on every capture
+ *    whose conversation was never enumerated by this install (a live capture
+ *    of an open conversation: the list route is outside the platform row's
+ *    `pathHints` on purpose — see the grok row), and on every value this build
+ *    could not read. It takes no part in the session id, the file name or the
+ *    dedup key — those remain `platform.sessionId` / `file_sha256`.
+ *  · **Extension-authored.** Only the backfill engine writes it (it read it
+ *    out of the enumeration); `isCapturedFetchShape` rejects a page payload
+ *    carrying it, exactly like `sessionId` and `provenance` — a page naming
+ *    conversation metadata is choosing a fact the archive would trust.
+ */
+export interface ConversationListing {
+  /**
+   * The list row's `title`. Present only when a string was read — including an
+   * empty one, which is the platform's own value, never a stand-in for "absent".
+   */
+  title?: string;
+  /** The list row's `starred` flag. Present only when a boolean was read. */
+  starred?: boolean;
+  /** The list row's `createTime` — the platform's own value, unconverted. */
+  createTime?: string | number;
+  /** The list row's `modifyTime` — the platform's own value, unconverted. */
+  modifyTime?: string | number;
 }
 
 /** Normalized provenance dimensions. Values are observations, never guesses. */
@@ -1220,6 +1283,11 @@ export function isCapturedFetchShape(value: unknown): value is CapturedFetch {
   if ('provenance' in value) return false;
   if ('provenanceSupplement' in value) return false;
   if ('dimensions' in value) return false;
+  // 🔴 W984 · `listing` is extension-authored conversation metadata (the
+  //    enumeration read it from the list response). A page payload carrying it
+  //    is a page choosing what the archive will record about a conversation —
+  //    rejected on sight, like `sessionId` above.
+  if ('listing' in value) return false;
   // 🔴 W299 · The transient ChatGPT account header is accepted only on ChatGPT captures.
   //    A forged or malformed value is page-visible metadata and becomes `unknown` in the
   //    fingerprint reader; it cannot discard a valid capture. `platform.id` is checked
@@ -1486,6 +1554,24 @@ export interface InboxBundle {
   provenanceSupplement?: ChatGptProvenanceSupplement;
   /** Optional normalized source provenance, authored by the extension. */
   dimensions?: SessionProvenanceDimensions;
+  /**
+   * 🔴 W984 · The conversation-level facts this install's enumeration read
+   * from the platform's conversation-list response about this conversation
+   * (`title` / `starred` / `createTime` / `modifyTime` on grok — see
+   * [`ConversationListing`]). Carried **verbatim**, because — like `identity`
+   * and `account` — it is not inside `raw.text` and an unparsed drop here
+   * loses it permanently: the content route's own body does not hold it, and
+   * `createTime` (the export's `create_time`) is not derivable from message
+   * times.
+   *
+   * Absent on every bundle written before this change, on every capture whose
+   * conversation was never enumerated by this install (a live capture of an
+   * open conversation), and on every list row that named none of the fields
+   * readably — all three are the same honest "no observation", and none of
+   * them may appear as a value. Takes no part in the id or the dedup key:
+   * those remain `platform.sessionId` / `file_sha256`.
+   */
+  listing?: ConversationListing;
   url: string;
   method: string;
   status: number;

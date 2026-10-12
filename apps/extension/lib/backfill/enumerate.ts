@@ -207,7 +207,7 @@
  *    measurement that would close it.
  */
 
-import { PLATFORMS } from '../contract';
+import { PLATFORMS, type ConversationListing } from '../contract';
 import {
   GEMINI_RPC_DETAIL,
   GEMINI_RPC_LIST,
@@ -255,6 +255,24 @@ export interface EnumPage {
    * A plan that declares nothing here contributes rows the coverage page counts as "time unknown".
    */
   times?: Map<string, DebtTime>;
+  /**
+   * 🔴 W984 · **The conversation-level metadata the list carried for each
+   * conversation on this page**, by id — the fields the captured request's own
+   * response does not hold (`title` / `starred` / `createTime` / `modifyTime`
+   * on grok; see `ConversationListing` in lib/contract.ts and the plan's own
+   * provenance for why those names are source-backed).
+   *
+   * Optional, and **absent when this page's rows carried nothing readable** —
+   * an empty map would read as "the page said each row has no metadata", which
+   * is not what this parser observed. Only ids with at least one readable
+   * field appear: a row that named none gets no entry, and the engine delivers
+   * its body without the bundle key (absent stays absent, invariant 1).
+   *
+   * Values are carried **verbatim** — never converted, never defaulted — so a
+   * wrong guess here is impossible by construction: what is not read is not
+   * invented.
+   */
+  listings?: Map<string, ConversationListing>;
   /** The total the API gave us directly; null when it did not. */
   total: number | null;
   /**
@@ -2530,9 +2548,18 @@ export function parsePerplexityDetailPage(text: string): DetailParseResult {
  * Recognised: a top-level `conversations` array, and `conversationId` on each
  * element — the two things every source agrees on. `total` is **null**: no source
  * shows a total field on this endpoint, and inventing one would be inventing a
- * denominator (the same call parseDeepSeekListPage makes). `title`, `starred`,
- * `createTime` and `modifyTime` are present in the sources but are not read here:
- * the engine's enumeration needs ids, and this leg does not rewrite titles.
+ * denominator (the same call parseDeepSeekListPage makes).
+ *
+ * 🔴 W984 · `title`, `starred`, `createTime` and `modifyTime` **are read now**,
+ *    carried verbatim into `page.listings` — four names every source's own type
+ *    declaration gives this row (see GROK_PLAN's provenance) and four facts the
+ *    content route's response does not hold, which is why they had to come from
+ *    here or be gone for good (the reference-corpus oracle measured them missing
+ *    from every capture). Terminating, never substituting: a field the row does
+ *    not name is absent from its listing; a value of a type this code cannot read
+ *    (a `title: 123`) is dropped, and the row's other readable fields survive it
+ *    — `conversationId` is the only field whose drift halts the leg, because
+ *    drifting decoration must never cost the account its ids.
  *
  * ## 🔴 `nextPageToken`: absent/empty is the API's own "last page"
  * Unlike Perplexity, this endpoint's termination signal **is** in the response,
@@ -2568,15 +2595,34 @@ export function parseGrokListPage(text: string): ParseResult {
   }
 
   const ids: string[] = [];
+  // 🔴 W984 · Only ids with at least one readable metadata field land here; see
+  //    EnumPage.listings for why an empty observation is no map at all.
+  const listings = new Map<string, ConversationListing>();
   for (const item of conversations) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       return { ok: false, detail: 'grok conversation item is not an object' };
     }
-    const id = (item as Record<string, unknown>).conversationId;
+    const row = item as Record<string, unknown>;
+    const id = row.conversationId;
     if (typeof id !== 'string' || id.length === 0) {
       return { ok: false, detail: 'grok conversation item has no string `conversationId`' };
     }
     ids.push(id);
+    // 🔴 Verbatim and type-gated, per field: each of the four is carried only
+    //    when the row named it in the type we can pass through untouched
+    //    (title string, starred boolean, times a scalar the platform printed).
+    //    Nothing here converts, and nothing invents — a dropped field on one
+    //    row costs that row's listing the field, never the page its ids.
+    const listing: ConversationListing = {};
+    if (typeof row.title === 'string') listing.title = row.title;
+    if (typeof row.starred === 'boolean') listing.starred = row.starred;
+    if (typeof row.createTime === 'string' || typeof row.createTime === 'number') {
+      listing.createTime = row.createTime;
+    }
+    if (typeof row.modifyTime === 'string' || typeof row.modifyTime === 'number') {
+      listing.modifyTime = row.modifyTime;
+    }
+    if (Object.keys(listing).length > 0) listings.set(id, listing);
   }
 
   const rawToken = record.nextPageToken;
@@ -2584,7 +2630,10 @@ export function parseGrokListPage(text: string): ParseResult {
     return { ok: false, detail: 'grok list response has a non-string `nextPageToken` (wire shape changed?)' };
   }
   const nextToken = typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : null;
-  return { ok: true, page: { ids, total: null, nextToken } };
+  return {
+    ok: true,
+    page: { ids, total: null, nextToken, ...(listings.size > 0 ? { listings } : {}) },
+  };
 }
 
 /**
@@ -3294,6 +3343,10 @@ const grokDetail2Url = (origin: string, id: string): string =>
  *                     🔴 the sources **disagree**: a third uses an integer `page`
  *   end of list       `nextPageToken` absent/empty, or an empty page · 3 sources
  *   list fields       conversations[].conversationId              · 3 sources (+ a title/createTime/modifyTime set)
+ *   🔴 W984 · the metadata set that line names is now READ (title, starred,
+ *      createTime, modifyTime — carried verbatim, absent when the row does not
+ *      name them) into EnumPage.listings; the ids above remain the only field
+ *      whose drift halts the leg.
  *   skeleton          GET  .../conversations/{id}/response-node   · 3 sources
  *   skeleton fields   responseNodes[].responseId                  · 3 sources
  *   content           POST .../conversations/{id}/load-responses  · 3 sources
@@ -3379,9 +3432,15 @@ export const GROK_PLAN: BackfillEnumPlan = {
     + 'three implementations agree on the route family and on the two-step body '
     + '(GET .../conversations/{id}/response-node → POST .../conversations/{id}/load-responses '
     + 'with { responseIds: [...] }), and on the response envelopes '
-    + '({ conversations: [{ conversationId }], nextPageToken } / '
+    + '({ conversations: [{ conversationId, title, starred, createTime, modifyTime }], nextPageToken } / '
     + '{ responseNodes: [{ responseId }] } / '
     + '{ responses: [{ responseId, message, sender, createTime, parentResponseId, model }] }). '
+    + '🔴 W984 · the list row\'s metadata set (title, starred, createTime, '
+    + 'modifyTime — the names all three sources type it with) is now carried '
+    + 'verbatim into the delivered bundle\'s `listing`; the names are '
+    + 'source-backed rather than live-measured, so every field is type-gated and '
+    + 'absent stays absent — never resynthesised from the content route, which '
+    + 'holds none of them. '
     + 'Cookie-only auth (no bearer, no CSRF, no custom header): 2 sources. '
     + '🔴 The LIST cursor disagrees between sources: two pass `pageToken` back '
     + '(echoing the previous response\'s nextPageToken) and one sends an integer `page` '
