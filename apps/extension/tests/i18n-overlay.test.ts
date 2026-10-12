@@ -169,6 +169,102 @@ describe('i18n overlay · failing loudly, never silently', () => {
   });
 });
 
+describe('i18n overlay · the floor under the auto path', () => {
+  /**
+   * A page whose renderer answers with no localized messages at all — the
+   * fresh-page state the CI failure observed (a coverage health line and a
+   * popup card both painted empty while their numbers rendered). The fake
+   * returns the empty string for *every* key, including the ones the shipped
+   * catalog holds, which is why the assertions below can read the wording
+   * straight out of `CATALOGS.en`: they prove the floor serves the very
+   * sentence the renderer dropped.
+   */
+  function notReadyBrowser(uiLanguage?: string) {
+    const browser = withI18n({ runtime: { id: 'i18n-floor-test' } });
+    (browser as { i18n?: unknown }).i18n = {
+      getMessage: () => '',
+      ...(uiLanguage === undefined ? {} : { getUILanguage: () => uiLanguage }),
+    };
+    return browser;
+  }
+
+  /** Complete a fake after `withI18n`, whose own `runtimeApi` overwrites `getManifest`. */
+  function manifestLocale(browser: ReturnType<typeof withI18n>, locale: string) {
+    ((browser as { runtime?: { getManifest?: unknown } }).runtime as { getManifest: unknown }).getManifest =
+      () => ({ version: '0.0.0', default_locale: locale });
+    return browser;
+  }
+
+  it('a renderer that answers empty still shows the shipped wording, and says so once', async () => {
+    vi.stubGlobal('browser', notReadyBrowser('en-US'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, initUiLocale, renderMessage } = await overlay();
+    expect(await initUiLocale()).toBe('auto');
+
+    // The two strings the CI failure actually lost: a plain label and the
+    // substituted health sentence. Both come back as the catalog's own text —
+    // not '', and not a key or placeholder left unfilled.
+    expect(t('coverage.card.title')).toBe(CATALOGS.en.coverage_card_title!.message);
+    expect(t('coverage.health.ok', { total: 1 }))
+      .toBe(renderMessage(CATALOGS.en.coverage_health_ok!.message, [{ total: 1 }]));
+    expect(t('coverage.health.ok', { total: 1 })).not.toContain('{');
+
+    // The rescue is visible — exactly once, naming the key — the same
+    // discipline the missing-entry fallback lives under.
+    const rescues = warn.mock.calls.map((c) => String(c[0])).filter((w) => w.includes('chat-stasher'));
+    expect(rescues).toHaveLength(1);
+    expect(rescues[0]).toContain('coverage.card.title');
+    for (let i = 0; i < 25; i += 1) t('coverage.card.title');
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((w) => w.includes('chat-stasher'))).toHaveLength(1);
+  });
+
+  it('the floor follows the browser language, not just English', async () => {
+    vi.stubGlobal('browser', notReadyBrowser('zh-CN'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, initUiLocale } = await overlay();
+    await initUiLocale();
+    expect(t('popup.status.on')).toBe(CATALOGS.zh_CN.popup_status_on!.message);
+    expect(t('coverage.card.title')).toBe(CATALOGS.zh_CN.coverage_card_title!.message);
+  });
+
+  it('with no UI language to match, the manifest default names the floor', async () => {
+    vi.stubGlobal('browser', manifestLocale(notReadyBrowser(), 'en'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, initUiLocale } = await overlay();
+    await initUiLocale();
+    expect(t('popup.status.on')).toBe(CATALOGS.en.popup_status_on!.message);
+  });
+
+  it('a floor that cannot be read keeps the empty answer rather than inventing text', async () => {
+    vi.stubGlobal('browser', notReadyBrowser('en-US'));
+    vi.stubGlobal('fetch', catalogFetch({ fail: true }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, initUiLocale } = await overlay();
+    await initUiLocale();
+    // The pre-existing worst case, exactly as before the floor existed: the
+    // package's own warning is the only voice, and the answer stays empty
+    // rather than a guess.
+    expect(t('coverage.card.title')).toBe('');
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((w) => w.includes('chat-stasher'))).toHaveLength(0);
+  });
+
+  it('a healthy renderer answer is served as before, without a floor warn', async () => {
+    const fake = notReadyBrowser('en-US');
+    vi.stubGlobal('browser', fake);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, initUiLocale } = await overlay();
+    await initUiLocale();
+    // A different sentence than the floor holds, so a floor that wrongly won
+    // reads here: the renderer's own answer must come through untouched.
+    (fake as { i18n?: unknown }).i18n = {
+      getMessage: (key: string) => `healthy:${key.replaceAll('.', '_')}`,
+    };
+    expect(t('popup.status.off')).toBe('healthy:popup_status_off');
+    expect(t('coverage.card.title')).toBe('healthy:coverage_card_title');
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((w) => w.includes('chat-stasher'))).toHaveLength(0);
+  });
+});
+
 describe('i18n overlay · the stored choice', () => {
   function storageBacked(initial: Record<string, unknown> = {}) {
     const data: Record<string, unknown> = { ...initial };
