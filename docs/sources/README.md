@@ -46,12 +46,12 @@ These are the platforms the browser extension captures; the row for each is read
 
 | Page | Surface | Status | Last verified |
 |---|---|---|---|
-| [Claude (official export)](import-claude.md) | export | shipped in this build (`chat-stasher import --platform claude` parses it) | not yet verified end to end |
+| [Claude (official export)](import-claude.md) | export | shipped in this build (`chat-stasher import claude <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
 | [DeepSeek (official export)](import-deepseek.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 | [ChatGPT (official export)](import-chatgpt.md) | export | no parser in this build | not yet verified end to end |
-| [Grok (official export)](import-grok.md) | export | shipped in this build (`chat-stasher import --platform grok` parses it) | not yet verified end to end |
+| [Grok (official export)](import-grok.md) | export | shipped in this build (`chat-stasher import grok <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
 | [Gemini (official export)](import-gemini.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 
-An official export (a takeout you request from the platform) is the platform's own statement of what an account holds. The Parser column is read from the import seam itself: `shipped` means `chat-stasher import --platform <id>` parses the export in this build, and no row claims a scan or capture. No official export has a recorded end-to-end run yet, so each page says so rather than carrying a date.
+An official export (a takeout you request from the platform) is the platform's own statement of what an account holds. The Parser column is read from the import seam itself: `shipped` means `chat-stasher import <id> <export> --inbox <dir> --stage <dir>` parses the export in this build, and no row claims a scan or capture. No official export has a recorded end-to-end run yet, so each page says so rather than carrying a date.
 
 A recorded verification has a shelf life: a date older than 90 days is shown as `needs re-check (DATE)`, exactly as in the support tables, and the same day the generator fails its own check until the pages are re-derived. A source with no record says `not yet verified end to end`, which is a statement about what is recorded, never about whether the source works.
