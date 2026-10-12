@@ -4,7 +4,7 @@
 
 Every AI tool, chat site, browser, operating system and storage destination chat-stasher works with, and how sure we are about each one.
 
-The four large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the tool actually scans and registers. Do not edit them by hand: change the registry and regenerate.
+The four large tables below are **generated** from the registry that ships inside the CLI and from the extension's own platform list, by `scripts/gen-support-matrix.py`. They cannot drift from what the tool actually scans and registers. Do not edit them by hand: change the registry and regenerate. One page per source — what the tool collects from it, how complete that is, its quirks and known issues, and when it was last verified end to end — lives under [docs/sources/](sources/README.md); a comparison row in these tables is one line, and the page is the whole story.
 
 ## How to read the status
 

@@ -143,6 +143,8 @@ python3 -m unittest scripts/tests/test_user_strings.py
 python3 scripts/output-inventory.py --check
 python3 scripts/check-support-matrix.py
 python3 scripts/check-support-matrix.py --selftest
+python3 scripts/check-source-pages.py
+python3 scripts/check-source-pages.py --selftest
 python3 scripts/takeout-format-inventory.py --selftest
 python3 scripts/tests/test_takeout_format_inventory.py
 python3 scripts/check-commit-messages.py --selftest
@@ -374,6 +376,15 @@ Seven of these checks guard properties that are easy to break without noticing:
   registry and the extension's platform table, and fails when either source
   moved without the committed tables being re-derived. It never decides whether
   a row's claim is true — only whether the table still matches its inputs.
+- `check-source-pages.py` re-derives the per-source pages under `docs/sources/`
+  from the same three inputs those pages name — the harness registry, the
+  extension's platform table, and the import seam's `TakeoutPlatform` enum —
+  and fails when a page is missing, when no source owns a page, when a
+  generated header block no longer matches those inputs, when the generated
+  index drifted, or when a hand-written body lost or reordered one of its
+  fixed headings. Like the support-matrix check it never decides whether a
+  page's prose is true; it holds exactly the boundary between the generated
+  half and the written half.
 - `check-doc-links.py` resolves every link between our own Markdown files,
   including the `#fragment` on each one. A link to a file that moved, or to a
   heading that was renamed under it, renders perfectly and fails silently, and
