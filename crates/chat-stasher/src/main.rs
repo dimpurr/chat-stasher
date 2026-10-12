@@ -188,12 +188,12 @@ enum ScheduleAction {
     Uninstall,
 }
 
-/// A harness whose local-cache backup `import --harness` can feed in.
+/// A harness for `import --harness` (cache copy) or `backfill` (app-driven).
 ///
 /// One variant today: Grok Bot, whose measured local cache (ADR-051 fidelity
-/// `partial`) is the one whose copies beside the live cache needed a
-/// first-class door (GB-3/GB-3b). The enum exists so the offered value is a
-/// named word, not a free string — a harness with no backup support answers
+/// `partial`) is the one whose copies needed a first-class door (GB-3/GB-3b)
+/// and whose backfill ADR-058 decided. The enum exists so the offered value
+/// is a named word, not a free string: a harness with no support answers
 /// with this build's list, not with a guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum BackupHarness {
@@ -1502,6 +1502,82 @@ enum Command {
         #[command(subcommand)]
         action: IndexAction,
     },
+    /// Backfill an opt-in source's older history through its own app
+    /// (ADR-058 D1). Only Grok Bot exists today.
+    ///
+    /// The Grok Bot local cache is a bounded window, and every position
+    /// that fell out of it is gone from disk for good — but the server
+    /// still holds the conversation, and whenever the app opens one, the
+    /// app itself fetches the conversation's whole user-visible span into
+    /// view. `backfill grok-bot` relaunches the app with a debugging
+    /// connection that listens only on this machine, opens one
+    /// conversation at a time exactly as a person clicking the sidebar
+    /// would, waits while the app loads it, and delivers the rows the
+    /// archive does not already hold — marked as backfilled, through the
+    /// same session identity a collect uses, so nothing is added twice and
+    /// an ordinary collect after a backfill stays incremental.
+    ///
+    /// **The default is a dry run**: with no extra flags the same
+    /// read-only traversal runs — it too relaunches and drives the app —
+    /// and it only reports (per conversation: rows it would add, the
+    /// loaded span versus the locally held span, and the positions that
+    /// will stay missing). Rows are delivered only with
+    /// `--i-accept-the-risk`, which is what the public doc names, and the
+    /// risk statement is printed before every run, a dry run included.
+    ///
+    /// The run is user-started only: no schedule, daemon or config path
+    /// can reach it. The app is restored to a normal launch at the end of
+    /// every run — including Ctrl-C, where what has been delivered stays
+    /// delivered. The interior positions the vendor's service never sends
+    /// the app stay missing and the session's gap record and `partial`
+    /// fidelity stand: the archive never claims completeness.
+    ///
+    /// Exit codes: `0` every selected conversation loaded and was
+    /// reported (or delivered) · `1` the traversal finished with findings
+    /// — a conversation that never finished loading within its wait and
+    /// was skipped whole, a `--conversation` prefix that matched nothing,
+    /// a restore that could not be verified — or the app could not be
+    /// restored to a normal launch · `2` usage (including a `--stage`
+    /// that is not a directory) · `3` the run refused (macOS only, app
+    /// not installed, a signed-in app unconfirmable, the debug endpoint
+    /// unusable) or stopped before finishing — a user interrupt or an
+    /// app-layout change; partial work is kept and reported.
+    Backfill {
+        /// The harness whose app-driven backfill this runs.
+        /// Only `grok-bot` exists today.
+        #[arg(value_enum)]
+        harness: BackupHarness,
+        /// Existing stage directory receiving the sealed shards. Never
+        /// created.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Deliver the rows the run finds (a real run). Without this flag
+        /// the run is a dry run: the identical traversal, reports only.
+        #[arg(long = "i-accept-the-risk")]
+        i_accept_the_risk: bool,
+        /// Restrict the run to the conversations named by these id
+        /// prefixes (repeatable) — the prefixes the dry run prints.
+        /// Default: every conversation the app's sidebar lists.
+        #[arg(long = "conversation", value_name = "PREFIX")]
+        conversations: Vec<String>,
+        /// Machine partition for `sessions/<machine>/…`, as for `collect`.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Maximum sealed shards per bucket (default: 20).
+        #[arg(long, default_value_t = store::DEFAULT_SHARD_BUCKET_CAP)]
+        shard_bucket_cap: usize,
+        /// Named destination from the config, as for `collect` — the
+        /// destination whose delivered state the run extends.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Destination repository to backfill for, instead of a named
+        /// destination.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override for the destination above.
+        #[arg(long)]
+        key_file: Option<String>,
+    },
 }
 
 /// `cache` subcommands.
@@ -2022,6 +2098,27 @@ fn run() -> ExitCode {
                 &stage,
             ),
         },
+        Command::Backfill {
+            harness,
+            stage,
+            i_accept_the_risk,
+            conversations,
+            machine,
+            shard_bucket_cap,
+            destination,
+            repo,
+            key_file,
+        } => cmd_backfill_grok_bot(
+            harness,
+            &stage,
+            i_accept_the_risk,
+            &conversations,
+            machine.as_deref(),
+            shard_bucket_cap,
+            destination.as_deref(),
+            repo.as_deref(),
+            key_file.as_deref(),
+        ),
         Command::Ingest {
             inbox,
             stage,
@@ -6363,6 +6460,197 @@ fn cmd_import_backup(
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// `backfill grok-bot`: the user-started, app-driven recovery of a
+/// conversation's pre-window history (ADR-058 D1). The command shell: the
+/// library owns the run; this function resolves the collector context the
+/// run needs (machine, destination, state, persistence root), registers the
+/// interrupt handler, prints the report and maps the outcome's exit code.
+#[allow(clippy::too_many_arguments)]
+fn cmd_backfill_grok_bot(
+    harness: BackupHarness,
+    stage: &Path,
+    deliver: bool,
+    conversations: &[String],
+    machine: Option<&str>,
+    shard_bucket_cap: usize,
+    destination: Option<&str>,
+    repo: Option<&str>,
+    key_file: Option<&str>,
+) -> ExitCode {
+    // Exhaustive by construction: adding a harness here must decide what
+    // this command does for it, and the compiler enforces that now rather
+    // than a runtime guess answering later.
+    let BackupHarness::GrokBot = harness;
+    if !stage.is_dir() {
+        eprintln!(
+            "backfill: FAILED exit_code=2 — stage {} is not a directory; backfill never \
+             creates a stage",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    let config = match config_or_refuse("backfill") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    let machine = match resolve_machine("backfill", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let state_dir = chat_stasher::collect::default_state_dir();
+    let store_cfg = resolve_store_config(
+        &config,
+        destination,
+        repo.map(String::from),
+        key_file.map(String::from),
+        None,
+        &[],
+    );
+    let view = destination_view(&store_cfg, &machine);
+    let Some(persistence_root) = chat_stasher::scanner::grok_bot_persistence_root(&config) else {
+        eprintln!(
+            "backfill: REFUSED exit_code=3 — the grok-bot persistence root could not be \
+             resolved the way a scan resolves it; nothing was touched"
+        );
+        return ExitCode::from(3);
+    };
+
+    // The interrupt flag: a SIGINT/SIGTERM sets it and the run restores the
+    // app before exiting. One registration per process; an already-set
+    // handler (impossible for the CLI, which runs one command per process)
+    // leaves the flag unset, so the callback simply never fires.
+    let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registered = {
+        let flag = interrupt.clone();
+        ctrlc::set_handler(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .is_ok()
+    };
+
+    let driver = chat_stasher::backfill::CdpAppDriver::new(
+        chat_stasher::backfill::Clock::wall(),
+        &persistence_root,
+    );
+    let request = chat_stasher::backfill::BackfillRequest {
+        stage,
+        machine: &machine,
+        state_dir: &state_dir,
+        shard_bucket_cap,
+        destination: &view,
+        deliver,
+        conversation_prefixes: conversations.to_vec(),
+        persistence_root: &persistence_root,
+        interrupt: &interrupt,
+        clock: chat_stasher::backfill::Clock::wall(),
+        driver: Box::new(driver),
+    };
+    let mut stdout = std::io::stdout();
+    let outcome = chat_stasher::backfill::run_grok_bot_backfill(request, &mut stdout);
+    let code = outcome.exit_code();
+
+    match &outcome {
+        chat_stasher::backfill::BackfillOutcome::Refused(refusal) => {
+            let kind = if refusal.usage { "usage" } else { "refused" };
+            eprintln!("backfill: {kind} exit_code={code} — {}", refusal.reason);
+            if !registered {
+                eprintln!(
+                    "backfill: note — the interrupt handler could not be registered, so \
+                     Ctrl-C restores nothing; interrupting anyway stops the run where it \
+                     stands"
+                );
+            }
+        }
+        chat_stasher::backfill::BackfillOutcome::Completed(report) => {
+            print_backfill_report(report);
+        }
+        chat_stasher::backfill::BackfillOutcome::CompletedWithFindings(report, findings) => {
+            print_backfill_report(report);
+            eprintln!(
+                "backfill: exit_code={code} — the traversal finished with findings; a \
+                 re-run of this command tries again and adds nothing twice:"
+            );
+            for finding in findings {
+                eprintln!("  - {finding}");
+            }
+        }
+        chat_stasher::backfill::BackfillOutcome::Stopped(report, why) => {
+            print_backfill_report(report);
+            eprintln!(
+                "backfill: STOPPED exit_code={code} — {why}; what has been delivered stays \
+                 delivered and the app was restored where the restore was attempted"
+            );
+        }
+        chat_stasher::backfill::BackfillOutcome::RestoreFailed(report, why) => {
+            print_backfill_report(report);
+            eprintln!("backfill: FAILED exit_code={code} — {why}");
+        }
+    }
+    std::process::ExitCode::from(code)
+}
+
+fn print_backfill_report(report: &chat_stasher::backfill::BackfillReport) {
+    println!(
+        "[backfill] mode            : {}",
+        if report.dry_run {
+            "dry-run (no flag: reports only, delivers nothing)"
+        } else {
+            "deliver (--i-accept-the-risk given)"
+        }
+    );
+    println!("[backfill] run id          : {}", report.run_id);
+    if let Some(version) = &report.app_version_start {
+        println!("[backfill] app version     : {version}");
+    }
+    println!("[backfill] debug port      : {}", report.debug_port);
+    for conversation in &report.conversations {
+        println!("{}", conversation.summary_line());
+    }
+    println!(
+        "[backfill] conversations    : {}",
+        report.conversations.len()
+    );
+    let delivered: u64 = report
+        .conversations
+        .iter()
+        .map(|item| item.rows_delivered)
+        .sum();
+    let already: u64 = report
+        .conversations
+        .iter()
+        .map(|item| item.rows_already_delivered)
+        .sum();
+    println!(
+        "[backfill] rows {} : {delivered}",
+        if report.dry_run {
+            "would add"
+        } else {
+            "delivered"
+        }
+    );
+    println!("[backfill] rows already    : {already}");
+    if report.dry_run {
+        println!("[backfill] dry-run        : nothing was written");
+    }
+    let restore = &report.restore;
+    if restore.attempted {
+        println!(
+            "[backfill] restore         : app restored to a normal launch (debug pid {:?}, \
+             port {}, port closed verified: {}, sync resumed observed: {})",
+            restore.debug_pid,
+            restore.debug_port,
+            // reason: a port check that could not be verified displays as
+            // "false" — the report column answers "was it verified closed?",
+            // and "unverified" must not read as "yes"
+            restore.port_closed.unwrap_or(false),
+            restore
+                .sync_resumed
+                .map(|seen| seen.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        );
+    }
 }
 
 fn cmd_ingest(

@@ -1020,6 +1020,33 @@ pub fn scan_with_registry_and_machine(
     Ok(report)
 }
 
+/// The persistence root the grok-bot probe would read, resolved exactly the
+/// way the scan pass resolves it — the same precedence `probe_harness`
+/// applies (the registry's env override first, then the config's
+/// `[harness_roots]` root, then the registry template), through the same
+/// helpers, so a caller needing that read outside a full scan (the
+/// backfill pass's preflight) could not drift from the scan's own path.
+///
+/// `None` = this build would not scan grok-bot here (no registry cell for
+/// this platform, or a template this build refuses to guess-scan).
+pub fn grok_bot_persistence_root(config: &Config) -> Option<PathBuf> {
+    let registry = load_registry_from_repo().ok()?;
+    let harness = registry.harnesses.iter().find(|h| h.id == "grok-bot")?;
+    let cell = harness.paths.cell_for(current_platform())?;
+    if let Some((root, _)) = root_from_env_override(cell) {
+        return Some(root);
+    }
+    if let Some(explicit_root) = config.explicit_harness_root("grok-bot").map(expand_tilde) {
+        return Some(explicit_root);
+    }
+    if !Confidence::classify(&cell.confidence).scan_allowed() {
+        // A guessed path the registry itself refuses to guess: honor the
+        // same gate the scan pass honors.
+        return None;
+    }
+    static_prefix_root(&cell.template).map(|(root, _)| root)
+}
+
 fn scan_hermes_legacy(
     harness: &RegistryHarness,
     machine: &str,
