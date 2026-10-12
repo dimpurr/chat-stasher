@@ -2996,6 +2996,56 @@ mod tests {
         assert!(extracted.body.is_empty());
     }
 
+    /// W986: a session body holding a cross-shard replay — the second shard
+    /// re-delivered the first's rows, the third re-delivered the middle's
+    /// new rows — indexes each turn once. The extractor reads through the
+    /// same variant-per-seq rule the reader applies, so a row stored twice
+    /// by the archive contributes its text once to the index body and no
+    /// needle is findable twice over.
+    #[test]
+    fn grok_bot_cross_shard_replays_index_each_turn_once() {
+        let body = concat!(
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic quadruped question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"timestampMs":1780000000100,"isStreaming":false,"role":"assistant","content":"synthetic quadruped answer"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":2}}"#,
+            "\n",
+            // Shard two replays shard one whole; only the metadata seal
+            // differs, so no whole-body replay check drops it. Shard three
+            // replays the middle shard's new row again (interleaved shape).
+            r#"{"id":"synthetic-one","kind":"message","seq":1,"timestampMs":1780000000000,"isStreaming":false,"role":"user","content":"synthetic quadruped question"}"#,
+            "\n",
+            r#"{"id":"synthetic-two","kind":"message","seq":2,"timestampMs":1780000000100,"isStreaming":false,"role":"assistant","content":"synthetic quadruped answer"}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"timestampMs":1780000000200,"isStreaming":false,"role":"user","content":"synthetic quadruped follow-up"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+            r#"{"id":"synthetic-three","kind":"message","seq":3,"timestampMs":1780000000200,"isStreaming":false,"role":"user","content":"synthetic quadruped follow-up"}"#,
+            "\n",
+            r#"{"_chat_stasher":{"source":"grok-bot","partial_replica":true,"sequence_gaps":[],"observed_sequence_min":1,"observed_sequence_max":3}}"#,
+            "\n",
+        );
+        let extracted = extract_index_document_for("grok-bot", body.as_bytes()).unwrap();
+        assert!(extracted.is_indexable());
+        // Three distinct turns, one message each: the replayed rows add no
+        // message of their own and no second copy of anyone's text.
+        assert_eq!(extracted.message_offsets.len(), 3);
+        for needle in [
+            "synthetic quadruped question",
+            "synthetic quadruped answer",
+            "synthetic quadruped follow-up",
+        ] {
+            assert_eq!(
+                extracted.body.matches(needle).count(),
+                1,
+                "turn {needle:?} must be indexed exactly once, not once per stored copy"
+            );
+        }
+        assert_eq!(extracted.unread_lines, 0);
+    }
+
     /// The secret rule must hold in the built index, not only in the
     /// extractor's answer (GB-5 §3): a grok-bot session that carried a
     /// secret record is still searchable — its plainly rendered phrase is

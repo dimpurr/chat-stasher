@@ -60,8 +60,20 @@
 //! Anything else — archive unreachable, archive disagrees, no entry under this
 //! destination at all, state written by an older per-machine format — is
 //! **unverifiable, and unverifiable means unread**. The source is reread in
-//! full. There is no migration path and no "trust it for now" branch: a
-//! measurable duplicate always beats a silent omission.
+//! full. There is no "trust it for now" branch: a measurable duplicate always
+//! beats a silent omission.
+//!
+//! The one thing that moves under a key is the key. Grok Bot debts are
+//! addressed by their session identity rather than their source path
+//! ([`state_key`], W986): the same agent re-enters the scan whenever its
+//! persistence tree moves, and a path-keyed delivered set made every new
+//! path a first read that re-delivered the whole union. A state file from
+//! before that change is re-keyed at load — each path entry seeding its
+//! session's delivered set — which is a rewrite of *where an entry answers*,
+//! never of what it claims: the merged entry still discharges itself against
+//! the stage or the destination archive exactly as above, an entry whose
+//! digests were never recorded still re-reads in full, and a session no entry
+//! names has still never been read for.
 
 use crate::config::Config;
 use crate::models::{SessionRecord, SqliteSessionLayout};
@@ -1191,6 +1203,11 @@ pub fn collect_scan_report(
         // reason: on first archive to a new destination, runstate has no record for this destination, so the debt set is naturally empty
         .unwrap_or_default()
         .files;
+    // Re-key grok-bot debts before the first lookup, so a state file written
+    // before the session key (W986) answers under the key this build reads.
+    // In memory only: the file is rewritten by the same save paths as ever,
+    // and an entry still has to prove itself before any cursor is reused.
+    migrate_grok_bot_debts(&mut debts);
     let legacy_state_ignored = state_dir.join(LEGACY_STATE_FILE).exists();
     let mut report = CollectReport {
         destination_id: destination_id.clone(),
@@ -2651,6 +2668,101 @@ fn load_state(path: &Path) -> anyhow::Result<DebtState> {
     }
 }
 
+/// Re-key this destination's Grok Bot debts from their source paths onto
+/// their sessions (W986), in memory, before any lookup.
+///
+/// A state file written before the session key holds grok-bot entries under
+/// each path the session was ever read from — `<path>\0<session id>` — so
+/// one session collected from two paths holds two entries, and the new key
+/// must not leave the second one unread-behind-a-path-name. Every entry
+/// still names its session (`session_id`), so the migration needs nothing
+/// but the state file itself:
+///
+/// * one path entry seeds its session's delivered set;
+/// * several paths that read one session take the **union** of their
+///   delivered sets — each entry is a delivery that happened, and no row
+///   any path delivered is owed twice;
+/// * an entry whose delivered digests are *unknown* (`grok_bot_row_digests`
+///   `None`, a cursor a build wrote without a digest set) keeps the session
+///   unknown: the union of an unknown with anything stays unknown, so the
+///   session re-delivers once and is measured from then on — a re-keying
+///   must never claim more than some path actually proved;
+/// * every other field — the shard set the debt is accountable for, the
+///   cursor's byte bookkeeping — is carried by the most advanced entry,
+///   and the merged entry still has to discharge itself against the stage
+///   or the destination archive exactly as before. Re-keying changes which
+///   name an entry answers under, never what it is believed for
+///   (ADR-012/013).
+///
+/// Idempotent: an entry already keyed by its session is kept where it is
+/// and a session holding both new and old entries (a downgrade, then)
+/// merges them all into one. Entries of other harnesses are untouched:
+/// the moved entries are chosen by their session id, never by the shape of
+/// their key, so no path-addressed key of another harness can be mistaken
+/// for one of ours.
+fn migrate_grok_bot_debts(files: &mut BTreeMap<String, DebtEntry>) {
+    let original = std::mem::take(files);
+    let mut by_session: BTreeMap<String, Vec<DebtEntry>> = BTreeMap::new();
+    for (key, entry) in original {
+        if key != grok_bot_session_key(&entry.session_id) && is_grok_bot_session(&entry.session_id)
+        {
+            by_session
+                .entry(entry.session_id.clone())
+                .or_default()
+                .push(entry);
+        } else {
+            files.insert(key, entry);
+        }
+    }
+    for (session_id, entries) in by_session {
+        if let Some(merged) = merge_grok_bot_session_debts(entries) {
+            files.insert(grok_bot_session_key(&session_id), merged);
+        }
+    }
+}
+
+/// Merge one session's path-keyed debt entries into the single entry its
+/// session key will hold (see [`migrate_grok_bot_debts`]). `None` cannot
+/// happen for a nonempty group, but the merge stays total — a degenerate
+/// state file must re-deliver, never panic.
+fn merge_grok_bot_session_debts(entries: Vec<DebtEntry>) -> Option<DebtEntry> {
+    // Union of what the paths proved they delivered; `None` holds only
+    // while the vector is empty, which the caller never passes.
+    let Some(mut primary) = entries.first().cloned() else {
+        return None;
+    };
+    let mut delivered: BTreeSet<String> = BTreeSet::new();
+    let mut delivery_unknown = false;
+    for entry in &entries {
+        match entry.cursor.grok_bot_row_digests.as_ref() {
+            Some(digests) => delivered.extend(digests.iter().cloned()),
+            None => delivery_unknown = true,
+        }
+        if debt_advance(entry) > debt_advance(&primary) {
+            primary = entry.clone();
+        }
+    }
+    if delivery_unknown {
+        // The unknown outranks every measured set: another path's digests
+        // cannot narrow what the digest-less entry delivered, so the
+        // session re-delivers once under its own key and carries a measured
+        // set from then on.
+        primary.cursor.grok_bot_row_digests = None;
+    } else {
+        primary.cursor.grok_bot_row_digests = Some(delivered.into_iter().collect());
+    }
+    Some(primary)
+}
+
+/// How far along the archive's own record one debt entry is: the sealed
+/// bytes its shard set witnessed, then the shards themselves. Only the
+/// entry carrying bookkeeping for a merged group is picked with this
+/// (`merge_grok_bot_session_debts`); deliverability is decided by the
+/// delivered-set union, never by this rank.
+fn debt_advance(entry: &DebtEntry) -> (u64, usize) {
+    (entry.shards.concat_bytes, entry.shards.shard_count)
+}
+
 /// Persist `debts` as this destination's slice, leaving every other
 /// destination's slice byte-for-byte as it was loaded.
 fn save_state(
@@ -2684,12 +2796,46 @@ fn source_key(path: &Path) -> String {
         .into_owned()
 }
 
+/// The debt key of one Grok Bot session: the session's own identity, never
+/// its source path (W986).
+///
+/// The delivered set decides what a grok-bot pass writes, and the same agent
+/// is read again through a new path whenever its persistence tree moves —
+/// the app relocating `sand-client-persistence`, a second persistence
+/// directory under the app root, or a `[harness_roots]` rescue feed. A
+/// path-keyed entry made every new path a first read that re-delivered and
+/// re-sealed every union row, so the delivery identity is the one the
+/// archive already uses everywhere else: the session id
+/// `grok-bot.<machine>.<agent-uuid>` (machine + agent uuid, GB-5 §5), the
+/// same identity the union state file and the stage shards answer for.
+///
+/// The sentinel stands where a source path would stand in the other keys of
+/// this map; no path a filesystem can name equals it, so a session-keyed
+/// entry can never collide with another harness's path-addressed key.
+const GROK_BOT_SESSION_DEBT_KEY: &str = "grok-bot-session";
+
+fn grok_bot_session_key(session_id: &str) -> String {
+    format!("{GROK_BOT_SESSION_DEBT_KEY}\0{session_id}")
+}
+
+/// Whether a session id belongs to the Grok Bot harness. Its first dotted
+/// component is the harness short name the registry ids share, read through
+/// the same vocabulary rather than a string convention this file invents.
+fn is_grok_bot_session(session_id: &str) -> bool {
+    session_id
+        .split('.')
+        .next()
+        .and_then(crate::models::HarnessSource::from_id)
+        .is_some_and(|source| source == crate::models::HarnessSource::GrokBot)
+}
+
 fn state_key(record: &SessionRecord) -> String {
-    let path = source_key(&record.absolute_path);
-    if record.sqlite_layout.is_some() {
-        format!("{path}\0{}", record.id)
-    } else {
-        path
+    match record.sqlite_layout {
+        // Grok Bot delivery is session-keyed (see [`grok_bot_session_key`]):
+        // the source path contributes nothing, on purpose.
+        Some(SqliteSessionLayout::GrokBot) => grok_bot_session_key(&record.id),
+        Some(_) => format!("{}\0{}", source_key(&record.absolute_path), record.id),
+        None => source_key(&record.absolute_path),
     }
 }
 
@@ -2773,5 +2919,179 @@ mod shard_fact_tests {
         let mut archive = fact(1, b"record\n");
         archive.shard_identities[0].sha256 = sha256_hex(b"other\n");
         assert!(!archive_contains_shards(&archive, &fact(1, b"record\n")));
+    }
+}
+
+/// W986 — the re-keying of grok-bot debts from their source paths onto their
+/// sessions. Every fixture digests and shard set here is synthetic; the merge
+/// rules are the ones [`migrate_grok_bot_debts`] states.
+#[cfg(test)]
+mod grok_bot_debt_key_tests {
+    use super::*;
+
+    const SESSION: &str = "grok-bot.synthetic-machine.11111111-2222-4333-8444-555555555555";
+
+    fn grok_entry(path: &str, digests: Option<Vec<&str>>) -> (String, DebtEntry) {
+        let digests = digests.map(|digests| digests.into_iter().map(str::to_string).collect());
+        let key = format!("{path}\0{SESSION}");
+        (
+            key,
+            DebtEntry {
+                machine: "synthetic-machine".to_string(),
+                session_id: SESSION.to_string(),
+                cursor: OffsetEntry {
+                    offset: 0,
+                    prefix_len: 0,
+                    prefix_sha256: "synthetic-prefix".to_string(),
+                    compressed: false,
+                    opencode: None,
+                    store_fingerprint: None,
+                    grok_bot_row_digests: digests,
+                },
+                shards: ShardFact {
+                    shard_count: 1,
+                    concat_bytes: 10,
+                    concat_sha256: "synthetic-concat".to_string(),
+                    shard_identities: Vec::new(),
+                },
+            },
+        )
+    }
+
+    fn other_entry(path: &str, session_id: &str) -> (String, DebtEntry) {
+        // A debt of another harness: path-keyed, its own session id.
+        let (_, mut entry) = grok_entry(path, None);
+        entry.session_id = session_id.to_string();
+        (path.to_string(), entry)
+    }
+
+    #[test]
+    fn state_keyed_grok_bot_records_answer_by_session_never_by_path() {
+        let from_root = |path: &str| SessionRecord {
+            // The scanner fields state_key itself never reads beyond the
+            // layout and the id; the rest is inert fixture here.
+            id: SESSION.to_string(),
+            absolute_path: std::path::PathBuf::from(path),
+            byte_size: 0,
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            source: crate::models::HarnessSource::GrokBot,
+            compressed: false,
+            sqlite_layout: Some(SqliteSessionLayout::GrokBot),
+            provenance: Default::default(),
+        };
+        let path_keyed = state_key(&from_root("/synthetic/first/persistence/replica.blob"));
+        // Two paths, two records: one session, one key.
+        assert_eq!(
+            path_keyed,
+            state_key(&from_root("/synthetic/second/persistence/replica.blob"))
+        );
+        assert_eq!(path_keyed, grok_bot_session_key(SESSION));
+        assert!(
+            !path_keyed.contains("/synthetic"),
+            "the delivery key must not carry the source path"
+        );
+    }
+
+    #[test]
+    fn path_entries_seed_their_session_and_union_their_delivered_sets() {
+        let mut files = BTreeMap::new();
+        let (key_a, entry_a) = grok_entry("/synthetic/one", Some(vec!["digest-one"]));
+        let (key_b, entry_b) =
+            grok_entry("/synthetic/two", Some(vec!["digest-two", "digest-three"]));
+        let (claude_key, entry_plain) = other_entry(
+            "/synthetic/claude/session.jsonl",
+            "claude-code.synthetic-machine.synthetic-1",
+        );
+        files.insert(key_a, entry_a);
+        files.insert(key_b, entry_b);
+        files.insert(claude_key, entry_plain);
+        let claude_before = files
+            .get("/synthetic/claude/session.jsonl")
+            .cloned()
+            .unwrap();
+
+        migrate_grok_bot_debts(&mut files);
+
+        let merged = files
+            .get(&grok_bot_session_key(SESSION))
+            .expect("the session's entry answers under its session key");
+        assert_eq!(
+            merged.cursor.grok_bot_row_digests,
+            Some(vec![
+                "digest-one".to_string(),
+                "digest-three".to_string(),
+                "digest-two".to_string()
+            ]),
+            "the union of what the two paths delivered, sorted like every delivered set this build writes"
+        );
+        assert_eq!(
+            files.len(),
+            2,
+            "two path entries became one session entry; the other harness kept exactly its own"
+        );
+        assert_eq!(
+            files.get("/synthetic/claude/session.jsonl"),
+            Some(&claude_before),
+            "another harness's debt is untouched"
+        );
+    }
+
+    #[test]
+    fn an_unknown_delivered_set_migrates_to_unknown_not_to_a_usurped_union() {
+        let mut files = BTreeMap::new();
+        let (key_unknown, entry_unknown) = grok_entry("/synthetic/legacy", None);
+        let (key_known, entry_known) = grok_entry("/synthetic/measured", Some(vec!["digest-one"]));
+        files.insert(key_unknown, entry_unknown);
+        files.insert(key_known, entry_known);
+
+        migrate_grok_bot_debts(&mut files);
+
+        let merged = files.get(&grok_bot_session_key(SESSION)).unwrap();
+        assert_eq!(
+            merged.cursor.grok_bot_row_digests, None,
+            "unknown cannot be narrowed by union: the session re-delivers once and is measured from then on"
+        );
+    }
+
+    #[test]
+    fn the_most_advanced_entry_carries_the_shard_bookkeeping() {
+        let mut files = BTreeMap::new();
+        let (key_small, mut small) = grok_entry("/synthetic/a", Some(vec!["digest-one"]));
+        small.shards = ShardFact {
+            shard_count: 1,
+            concat_bytes: 10,
+            concat_sha256: "synthetic-small".to_string(),
+            shard_identities: Vec::new(),
+        };
+        let (key_large, mut large) = grok_entry("/synthetic/b", Some(vec!["digest-two"]));
+        large.shards = ShardFact {
+            shard_count: 2,
+            concat_bytes: 40,
+            concat_sha256: "synthetic-large".to_string(),
+            shard_identities: Vec::new(),
+        };
+        files.insert(key_small, small);
+        files.insert(key_large, large);
+
+        migrate_grok_bot_debts(&mut files);
+
+        let merged = files.get(&grok_bot_session_key(SESSION)).unwrap();
+        assert_eq!(merged.shards.shard_count, 2);
+        assert_eq!(merged.shards.concat_bytes, 40);
+        assert_eq!(merged.shards.concat_sha256, "synthetic-large");
+    }
+
+    #[test]
+    fn re_keying_is_idempotent_and_ignores_foreign_sessions() {
+        let mut files = BTreeMap::new();
+        let (_, entry) = grok_entry("/synthetic/path", Some(vec!["digest-one", "digest-two"]));
+        files.insert(grok_bot_session_key(SESSION), entry);
+
+        let before = files.clone();
+        migrate_grok_bot_debts(&mut files);
+        assert_eq!(
+            files, before,
+            "an already session-keyed entry merges to itself, unchanged"
+        );
     }
 }

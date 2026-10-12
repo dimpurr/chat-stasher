@@ -616,6 +616,25 @@ under its own heading below.
   always the documented Windows configuration, so no capability is
   withdrawn — the pretence that an installed timer could be checked is.
 
+- **`collect` no longer re-delivers a Grok Bot session read from a new
+  path.** The delivered-set cursor for Grok Bot answered under its source
+  path, so the same agent session re-entered collection as a first read
+  whenever its persistence directory moved, a `[harness_roots]` rescue feed
+  was scanned, or a second persistence directory existed: every union row
+  was sealed again as a new shard beside the old ones — the cross-shard
+  duplicate turns the audit measured. Delivery state is now keyed by the
+  session identity (`grok-bot.<machine>.<agent-uuid>`) the union and the
+  stage already use, so a new path delivers only rows that session has not
+  delivered. State files from before the change are re-keyed at load: each
+  path entry seeds its session's delivered set, several paths that read one
+  session union theirs, and an entry that never recorded its digests keeps
+  the session unread — one conservative re-delivery, then a measured set —
+  and every merged entry still has to prove itself against the stage or the
+  destination archive before its cursor is reused. No archived id, byte or
+  shard changes, and duplicate shards already in the archive are untouched:
+  raw reads keep every stored byte, while the rendered and full-text views
+  show each turn once.
+
 #### Security
 
 - **The activity index redacts the Windows profile directory too.** The

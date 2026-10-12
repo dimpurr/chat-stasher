@@ -617,14 +617,14 @@ crates/chat-stasher/src/activity.rs:2860-2909  a0ac92c15fee  lines=50
   <- docs-dev/privacy.md:453  :: /// or is a label the closed enum does not name, is a bundl…
 crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
-crates/chat-stasher/src/collect.rs:1318-1331  99e96335ad60  lines=14
-  <- docs-dev/privacy.md:496  :: match collect_one(
-crates/chat-stasher/src/collect.rs:2362-2429  23481377a3b6  lines=68
-  <- docs-dev/privacy.md:1071  :: fn process_whole_file(
-crates/chat-stasher/src/collect.rs:2449-2462  a691f0198571  lines=14
-  <- docs-dev/openclaw-scanner.md:46  :: entry.compressed
-crates/chat-stasher/src/collect.rs:2592-2606  13f73f5bd827  lines=15
-  <- docs-dev/openclaw-scanner.md:46  :: // reason: reaching here means no prefix passed validation …
+crates/chat-stasher/src/collect.rs:1318-1331  0312e9446113  lines=14
+  <- docs-dev/privacy.md:496  :: // whole file again on top of shards the stage already hold…
+crates/chat-stasher/src/collect.rs:2362-2429  a7bab4c28af9  lines=68
+  <- docs-dev/privacy.md:1071  :: grok_bot_row_digests: None,
+crates/chat-stasher/src/collect.rs:2449-2462  dbc462b0b0b2  lines=14
+  <- docs-dev/openclaw-scanner.md:46  :: record: &SessionRecord,
+crates/chat-stasher/src/collect.rs:2592-2606  00863f67bb71  lines=15
+  <- docs-dev/openclaw-scanner.md:46  :: counters.files_statted += 1;
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:294  :: /// Directory + filename of the config relative to the user…
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
