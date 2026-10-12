@@ -687,7 +687,11 @@ fn stage_prefix_entry(
 }
 
 /// Observe what the stage currently holds for one session.
-pub(crate) fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
+pub(crate) fn stage_shard_fact(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<ShardFact> {
     let dir = store::session_shard_dir(stage, machine, session_id);
     let mut entries = store::sealed_shard_entries(&dir)?;
     entries.sort_by_key(|(sequence, _)| *sequence);
@@ -713,7 +717,10 @@ pub(crate) fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) ->
 
 /// Read the local manifest baseline for one machine into a session lookup map,
 /// if the manifest exists and is valid. Missing or corrupt files yield `None`.
-pub(crate) fn load_local_manifest_facts(stage: &Path, machine: &str) -> Option<BTreeMap<String, ShardFact>> {
+pub(crate) fn load_local_manifest_facts(
+    stage: &Path,
+    machine: &str,
+) -> Option<BTreeMap<String, ShardFact>> {
     match crate::manifest::read_manifest(stage, machine) {
         Ok(crate::manifest::ManifestFileState::Loaded(rows)) => {
             let mut map = BTreeMap::new();
@@ -1563,7 +1570,9 @@ const GROK_BOT_UNION_STATE_VERSION: u32 = 2;
 /// canonical raw JSON. Rows are content-addressed because a sequence number
 /// alone cannot say whether a position carries one archived observation or
 /// several variants.
-pub(crate) fn grok_bot_row_digest(record: &crate::grok_bot::ReplicaRecord) -> anyhow::Result<String> {
+pub(crate) fn grok_bot_row_digest(
+    record: &crate::grok_bot::ReplicaRecord,
+) -> anyhow::Result<String> {
     let bytes = serde_json::to_vec(&record.raw).context("serialize Grok Bot raw record")?;
     Ok(sha256_hex(&bytes))
 }
@@ -1578,7 +1587,9 @@ pub(crate) fn grok_bot_union_path(state_dir: &Path, agent_id: &str) -> PathBuf {
 /// Load one agent's union state from disk. A missing file is an empty union;
 /// anything else — unreadable, or a version this build does not write — is a
 /// named failure, never a silent empty.
-pub(crate) fn load_grok_bot_union(union_path: &Path) -> anyhow::Result<Vec<crate::grok_bot::ReplicaRecord>> {
+pub(crate) fn load_grok_bot_union(
+    union_path: &Path,
+) -> anyhow::Result<Vec<crate::grok_bot::ReplicaRecord>> {
     match fs::read(union_path) {
         Ok(bytes) => {
             let state: GrokBotUnionState = serde_json::from_slice(&bytes).with_context(|| {

@@ -617,14 +617,14 @@ crates/chat-stasher/src/activity.rs:2860-2909  a0ac92c15fee  lines=50
   <- docs-dev/privacy.md:453  :: /// or is a label the closed enum does not name, is a bundl…
 crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
-crates/chat-stasher/src/collect.rs:1318-1331  0312e9446113  lines=14
-  <- docs-dev/privacy.md:496  :: // whole file again on top of shards the stage already hold…
-crates/chat-stasher/src/collect.rs:2458-2526  f4cd9482eca2  lines=69
-  <- docs-dev/privacy.md:1071  :: session_prefix: id_prefix(&record.id),
-crates/chat-stasher/src/collect.rs:2528-2541  67957b20f2b9  lines=14
-  <- docs-dev/openclaw-scanner.md:46  :: source_path_sha256: path_digest(&record.absolute_path),
-crates/chat-stasher/src/collect.rs:2671-2685  1adf6a788d2a  lines=15
-  <- docs-dev/openclaw-scanner.md:46  :: base_offset: entry.offset,
+crates/chat-stasher/src/collect.rs:1318-1331  ec0713b1c41c  lines=14
+  <- docs-dev/privacy.md:496  :: report.reconciliations.push(ReconcileNotice {
+crates/chat-stasher/src/collect.rs:2458-2526  9e81c95476e7  lines=69
+  <- docs-dev/privacy.md:1071  :: Ok(Processed {
+crates/chat-stasher/src/collect.rs:2528-2541  d01a447f96d8  lines=14
+  <- docs-dev/openclaw-scanner.md:46  :: state: OffsetEntry {
+crates/chat-stasher/src/collect.rs:2671-2685  4979f697033d  lines=15
+  <- docs-dev/openclaw-scanner.md:46  :: continue;
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:294  :: /// Directory + filename of the config relative to the user…
 crates/chat-stasher/src/config.rs:115-120  0c4fcb3ab27a  lines=6
