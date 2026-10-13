@@ -912,6 +912,206 @@
         "license_url": "https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE",
         "verification": "Public documentation and published packages were read, and the local layout was measured on macOS. This is not a licence review of the packaged application."
       }
+    },
+    {
+      "id": "codebuff",
+      "display_name": "Codebuff / Freebuff",
+      "dev_priority": "normal",
+      "known_issue": "attachment bytes are not archived and per-message times stay unknown; sessions render through the reader, attachments stay in the raw transcript only",
+      "dimensions": {
+        "supported": [],
+        "surfaces": [
+          "cli"
+        ]
+      },
+      "source_roots": [
+        {
+          "id": "codebuff",
+          "override_scope": "entry",
+          "paths": {
+            "macos": {
+              "template": "~/.config/manicode/",
+              "env_override": "FREEBUFF_CONFIG_DIR",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "source-confirmed",
+              "source": "upstream CodebuffAI/codebuff cli/src/utils/config-dir.ts:17-34 and cli/src/project-files.ts:57-63 (getProjectDataDir), read 2026-10-08 at branch main (unpinned; a third-party reader pinned the installed free flavour at 0.2.16 on 2026-10-05); the same chats/<ISO-timestamp> layout was probed read-only (counts and field names only) on the machine that had it on 2026-10-06. No install was present on the machine this entry was written on (checked 2026-10-13), so the shape is upstream-source-confirmed, not measured-locally."
+            },
+            "linux": {
+              "template": "$HOME/.config/manicode/",
+              "env_override": "FREEBUFF_CONFIG_DIR",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "the resolver is platform-independent (os.homedir()); no Linux install measured"
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.config\\manicode\\",
+              "env_override": "FREEBUFF_CONFIG_DIR",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "os.homedir() -> %USERPROFILE% and path.join('.config') is explicit in config-dir.ts, so this is NOT %APPDATA%; no Windows install measured"
+            }
+          }
+        },
+        {
+          "id": "codebuff-dev",
+          "default_only": true,
+          "paths": {
+            "macos": {
+              "template": "~/.config/manicode-dev/",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "source-confirmed",
+              "source": "upstream cli/src/utils/config-dir.ts:27-34: builds whose environment is not prod append a channel suffix to the same base, so dev writes a sibling root with the identical layout; the override on the primary root is entry-wide and a default-only root declares none (read 2026-10-08 at branch main, unpinned)"
+            },
+            "linux": {
+              "template": "$HOME/.config/manicode-dev/",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "the resolver is platform-independent (os.homedir()); no Linux install measured"
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.config\\manicode-dev\\",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "os.homedir() -> %USERPROFILE%; no Windows install measured"
+            }
+          }
+        },
+        {
+          "id": "codebuff-staging",
+          "default_only": true,
+          "paths": {
+            "macos": {
+              "template": "~/.config/manicode-staging/",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "source-confirmed",
+              "source": "upstream cli/src/utils/config-dir.ts:27-34: staging writes the third sibling root with the identical layout; the override on the primary root is entry-wide and a default-only root declares none (read 2026-10-08 at branch main, unpinned)"
+            },
+            "linux": {
+              "template": "$HOME/.config/manicode-staging/",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "the resolver is platform-independent (os.homedir()); no Linux install measured"
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.config\\manicode-staging\\",
+              "format": "json",
+              "session_pattern": "chat-messages.json",
+              "session_dir": {
+                "pattern": "projects/*/chats/*",
+                "file": "chat-messages.json",
+                "extra_files": [
+                  "chat-meta.json"
+                ],
+                "id_components": [
+                  1,
+                  3
+                ]
+              },
+              "confidence": "unascertained",
+              "source": "os.homedir() -> %USERPROFILE%; no Windows install measured"
+            }
+          }
+        }
+      ],
+      "notes": "Codebuff (formerly Manicode) CLI and its free/sponsored freebuff flavour: one product, one on-disk layout, legacy directory name manicode, three channel roots (prod, -dev, -staging) that are builds of the same tool and never surfaces. The native id is <project-basename>.<chat-id>, composed from the session directory path: the chat id IS the session start time in ISO-8601 with ':' -> '-', so the id's trailing component is a millisecond timestamp, not a UUID, and the basename keeps same-timestamp chats under different project basenames distinct. The start time itself is recorded at capture as its own field and must never be re-read from the id: a long project basename gets the id bounded at the tail, and the timestamp goes with it. The basename is lossy and is identity, not a container: never parse it as a cwd (the authoritative cwd lives in run-state.json, which is excluded); the container dimension stays empty. Whitelist: only chat-messages.json and chat-meta.json are captured (run-state.json, log.jsonl and in-flight *.tmp files are deliberately ignored), sealed whole-file as raw bytes, one full generation per changed pass. A transcript that does not read whole and validate as a JSON array skips its session for the pass: nothing is sealed, a bounded skip observation is recorded, and the run reports it. FREEBUFF_CONFIG_DIR replaces the whole base directory for every build and is therefore entry-wide: when set, the primary root reads the override value and the default-only dev/staging roots are not scanned; when unset, all three roots scan. message-history.json is a per-machine input log, not a session, and is not part of this capture. dimensions: none recorded (the artifacts carry no surface, tenant, container or status field).",
+      "seal_policy": "no-rename",
+      "seal_source": "upstream cli/src/utils/write-file-atomic.ts:8-39 — the transcript is written temp-then-rename in its own directory on every checkpoint (~5 s while a session is live), so a copy-only seal observes a complete generation and the source is never renamed or moved; a torn file the atomic write left behind is skipped, never half-sealed"
     }
   ],
   "browsers": [

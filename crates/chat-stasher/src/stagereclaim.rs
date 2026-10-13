@@ -342,7 +342,11 @@ fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
 /// Merge freshly derived summaries into one machine's manifest file. Rows for
 /// sessions whose body is still present replace (or add) the stored row; rows
 /// for already-reclaimed sessions (no body, so `shard_count == 0` in the fresh
-/// derivation) are skipped so their stored baseline survives.
+/// derivation) are skipped so their stored baseline survives. A fresh row
+/// that carries no captured start time never erases the stored row's
+/// (ADR-054 D4): a session whose stage-side fact file went missing regenerates
+/// from the *stored* fact, and an absent fact stays absent — unknown, never
+/// zero, never a file time.
 fn refresh_manifest(
     stage: &Path,
     machine: &str,
@@ -356,7 +360,13 @@ fn refresh_manifest(
     }
     for row in fresh {
         if row.shard_count > 0 {
-            merged.insert(row.session_id.clone(), row.clone());
+            let mut row = row.clone();
+            if row.captured_start.is_none() {
+                if let Some(stored) = merged.get(&row.session_id) {
+                    row.captured_start = stored.captured_start.clone();
+                }
+            }
+            merged.insert(row.session_id.clone(), row);
         }
     }
     let rows: Vec<manifest::SessionManifest> = merged.into_values().collect();
@@ -379,8 +389,12 @@ pub fn reclaim_session_body(
         fs::remove_file(path)
             .with_context(|| format!("remove reclaimed shard {}", path.display()))?;
     }
-    // Remove now-empty bucket directories. The session dir itself stays: it
-    // holds `shard-seq`.
+    // Remove the sealed raw sidecar files too (ADR-054 D5/D9): they are
+    // body-tier content — `chat-meta.json`'s `firstPrompt` is a truncated
+    // copy of user text — so a reclaimed body must not quietly leave them
+    // behind in the stage. The archive already holds every generation, and
+    // the metadata this directory must keep (`shard-seq`,
+    // `captured-start`) is not prefixed `extra-`.
     let rd = match fs::read_dir(&dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries.len()),
@@ -397,6 +411,9 @@ pub fn reclaim_session_body(
                     // whatever non-shard files it has.
                 }
             }
+        } else if store::is_extra_file(&entry.file_name().to_string_lossy()) {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("remove reclaimed sidecar {}", entry.path().display()))?;
         }
     }
     Ok(entries.len())
@@ -501,6 +518,7 @@ mod tests {
             concat_bytes: 0,
             concat_sha256: "b".repeat(64),
             sealed_at_unix: 1,
+            captured_start: None,
         };
         manifest::write_manifest(stage, machine, &[original_b.clone()]).unwrap();
 
@@ -523,6 +541,80 @@ mod tests {
         assert_eq!(b.concat_sha256, "b".repeat(64));
         let a = by_id.remove("s-a").expect("s-a row must be derived fresh");
         assert_eq!(a.shard_count, 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn refresh_manifest_carries_a_stored_captured_start_into_a_fresh_row_without_one() {
+        // ADR-054 D4: the capture-time start is written beside the sealed
+        // shards, so a regeneration carries it into the fresh row. When the
+        // stage-side record is missing (deleted by its owner), the *stored*
+        // row's value survives the refresh — a fresh row with no field
+        // never erases it, and absent still means unknown.
+        let dir = tempfile::TempDir::new().unwrap();
+        let stage = dir.path();
+        let machine = "m-unit";
+        write_session(stage, machine, "s-a", 1);
+        let stored_start = manifest::CapturedStart {
+            time: "2026-10-05T18:07:03.513Z".into(),
+            source: crate::codebuff::START_SOURCE_CHAT_DIRECTORY_NAME.into(),
+        };
+        let original = manifest::SessionManifest {
+            session_id: "s-a".into(),
+            machine: machine.into(),
+            shard_count: 1,
+            concat_bytes: 10,
+            concat_sha256: "a".repeat(64),
+            sealed_at_unix: 1,
+            captured_start: Some(stored_start.clone()),
+        };
+        manifest::write_manifest(stage, machine, &[original]).unwrap();
+
+        // A fresh derivation whose session directory lost the stage-side
+        // record (so the fresh row carries no field).
+        let fresh = vec![manifest::SessionManifest {
+            session_id: "s-a".into(),
+            machine: machine.into(),
+            shard_count: 1,
+            concat_bytes: 10,
+            concat_sha256: "a".repeat(64),
+            sealed_at_unix: 2,
+            captured_start: None,
+        }];
+        refresh_manifest(stage, machine, &fresh).unwrap();
+        let rows = match manifest::read_manifest(stage, machine).unwrap() {
+            manifest::ManifestFileState::Loaded(rows) => rows,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].captured_start,
+            Some(stored_start),
+            "the stored fact survives a regeneration that could not re-read it"
+        );
+        assert_eq!(rows[0].sealed_at_unix, 2, "bookkeeping still refreshes");
+
+        // And a fresh row that *does* carry a field is the one that wins:
+        // the stage-side record is the fact's source, not the stored row.
+        let fresh_start = manifest::CapturedStart {
+            time: "2026-10-05T19:00:00.001Z".into(),
+            source: crate::codebuff::START_SOURCE_CHAT_DIRECTORY_NAME.into(),
+        };
+        let fresh = vec![manifest::SessionManifest {
+            session_id: "s-a".into(),
+            machine: machine.into(),
+            shard_count: 1,
+            concat_bytes: 10,
+            concat_sha256: "a".repeat(64),
+            sealed_at_unix: 3,
+            captured_start: Some(fresh_start.clone()),
+        }];
+        refresh_manifest(stage, machine, &fresh).unwrap();
+        let rows = match manifest::read_manifest(stage, machine).unwrap() {
+            manifest::ManifestFileState::Loaded(rows) => rows,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        assert_eq!(rows[0].captured_start, Some(fresh_start));
         drop(dir);
     }
 }

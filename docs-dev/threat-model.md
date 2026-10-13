@@ -77,7 +77,7 @@ build you did not compile yourself, or a dependency (see
 |---|---|
 | **Can see** | That encrypted objects exist; their **sizes**; their **timestamps**; how many there are and how that changes over time. From the SFTP/SSH case specifically, also your source IP and connection times, as with any SSH server. Your account with them, obviously. |
 | **Cannot see** | Conversation text, session ids, platform names, which harness a session came from — all of it is inside the encrypted rustic repository. |
-| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:326-427,2261-2263,2303-2313`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:166-182`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
+| **Evidence** | Content is written through `rustic_core` into a repository whose master key never leaves your machine (`crates/chat-stasher/src/store.rs:326-427,2367-2369,2409-2419`). The backend is `rustic_backend` with the opendal feature and the options you supply (`crates/chat-stasher/Cargo.toml:31-32`; `crates/chat-stasher/src/config.rs:166-182`). SSH connection handling: `crates/chat-stasher/src/reap.rs:1-12`. |
 
 **This is a real metadata leak and we are stating it plainly.** A destination
 provider learns your **backup rhythm and volume**: how often you archive, how
@@ -121,7 +121,7 @@ Concretely, five separate plaintext exposures:
 2. **The master key file.** It is written as plaintext JSON. On Unix it is
    created `0600` — the mode is set when the file is created, not afterwards —
    inside a parent directory tightened to `0700`
-   (`crates/chat-stasher/src/store.rs:2307-2313`, `:2341-2369`); on platforms without Unix
+   (`crates/chat-stasher/src/store.rs:2413-2419`, `:2447-2475`); on platforms without Unix
    modes it inherits whatever the filesystem gives it. That keeps it away from
    *other* users, not from you: any process running as you can read it and,
    combined with access to your destination, decrypt the entire archive.
@@ -861,9 +861,9 @@ Two enforcement points exist in the code:
   repository; it succeeds only when stage, scanner, collector and audit all
   agree, and otherwise exits non-zero with an explicit refusal rather than
   writing an empty snapshot
-  (`crates/chat-stasher/src/main.rs:8844-8848`). It also fails closed when it
+  (`crates/chat-stasher/src/main.rs:8884-8888`). It also fails closed when it
   cannot even establish stage safety
-  (`crates/chat-stasher/src/main.rs:8817-8824`).
+  (`crates/chat-stasher/src/main.rs:8857-8864`).
 - **A destination that cannot be consulted is not an empty destination.**
   `dest-init` classifies each source destination into three states, not two:
   `Consulted`, `KnownEmpty` (nothing there *and* no local record of ever having
@@ -897,15 +897,15 @@ a real limitation of the current code.
 
 2. **The master key file is plaintext on disk.** It is not passphrase-wrapped
    and not kept in an OS keychain. On Unix it is created `0600` in a `0700`
-   parent (`crates/chat-stasher/src/store.rs:2303-2373`), which keeps it from
+   parent (`crates/chat-stasher/src/store.rs:2409-2479`), which keeps it from
    other users but not from anything running as you; on platforms without Unix
    modes it inherits the filesystem's defaults.
 
 3. **Lose the key file and the data is gone. We have no recovery mechanism of
    any kind.** The master key is the repository's only key
-   (`crates/chat-stasher/src/store.rs:2261-2263`); losing it makes the repository
+   (`crates/chat-stasher/src/store.rs:2367-2369`); losing it makes the repository
    unreadable, and `load_key_file` can only report the loss
-   (`crates/chat-stasher/src/store.rs:2390-2400`). There is no escrow, no
+   (`crates/chat-stasher/src/store.rs:2496-2506`). There is no escrow, no
    recovery code, no maintainer-held copy, and no password-reset path — by
    design, because any of those would mean someone other than you could open
    your archive. **Back up the key file separately from the repository, or your
@@ -925,7 +925,7 @@ a real limitation of the current code.
    back into a harness's own directories does not exist**. `read` reports
    **one session at a time** with its length and SHA-256, without printing
    conversation content
-   (`crates/chat-stasher/src/main.rs:500-503,9357-9517`). `export --out <dir>`
+   (`crates/chat-stasher/src/main.rs:500-503,9397-9557`). `export --out <dir>`
    writes **many** sessions to files in one command, laid out as
    `<out>/<machine>/<harness>/<session-id>.jsonl`, and its directory is
    **plaintext** (`crates/chat-stasher/src/main.rs:763-849`) — see exposure 5
@@ -940,7 +940,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1468-1688,1690-1705,2139-2148`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1472-1692,1694-1709,2143-2152`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go

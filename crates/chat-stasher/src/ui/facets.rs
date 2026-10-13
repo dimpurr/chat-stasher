@@ -124,6 +124,7 @@ const WEB_PLATFORM_HARNESSES: &[&str] = &[
 const CODING_AGENT_HARNESSES: &[&str] = &[
     "aider",
     "claude-code",
+    "codebuff",
     "codex",
     "continue",
     "crush",

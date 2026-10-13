@@ -13,6 +13,7 @@ mod antigravity;
 /// One extractor file per harness, dispatched by [`normalize_value`]. A
 /// harness with no arm there is served the raw view only — see
 /// [`harness_has_a_reader`] — and never a generic guess about its shape.
+mod codebuff;
 mod codex;
 mod cursor;
 mod deepseek_harness;
@@ -216,6 +217,14 @@ pub fn normalize(harness: &str, body: &str) -> Conversation {
         grok_bot::normalize_body(body, &mut conversation);
         return conversation;
     }
+    if harness == "codebuff" {
+        // The transcript is a whole JSON array sealed as one generation per
+        // changed pass (ADR-054 D2), so the body holds one or more complete
+        // generations and the reading is a whole-body fact — which
+        // generation is current — that the per-line walk cannot decide.
+        codebuff::normalize_body(body, &mut conversation);
+        return conversation;
+    }
     for line in body.lines() {
         if line.trim().is_empty() {
             continue;
@@ -306,6 +315,7 @@ fn harness_has_a_reader(harness: &str) -> bool {
             // deliberately not abbreviable to `deepseek`.
             | "deepseek-harness"
             | "claude"
+            | "codebuff"
             | ""
     ) || is_web_bundle(harness)
 }

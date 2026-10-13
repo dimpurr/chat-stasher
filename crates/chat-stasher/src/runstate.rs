@@ -172,6 +172,14 @@ pub struct RunState {
     pub snapshot_created: bool,
     pub collect_errors: usize,
     pub archive_gaps: usize,
+    /// Codebuff sessions the collect half read but could not archive, because
+    /// the transcript snapshot did not validate as a JSON array (ADR-054
+    /// D6). A pass with skips here is *incomplete* — it did not finish
+    /// reading — which `run-once` reports instead of a success. Counts
+    /// only, like the fields beside it, and additively default so older
+    /// state files still parse.
+    #[serde(default)]
+    pub torn_skips: usize,
     /// sha256 prefix of the machine partition name — enough to notice that
     /// two machines share a state dir, without recording the hostname.
     pub machine_digest: String,
@@ -200,6 +208,7 @@ impl RunState {
             snapshot_created: matches!(outcome, RunOutcome::Completed),
             collect_errors: 0,
             archive_gaps: 0,
+            torn_skips: 0,
             machine_digest: machine_digest(machine),
             phases: PassMetrics::default(),
         }
@@ -390,6 +399,7 @@ pub fn run_state_json(
                 "snapshot_created": state.snapshot_created,
                 "collect_errors": state.collect_errors,
                 "archive_gaps": state.archive_gaps,
+                "torn_skips": state.torn_skips,
                 "phases": serde_json::to_value(&state.phases)
                     // reason: PassMetrics is plain integers and string keys,
                     // so its serialization cannot fail; the fallback keeps

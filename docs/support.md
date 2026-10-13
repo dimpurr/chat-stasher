@@ -119,6 +119,15 @@ around it.
 | DeepSeek Harness | macOS | `~/.dsh/sessions/` | jsonl.zstd | measured-locally | supported | https://github.com/deepseek-ai/deepseek-harness |
 | DeepSeek Harness | Linux | `$HOME/.dsh/sessions/` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
 | DeepSeek Harness | Windows | `%USERPROFILE%\.dsh\sessions\` | jsonl.zstd | unascertained | not supported | https://github.com/deepseek-ai/deepseek-harness |
+| Codebuff / Freebuff (codebuff) | macOS | `~/.config/manicode/` | json | source-confirmed | supported | - |
+| Codebuff / Freebuff (codebuff) | Linux | `$HOME/.config/manicode/` | json | unascertained | not supported | - |
+| Codebuff / Freebuff (codebuff) | Windows | `%USERPROFILE%\.config\manicode\` | json | unascertained | not supported | - |
+| Codebuff / Freebuff (codebuff-dev) | macOS | `~/.config/manicode-dev/` | json | source-confirmed | supported | - |
+| Codebuff / Freebuff (codebuff-dev) | Linux | `$HOME/.config/manicode-dev/` | json | unascertained | not supported | - |
+| Codebuff / Freebuff (codebuff-dev) | Windows | `%USERPROFILE%\.config\manicode-dev\` | json | unascertained | not supported | - |
+| Codebuff / Freebuff (codebuff-staging) | macOS | `~/.config/manicode-staging/` | json | source-confirmed | supported | - |
+| Codebuff / Freebuff (codebuff-staging) | Linux | `$HOME/.config/manicode-staging/` | json | unascertained | not supported | - |
+| Codebuff / Freebuff (codebuff-staging) | Windows | `%USERPROFILE%\.config\manicode-staging\` | json | unascertained | not supported | - |
 
 ### Web AI chats (browser extension)
 
@@ -153,6 +162,7 @@ around it.
 | Local | Continue | - | low | no reader extractor yet: archived sessions render as raw view only (git 41db2bf) |
 | Local | Kimi Code | 2026-10-03 | normal | Activity bounds are inferred and partial when unrecognised wire operation types occur. |
 | Local | DeepSeek Harness | - | normal | measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); no session has been archived end to end yet |
+| Local | Codebuff / Freebuff | - | normal | attachment bytes are not archived and per-message times stay unknown; sessions render through the reader, attachments stay in the raw transcript only |
 | Web | deepseek | 2026-09-24 | normal | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | perplexity | - | low | an account switch is not yet guarded: the new account list ids can land in the old run scope (see issue #4) |
 | Web | chatgpt | 2026-09-24 | high | a workspace switch is not yet pinned to the run scope: the new workspace list ids can land in the old scope (see issue #4) |

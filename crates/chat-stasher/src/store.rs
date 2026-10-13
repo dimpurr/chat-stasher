@@ -1671,6 +1671,112 @@ pub fn shard_seq_file_in_dir(dir: &Path) -> PathBuf {
     dir.join(SHARD_SEQ_FILE)
 }
 
+/// File name of the per-session captured-start record (ADR-054 D4): the
+/// codebuff chat directory name's own RFC 3339 UTC instant plus its source,
+/// written beside the sealed shards so the manifest's regenerated rows carry
+/// the recorded value instead of losing it. Same collision safety as
+/// `shard-seq`: never a shard shape, so every shard walk ignores it.
+pub const CAPTURED_START_FILE: &str = "captured-start";
+
+/// Prefix of the raw sidecar files a session-directory whitelist rule seals
+/// beside the transcript under the same session identity (ADR-054 D5/D9).
+/// Content-addressed (`extra-<name>.<sha256-12>`), append-only in the stage:
+/// a changed sidecar lands as a new file and an unchanged one is not
+/// rewritten — the same one-generation-per-observation shape the sealed
+/// shards keep. Never a shard shape, so shard counting, manifest
+/// concatenation and reclamation's shard walk all ignore them.
+pub const EXTRA_FILE_PREFIX: &str = "extra-";
+
+/// True for every sealed sidecar file name (see [`EXTRA_FILE_PREFIX`]).
+pub fn is_extra_file(name: &str) -> bool {
+    name.starts_with(EXTRA_FILE_PREFIX)
+}
+
+/// Write a session's captured-start record beside its sealed shards.
+/// Idempotent: an existing identical record is left untouched, and an
+/// existing *different* record is overwritten in place — the record is the
+/// stamp of a fact already captured, not a history of stamps, and a second
+/// pass that recomputes the same fact must not churn the stage.
+pub fn write_captured_start(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    record: &crate::manifest::CapturedStart,
+) -> anyhow::Result<()> {
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    write_captured_start_in_dir(&dir, record)
+}
+
+/// [`write_captured_start`] for an already-resolved session directory.
+pub fn write_captured_start_in_dir(
+    dir: &Path,
+    record: &crate::manifest::CapturedStart,
+) -> anyhow::Result<()> {
+    let path = dir.join(CAPTURED_START_FILE);
+    let body = serde_json::to_vec(record).context("serialize captured-start record")?;
+    if let Ok(existing) = fs::read(&path) {
+        if existing == body {
+            return Ok(());
+        }
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let tmp = dir.join(format!(".{CAPTURED_START_FILE}.tmp"));
+    fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Read a session's captured-start record from its stage directory. Absent
+/// or unparseable records observe nothing — an unknown start time, never a
+/// fabricated one — so `None` covers both, deliberately.
+pub fn read_captured_start_in_dir(
+    dir: &Path,
+) -> anyhow::Result<Option<crate::manifest::CapturedStart>> {
+    let path = dir.join(CAPTURED_START_FILE);
+    match fs::read(&path) {
+        Ok(body) => serde_json::from_slice(&body).with_context(|| {
+            format!("parse captured-start record {} (deleting or leaving it makes the session start unknown, which is honest)", path.display())
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Seal one raw whitelist sidecar file under the same session identity
+/// (ADR-054 D5/D9): the bytes land in the session's own stage directory as
+/// `extra-<name>.<sha256-12>`, already content-addressed by the caller's
+/// digest. Returns `true` when a new file was written and `false` when this
+/// content is already sealed — an unchanged sidecar must not rewrite the
+/// stage, and a changed one appends a new generation like a shard does.
+pub fn write_session_extra_file(
+    stage_root: &Path,
+    machine: &str,
+    session_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> anyhow::Result<bool> {
+    // The sidecar's own name is part of the sealed file's name, so two
+    // declared files can never collide. The digest keeps distinct contents
+    // distinct, same argument as the shard sequence but keyed on bytes.
+    let digest12: String = hex_digest(&Sha256::digest(bytes))
+        .chars()
+        .take(12)
+        .collect();
+    let file_name = format!("{EXTRA_FILE_PREFIX}{name}.{digest12}");
+    let dir = session_shard_dir(stage_root, machine, session_id);
+    let path = dir.join(&file_name);
+    if path.is_file() {
+        return Ok(false);
+    }
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let tmp = dir.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(true)
+}
+
 /// Decide whether a `NotFound` from reading the shard sequence file really
 /// means "the counter is not there", or only means "the path could not be
 /// resolved". The two are the same error on Windows: `ERROR_PATH_NOT_FOUND`

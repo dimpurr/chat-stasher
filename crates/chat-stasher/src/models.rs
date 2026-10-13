@@ -27,6 +27,9 @@ pub enum HarnessSource {
     Continue,
     KimiCode,
     DeepSeekHarness,
+    /// Codebuff / Freebuff (`manicode`): one product, one on-disk layout,
+    /// two npm names (ADR-054 D1).
+    Codebuff,
 }
 
 /// Layout of a virtual session backed by a structured, read-only local source.
@@ -69,6 +72,7 @@ impl HarnessSource {
             // Not abbreviable to `deepseek`: that id is the deepseek.com web
             // chat platform, a different harness from this local agent.
             HarnessSource::DeepSeekHarness => "deepseek-harness",
+            HarnessSource::Codebuff => "codebuff",
         }
     }
 
@@ -94,6 +98,7 @@ impl HarnessSource {
             "continue" => Some(HarnessSource::Continue),
             "kimi-code" => Some(HarnessSource::KimiCode),
             "deepseek-harness" => Some(HarnessSource::DeepSeekHarness),
+            "codebuff" => Some(HarnessSource::Codebuff),
             _ => None,
         }
     }
@@ -135,4 +140,51 @@ pub struct SessionRecord {
     /// Capture-time dimensions declared by the registry path that found this
     /// source. This never changes the session identity or transcript bytes.
     pub provenance: crate::provenance::SessionProvenance,
+    /// Facts a registry `session_dir` rule (or the multi-root walk above it)
+    /// observed about the record's session directory, collected for their
+    /// capture-time consumers: the codebuff chat-directory start time and its
+    /// cross-check (ADR-054 D4), the whitelist sidecars that seal raw under
+    /// the same session identity (ADR-054 D5/D9), and the registry
+    /// `source_roots[].id` a skip observation names instead of a path
+    /// (ADR-054 D6/D7). Absent for every record a session-directory rule did
+    /// not produce; never identity, never content.
+    pub session_dir: Option<SessionDirFacts>,
+}
+
+/// Per-session facts the scanner records at discovery for a harness whose
+/// registry cell declares a `session_dir` rule that needs them (only
+/// codebuff does today; ADR-054). Additive on purpose: fields stay optional
+/// or defaulted so adding a fact never rewrites every construction site.
+#[derive(Debug, Clone, Default)]
+pub struct SessionDirFacts {
+    /// The registry `source_roots[].id` whose walk produced the record —
+    /// `codebuff` / `codebuff-dev` / `codebuff-staging` — set by the
+    /// multi-root probe so control records name a root, never a path
+    /// (ADR-054 D6). `None` only on a record no root walk labelled.
+    pub root_id: Option<String>,
+    /// The chat directory name's own RFC 3339 UTC instant, recorded at
+    /// capture and read from that record — never re-parsed from the archive
+    /// id (ADR-054 D4). Absent means the name did not match the accepted
+    /// shape: unknown, never zero, never a file time.
+    pub captured_start: Option<crate::manifest::CapturedStart>,
+    /// The session directory's own mtime (and ctime under Unix, whichever is
+    /// earlier), for the D4 cross-check that it does not precede
+    /// [`Self::captured_start`].
+    pub dir_mtime: Option<SystemTime>,
+    /// Whitelist sidecar files found beside the transcript (ADR-054 D5/D9),
+    /// sealed as raw bytes under the same session identity. Absent-tolerant:
+    /// a session without its sidecars is still archived.
+    pub extra_files: Vec<ExtraFileSource>,
+}
+
+/// One whitelist sidecar file (ADR-054 D5): metadata only at scan time — the
+/// collector alone reads its bytes.
+#[derive(Debug, Clone)]
+pub struct ExtraFileSource {
+    /// Literal file name as declared by the registry rule.
+    pub name: String,
+    /// Absolute path of the file.
+    pub path: PathBuf,
+    /// Byte size at scan time.
+    pub byte_size: u64,
 }
