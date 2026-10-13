@@ -282,6 +282,26 @@ under its own heading below.
   so every conversation currently gets a body and the run prints the probe's
   own answer.
 
+- **Opt-in backfill recovers a Grok Bot conversation's pre-window history
+  through the app itself.** The local cache is a bounded window, and every
+  position that fell out of it is gone from disk for good — but whenever the
+  app opens a conversation it fetches the conversation's whole user-visible
+  span into view, so `backfill grok-bot` relaunches the app with a debugging
+  connection that listens only on this machine, opens one conversation at a
+  time with at least ten seconds between them, waits while the app loads it,
+  and delivers the rows the archive does not already hold: the same
+  session-keyed identity a collect uses, so nothing is added twice and an
+  ordinary collect afterwards stays incremental. Each delivered shard's
+  measurement line records that it came from a backfill, with the run id and
+  the app version; the withheld interior rows the service never sends stay
+  missing, and the session's gap record and `partial` fidelity stand. The
+  default is a dry run — the identical traversal, reports only — and
+  delivery needs the explicit `--i-accept-the-risk`; the risk statement is
+  printed before every run, a dry one included. The app is restored to a
+  normal launch at the end of every run, interrupted runs included. macOS
+  only; nothing in it ever calls the vendor's service or touches a
+  credential, and no schedule or daemon path can reach it.
+
 #### Changed
 
 - **Fixed clock-time hourly schedule on macOS.** When `backup_interval_secs` is

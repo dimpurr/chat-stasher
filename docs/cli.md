@@ -34,6 +34,7 @@ chat-stasher <command> --help
 | [`install-native-host`](#install-native-host) | Registers the browser host | Browser manifests, config |
 | [`ingest`](#ingest) | Archives an extension export file | Stage |
 | [`import`](#import) | Turns an official export (a takeout) into inbox bundles, or feeds a copied Grok Bot cache backup in as an archive pass | Takeout mode: an existing `--stage` and a named `--inbox`. Backup mode: `--stage` and one or more `--from` directories, read-only |
+| [`backfill`](#backfill) | Recovers a Grok Bot conversation's pre-window history by letting its own app load it (opt-in, macOS only) | App: quits and relaunches Grok Bot; Stage, archive (only with `--i-accept-the-risk`) |
 
 Lower-level commands, used by the ones above or for repair, are listed under [Plumbing](#plumbing).
 
@@ -522,6 +523,24 @@ The other mode, `--harness grok-bot --from <dir>`, imports one folder at a time 
 | `--shard-bucket-cap <n>` | Maximum sealed shards per bucket (default: 20). |
 
 Exit codes, both modes: `0` everything was read to the end and imported · `1` it was read, and a conversation, session or write failed — what was written is real but the run is incomplete · `2` usage (including a `--stage` that is not a directory) · `3` an input was never read to the end, so nothing about what it holds is proven and (for a backup import) nothing was imported.
+
+## Recovering older history
+
+### `backfill`
+
+The Grok Bot local cache is a bounded window, and every position that fell out of it is gone from disk for good — but the server still holds the conversation, and whenever the app opens one, the app itself fetches the conversation's whole user-visible span into view. `backfill grok-bot` is the opt-in route through that fact: it quits and relaunches Grok Bot with a debugging connection that listens only on this machine, opens one conversation at a time exactly as a person clicking the sidebar would, waits while the app loads it, and delivers the rows the archive does not already hold — through the same session identity a collect uses, so nothing is added twice and an ordinary collect afterwards stays incremental. Each delivered shard's measurement line records that it came from a backfill, with the run id and the app version it drove. The withheld interior rows the service never sends the app stay missing and the session's gap record and `partial` fidelity stand. macOS only; the tool never calls the vendor's service itself and never touches a credential. The app is restored to a normal launch at the end of every run, interrupted runs included: what has been delivered stays delivered.
+
+**The default is a dry run**: with no extra flags the same read-only traversal runs — it too relaunches and drives the app — and it only reports, per conversation: how many rows the archive would gain, the loaded span versus the locally held span, and the positions that will stay missing. Delivery needs the explicit acknowledgement flag, whose name is what the [source page](sources/grok-bot.md) documents.
+
+| Flag | Meaning |
+|---|---|
+| `<harness>` | The harness whose app-driven backfill this runs. Only `grok-bot` exists today. |
+| `--stage <dir>` | Required. An existing stage directory; never created. |
+| `--i-accept-the-risk` | Deliver the rows found (a real run). Without it the run is a dry run: identical traversal, reports only. |
+| `--conversation <prefix>` | Restrict the run to the conversations these id prefixes name, repeatable — the prefixes the dry run prints. Default: every conversation the app's sidebar lists. |
+| `--machine <id>` / `--destination <name>` / `--repo` / `--key-file` / `--shard-bucket-cap <n>` | As for `collect` — the destination whose delivered state the run extends. |
+
+Exit codes: `0` every selected conversation loaded and was reported (or delivered) · `1` the traversal finished with findings — a conversation that never finished loading within its wait and was skipped whole, a `--conversation` prefix that matched nothing, an app that could not be restored to a normal launch or a close-out that could not be verified · `2` usage (including a `--stage` that is not a directory) · `3` the run refused before touching anything (macOS only, app not installed, a signed-in app unconfirmable, an unreachable or non-loopback debug endpoint), or stopped before finishing — a user interrupt or an app-layout change; partial work is kept and reported.
 
 ## Plumbing
 

@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod audit_store;
+pub mod backfill;
 pub mod body_cache;
 pub mod bundle_transport;
 pub mod collect;

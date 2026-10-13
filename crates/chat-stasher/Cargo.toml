@@ -173,3 +173,31 @@ default-features = false
 features = ["blocking", "json", "rustls", "query"]
 [dependencies.hmac]
 version = "0.13"
+
+# `backfill grok-bot`'s transport is the app's own renderer over a loopback
+# Chromium debugging port: one HTTP target discovery over reqwest plus exactly
+# one WebSocket. Hand-rolling the WS layer would mean re-deriving the frame
+# format, the SHA-1 accept computation and the close handshake with no review
+# surface, so the minimal maintained client is taken instead; default features
+# are off — the port is plain `ws://` on `127.0.0.1`, so no TLS code is built.
+#
+# `ctrlc` is the SIGINT/SIGTERM flag the backfill run's restore-on-every-exit
+# guarantee hangs on: the handler only sets an `AtomicBool` the traversal
+# checks between conversations and during load polls; restore itself is
+# explicit program flow.
+[dependencies.tungstenite]
+version = "0.28"
+default-features = false
+features = ["handshake"]
+[dependencies.ctrlc]
+version = "3.5"
+
+# The `backfill grok-bot` CDP tests speak the production WebSocket's own
+# library from the mock endpoint's side (server handshake + frames), which
+# no hand-rolled fixture could faithfully mirror. Same version and features
+# as the normal dependency above, so this adds no new package to the build
+# graph — only the direct dev edge.
+[dev-dependencies.tungstenite]
+version = "0.28"
+default-features = false
+features = ["handshake"]

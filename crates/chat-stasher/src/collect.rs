@@ -94,7 +94,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const STATE_VERSION: u32 = 2;
-const STATE_FILE: &str = "debts-v2.json";
+pub(crate) const STATE_FILE: &str = "debts-v2.json";
 /// The pre-ADR-012 per-machine cursor file. It is never read and never
 /// migrated: it belongs to no destination, so it can prove nothing to any
 /// destination. Its only remaining job is to be *reported* as ignored, so the
@@ -179,16 +179,16 @@ pub struct DebtEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct DestinationDebts {
-    files: BTreeMap<String, DebtEntry>,
+pub(crate) struct DestinationDebts {
+    pub(crate) files: BTreeMap<String, DebtEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct DebtState {
+pub(crate) struct DebtState {
     version: u32,
     /// Keyed by [`destination_id`]. A destination that is not in this map has
     /// never been read for, so every source is unread for it.
-    destinations: BTreeMap<String, DestinationDebts>,
+    pub(crate) destinations: BTreeMap<String, DestinationDebts>,
 }
 
 /// Do we hold a local record of ever having collected *for* this destination?
@@ -687,7 +687,11 @@ fn stage_prefix_entry(
 }
 
 /// Observe what the stage currently holds for one session.
-fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<ShardFact> {
+pub(crate) fn stage_shard_fact(
+    stage: &Path,
+    machine: &str,
+    session_id: &str,
+) -> anyhow::Result<ShardFact> {
     let dir = store::session_shard_dir(stage, machine, session_id);
     let mut entries = store::sealed_shard_entries(&dir)?;
     entries.sort_by_key(|(sequence, _)| *sequence);
@@ -713,7 +717,10 @@ fn stage_shard_fact(stage: &Path, machine: &str, session_id: &str) -> anyhow::Re
 
 /// Read the local manifest baseline for one machine into a session lookup map,
 /// if the manifest exists and is valid. Missing or corrupt files yield `None`.
-fn load_local_manifest_facts(stage: &Path, machine: &str) -> Option<BTreeMap<String, ShardFact>> {
+pub(crate) fn load_local_manifest_facts(
+    stage: &Path,
+    machine: &str,
+) -> Option<BTreeMap<String, ShardFact>> {
     match crate::manifest::read_manifest(stage, machine) {
         Ok(crate::manifest::ManifestFileState::Loaded(rows)) => {
             let mut map = BTreeMap::new();
@@ -778,7 +785,7 @@ fn stage_covers(
 ///
 /// Returns `Some(verdict)` if the debt was settled locally, or `None` if remote archive
 /// verification is required.
-fn debt_settled_locally(
+pub(crate) fn debt_settled_locally(
     entry: &DebtEntry,
     machine: &str,
     stage: &Path,
@@ -808,7 +815,7 @@ fn debt_settled_locally(
 
 /// Discharge a stored cursor against the authorities that can speak for
 /// this destination — never against the cursor itself.
-fn verify_debt(
+pub(crate) fn verify_debt(
     entry: &DebtEntry,
     machine: &str,
     stage: &Path,
@@ -1563,13 +1570,15 @@ const GROK_BOT_UNION_STATE_VERSION: u32 = 2;
 /// canonical raw JSON. Rows are content-addressed because a sequence number
 /// alone cannot say whether a position carries one archived observation or
 /// several variants.
-fn grok_bot_row_digest(record: &crate::grok_bot::ReplicaRecord) -> anyhow::Result<String> {
+pub(crate) fn grok_bot_row_digest(
+    record: &crate::grok_bot::ReplicaRecord,
+) -> anyhow::Result<String> {
     let bytes = serde_json::to_vec(&record.raw).context("serialize Grok Bot raw record")?;
     Ok(sha256_hex(&bytes))
 }
 
 /// The union state file one grok-bot agent's observations answer through.
-fn grok_bot_union_path(state_dir: &Path, agent_id: &str) -> PathBuf {
+pub(crate) fn grok_bot_union_path(state_dir: &Path, agent_id: &str) -> PathBuf {
     state_dir
         .join("grok-bot-unions")
         .join(format!("{}.json", sha256_hex(agent_id.as_bytes())))
@@ -1578,7 +1587,9 @@ fn grok_bot_union_path(state_dir: &Path, agent_id: &str) -> PathBuf {
 /// Load one agent's union state from disk. A missing file is an empty union;
 /// anything else — unreadable, or a version this build does not write — is a
 /// named failure, never a silent empty.
-fn load_grok_bot_union(union_path: &Path) -> anyhow::Result<Vec<crate::grok_bot::ReplicaRecord>> {
+pub(crate) fn load_grok_bot_union(
+    union_path: &Path,
+) -> anyhow::Result<Vec<crate::grok_bot::ReplicaRecord>> {
     match fs::read(union_path) {
         Ok(bytes) => {
             let state: GrokBotUnionState = serde_json::from_slice(&bytes).with_context(|| {
@@ -1600,7 +1611,7 @@ fn load_grok_bot_union(union_path: &Path) -> anyhow::Result<Vec<crate::grok_bot:
 
 /// Commit one agent's union state atomically, tmp file then rename, exactly
 /// as a delivered pass has always written it.
-fn write_grok_bot_union(
+pub(crate) fn write_grok_bot_union(
     union_path: &Path,
     records: Vec<crate::grok_bot::ReplicaRecord>,
 ) -> anyhow::Result<()> {
@@ -1619,7 +1630,7 @@ fn write_grok_bot_union(
 /// already in it is never handed over a second time, and `deliver_all` — the
 /// reread a forced reset or an unmeasured cursor requires — hands the whole
 /// union over once so the set is measured from then on.
-fn plan_grok_bot_rows<'a>(
+pub(crate) fn plan_grok_bot_rows<'a>(
     union: &'a [crate::grok_bot::ReplicaRecord],
     delivered: &std::collections::BTreeSet<String>,
     deliver_all: bool,
@@ -1641,19 +1652,19 @@ fn plan_grok_bot_rows<'a>(
 
 /// A borrowed union row a delivery has selected.
 #[derive(Debug, Clone, Copy)]
-struct ReplicaRecordRef<'a> {
-    record: &'a crate::grok_bot::ReplicaRecord,
+pub(crate) struct ReplicaRecordRef<'a> {
+    pub(crate) record: &'a crate::grok_bot::ReplicaRecord,
 }
 
 /// The `_chat_stasher` measurement line a delivered Grok Bot shard carries:
 /// the union's own gaps and bounds, the agent name the persistence handled
-/// us, and — only for shards a backup import sealed (W988) — the provenance
-/// of that import. The reader skips this line's unknown fields, so its two
-/// forms stay one vocabulary.
-fn grok_bot_delivery_metadata(
+/// us, and — only for shards a pass sealed (backup import W988, app-driven
+/// backfill BF-GROKBOT-1) — the provenance of that pass. The reader skips
+/// this line's unknown fields, so its forms stay one vocabulary.
+pub(crate) fn grok_bot_delivery_metadata(
     agent_name: Option<&str>,
     union: &[crate::grok_bot::ReplicaRecord],
-    import: Option<&GrokBotImportProvenance>,
+    provenance: Option<&GrokBotPassProvenance>,
 ) -> serde_json::Value {
     let union_sequences: Vec<u64> = union.iter().map(|item| item.sequence).collect();
     let gaps = crate::grok_bot::sequence_gaps(union_sequences.iter().copied());
@@ -1668,18 +1679,32 @@ fn grok_bot_delivery_metadata(
             "observed_sequence_max": union_sequences.last(),
         }
     });
-    if let Some(import) = import {
-        metadata["_chat_stasher"]["imported_from_backup"] =
-            serde_json::Value::String(import.backup_name.clone());
-        metadata["_chat_stasher"]["imported_at"] =
-            serde_json::Value::String(import.imported_at.clone());
+    match provenance {
+        Some(GrokBotPassProvenance::BackupImport(import)) => {
+            metadata["_chat_stasher"]["imported_from_backup"] =
+                serde_json::Value::String(import.backup_name.clone());
+            metadata["_chat_stasher"]["imported_at"] =
+                serde_json::Value::String(import.imported_at.clone());
+        }
+        Some(GrokBotPassProvenance::Backfill(backfill)) => {
+            metadata["_chat_stasher"]["backfill"] = serde_json::Value::Bool(true);
+            metadata["_chat_stasher"]["backfill_run_id"] =
+                serde_json::Value::String(backfill.run_id.clone());
+            metadata["_chat_stasher"]["backfill_app_version"] = match &backfill.app_version {
+                Some(version) => serde_json::Value::String(version.clone()),
+                None => serde_json::Value::Null,
+            };
+            metadata["_chat_stasher"]["backfill_at"] =
+                serde_json::Value::String(backfill.ran_at.clone());
+        }
+        None => {}
     }
     metadata
 }
 
 /// The cursor one delivered Grok Bot pass records: the delivered digest set
 /// it is now measured by, plus the observation scale of the delivery itself.
-fn grok_bot_delivery_cursor(
+pub(crate) fn grok_bot_delivery_cursor(
     source_bytes: u64,
     union: &[crate::grok_bot::ReplicaRecord],
     delivered_now: std::collections::BTreeSet<String>,
@@ -2732,7 +2757,7 @@ fn plain_state(path: &Path, offset: u64) -> anyhow::Result<OffsetEntry> {
 /// anything to any destination, so it is discarded and every source becomes
 /// unread. Blocking the run instead would be the one outcome ADR-012 rules
 /// out — the archive is the truth, and it is still reachable.
-fn load_state(path: &Path) -> anyhow::Result<DebtState> {
+pub(crate) fn load_state(path: &Path) -> anyhow::Result<DebtState> {
     let empty = DebtState {
         version: STATE_VERSION,
         destinations: BTreeMap::new(),
@@ -2779,7 +2804,7 @@ fn load_state(path: &Path) -> anyhow::Result<DebtState> {
 /// the moved entries are chosen by their session id, never by the shape of
 /// their key, so no path-addressed key of another harness can be mistaken
 /// for one of ours.
-fn migrate_grok_bot_debts(files: &mut BTreeMap<String, DebtEntry>) {
+pub(crate) fn migrate_grok_bot_debts(files: &mut BTreeMap<String, DebtEntry>) {
     let original = std::mem::take(files);
     let mut by_session: BTreeMap<String, Vec<DebtEntry>> = BTreeMap::new();
     for (key, entry) in original {
@@ -2844,7 +2869,7 @@ fn debt_advance(entry: &DebtEntry) -> (u64, usize) {
 
 /// Persist `debts` as this destination's slice, leaving every other
 /// destination's slice byte-for-byte as it was loaded.
-fn save_state(
+pub(crate) fn save_state(
     path: &Path,
     state: &DebtState,
     destination_id: &str,
@@ -2893,7 +2918,7 @@ fn source_key(path: &Path) -> String {
 /// entry can never collide with another harness's path-addressed key.
 const GROK_BOT_SESSION_DEBT_KEY: &str = "grok-bot-session";
 
-fn grok_bot_session_key(session_id: &str) -> String {
+pub(crate) fn grok_bot_session_key(session_id: &str) -> String {
     format!("{GROK_BOT_SESSION_DEBT_KEY}\0{session_id}")
 }
 
@@ -2922,7 +2947,7 @@ fn path_digest(path: &Path) -> String {
     sha256_hex(source_key(path).as_bytes())
 }
 
-fn id_prefix(id: &str) -> String {
+pub(crate) fn id_prefix(id: &str) -> String {
     crate::id::short_session_id(id)
 }
 
@@ -2972,6 +2997,36 @@ pub struct GrokBotImportProvenance {
     pub backup_name: String,
     /// When the import pass ran, RFC 3339 UTC.
     pub imported_at: String,
+}
+
+/// Provenance carried by a grok-bot shard a **pass** sealed — a read of the
+/// session that is not the ordinary live collect:
+///
+/// * [`Self::BackupImport`] (W988) — rows read from a copied local cache;
+/// * [`Self::Backfill`] (BF-GROKBOT-1, ADR-058 D1) — rows the app itself
+///   loaded into view and the backfill harvested.
+///
+/// One vocabulary on the `_chat_stasher` metadata line: each variant brings
+/// its own identifying fields and the reader skips the fields of whichever
+/// one it does not know, so no variant breaks an older body.
+#[derive(Debug, Clone)]
+pub enum GrokBotPassProvenance {
+    BackupImport(GrokBotImportProvenance),
+    Backfill(GrokBotBackfillProvenance),
+}
+
+/// Provenance stamped on every shard an app-driven backfill run sealed. The
+/// same convention the backup import follows: no absolute paths, no home
+/// directories, no account identifiers — a short run id, the app version the
+/// run drove (unknown reported as unknown), and when the run ran.
+#[derive(Debug, Clone)]
+pub struct GrokBotBackfillProvenance {
+    /// Short id of this backfill run.
+    pub run_id: String,
+    /// Version of the app the run drove, best effort from its bundle.
+    pub app_version: Option<String>,
+    /// When the run started, RFC 3339 UTC.
+    pub ran_at: String,
 }
 
 /// Per-session outcome of one backup import pass. Counts and short ids only.
@@ -3328,7 +3383,9 @@ pub fn import_grok_bot_backups(
             let metadata = grok_bot_delivery_metadata(
                 item.observed.name.as_deref(),
                 &union,
-                Some(&item.provenance),
+                Some(&GrokBotPassProvenance::BackupImport(
+                    item.provenance.clone(),
+                )),
             );
             serde_json::to_writer(&mut payload, &metadata)
                 .context("serialize Grok Bot partial metadata")?;

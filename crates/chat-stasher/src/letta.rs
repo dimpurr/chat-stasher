@@ -897,7 +897,16 @@ mod tests {
                     };
                     prepare_stream(&stream);
                     let mut input = [0; 8192];
-                    let count = stream.read(&mut input).unwrap();
+                    // A client that aborts mid-exchange is one connection
+                    // to drop, not a panic: a pass whose budget runs out
+                    // abandons exactly one in-flight request, which is
+                    // the behavior these tests exercise on purpose. The
+                    // abort shows up here as EOF, a reset, or a read
+                    // timeout — never as a well-formed request.
+                    let count = match stream.read(&mut input) {
+                        Ok(count) if count > 0 => count,
+                        Ok(_) | Err(_) => continue,
+                    };
                     let request = std::str::from_utf8(&input[..count]).unwrap();
                     // Unit tests deliberately use no credential at all.
                     assert!(!request.to_ascii_lowercase().contains("authorization:"));
@@ -965,8 +974,22 @@ mod tests {
                         panic!("unexpected mock route");
                     };
                     let body = serde_json::to_vec(&body).unwrap();
-                    write!(stream,"HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
-                    stream.write_all(&body).unwrap();
+                    // Same tolerance for the reply: the peer may have
+                    // aborted while the response was being written. A
+                    // write that reached a live client is the client's
+                    // failure domain — its own assertions and retries
+                    // report it — so this thread only ends the connection.
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if stream
+                        .write_all(head.as_bytes())
+                        .and_then(|()| stream.write_all(&body))
+                        .is_err()
+                    {
+                        continue;
+                    }
                 }
             });
             Self {
