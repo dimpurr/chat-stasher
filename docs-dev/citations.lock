@@ -977,11 +977,11 @@ crates/chat-stasher/src/runstate.rs:287-335  036d69fcbd03  lines=49
   <- docs-dev/install.md:995  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:289-295  525f5b894e82  lines=7
   <- docs-dev/install.md:1290  :: }
-crates/chat-stasher/src/scanner.rs:2048-2109  d53146cadd75  lines=62
+crates/chat-stasher/src/scanner.rs:2196-2257  d53146cadd75  lines=62
   <- docs-dev/privacy.md:1071  :: }
-crates/chat-stasher/src/scanner.rs:2111-2198  9bfd685db55b  lines=88
+crates/chat-stasher/src/scanner.rs:2259-2346  9bfd685db55b  lines=88
   <- docs-dev/privacy.md:1071  :: Err(_) => {
-crates/chat-stasher/src/scanner.rs:2511-2521  001e05e6d936  lines=11
+crates/chat-stasher/src/scanner.rs:2659-2669  001e05e6d936  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: agent_id: &str,
 crates/chat-stasher/src/schedule.rs:208-243  31cde3d34520  lines=36
   <- docs-dev/install.md:939  :: /// Resolve the executable that a persistent scheduler may …
