@@ -50,12 +50,14 @@
 
 use anyhow::Context;
 use rustic_core::repofile::{MasterKey, Node, NodeType, SnapshotFile};
-use rustic_core::{Grouped, LsOptions, SnapshotGroupCriterion};
+use rustic_core::{Grouped, IndexedFullStatus, LsOptions, Repository, SnapshotGroupCriterion};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::store::{BackupStore, DuplicateShardPolicy, SESSIONS_DIR, SHARD_SUFFIX};
+use crate::store::{
+    BackupStore, DuplicateShardPolicy, MACHINE_LOGS_DIR, SESSIONS_DIR, SHARD_SUFFIX,
+};
 
 /// One session merged back from the archive.
 #[derive(Debug, Clone)]
@@ -97,6 +99,36 @@ impl SessionBackedUp {
     }
 }
 
+/// One machine log's sealed generations as the archive holds them
+/// (ADR-053 D4).
+///
+/// Deliberately **not** a [`SessionBackedUp`] and deliberately not inside
+/// [`MachineMerge::sessions`]: a machine log has no session id (D1) and must
+/// never be visible to anything that counts, lists or reports sessions. What
+/// it is for is cursor verification: "does the archive hold the generations
+/// this cursor claims", asked exactly like it is asked for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineLogBackedUp {
+    /// Machine partition the log belongs to (`machine-logs/<machine>/`).
+    pub machine: String,
+    /// Registry harness id that declares the log (`claude-code`).
+    pub harness: String,
+    /// The log's own declared id (`history`).
+    pub log_id: String,
+    /// Number of sealed generations found, in sequence order.
+    pub shard_count: usize,
+    /// Byte length of the concatenated generations.
+    pub concat_bytes: u64,
+    /// sha256 of the concatenated generations.
+    pub sha256: String,
+    /// sha256 of each generation, in sequence order.
+    pub shard_sha256: Vec<String>,
+    /// Parsed global sequence numbers aligned with `shard_sha256`.
+    pub shard_sequences: Vec<Option<u64>>,
+    /// Byte length of each generation, same order.
+    pub shard_bytes: Vec<u64>,
+}
+
 /// The merged report for one machine: its newest snapshot + all sessions
 /// walked from that snapshot.
 #[derive(Debug, Clone)]
@@ -130,6 +162,13 @@ pub struct ReadAllReport {
     /// the report, but each one is a machine whose sessions are missing from
     /// it — see [`ReadAllReport::complete`].
     pub warnings: Vec<String>,
+    /// Machine logs the archive holds (ADR-053 D4), one row per
+    /// `(machine, harness, log-id)`.
+    ///
+    /// A separate list from `machines[].sessions` by construction, so every
+    /// consumer of this report that counts sessions keeps counting exactly
+    /// what it counted before a machine log existed.
+    pub machine_logs: Vec<MachineLogBackedUp>,
 }
 
 impl ReadAllReport {
@@ -331,6 +370,10 @@ impl BackupStore {
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
 
+        // Machine-log generations, accumulated across the snapshots this read
+        // walks. Kept out of `buckets`/`sessions` entirely (ADR-053 D4).
+        let mut machine_log_shards: MachineLogShards = BTreeMap::new();
+
         let mut merges = Vec::new();
         for snap in newest {
             let hostname = snap.hostname.clone();
@@ -370,6 +413,15 @@ impl BackupStore {
                         .entry((machine, session))
                         .or_default()
                         .push((shard, i));
+                }
+                if let Some(key) = machine_log_shard_path(path) {
+                    collect_machine_log_shard(
+                        &mut machine_log_shards,
+                        path,
+                        key,
+                        node,
+                        &snapshot_id,
+                    );
                 }
             }
 
@@ -430,6 +482,12 @@ impl BackupStore {
         }
 
         merges.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        // Machine logs are read whether or not a `wanted` session set was
+        // given: a wanted-set answer that omitted a log would be read as "the
+        // archive does not hold it" and force a full re-read of that log, so
+        // the small generation set is always included. Session filtering is
+        // unchanged.
+        report.machine_logs = materialize_machine_logs(&repo, machine_log_shards)?;
         report.machines = merges;
         Ok(report)
     }
@@ -476,6 +534,11 @@ impl BackupStore {
 
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
+
+        // Machine-log generations, accumulated across every snapshot of every
+        // host this read walks — one row per (machine, harness, log-id) at the
+        // end. Kept entirely out of `sessions_map` (ADR-053 D4).
+        let mut machine_log_shards: MachineLogShards = BTreeMap::new();
 
         let mut merges = Vec::new();
         for (_host, snaps) in snapshots_by_host_newest_first(snaps) {
@@ -562,6 +625,15 @@ impl BackupStore {
                             metadata_loaded = true;
                         }
                         continue;
+                    }
+                    if let Some(key) = machine_log_shard_path(&path) {
+                        collect_machine_log_shard(
+                            &mut machine_log_shards,
+                            &path,
+                            key,
+                            &node,
+                            &short,
+                        );
                     }
                     if let Some((m, session, shard)) = bucket_shard_path(&path) {
                         if m == hostname {
@@ -680,6 +752,12 @@ impl BackupStore {
         }
 
         merges.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        // Machine logs are read whether or not a `wanted` session set was
+        // given: a wanted-set answer that omitted a log would be read as "the
+        // archive does not hold it" and force a full re-read of that log, so
+        // the small generation set is always included. Session filtering is
+        // unchanged.
+        report.machine_logs = materialize_machine_logs(&repo, machine_log_shards)?;
         report.machines = merges;
         Ok(report)
     }
@@ -1003,6 +1081,122 @@ pub(crate) fn is_provenance_path(path: &Path, machine: &str) -> bool {
 
 fn store_seq_of(name: &str) -> u64 {
     crate::store::parse_shard_seq(name).unwrap_or(u64::MAX)
+}
+
+/// Bucket one file path into `(machine, harness, log-id, shard-name)` when its
+/// trailing components are the machine-log layout
+/// `…/machine-logs/<machine>/<harness>/<log-id>/[<bucket>/]<shard>.jsonl`
+/// (ADR-053 D4).
+///
+/// The same rule as [`bucket_shard_path`], for the same reason: the stage
+/// prefix differs per machine and even per host, so the `machine-logs` marker
+/// is taken as the *last* component equal to that name. The bucket component
+/// is ignored because the six-digit sequence is global. A path with a
+/// `sessions` component never matches here, and one with `machine-logs` never
+/// matches there — the two products cannot be confused for one another.
+pub fn machine_log_shard_path(path: &Path) -> Option<(String, String, String, String)> {
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let mut marker = None;
+    for (i, c) in comps.iter().enumerate() {
+        if *c == MACHINE_LOGS_DIR {
+            marker = Some(i);
+        }
+    }
+    let i = marker?;
+    let rest = &comps[i + 1..];
+    if rest.len() != 4 && rest.len() != 5 {
+        return None;
+    }
+    let shard = rest.last()?;
+    if !shard.ends_with(SHARD_SUFFIX) {
+        return None;
+    }
+    // A generation is a *canonical* shard name (`000001.jsonl`), not merely a
+    // file that ends in `.jsonl`: the machine-log directory also holds its
+    // capture stamps and its sequence counter, and a capture stamp must never
+    // be counted as a generation (nor folded into a concatenation).
+    crate::store::parse_shard_seq(shard)?;
+    Some((
+        rest[0].to_string(),
+        rest[1].to_string(),
+        rest[2].to_string(),
+        (*shard).to_string(),
+    ))
+}
+
+/// Accumulator for machine-log generations across the snapshots one read
+/// walks: `(machine, harness, log-id)` → shard identity → shard info.
+///
+/// The identity is [`archive_shard_identity`]'s, so a generation present in
+/// two snapshots is one row, and a generation only an older snapshot holds is
+/// retained. Every generation ever pushed is kept — never collapsed — because
+/// a cursor claims the whole set a log's directory holds, and after a head
+/// rewrite the archive legitimately holds generations from two bases
+/// (ADR-053 D3).
+type MachineLogShards = BTreeMap<
+    (String, String, String),
+    BTreeMap<(u64, String), (Option<u64>, String, String, Node)>,
+>;
+
+fn collect_machine_log_shard(
+    into: &mut MachineLogShards,
+    path: &Path,
+    (machine, harness, log_id, shard): (String, String, String, String),
+    node: &Node,
+    snapshot_short: &str,
+) {
+    let (identity, sequence) = archive_shard_identity(path, &shard);
+    into.entry((machine, harness, log_id))
+        .or_default()
+        .entry(identity)
+        .or_insert((sequence, snapshot_short.to_string(), shard, node.clone()));
+}
+
+/// Fold accumulated machine-log generations into one row per log, in
+/// sequence order. Digests and lengths only: each body is dumped, hashed and
+/// dropped, never returned.
+fn materialize_machine_logs(
+    repo: &Repository<IndexedFullStatus>,
+    shards: MachineLogShards,
+) -> anyhow::Result<Vec<MachineLogBackedUp>> {
+    let mut out = Vec::new();
+    for ((machine, harness, log_id), entries) in shards {
+        let mut ordered: Vec<_> = entries.into_values().collect();
+        // The six-digit sequence is the ordering key; a noncanonical legacy
+        // name sorts last, exactly as it does for sessions.
+        ordered.sort_by_key(|(_, _, name, _)| store_seq_of(name));
+        let mut concat = Vec::new();
+        let mut shard_sha256 = Vec::with_capacity(ordered.len());
+        let mut shard_sequences = Vec::with_capacity(ordered.len());
+        let mut shard_bytes = Vec::with_capacity(ordered.len());
+        for (sequence, _snapshot, name, node) in &ordered {
+            let mut buf = Vec::new();
+            repo.dump(node, &mut buf)
+                .with_context(|| format!("dump machine-log shard {name}"))?;
+            shard_sha256.push(hex_digest(&Sha256::digest(&buf)));
+            shard_sequences.push(*sequence);
+            shard_bytes.push(buf.len() as u64);
+            concat.extend_from_slice(&buf);
+        }
+        out.push(MachineLogBackedUp {
+            machine,
+            harness,
+            log_id,
+            shard_count: ordered.len(),
+            concat_bytes: concat.len() as u64,
+            sha256: hex_digest(&Sha256::digest(&concat)),
+            shard_sha256,
+            shard_sequences,
+            shard_bytes,
+        });
+    }
+    out.sort_by(|a, b| {
+        (&a.machine, &a.harness, &a.log_id).cmp(&(&b.machine, &b.harness, &b.log_id))
+    });
+    Ok(out)
 }
 
 /// Bucket one file path into `(machine, session, shard-name)` if its trailing

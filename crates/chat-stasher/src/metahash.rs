@@ -97,12 +97,101 @@ fn stage_metadata_files(stage: &Path, machine: &str) -> anyhow::Result<Vec<(Stri
     Ok(files)
 }
 
-/// Compute a deterministic SHA-256 digest over the names and contents of all
-/// non-hidden metadata files for this machine, including `ext-status/*.json`.
+/// Does this machine's stage hold any machine-log file (ADR-053 D4)?
 ///
-/// Returns `Ok(None)` if neither metadata directory contains a file.
+/// The push guard asks this question, and it has to be asked separately from
+/// `count_meta_files`: a machine log is body-tier content in its own namespace,
+/// not a metadata file, so counting its generations as "metadata files" would
+/// quietly redefine that number.
+pub fn has_machine_log_files(stage: &Path, machine: &str) -> anyhow::Result<bool> {
+    Ok(!machine_log_files(stage, machine)?.is_empty())
+}
+
+/// The machine-log files of one machine, as `(relative name, path)` pairs.
+///
+/// The walk is exactly as deep as the namespace is
+/// (`<harness>/<log-id>/<bucket>/<shard>`), takes no hidden file, and never
+/// leaves `<stage>/machine-logs/<machine>/`. Names are relative to the
+/// namespace so the hash key does not depend on the stage prefix. Only names
+/// and content digests are read from these files — never prompt text.
+fn machine_log_files(stage: &Path, machine: &str) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let root = stage.join(crate::store::MACHINE_LOGS_DIR).join(machine);
+    let mut files = Vec::new();
+    let harnesses = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(e) => return Err(e).with_context(|| format!("read {}", root.display())),
+    };
+    for harness in harnesses {
+        let harness = harness?;
+        if !harness.file_type()?.is_dir() {
+            continue;
+        }
+        let harness_name = harness.file_name().to_string_lossy().into_owned();
+        if harness_name.starts_with('.') {
+            continue;
+        }
+        for log in fs::read_dir(harness.path())? {
+            let log = log?;
+            if !log.file_type()?.is_dir() {
+                continue;
+            }
+            let log_name = log.file_name().to_string_lossy().into_owned();
+            if log_name.starts_with('.') {
+                continue;
+            }
+            collect_machine_log_files(
+                &log.path(),
+                &format!("{harness_name}/{log_name}"),
+                &mut files,
+            )?;
+        }
+    }
+    Ok(files)
+}
+
+fn collect_machine_log_files(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<(String, PathBuf)>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_file() {
+            files.push((format!("{prefix}/{name}"), entry.path()));
+        } else if kind.is_dir() {
+            for inner in fs::read_dir(entry.path())? {
+                let inner = inner?;
+                let inner_name = inner.file_name().to_string_lossy().into_owned();
+                if inner_name.starts_with('.') || !inner.file_type()?.is_file() {
+                    continue;
+                }
+                files.push((format!("{prefix}/{name}/{inner_name}"), inner.path()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compute a deterministic SHA-256 digest over the names and contents of all
+/// non-hidden metadata files for this machine, including `ext-status/*.json`,
+/// plus this machine's machine-log files (ADR-053 D4 — see
+/// [`machine_log_files`]).
+///
+/// Returns `Ok(None)` if neither metadata directory nor the machine-log
+/// namespace contains a file.
 pub fn compute_meta_hash(stage: &Path, machine: &str) -> anyhow::Result<Option<String>> {
     let mut files = stage_metadata_files(stage, machine)?;
+    // A machine-log pass is captured content in its own namespace (ADR-053
+    // D2/D4), so its files are a change input even though they are not
+    // metadata files. Hashed as names plus content digests, exactly like the
+    // metadata files above: what enters this digest is never prompt text.
+    files.extend(machine_log_files(stage, machine)?);
 
     if files.is_empty() {
         return Ok(None);
@@ -187,7 +276,10 @@ pub fn evaluate_run_once_change(
 ) -> anyhow::Result<(bool, bool)> {
     let has_meta = has_meta_files(stage, machine)?;
     let meta_changed = check_meta_changed(stage, machine, state_dir)?;
-    let has_content = stage_shards > 0 || has_meta;
+    // A stage holding only machine-log generations is not empty: there is
+    // captured content to archive even though no session shard was written.
+    let has_machine_logs = has_machine_log_files(stage, machine)?;
+    let has_content = stage_shards > 0 || has_meta || has_machine_logs;
     let changed = shards_changed || meta_changed;
     Ok((has_content, changed))
 }
