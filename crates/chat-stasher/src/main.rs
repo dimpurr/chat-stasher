@@ -6594,10 +6594,18 @@ fn cmd_backfill_grok_bot(
         }
         chat_stasher::backfill::BackfillOutcome::Stopped(report, why) => {
             print_backfill_report(report);
-            eprintln!(
-                "backfill: STOPPED exit_code={code} — {why}; what has been delivered stays \
-                 delivered and the app was restored where the restore was attempted"
-            );
+            if report.restore.failure.is_some() {
+                // The stop text already carries the restore's failure
+                // (a stalled traversal is exit 3 and the close-out's
+                // verdict rides along in it); the old tail would
+                // claim an attempted restore that in fact failed.
+                eprintln!("backfill: STOPPED exit_code={code} — {why}");
+            } else {
+                eprintln!(
+                    "backfill: STOPPED exit_code={code} — {why}; what has been delivered stays \
+                     delivered and the app was restored where the restore was attempted"
+                );
+            }
         }
         chat_stasher::backfill::BackfillOutcome::RestoreFailed(report, why) => {
             print_backfill_report(report);
@@ -6652,20 +6660,54 @@ fn print_backfill_report(report: &chat_stasher::backfill::BackfillReport) {
     }
     let restore = &report.restore;
     if restore.attempted {
-        println!(
-            "[backfill] restore         : app restored to a normal launch (debug pid {:?}, \
-             port {}, port closed verified: {}, sync resumed observed: {})",
-            restore.debug_pid,
-            restore.debug_port,
-            // reason: a port check that could not be verified displays as
-            // "false" — the report column answers "was it verified closed?",
-            // and "unverified" must not read as "yes"
-            restore.port_closed.unwrap_or(false),
-            restore
-                .sync_resumed
-                .map(|seen| seen.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-        );
+        if let Some(failure) = &restore.failure {
+            println!(
+                "[backfill] restore         : not restored to a normal launch — {failure} \
+                 (debug pid {:?}, port {})",
+                restore.debug_pid, restore.debug_port,
+            );
+        } else if restore.relaunch_owed {
+            println!(
+                "[backfill] restore         : app restored to a normal launch (debug pid {:?}, \
+                 port {}, relaunch running verified: {}, port closed verified: {}, sync \
+                 resumed observed: {}, previous conversation re-selected: {})",
+                restore.debug_pid,
+                restore.debug_port,
+                // reason: a verification that could not be made displays
+                // as "false" — the report columns answer "was it
+                // verified?", and "unverified" must not read as "yes"
+                restore.relaunch_running.unwrap_or(false),
+                // reason: the port column answers "was it verified
+                // closed?", and an unverified check must not display
+                // as "yes"
+                restore.port_closed.unwrap_or(false),
+                restore
+                    .sync_resumed
+                    .map(|seen| seen.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                match restore.conversation_reselected {
+                    Some(true) => "yes".to_string(),
+                    Some(false) => "no".to_string(),
+                    // reason: no conversation was open when the run began
+                    // (nothing to re-select) or the re-selection could not
+                    // be attempted — an absence of the attempt, not a
+                    // failed one
+                    None => "not attempted".to_string(),
+                },
+            );
+        } else {
+            println!(
+                "[backfill] restore         : debug relaunch quit, no plain relaunch owed \
+                 because the app was not running before the run (debug pid {:?}, port {}, \
+                 port closed verified: {})",
+                restore.debug_pid,
+                restore.debug_port,
+                // reason: the port column answers "was it verified
+                // closed?", and an unverified check must not display
+                // as "yes"
+                restore.port_closed.unwrap_or(false),
+            );
+        }
     }
 }
 

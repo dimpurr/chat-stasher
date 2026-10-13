@@ -297,7 +297,15 @@ under its own heading below.
   missing, and the session's gap record and `partial` fidelity stand. The
   default is a dry run — the identical traversal, reports only — and
   delivery needs the explicit `--i-accept-the-risk`; the risk statement is
-  printed before every run, a dry one included. The app is restored to a
+  printed before every run, a dry one included. The run waits for the
+  relaunched app to present its conversation list before its first read, so
+  a booting app is never misread as a zero-conversation traversal; it waits
+  the quitting debug relaunch out — every recorded process fully exited,
+  its debugging port released — before relaunching the app the ordinary
+  way and verifying that the restored app stays running, so the relaunch
+  cannot lose to the dying instance's one-instance lock; a traversal that
+  stopped keeps its stop reason and its exit code even when the close-out
+  fails on top of it. The app is restored to a
   normal launch at the end of every run, interrupted runs included. macOS
   only; nothing in it ever calls the vendor's service or touches a
   credential, and no schedule or daemon path can reach it.

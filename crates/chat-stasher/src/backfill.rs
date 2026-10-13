@@ -55,10 +55,16 @@
 //!   here claims completeness.
 //! * **The app is restored to a normal launch at the end of every exit
 //!   path** — previously-open conversation put back (best effort), the
-//!   debug relaunch quit by exact recorded pid, the app relaunched with no
-//!   flags, the close-out verified (no debugging port listening, sync
-//!   resumed) and reported. A failed restore is reported with the recorded
-//!   pid and port, never swallowed into a success exit.
+//!   debug relaunch quit by exact recorded pid, the quit waited out
+//!   (recorded pids and children fully exited, the debugging port
+//!   released, so the plain relaunch does not race the dying
+//!   instance's single-instance lock), the app relaunched with no flags
+//!   and verified running through a settle window, the close-out
+//!   verified (no debugging port listening, sync resumed) and reported.
+//!   A failed restore is reported with the recorded pid and port,
+//!   never swallowed into a success exit — and a traversal that
+//!   stopped keeps its own verdict and its stop text even when the
+//!   close-out fails on top of it.
 //! * **macOS only** — the only measured platform, and the gate is the CLI
 //!   registration's, there where the real, platform-specific driver is
 //!   built: a build for any other platform answers
@@ -98,10 +104,25 @@ const LOAD_POLL_INTERVAL_MS: u64 = 250;
 /// debugging endpoint on the loopback port.
 pub const APP_BOOT_WAIT_MS: u64 = 60_000;
 
+/// The bounded wait, milliseconds, for the relaunched app's renderer to
+/// present a populated sidebar — the app's boot continues past its
+/// debugging endpoint answering, and a sidebar read before the renderer
+/// has painted its list reads as a traversal over zero conversations,
+/// which is a boot state, never a measurement. The poll is a read-only
+/// view-state query every half-second; it makes no request the app
+/// itself would not make while a person watches it start.
+pub const SIDEBAR_READY_WAIT_MS: u64 = 60_000;
+
+/// Gap between sidebar readiness polls, milliseconds.
+const SIDEBAR_READY_POLL_INTERVAL_MS: u64 = 500;
+
 /// The bounded wait, milliseconds, for the app's own persistence writes to
 /// resume after the normal relaunch before the close-out reports them as
-/// unconfirmed.
-pub const SYNC_RESUME_WAIT_MS: u64 = 60_000;
+/// unconfirmed. A relaunched app's first sync pass has been observed
+/// taking up to about a minute, so the wait keeps a margin over that
+/// measurement rather than turning a healthy relaunch into an unverified
+/// close-out at the boundary.
+pub const SYNC_RESUME_WAIT_MS: u64 = 90_000;
 
 // ---------------------------------------------------------------------------
 // Texts the user sees. The risk wording is the public doc section's own
@@ -246,6 +267,27 @@ pub struct RestoreOutcome {
     /// Verified: the app's own persistence writes resumed after the normal
     /// relaunch. `None` = could not be observed within the bounded wait.
     pub sync_resumed: Option<bool>,
+    /// Whether the restore owed a plain relaunch at all: whether an app
+    /// was already running before the run quit it. Set by the run from
+    /// its own preflight, not by the driver — a run that started against
+    /// no running app owes none, and launching one would start an app
+    /// that was never running, a state change masquerading as a restore.
+    pub relaunch_owed: bool,
+    /// Verified: the owed relaunch came up and stayed running through its
+    /// settle window — the window that catches an instance that dies on
+    /// the just-quit instance's single-instance lock, the quietest way a
+    /// machine can end up with no app at all. `Some(false)` is a
+    /// measured dead relaunch; `None` = none was owed, or it could not
+    /// be observed within its bounded wait.
+    pub relaunch_running: Option<bool>,
+    /// The previously-open conversation was clicked back before the
+    /// debug relaunch was quit, so the plain relaunch restores it
+    /// itself. `None` = no conversation was open when the run began, or
+    /// the re-selection could not be attempted; `Some(false)` =
+    /// attempted and the sidebar did not show the conversation. A plain
+    /// relaunch carries no debugging connection, so the re-selection is
+    /// performed, never observed on the relaunched instance.
+    pub conversation_reselected: Option<bool>,
     /// Restore could not be completed; the message names what failed.
     pub failure: Option<String>,
 }
@@ -280,8 +322,13 @@ pub trait AppDriver {
     fn nudge_older_pages(&mut self) -> std::result::Result<(), DriverError>;
 
     /// Restore a normal launch: re-select the previously-open conversation
-    /// (best effort), quit the debug relaunch by the exact recorded pid,
-    /// relaunch with no flags, and verify no debugging port is listening.
+    /// (best effort, performed before the quit and reported), quit the
+    /// debug relaunch by the exact recorded pid and its recorded
+    /// children, wait that quit out — every recorded pid fully exited,
+    /// the debugging port released — so the plain relaunch cannot start
+    /// inside the dying instance's single-instance window, relaunch with
+    /// no flags, and verify the relaunch stayed running and no debugging
+    /// port is listening.
     fn restore_normal_launch(
         &mut self,
         previously_open: Option<&str>,
@@ -625,6 +672,11 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
             false,
         );
     }
+    // Whether an app was already running before this run touches
+    // anything: the one fact that decides whether the close-out owes a
+    // plain relaunch back. Read here, before the first quit, so it stays
+    // the pre-run truth no matter how the run ends.
+    let app_was_running = !status.running_pids.is_empty();
 
     // Preflight snapshot through the existing reader path — the same read a
     // live scan performs — doubling as the signed-in probe: a signed-in app
@@ -693,7 +745,7 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
         if let Err(error) =
             crate::store::assert_stage_writer_audited(crate::store::StageWriter::Collect)
         {
-            let restore = close_out_restore(&mut req, None, None);
+            let restore = close_out_restore(&mut req, None, None, app_was_running);
             let report = report_from(
                 &req,
                 (&run_id, debug_port),
@@ -712,7 +764,7 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
             req.state_dir.join("grok-bot-unions"),
         ] {
             if let Err(error) = std::fs::create_dir_all(&dir) {
-                let restore = close_out_restore(&mut req, None, None);
+                let restore = close_out_restore(&mut req, None, None, app_was_running);
                 let report = report_from(
                     &req,
                     (&run_id, debug_port),
@@ -734,7 +786,7 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
     let relaunched_pid = match req.driver.relaunch_for_backfill(debug_port) {
         Ok(pid) => pid,
         Err(error) => {
-            let restore = close_out_restore(&mut req, None, None);
+            let restore = close_out_restore(&mut req, None, None, app_was_running);
             let report = report_from(
                 &req,
                 (&run_id, debug_port),
@@ -754,29 +806,28 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
         unmatched_prefixes: Vec::new(),
     };
 
-    let prepared: std::result::Result<Option<(RunContext, Vec<String>)>, TraverseStop> =
-        prepare_traversal(
-            &mut req,
-            &mut scratch,
-            &run_id,
-            &ran_at,
-            &app_version_start,
-            &agent_names,
-            &locals,
-        );
+    let prepared: std::result::Result<(RunContext, Vec<String>), TraverseStop> = prepare_traversal(
+        &mut req,
+        &mut scratch,
+        &run_id,
+        &ran_at,
+        &app_version_start,
+        &agent_names,
+        &locals,
+    );
     let traversal = match prepared {
-        Ok(Some((ctx, selected))) => traverse_all(&mut req, &mut scratch, ctx, selected),
-        Ok(None) => TraversalEnd::Stop(TraverseStop::Shape(
-            "the app's sidebar lists no conversations while the local cache holds \
-             replicas, so the view state is not what this build reads"
-                .to_string(),
-        )),
+        Ok((ctx, selected)) => traverse_all(&mut req, &mut scratch, ctx, selected),
         Err(stop) => TraversalEnd::Stop(stop),
     };
 
     // ---- Close-out: restore the app, verify the restore, report. The one
     // site every post-relaunch exit path flows through.
-    let restore = close_out_restore(&mut req, scratch.previously_open.clone(), debug_anchor);
+    let restore = close_out_restore(
+        &mut req,
+        scratch.previously_open.clone(),
+        debug_anchor,
+        app_was_running,
+    );
     let app_version_end = req
         .driver
         .app_status()
@@ -791,24 +842,38 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
         restore,
     );
 
-    if report.restore.failure.is_some() {
-        let (debug_pid, debug_port, failure) = (
-            report.restore.debug_pid,
-            report.restore.debug_port,
-            report.restore.failure.clone().expect("checked just above"),
-        );
-        return BackfillOutcome::RestoreFailed(
-            report,
-            format!(
-                "the app could not be restored to a normal launch, or the close-out \
-                 could not be verified: {failure} (the debug launch was pid {debug_pid:?} on \
-                 port {debug_port})"
-            ),
-        );
-    }
+    // The traversal's own verdict decides the exit, and a run that did
+    // not finish reading answers "did not finish" (exit 3) even when the
+    // close-out failed on top of it — collapsing the two into exit 1's
+    // "finished reading and failed" would turn "we do not know" into
+    // "we checked". The restore's failure rides along in the stop text,
+    // never dropped; a traversal that did finish keeps exit 1 for a
+    // failed close-out exactly as before.
     match traversal {
-        TraversalEnd::Stop(stop) => BackfillOutcome::Stopped(report, stop.describe()),
+        TraversalEnd::Stop(stop) => {
+            let mut why = stop.describe();
+            if let Some(failure) = report.restore.failure.clone() {
+                let (debug_pid, debug_port) = (report.restore.debug_pid, report.restore.debug_port);
+                why.push_str(&format!(
+                    "; and the app could not be restored to a normal launch, or the \
+                     close-out could not be verified: {failure} (the debug launch was \
+                     pid {debug_pid:?} on port {debug_port})"
+                ));
+            }
+            BackfillOutcome::Stopped(report, why)
+        }
         TraversalEnd::Done => {
+            if let Some(failure) = report.restore.failure.clone() {
+                let (debug_pid, debug_port) = (report.restore.debug_pid, report.restore.debug_port);
+                return BackfillOutcome::RestoreFailed(
+                    report,
+                    format!(
+                        "the app could not be restored to a normal launch, or the \
+                         close-out could not be verified: {failure} (the debug launch was \
+                         pid {debug_pid:?} on port {debug_port})"
+                    ),
+                );
+            }
             let mut findings = report
                 .unmatched_prefixes
                 .iter()
@@ -861,11 +926,48 @@ impl Default for Scratch {
     }
 }
 
+/// Wait for the relaunched app to be ready for its first sidebar read:
+/// the app's boot continues past its debugging endpoint answering, and
+/// the renderer presents an empty list until it has painted, so the
+/// run polls until the sidebar lists at least one conversation before
+/// anything is read. A sidebar still empty at the end of the bounded
+/// wait is a whole-run stop said loudly — the preflight just proved the
+/// local cache holds replicas, so an unpainted (or unpaintable) sidebar
+/// is a boot that never finished or a shape this build cannot find the
+/// conversations in, and either proves nothing about how many there
+/// are. Zero is a measurement this run never reached, never a
+/// fallback.
+fn wait_for_populated_sidebar(
+    req: &mut BackfillRequest<'_>,
+) -> std::result::Result<Vec<UiConversation>, TraverseStop> {
+    let deadline = req.clock.now_ms().saturating_add(SIDEBAR_READY_WAIT_MS);
+    loop {
+        if req.interrupt.load(Ordering::SeqCst) {
+            return Err(TraverseStop::Interrupted);
+        }
+        match req.driver.list_conversations() {
+            Ok(list) if !list.is_empty() => return Ok(list),
+            Ok(_) => {}
+            Err(DriverError::ShapeBreak(what)) => return Err(TraverseStop::Shape(what)),
+            Err(DriverError::Fatal(error)) => return Err(TraverseStop::Fatal(error.to_string())),
+        }
+        if req.clock.now_ms() >= deadline {
+            return Err(TraverseStop::Fatal(format!(
+                "the relaunched app's sidebar listed no conversation within the \
+                 {SIDEBAR_READY_WAIT_MS} ms readiness wait, so no conversation was opened \
+                 or read; an empty sidebar there is an app that never finished \
+                 presenting it (or whose conversations this build cannot find in its \
+                 view state), never a measurement of zero conversations"
+            )));
+        }
+        req.clock.sleep_ms(SIDEBAR_READY_POLL_INTERVAL_MS);
+    }
+}
+
 /// The side of the traversal that runs before any conversation is opened:
-/// record the previously-open conversation, read the sidebar, apply the
-/// `--conversation` prefixes, and load the delivery state. Errors here are
-/// whole-run stops; `Ok(None)` = the sidebar lists nothing (suspect, because
-/// the preflight snapshot just proved replicas exist).
+/// wait for the relaunched app's readiness, record the previously-open
+/// conversation, apply the `--conversation` prefixes, and load the
+/// delivery state. Errors here are whole-run stops.
 fn prepare_traversal(
     req: &mut BackfillRequest<'_>,
     scratch: &mut Scratch,
@@ -874,25 +976,23 @@ fn prepare_traversal(
     app_version_start: &Option<String>,
     agent_names: &BTreeMap<String, String>,
     locals: &BTreeMap<String, LocalConversation>,
-) -> std::result::Result<Option<(RunContext, Vec<String>)>, TraverseStop> {
+) -> std::result::Result<(RunContext, Vec<String>), TraverseStop> {
+    // Readiness before any of the app's state is read: an empty sidebar
+    // during boot must not be taken for the app's answer (the
+    // previously-open conversation is read only after it, for the same
+    // reason — the re-selection the close-out owes is only meaningful
+    // once the app's own selection is visible).
+    let conversations = wait_for_populated_sidebar(req)?;
     scratch.previously_open = match req.driver.currently_open() {
         Ok(open) => open,
         Err(DriverError::ShapeBreak(what)) => return Err(TraverseStop::Shape(what)),
         Err(DriverError::Fatal(error)) => return Err(TraverseStop::Fatal(error.to_string())),
     };
 
-    let conversations = match req.driver.list_conversations() {
-        Ok(list) => list,
-        Err(DriverError::ShapeBreak(what)) => return Err(TraverseStop::Shape(what)),
-        Err(DriverError::Fatal(error)) => return Err(TraverseStop::Fatal(error.to_string())),
-    };
     let conversation_agent_ids: Vec<String> = conversations
         .into_iter()
         .map(|item| item.agent_id)
         .collect();
-    if conversation_agent_ids.is_empty() {
-        return Ok(None);
-    }
     if conversation_agent_ids
         .iter()
         .any(|id| id.split('-').count() != 5)
@@ -944,7 +1044,7 @@ fn prepare_traversal(
                 remote_facts: None,
                 manifest_facts: None,
             };
-            return Ok(Some((ctx, Vec::new())));
+            return Ok((ctx, Vec::new()));
         }
     }
 
@@ -1005,7 +1105,7 @@ fn prepare_traversal(
         remote_facts,
         manifest_facts,
     };
-    Ok(Some((ctx, selected)))
+    Ok((ctx, selected))
 }
 
 fn session_id_for(machine: &str, agent: &str) -> String {
@@ -1405,11 +1505,15 @@ fn deliver_one(
 /// Restore the app and verify the restore — the close-out's single entry
 /// point. `debug` carries the relaunched pid and port when there was a
 /// relaunch; without it the driver decides what restore means (usually
-/// nothing: nothing was ever quit).
+/// nothing: nothing was ever quit). `app_was_running` is the run's own
+/// preflight fact of whether an app was running before anything was
+/// touched — what decides whether the restore owes a plain relaunch,
+/// read from the driver's report rather than trusted to it.
 fn close_out_restore(
     req: &mut BackfillRequest<'_>,
     previously_open: Option<String>,
     debug: Option<(u32, u16)>,
+    app_was_running: bool,
 ) -> RestoreOutcome {
     let mut outcome = match req.driver.restore_normal_launch(previously_open.as_deref()) {
         Ok(outcome) => outcome,
@@ -1422,9 +1526,16 @@ fn close_out_restore(
             debug_port: debug.map(|(_, port)| port).unwrap_or_default(),
             port_closed: None,
             sync_resumed: None,
+            relaunch_owed: app_was_running,
+            relaunch_running: None,
+            conversation_reselected: None,
             failure: Some(error.to_string()),
         },
     };
+    // The owed flag is the run's own preflight reading, not the driver's
+    // to claim: how the restore answered is the driver's to report, what
+    // the machine owed it is measured before anything was touched.
+    outcome.relaunch_owed = app_was_running;
     if !outcome.attempted {
         return outcome;
     }
@@ -1447,12 +1558,32 @@ fn close_out_restore(
         outcome.failure = Some(why);
         return outcome;
     }
+    // The plain relaunch the close-out owes: it must have come up and
+    // stayed up through its settle window — an instance that dies on the
+    // just-quit instance's single-instance lock is the quietest way a
+    // machine can end up with no app at all, so it is verified, never
+    // assumed. `Some(false)` is a measurement of a dead relaunch;
+    // `None` is an unobservation; only the owed relaunch is judged, and
+    // the driver's own, more specific failure text (when it wrote one)
+    // is kept ahead of these generic verdicts.
+    if outcome.relaunch_owed && outcome.relaunch_running != Some(true) {
+        outcome.failure.get_or_insert_with(|| {
+            if outcome.relaunch_running == Some(false) {
+                "the relaunched app did not stay running".to_string()
+            } else {
+                "whether the relaunched app stayed running could not be \
+                 verified"
+                    .to_string()
+            }
+        });
+        return outcome;
+    }
     // The sync check: the app's own persistence writes resumed within the
-    // bounded wait — the probe's own close-out criterion. Only observable
-    // when a debug instance was recorded and quit (a run whose relaunch
-    // failed before recording leaves no app expected to sync); not
-    // observed is reported as not observed, never assumed.
-    if outcome.debug_pid.is_some() {
+    // bounded wait — the probe's own close-out criterion. It is owed
+    // exactly when the restore ended with the app running, which is what
+    // the relaunch verification above just proved; not observed is
+    // reported as not observed, never assumed.
+    if outcome.relaunch_running == Some(true) {
         let start = req.clock.now_ms();
         let before = req.driver.sync_evidence_ms().ok().flatten();
         let mut resumed = None;
