@@ -327,6 +327,7 @@ Backfill is deliberately gentle: small batches spread through the day, under a d
 | Do a whole task, start to finish | [docs/use-cases/](docs/use-cases/) |
 | See what is supported, and how sure we are | [docs/support.md](docs/support.md) |
 | Read one source's whole story: what it collects, how complete, its quirks | [docs/sources/](docs/sources/) |
+| Know how a source id is built and why | [docs/id-naming.md](docs/id-naming.md) |
 | Understand the pipeline and the archive | [docs/how-it-works.md](docs/how-it-works.md) |
 | Decide whether to trust it | [docs/privacy-security.md](docs/privacy-security.md) |
 | Work on the code | [CONTRIBUTING.md](CONTRIBUTING.md) · [docs-dev/](docs-dev/) |

@@ -43,6 +43,7 @@ New sources are named by the rule above, and the existing ones converge on it by
 | `zed` | `zed-ide` |
 | `continue` | `continue-ide` |
 | `grok-bot`, `gemini-cli`, `kimi-code`, `deepseek-harness`, `github-copilot-cli`, `google-antigravity`, `hermes-agent`, `openclaw`, `opencode` | unchanged — already conformant |
+| `letta` | unchanged — a deliberate keep, not a conformance call: no collision today, and renaming would re-key its audit HMAC scopes for zero disambiguation gain |
 
 The **archive is append-only**, so this convergence never rewrites what exists: session ids and paths already archived stay exactly as they were written, forever, and remain first-class. No conversation ever gets a second archive entry because its id's vocabulary changed. Filters such as `--harness` accept the old and the new spelling of a source and mean the same thing by both, and lists, counts and search results group the two spellings under the new name — one source, one number, whichever spelling a given session's id carries.
 
