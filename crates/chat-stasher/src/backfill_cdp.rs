@@ -63,6 +63,31 @@ const BUNDLE_LOCATIONS: &[&str] = &["/Applications/Grok Bot.app", "~/Application
 /// The only host forms the debug port may bind. Anything wider refuses.
 const LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "[::1]", "::1"];
 
+/// The bounded wait, milliseconds, for a quitting app's exact recorded
+/// pids to fully exit: an Electron main process ends some time after its
+/// quit signal, and until it is fully gone it still holds the app's
+/// single-instance lock, so any relaunch inside the window — the debug
+/// one at the start of the run, the plain one at the close-out — dies
+/// on it. The wait ends only on a confirmed exit; a timeout is a
+/// reported failure, never a guessed release.
+const QUIT_EXIT_WAIT_MS: u64 = 15_000;
+
+/// Gap between exit-confirmation polls, milliseconds.
+const QUIT_EXIT_POLL_INTERVAL_MS: u64 = 200;
+
+/// The bounded wait, milliseconds, for the owed plain relaunch to show
+/// a running process.
+const RELAUNCH_APPEAR_WAIT_MS: u64 = 10_000;
+
+/// The settle window, milliseconds, the owed plain relaunch must stay
+/// running through — wide enough to catch an instance that starts and
+/// immediately dies on a lingering single-instance lock, without
+/// holding the run open long enough to matter.
+const RELAUNCH_SETTLE_WAIT_MS: u64 = 2_000;
+
+/// Gap between relaunch-verification polls, milliseconds.
+const RELAUNCH_VERIFY_POLL_INTERVAL_MS: u64 = 250;
+
 // ---------------------------------------------------------------------------
 // The process shell.
 //
@@ -96,6 +121,11 @@ pub trait OsCommands {
             // quit; the parent's own quit below is the loud part
             .unwrap_or_default()
     }
+    /// Whether one exact pid is still alive. Listing only; nothing
+    /// signals here. A probe that cannot be made answers alive — a
+    /// process this could not see must not be declared dead while it
+    /// may still hold the app's single-instance lock.
+    fn pid_alive(&self, pid: u32) -> bool;
 }
 
 /// The production shell: the system tools, nothing else.
@@ -175,6 +205,20 @@ impl OsCommands for SystemOs {
             .filter(|line| !line.trim().is_empty() && !line.starts_with("COMMAND"))
             .map(|line| line.to_string())
             .collect())
+    }
+
+    fn pid_alive(&self, pid: u32) -> bool {
+        // One existence probe, `-0`, to exactly one pid: no signal is
+        // delivered. `/bin/kill` exists for this on macOS the way it
+        // exists for the real signal above.
+        match Command::new("kill").arg("-0").arg(pid.to_string()).output() {
+            // reason: a liveness probe that cannot be run must not
+            // answer dead — the close-out's relaunch would race a
+            // process that was never seen exiting, and aliveness is
+            // the answer the bounded wait fails loudly on
+            Ok(output) => output.status.success(),
+            Err(_) => true,
+        }
     }
 }
 
@@ -535,6 +579,24 @@ impl CdpAppDriver {
         self.os.pids_matching(marker).unwrap_or_default()
     }
 
+    /// Whether every exact recorded pid is fully gone, polled by
+    /// `pid_alive` until the last one answers dead or the bounded wait
+    /// ends. Used before both relaunch openings — the debug relaunch
+    /// races the pre-run instance's single-instance lock exactly the way
+    /// the plain restore relaunch races the debug instance's.
+    fn wait_pids_gone(&self, recorded: &[u32], wait_ms: u64) -> bool {
+        let start = self.clock.now_ms();
+        loop {
+            if !recorded.iter().any(|pid| self.os.pid_alive(*pid)) {
+                return true;
+            }
+            if self.clock.now_ms().saturating_sub(start) > wait_ms {
+                return false;
+            }
+            self.clock.sleep_ms(QUIT_EXIT_POLL_INTERVAL_MS);
+        }
+    }
+
     /// Whether every listener line on the port is a loopback address. No
     /// address token or a non-loopback host counts as not verified — the
     /// run refuses rather than connect.
@@ -600,14 +662,21 @@ impl AppDriver for CdpAppDriver {
     fn relaunch_for_backfill(&mut self, port: u16) -> std::result::Result<u32, DriverError> {
         let fail = |what: String| DriverError::Fatal(anyhow!("the debug relaunch failed: {what}"));
 
-        // Quit a running app by exact pid, children by parent alongside.
+        // Quit a running app by exact pid, children by parent alongside,
+        // and record every exact pid the quit covers — then wait the quit
+        // out: the exiting instance still holds the app's single-instance
+        // lock until it is fully gone, and the debug relaunch this opens
+        // must not start inside that window.
         let quit_pids = self.running_pids();
         if !quit_pids.is_empty() {
             self.running_before = quit_pids.clone();
+            let mut quit_record: Vec<u32> = Vec::new();
             for pid in &quit_pids {
                 for child in self.os.pids_of_parent(*pid) {
+                    quit_record.push(child);
                     drop(self.os.kill(child));
                 }
+                quit_record.push(*pid);
                 if let Err(error) = self.os.kill(*pid) {
                     return Err(fail(format!(
                         "the running app could not be quit: {error:#}"
@@ -615,14 +684,13 @@ impl AppDriver for CdpAppDriver {
                 }
             }
             self.quit_something = true;
-            let start = self.clock.now_ms();
-            while self
-                .running_pids()
-                .iter()
-                .any(|pid| quit_pids.contains(pid))
-                && self.clock.now_ms().saturating_sub(start) < 5_000
-            {
-                self.clock.sleep_ms(200);
+            if !self.wait_pids_gone(&quit_record, QUIT_EXIT_WAIT_MS) {
+                return Err(fail(
+                    "the quit app did not fully exit within its bounded wait, so the \
+                     debugging relaunch could not be started against its released \
+                     single-instance lock"
+                        .to_string(),
+                ));
             }
         }
         self.debug_port = port;
@@ -829,30 +897,39 @@ impl AppDriver for CdpAppDriver {
         };
         // Best-effort re-selection of the previously-open conversation
         // while the debug instance still runs (the app remembers the last
-        // open conversation across its own restart).
+        // open conversation across its own restart). Performed and
+        // recorded, never claimed as observed on the relaunched plain
+        // instance — a plain launch carries no debugging connection.
         if let Some(conversation) = previously_open {
             if let Some(connection) = self.connection.as_mut() {
-                if let Ok(located) = connection.eval(&script_locate_conversation(conversation)) {
-                    let spot = (
-                        located.get("found").and_then(Value::as_bool),
-                        located.get("x").and_then(Value::as_f64),
-                        located.get("y").and_then(Value::as_f64),
-                    );
-                    if let (Some(true), Some(x), Some(y)) = spot {
-                        drop(connection.dispatch_mouse(json!({
-                            "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1,
-                        })));
-                        drop(connection.dispatch_mouse(json!({
-                            "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1,
-                        })));
+                match connection.eval(&script_locate_conversation(conversation)) {
+                    Ok(located) => {
+                        let spot = (
+                            located.get("found").and_then(Value::as_bool),
+                            located.get("x").and_then(Value::as_f64),
+                            located.get("y").and_then(Value::as_f64),
+                        );
+                        if let (Some(true), Some(x), Some(y)) = spot {
+                            outcome.conversation_reselected = Some(true);
+                            drop(connection.dispatch_mouse(json!({
+                                "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1,
+                            })));
+                            drop(connection.dispatch_mouse(json!({
+                                "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1,
+                            })));
+                        } else {
+                            outcome.conversation_reselected = Some(false);
+                        }
                     }
+                    Err(_) => outcome.conversation_reselected = None,
                 }
             }
         }
         // End the debug session first, so the app is not driven while it
-        // is being quit. The exact pid when it was recorded; otherwise
-        // whatever appeared after the preflight set — never a name, never
-        // a pattern.
+        // is being quit. The exact pid when it was recorded, its children
+        // by parent alongside — never a name, never a pattern. Every
+        // exact pid the quit covers is recorded, because the wait below
+        // judges the exit on exactly those.
         self.connection = None;
         let mut to_quit: Vec<u32> = Vec::new();
         if let Some(pid) = self.relaunched_pid {
@@ -864,10 +941,13 @@ impl AppDriver for CdpAppDriver {
                     .filter(|pid| !self.running_before.contains(pid)),
             );
         }
+        let mut quit_record: Vec<u32> = Vec::new();
         for pid in &to_quit {
             for child in self.os.pids_of_parent(*pid) {
+                quit_record.push(child);
                 drop(self.os.kill(child));
             }
+            quit_record.push(*pid);
             if let Err(error) = self.os.kill(*pid) {
                 outcome.failure = Some(format!("the debug relaunch could not be quit: {error:#}"));
                 return Ok(outcome);
@@ -875,10 +955,108 @@ impl AppDriver for CdpAppDriver {
         }
         self.relaunched_pid = None;
         self.relaunched = false;
+        // Wait the quit out before any relaunch: the exiting instance
+        // holds the app's single-instance lock until it is fully gone,
+        // and a plain relaunch started inside that window starts an
+        // instance that dies on the lock and leaves the machine with no
+        // app at all — the exact end state the close-out exists to
+        // prevent. Full exit means every recorded pid answers dead and
+        // the debugging port's socket has released. A wait that times
+        // out is a reported failure, never a guessed release; the plain
+        // relaunch below still runs as the best effort it always was.
+        let start = self.clock.now_ms();
+        loop {
+            let any_alive = quit_record.iter().any(|pid| self.os.pid_alive(*pid));
+            let port_free = self
+                .os
+                .port_listeners(self.debug_port)
+                .map(|lines| lines.is_empty())
+                // reason: a listing that cannot be made must be read as
+                // "not released" — the relaunch would race a port this
+                // could not see, and the timeout is the honest answer
+                .unwrap_or(false);
+            if !any_alive && port_free {
+                break;
+            }
+            if self.clock.now_ms().saturating_sub(start) > QUIT_EXIT_WAIT_MS {
+                outcome.failure.get_or_insert_with(|| {
+                    "the quit debug launch did not fully exit within its bounded \
+                     wait, so its single-instance lock could not be confirmed \
+                     released"
+                        .to_string()
+                });
+                break;
+            }
+            self.clock.sleep_ms(QUIT_EXIT_POLL_INTERVAL_MS);
+        }
         if self.quit_something {
             if let Err(error) = self.open_app(&[]) {
                 outcome.failure = Some(format!("the app could not be relaunched: {error:#}"));
                 return Ok(outcome);
+            }
+            // Verify the relaunch: a fresh instance must appear, stay
+            // running through a settle window (the single-instance race
+            // shows up as an instance that starts and immediately dies)
+            // and never carry the old debug port. A listing that answers
+            // at all makes a "no fresh pid" a measurement; one that never
+            // answers leaves it unobserved — and the close-out judges
+            // the difference.
+            let start = self.clock.now_ms();
+            let mut listed_ok = false;
+            let mut fresh: Vec<u32> = Vec::new();
+            let appeared = loop {
+                if let Ok(seen) = self
+                    .os
+                    .pids_matching("/Grok Bot.app/Contents/MacOS/Grok Bot")
+                {
+                    listed_ok = true;
+                    let not_old: Vec<u32> = seen
+                        .into_iter()
+                        .filter(|pid| {
+                            !quit_record.contains(pid) && !self.running_before.contains(pid)
+                        })
+                        .collect();
+                    if !not_old.is_empty() {
+                        fresh = not_old;
+                        break true;
+                    }
+                }
+                if self.clock.now_ms().saturating_sub(start) > RELAUNCH_APPEAR_WAIT_MS {
+                    break false;
+                }
+                self.clock.sleep_ms(RELAUNCH_VERIFY_POLL_INTERVAL_MS);
+            };
+            if appeared {
+                let settle_start = self.clock.now_ms();
+                let settled = loop {
+                    if !fresh.iter().any(|pid| self.os.pid_alive(*pid)) {
+                        break false;
+                    }
+                    if self.clock.now_ms().saturating_sub(settle_start) > RELAUNCH_SETTLE_WAIT_MS {
+                        break true;
+                    }
+                    self.clock.sleep_ms(RELAUNCH_VERIFY_POLL_INTERVAL_MS);
+                };
+                outcome.relaunch_running = Some(settled);
+                if !settled {
+                    outcome.failure.get_or_insert_with(|| {
+                        "the relaunched app started and exited again within its \
+                         settle window"
+                            .to_string()
+                    });
+                }
+            } else if listed_ok {
+                outcome.relaunch_running = Some(false);
+                outcome.failure.get_or_insert_with(|| {
+                    "the relaunched app never showed a running process within its \
+                         bounded wait"
+                        .to_string()
+                });
+            } else {
+                // reason: an unobservable process listing is an
+                // unobservation, not a dead relaunch — the close-out
+                // reports it as could-not-verify, never as a measurement
+                outcome.relaunch_running = None;
             }
         }
         // Verify: nothing still listens on the debug port. `attempted`

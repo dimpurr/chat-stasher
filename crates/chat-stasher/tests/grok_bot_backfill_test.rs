@@ -259,6 +259,16 @@ struct MockScenario {
     sync_stuck: Option<u64>,
     /// restore_normal_launch reports failure.
     restore_fails: bool,
+    /// A booting app: the sidebar reads answer empty until this many reads
+    /// have passed, then the conversation list populates — the boot state
+    /// the run's readiness wait exists for (W991 saw its two dry runs read
+    /// a still-booting sidebar and traverse zero conversations).
+    sidebar_populates_after: usize,
+    /// The close-out's plain relaunch dies on the single-instance lock:
+    /// the mock's restore reports the port closed (nothing listens when
+    /// the relaunch is dead — W991's exact readings) and the relaunch
+    /// not running.
+    relaunch_dies: bool,
 }
 
 impl MockScenario {
@@ -275,6 +285,8 @@ impl MockScenario {
             interrupt_on_open: None,
             sync_stuck: None,
             restore_fails: false,
+            sidebar_populates_after: 0,
+            relaunch_dies: false,
         }
     }
 }
@@ -285,6 +297,7 @@ struct MockDriver {
     interrupt_flag: Option<Arc<AtomicBool>>,
     open: RefCell<Option<String>>,
     reads_since_open: Cell<usize>,
+    list_reads: Cell<usize>,
 }
 
 impl MockDriver {
@@ -318,7 +331,10 @@ impl AppDriver for MockDriver {
     fn app_status(&mut self) -> anyhow::Result<AppStatus> {
         Ok(AppStatus {
             installed_version: self.scenario.installed_version.clone(),
-            running_pids: Vec::new(),
+            // An app is already running before the run, like every live
+            // deployment: the run's preflight reads this, and the
+            // close-out owes a plain relaunch back because of it.
+            running_pids: vec![36025],
         })
     }
 
@@ -329,6 +345,16 @@ impl AppDriver for MockDriver {
     }
 
     fn list_conversations(&mut self) -> Result<Vec<UiConversation>, DriverError> {
+        let reads = self.list_reads.get() + 1;
+        self.list_reads.set(reads);
+        if reads <= self.scenario.sidebar_populates_after {
+            // The relaunched app's renderer has not painted its sidebar
+            // list yet — exactly the state a freshly booted app serves
+            // before it is ready, which the run must wait out rather
+            // than read as "no conversations".
+            self.note("sidebar-readiness:empty".to_string());
+            return Ok(Vec::new());
+        }
         Ok(self
             .scenario
             .conversations
@@ -399,7 +425,30 @@ impl AppDriver for MockDriver {
                 debug_port: 0,
                 port_closed: Some(false),
                 sync_resumed: None,
+                relaunch_running: None,
+                conversation_reselected: Some(true),
+                // The run's close-out sets this from its own preflight;
+                // the driver never claims it.
+                relaunch_owed: false,
                 failure: Some("the debugging port still listens".to_string()),
+            });
+        }
+        if self.scenario.relaunch_dies {
+            // W991's close-out readings exactly: the port check sees
+            // nothing listening (the relaunch is dead), the sync check
+            // can observe nothing — and the relaunch never stays up.
+            // No failure text of its own: the close-out's verdict must
+            // speak from the relaunch-verification facts.
+            return Ok(RestoreOutcome {
+                attempted: true,
+                debug_pid: Some(4242),
+                debug_port: 0,
+                port_closed: Some(true),
+                sync_resumed: None,
+                relaunch_running: Some(false),
+                conversation_reselected: Some(true),
+                relaunch_owed: false,
+                failure: None,
             });
         }
         Ok(RestoreOutcome {
@@ -408,6 +457,9 @@ impl AppDriver for MockDriver {
             debug_port: 0,
             port_closed: Some(true),
             sync_resumed: Some(true),
+            relaunch_running: Some(true),
+            conversation_reselected: Some(true),
+            relaunch_owed: false,
             failure: None,
         })
     }
@@ -463,6 +515,7 @@ fn run_backfill(
         journal: journal.clone(),
         interrupt_flag: interrupt_for_mock,
         reads_since_open: Cell::new(0),
+        list_reads: Cell::new(0),
     };
     std::fs::create_dir_all(&harness.stage).unwrap();
     let request = BackfillRequest {
@@ -1177,6 +1230,173 @@ fn a_shape_break_stops_the_whole_run() {
     assert_eq!(report.restore.port_closed, Some(true));
 }
 
+/// A booting app's empty sidebar must be waited out, never read as
+/// "no conversations": the W991 end-to-end run saw the traversal open a
+/// still-booting app, read an empty sidebar as a zero-traversal, and lose
+/// the real conversation list to the boot race. The run polls until the
+/// list populates, then traverses normally — and the readiness polls are
+/// visible in the journal, before any click.
+#[test]
+fn a_booting_app_is_waited_out_before_its_first_sidebar_read() {
+    let harness = harness(&[(AGENT, visible_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    let mut scenario = MockScenario::sane();
+    scenario.sidebar_populates_after = 2;
+    let (clock, _now) = fake_clock();
+    let (outcome, journal, _) = run_backfill(&harness, scenario, clock, true, &[], None);
+    let report = match outcome {
+        BackfillOutcome::Completed(report) => report,
+        other => panic!("a waitable boot must not stop the run: {other:?}"),
+    };
+    assert_eq!(
+        report.conversations.len(),
+        1,
+        "the boot race is not a traversal over zero conversations"
+    );
+    assert_eq!(report.conversations[0].rows_delivered, 7);
+    let journal = journal.borrow();
+    let empties: Vec<usize> = journal
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line == "sidebar-readiness:empty").then_some(index))
+        .collect();
+    let click = journal
+        .iter()
+        .position(|line| line.starts_with("click:"))
+        .expect("the conversation opened once ready");
+    assert_eq!(
+        empties.len(),
+        2,
+        "the readiness wait polled through the boot's empty reads"
+    );
+    assert!(
+        click > *empties.last().expect("non-empty"),
+        "no conversation opens before the sidebar has populated"
+    );
+}
+
+/// An app whose sidebar never populates is a whole-run stop said loudly
+/// — never a silent traversal over zero: the preflight just proved the
+/// local cache holds replicas, so an empty sidebar at the end of the
+/// readiness wait proves a boot that never finished, not a measurement
+/// of zero conversations. Exit stays in the "did not finish" family.
+#[test]
+fn a_sidebar_that_never_populates_stops_the_whole_run_loudly() {
+    let harness = harness(&[(AGENT, visible_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    let mut scenario = MockScenario::sane();
+    scenario.sidebar_populates_after = usize::MAX;
+    let (clock, _now) = fake_clock();
+    let (outcome, journal, _) = run_backfill(&harness, scenario, clock, true, &[], None);
+    let exit = outcome.exit_code();
+    match outcome {
+        BackfillOutcome::Stopped(report, why) => {
+            assert_eq!(exit, 3, "a readiness failure did not finish the run");
+            assert!(
+                why.contains("listed no conversation"),
+                "the stop names the unpopulated sidebar: {why}"
+            );
+            assert!(
+                why.contains("never a measurement of zero conversations"),
+                "the stop states why the empty sidebar proves nothing: {why}"
+            );
+            assert!(report.conversations.is_empty());
+            assert!(
+                !journal
+                    .borrow()
+                    .iter()
+                    .any(|line| line.starts_with("click:")),
+                "nothing was opened"
+            );
+            assert!(report.restore.attempted, "the close-out still ran");
+            assert_eq!(report.restore.port_closed, Some(true));
+        }
+        other => panic!("a never-ready sidebar stops the run: {other:?}"),
+    }
+}
+
+/// The W991 shape end to end: a readiness stop AND a failed close-out
+/// together. The traversal's stop text must survive — it is the only
+/// reason the report names — and the run answers "did not finish"
+/// (exit 3), with the restore's failure riding along in the same text
+/// rather than replacing the traversal's verdict.
+#[test]
+fn a_readiness_stop_gives_exit_3_and_carries_a_later_restore_failure() {
+    let harness = harness(&[(AGENT, visible_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    let mut scenario = MockScenario::sane();
+    scenario.sidebar_populates_after = usize::MAX;
+    scenario.restore_fails = true;
+    let (clock, _now) = fake_clock();
+    let (outcome, _, _) = run_backfill(&harness, scenario, clock, true, &[], None);
+    let exit = outcome.exit_code();
+    match outcome {
+        BackfillOutcome::Stopped(report, why) => {
+            assert_eq!(
+                exit, 3,
+                "a run that never traversed anything answers did-not-finish, even when \
+                 the close-out also failed"
+            );
+            assert!(
+                why.contains("listed no conversation"),
+                "the traversal's stop text leads: {why}"
+            );
+            assert!(
+                why.contains("debugging port"),
+                "the restore's failure rides along: {why}"
+            );
+            assert!(
+                why.contains("4242"),
+                "the recorded pid is in the text: {why}"
+            );
+            assert!(report.restore.failure.is_some());
+        }
+        other => {
+            panic!("readiness stop + restore failure stays a Stopped carrying both: {other:?}")
+        }
+    }
+}
+
+/// A restore whose relaunch dies is reported, never swallowed: W991 saw
+/// the close-out print "port closed verified: true" over a machine whose
+/// app was down — the port check is true precisely when the relaunch is
+/// dead. The close-out must judge the owed relaunch on its own facts and
+/// answer exit 1 with the reason, while the traversal's delivered work
+/// still stands.
+#[test]
+fn a_relaunch_that_does_not_stay_running_fails_the_close_out() {
+    let harness = harness(&[(AGENT, visible_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    let mut scenario = MockScenario::sane();
+    scenario.relaunch_dies = true;
+    let (clock, _now) = fake_clock();
+    let (outcome, _, _) = run_backfill(&harness, scenario, clock, true, &[], None);
+    let exit = outcome.exit_code();
+    match outcome {
+        BackfillOutcome::RestoreFailed(report, why) => {
+            assert_eq!(
+                exit, 1,
+                "a finished traversal plus a dead relaunch is exit 1"
+            );
+            assert!(
+                why.contains("the relaunched app did not stay running"),
+                "the reason names the relaunch, not the port: {why}"
+            );
+            assert_eq!(report.restore.port_closed, Some(true));
+            assert_eq!(report.restore.relaunch_running, Some(false));
+            assert!(
+                !why.contains("still listens"),
+                "the port check must not be the headline when the relaunch is the failure: {why}"
+            );
+            assert_eq!(
+                report.conversations[0].rows_delivered, 7,
+                "the delivered work still stands"
+            );
+        }
+        other => panic!("a dead relaunch is a RestoreFailed: {other:?}"),
+    }
+}
+
 /// A restore that cannot be verified is never a success: the run exits 1
 /// and says exactly what could not be finished, with the recorded pid.
 #[test]
@@ -1229,10 +1449,184 @@ impl Harness {
 // and the loopback gate.
 //
 
+/// The fake machine's process state: which exact pids are alive, which of
+/// them the app-marker listing answers, the parent→children edges the
+/// `pgrep -P` listing reads, and slow-exit arming — a killed pid that
+/// keeps answering `pid_alive` for a few probes models an Electron main
+/// process that exits some time after its quit signal, which is exactly
+/// the dying-instance window W991 measured the close-out losing to.
+pub struct FakeProcesses {
+    live: Mutex<BTreeSet<u32>>,
+    /// The pids the marker listing (`pgrep -f <app path>`) answers: the
+    /// app's main binaries. Helpers answer the parent listing only.
+    marker_pids: Mutex<BTreeSet<u32>>,
+    children: Mutex<BTreeMap<u32, Vec<u32>>>,
+    /// Killed pids that still answer alive for this many `pid_alive`
+    /// probes, then die. A plain relaunch can be armed too, so an
+    /// instance that starts and dies is modelable as well.
+    dying: Mutex<BTreeMap<u32, usize>>,
+    journal: Mutex<Vec<String>>,
+}
+
+impl FakeProcesses {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            live: Mutex::new(BTreeSet::new()),
+            marker_pids: Mutex::new(BTreeSet::new()),
+            children: Mutex::new(BTreeMap::new()),
+            dying: Mutex::new(BTreeMap::new()),
+            journal: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Arm a slow exit: after its kill, the pid answers `pid_alive` for
+    /// `ticks` probes and is gone after them.
+    fn arm_slow_exit(&self, pid: u32, ticks: usize) {
+        self.dying.lock().unwrap().insert(pid, ticks);
+    }
+
+    /// The debug relaunch's helper children, listed by the parent
+    /// listing until they are dead. Each helper also dies slowly once
+    /// killed, like an app being torn down.
+    fn plan_debug_helpers(&self, parent: u32, helpers: &[u32], exit_ticks: usize) {
+        let mut children = self.children.lock().unwrap();
+        children.insert(parent, helpers.to_vec());
+        for helper in helpers {
+            self.arm_slow_exit(*helper, exit_ticks);
+        }
+    }
+
+    /// `open` with the debugging flag: the main pid comes up (4242) with
+    /// whatever helpers were planned for it.
+    fn spawn_debug(&self, main: u32) {
+        let planned = self
+            .children
+            .lock()
+            .unwrap()
+            .get(&main)
+            .cloned()
+            .unwrap_or_default();
+        let mut live = self.live.lock().unwrap();
+        live.clear();
+        live.insert(main);
+        for helper in planned {
+            live.insert(helper);
+        }
+        self.marker_pids.lock().unwrap().clear();
+        self.marker_pids.lock().unwrap().insert(main);
+    }
+
+    /// `open` with no flags: a new instance is a new pid (5252), unless a
+    /// slow exit was armed for it — then the instance starts and is
+    /// already exiting, alive to the pid probe a few times and gone
+    /// after: the relaunch that loses to the dying instance's
+    /// single-instance lock.
+    fn spawn_plain(&self, main: u32) {
+        let mut live = self.live.lock().unwrap();
+        live.clear();
+        let doomed = self.dying.lock().unwrap().contains_key(&main);
+        if !doomed {
+            live.insert(main);
+        }
+        self.marker_pids.lock().unwrap().clear();
+        self.marker_pids.lock().unwrap().insert(main);
+    }
+
+    /// A pid that's already running before the test begins: the app the
+    /// user had open — what the run must quit and later restore.
+    fn seed_running_app(&self, pid: u32) {
+        self.live.lock().unwrap().insert(pid);
+        self.marker_pids.lock().unwrap().insert(pid);
+    }
+
+    fn kill(&self, pid: u32) {
+        let result = self.pid_alive(pid);
+        self.journal
+            .lock()
+            .unwrap()
+            .push(format!("kill:{pid} (was alive: {result})"));
+        self.live.lock().unwrap().remove(&pid);
+        self.children.lock().unwrap().remove(&pid);
+    }
+
+    fn pid_alive(&self, pid: u32) -> bool {
+        if self.live.lock().unwrap().contains(&pid) {
+            self.journal
+                .lock()
+                .unwrap()
+                .push(format!("alive:{pid}:true"));
+            return true;
+        }
+        let mut dying = self.dying.lock().unwrap();
+        match dying.get_mut(&pid) {
+            Some(ticks) if *ticks > 0 => {
+                *ticks -= 1;
+                self.journal
+                    .lock()
+                    .unwrap()
+                    .push(format!("alive:{pid}:true"));
+                true
+            }
+            _ => {
+                dying.remove(&pid);
+                self.journal
+                    .lock()
+                    .unwrap()
+                    .push(format!("alive:{pid}:false"));
+                false
+            }
+        }
+    }
+
+    /// What `pgrep -f <app path>` answers: marker pids that are alive or
+    /// still dying — a process exiting under load is still listed until
+    /// it is really gone.
+    fn marker_alive(&self) -> Vec<u32> {
+        let live = self.live.lock().unwrap();
+        let dying = self.dying.lock().unwrap();
+        self.marker_pids
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|pid| live.contains(pid) || dying.contains_key(pid))
+            .collect()
+    }
+
+    /// What `pgrep -P <pid>` answers: the planned children of one pid
+    /// that are alive or still dying.
+    fn children_of(&self, parent: u32) -> Vec<u32> {
+        let live = self.live.lock().unwrap();
+        let dying = self.dying.lock().unwrap();
+        self.children
+            .lock()
+            .unwrap()
+            .get(&parent)
+            .map(|children| {
+                children
+                    .iter()
+                    .copied()
+                    .filter(|pid| live.contains(pid) || dying.contains_key(pid))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn journal(&self) -> Vec<String> {
+        self.journal.lock().unwrap().clone()
+    }
+
+    fn note(&self, line: String) {
+        self.journal.lock().unwrap().push(line);
+    }
+}
+
 struct FakeOs {
-    /// The "app's" state: whether `open` left it running and on which port
-    /// — what the port listing answers.
+    /// The "app's" running/debug-port state: what the port listing and
+    /// the endpoint-facing booleans answer.
     state: Arc<ServerState2>,
+    /// The process listing side: exact pids, marker listing, kills.
+    processes: Arc<FakeProcesses>,
     /// What the plist probe answers, for the app-version stamp.
     bundle_version: Option<&'static str>,
     /// The port listing lies: wider than loopback, for the refusal test.
@@ -1257,6 +1651,7 @@ impl FakeOs {
     ) -> Arc<Self> {
         Arc::new(Self {
             state,
+            processes: FakeProcesses::new(),
             bundle_version,
             non_loopback: false,
             on_debug_port,
@@ -1273,6 +1668,7 @@ impl FakeOs {
         // and the refusal comes from the falsified binding report.
         Arc::new(Self {
             state,
+            processes: FakeProcesses::new(),
             bundle_version: Some("0.70.2"),
             non_loopback: true,
             on_debug_port: Some(on_debug_port),
@@ -1282,20 +1678,40 @@ impl FakeOs {
     fn silent(state: Arc<ServerState2>) -> Arc<Self> {
         Arc::new(Self {
             state,
+            processes: FakeProcesses::new(),
             bundle_version: Some("0.70.2"),
             non_loopback: false,
             on_debug_port: None,
         })
     }
+
+    /// The process model this fake machine answers its exact-pid queries
+    /// from, so a test can arm slow exits and read the event journal.
+    fn processes(&self) -> Arc<FakeProcesses> {
+        self.processes.clone()
+    }
 }
 
 impl OsCommands for FakeOs {
-    fn run(&self, program: &str, _args: &[&str]) -> anyhow::Result<String> {
+    fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<String> {
         if program.contains("PlistBuddy") {
             return Ok(match self.bundle_version {
                 Some(version) => format!("{version}\n"),
                 None => String::new(),
             });
+        }
+        if program == "pgrep" && args.first() == Some(&"-P") {
+            let parent = args
+                .get(1)
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .unwrap_or_default();
+            return Ok(self
+                .processes
+                .children_of(parent)
+                .iter()
+                .map(|pid| pid.to_string())
+                .collect::<Vec<String>>()
+                .join("\n"));
         }
         if program == "pgrep" {
             return Ok(String::new());
@@ -1311,6 +1727,8 @@ impl OsCommands for FakeOs {
             .find_map(|arg| arg.strip_prefix("--remote-debugging-port="))
             .and_then(|port| port.parse::<u16>().ok());
         if let Some(port) = port {
+            self.processes.spawn_debug(4242);
+            self.processes.note(format!("open:debug:{port}"));
             *self.state.port.lock().unwrap() = Some(port);
             self.state.running.store(true, Ordering::SeqCst);
             if let Some(start) = &self.on_debug_port {
@@ -1318,25 +1736,31 @@ impl OsCommands for FakeOs {
             }
         } else {
             // The normal relaunch after the run: no debug flag, no socket.
-            self.state.running.store(false, Ordering::SeqCst);
+            self.processes.spawn_plain(5252);
+            self.processes.note("open:plain".to_string());
+            self.state.running.store(true, Ordering::SeqCst);
             *self.state.port.lock().unwrap() = None;
         }
         Ok(())
     }
 
     fn pids_matching(&self, _marker: &str) -> anyhow::Result<Vec<u32>> {
-        if self.state.running.load(Ordering::SeqCst) {
-            Ok(vec![4242])
-        } else {
-            Ok(Vec::new())
-        }
+        Ok(self.processes.marker_alive())
     }
 
     fn kill(&self, pid: u32) -> anyhow::Result<()> {
-        if pid == 4242 {
+        self.processes.kill(pid);
+        // Quitting a main app process ends the endpoint and the port it
+        // holds; helpers do not.
+        if self.processes.marker_pids.lock().unwrap().contains(&pid) {
             self.state.running.store(false, Ordering::SeqCst);
+            *self.state.port.lock().unwrap() = None;
         }
         Ok(())
+    }
+
+    fn pid_alive(&self, pid: u32) -> bool {
+        self.processes.pid_alive(pid)
     }
 
     fn port_listeners(&self, port: u16) -> anyhow::Result<Vec<String>> {
@@ -1605,6 +2029,226 @@ fn the_production_cdp_client_drives_a_mock_endpoint_and_reports_exactly() {
             other => panic!("a non-loopback endpoint is refused: {other:?}"),
         }
     }
+}
+
+/// W991's close-out left the app not running: the plain relaunch fired
+/// milliseconds after the debug instance was killed and lost to its
+/// single-instance lock. The close-out must wait for the exact recorded
+/// pids — the main process and its children — to be fully gone before
+/// relaunching, because a dying Electron process still holds the lock.
+/// This test drives the production driver (mock endpoint, fake process
+/// table) and pins the ordering: no `open:plain` before the first
+/// `pid_alive:…:false` probe of each quit pid.
+#[test]
+fn the_close_out_waits_out_the_dying_debug_instance_before_the_plain_relaunch() {
+    let harness = Harness::fresh_with(&[(AGENT, window_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    plant_bundle_at(&harness, "Grok Bot.app");
+    let (state, starter) = mock_toolkit(MockApp {
+        conversations: vec![AGENT.to_string()],
+        rows: [(AGENT.to_string(), visible_rows())].into_iter().collect(),
+        initial_open: Some(AGENT.to_string()),
+        journal: Arc::new(Mutex::new(Vec::new())),
+        located: Arc::new(Mutex::new(None)),
+        current: Arc::new(Mutex::new(None)),
+        reads: Arc::new(Mutex::new(0)),
+        partials: 0,
+    });
+    let os = FakeOs::with(state, Some("0.70.2"), Some(starter));
+    // The machine W991 measured, down to the pre-state: the user's app is
+    // running before the run (the close-out owes a plain relaunch back),
+    // and the quitting app's main process and its helper keep answering
+    // pid_alive for a few probes after the kill, because an Electron app
+    // exits some time after its quit signal.
+    os.processes().seed_running_app(36025);
+    os.processes().plan_debug_helpers(4242, &[4301], 2);
+    os.processes().arm_slow_exit(4242, 3);
+    let (clock, _now) = fake_clock();
+    let mut driver = CdpAppDriver::with_locations(
+        os.clone(),
+        clock,
+        &harness.persistence_root,
+        vec![harness.sandbox.root().join("Grok Bot.app")],
+    );
+    let pid = driver
+        .relaunch_for_backfill(60_515)
+        .expect("the debug relaunch comes up against the mock endpoint");
+    assert_eq!(pid, 4242);
+    let listed = driver
+        .list_conversations()
+        .expect("the sidebar reads once ready");
+    assert_eq!(listed.len(), 1);
+
+    let outcome = driver
+        .restore_normal_launch(Some(AGENT))
+        .expect("the restore runs");
+    assert!(outcome.attempted);
+
+    let journal = os.processes().journal();
+    let plain = journal
+        .iter()
+        .position(|line| line == "open:plain")
+        .expect("the plain relaunch ran");
+    let main_gone = journal
+        .iter()
+        .position(|line| line == "alive:4242:false")
+        .expect("the main process's exit was confirmed by an exact-pid probe");
+    let helper_gone = journal
+        .iter()
+        .position(|line| line == "alive:4301:false")
+        .expect("the helper's exit was confirmed by an exact-pid probe");
+    assert!(
+        plain > main_gone && plain > helper_gone,
+        "the plain relaunch started only after the quitting instance and its \
+         recorded children were fully gone — journal: {journal:?}"
+    );
+    // The restore that owes the relaunch verified it: the relaunched
+    // instance stayed running through its settle window, nothing listens
+    // on the debug port, and the previously-open conversation's
+    // re-selection was performed before the quit.
+    assert_eq!(outcome.relaunch_running, Some(true));
+    assert_eq!(outcome.port_closed, Some(true));
+    assert_eq!(outcome.conversation_reselected, Some(true));
+    assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
+}
+
+/// A plain relaunch that starts and immediately dies — the single-instance
+/// race when a straggler still holds the lock — is caught by the settle
+/// window and reported as exactly that, with the port check still true
+/// (nothing listens when the relaunched instance is dead: W991's exact
+/// readings, which once made the failure invisible).
+#[test]
+fn a_relaunch_that_starts_and_dies_on_the_lock_is_reported_not_swallowed() {
+    let harness = Harness::fresh_with(&[(AGENT, window_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    plant_bundle_at(&harness, "Grok Bot.app");
+    let (state, starter) = mock_toolkit(MockApp {
+        conversations: vec![AGENT.to_string()],
+        rows: [(AGENT.to_string(), visible_rows())].into_iter().collect(),
+        initial_open: None,
+        journal: Arc::new(Mutex::new(Vec::new())),
+        located: Arc::new(Mutex::new(None)),
+        current: Arc::new(Mutex::new(None)),
+        reads: Arc::new(Mutex::new(0)),
+        partials: 0,
+    });
+    let os = FakeOs::with(state, Some("0.70.2"), Some(starter));
+    os.processes().seed_running_app(36025);
+    // The plain relaunch is doomed at spawn: alive to the settle probes
+    // twice, then gone — an instance that died on the lock.
+    os.processes().arm_slow_exit(5252, 2);
+    let (clock, _now) = fake_clock();
+    let mut driver = CdpAppDriver::with_locations(
+        os.clone(),
+        clock,
+        &harness.persistence_root,
+        vec![harness.sandbox.root().join("Grok Bot.app")],
+    );
+    let _pid = driver
+        .relaunch_for_backfill(60_516)
+        .expect("the debug relaunch comes up against the mock endpoint");
+    let outcome = driver
+        .restore_normal_launch(None)
+        .expect("the restore runs");
+    assert_eq!(
+        outcome.relaunch_running,
+        Some(false),
+        "the settle window caught the dying relaunch"
+    );
+    assert_eq!(outcome.port_closed, Some(true));
+    let failure = outcome.failure.expect("the dead relaunch is a failure");
+    assert!(
+        failure.contains("exited again within its settle window"),
+        "the failure names what was observed: {failure}"
+    );
+}
+
+/// A quitting debug instance that never exits holds its single-instance
+/// lock forever; the close-out waits its bounded wait, then reports the
+/// unconfirmed release as exactly that — never relaunches into the lock
+/// silently, never guesses it released.
+#[test]
+fn a_debug_instance_that_never_exits_is_reported_not_guessed() {
+    let harness = Harness::fresh_with(&[(AGENT, window_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    plant_bundle_at(&harness, "Grok Bot.app");
+    let (state, starter) = mock_toolkit(MockApp {
+        conversations: vec![AGENT.to_string()],
+        rows: [(AGENT.to_string(), visible_rows())].into_iter().collect(),
+        initial_open: None,
+        journal: Arc::new(Mutex::new(Vec::new())),
+        located: Arc::new(Mutex::new(None)),
+        current: Arc::new(Mutex::new(None)),
+        reads: Arc::new(Mutex::new(0)),
+        partials: 0,
+    });
+    let os = FakeOs::with(state, Some("0.70.2"), Some(starter));
+    // Cold start (nothing to quit at the preflight): the wedge is the
+    // debug instance itself, which answers every pid_alive probe.
+    os.processes().arm_slow_exit(4242, usize::MAX);
+    let (clock, _now) = fake_clock();
+    let mut driver = CdpAppDriver::with_locations(
+        os.clone(),
+        clock,
+        &harness.persistence_root,
+        vec![harness.sandbox.root().join("Grok Bot.app")],
+    );
+    let _pid = driver
+        .relaunch_for_backfill(60_517)
+        .expect("the debug relaunch comes up against the mock endpoint");
+    let outcome = driver
+        .restore_normal_launch(None)
+        .expect("the restore runs");
+    let failure = outcome
+        .failure
+        .expect("an unconfirmed exit is a restore failure");
+    assert!(
+        failure.contains("did not fully exit within its bounded wait"),
+        "the failure names the unconfirmed exit, never a guessed release: {failure}"
+    );
+    assert!(outcome.relaunch_running.is_none());
+}
+
+/// A cold start owes no plain relaunch: the run began against a machine
+/// with the app not running, so "restored" means the debug relaunch quit
+/// and the machine left as it was — not an app started by the restore.
+#[test]
+fn a_cold_start_quits_the_debug_relaunch_and_owes_no_plain_relaunch() {
+    let harness = Harness::fresh_with(&[(AGENT, window_rows())]);
+    std::fs::create_dir_all(&harness.stage).unwrap();
+    plant_bundle_at(&harness, "Grok Bot.app");
+    let (state, starter) = mock_toolkit(MockApp {
+        conversations: vec![AGENT.to_string()],
+        rows: [(AGENT.to_string(), visible_rows())].into_iter().collect(),
+        initial_open: None,
+        journal: Arc::new(Mutex::new(Vec::new())),
+        located: Arc::new(Mutex::new(None)),
+        current: Arc::new(Mutex::new(None)),
+        reads: Arc::new(Mutex::new(0)),
+        partials: 0,
+    });
+    let os = FakeOs::with(state, Some("0.70.2"), Some(starter));
+    let (clock, _now) = fake_clock();
+    let mut driver = CdpAppDriver::with_locations(
+        os.clone(),
+        clock,
+        &harness.persistence_root,
+        vec![harness.sandbox.root().join("Grok Bot.app")],
+    );
+    let _pid = driver
+        .relaunch_for_backfill(60_518)
+        .expect("the debug relaunch comes up against the mock endpoint");
+    let outcome = driver
+        .restore_normal_launch(None)
+        .expect("the restore runs");
+    let journal = os.processes().journal();
+    assert!(
+        !journal.iter().any(|line| line == "open:plain"),
+        "nothing was running before the run, so the restore starts nothing: {journal:?}"
+    );
+    assert_eq!(outcome.relaunch_running, None);
+    assert_eq!(outcome.port_closed, Some(true));
+    assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
 }
 
 fn drive_request(
