@@ -832,8 +832,13 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
     }
 }
 
-/// One probe serialised for `status --json` / `doctor --json`. Every count is
-/// a tri-state; none can be `0`-or-null because a value was never looked at.
+/// One probe's metadata-only serialisation: the doctor's `probes` rows are
+/// exactly this, and the harness rows of a full scan report (`status
+/// --json`) are this plus the record-dependent staged-session count
+/// ([`probe_json_with_found_staged`]) — only a scan that still holds its
+/// records can answer that question, and the doctor's report keeps probes
+/// and drops records. Every count is a tri-state; none can be `0`-or-null
+/// because a value was never looked at.
 pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
     serde_json::json!({
         "harness": p.id,
@@ -845,6 +850,83 @@ pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
         "unreadable_count": probe_unreadable_count(p),
         "unreadable_entry_count": probe_unreadable_entry_count(p),
     })
+}
+
+/// The staged-session answer for one probe (GC-3), for a scan that still
+/// holds its records: how many DISTINCT session ids those records carry for
+/// this harness — the unit `collect` stages, one session dir per id.
+///
+/// Neither existing count states that unit. `session_count` is the declared
+/// store's own row count (a store session must stay a store session), and
+/// `total_sessions` counts `SessionRecord`s — and since W982 a harness can
+/// legitimately emit several records under one id (a grok `session_docs`
+/// row and its native `chat_history.jsonl` share their id deliberately, so
+/// one conversation stays one conversation), so records are not the staged
+/// unit either. The verify scripts needed that third number and had to
+/// parse collect's human stdout for it; this is where the product states
+/// it instead.
+///
+/// The tri-state reasons mirror [`probe_session_count`] where the shapes
+/// coincide, with one deliberate difference: a positive count here is
+/// `known` whatever the probe's state, because the question is not "what
+/// does the source hold" but "what will collect archive from this scan" —
+/// and the emitted records are the complete answer to that. Only the zero
+/// cases keep the honest `unknown`: a store the scan handed no records for,
+/// and a harness that was never looked at, must not read as a measured
+/// empty.
+pub fn probe_found_staged(p: &HarnessProbe, staged_ids: u64) -> json_out::CountState {
+    use crate::json_out::CountState;
+    if staged_ids > 0 {
+        return CountState::known(staged_ids);
+    }
+    match p.state {
+        ProbeState::Scanned | ProbeState::FileTarget => match p.record_count {
+            Some(0) => CountState::known(0),
+            // The store enumerates sessions but the scan produced no
+            // records for them, so what collect will be handed — and stage —
+            // is unproven, never a zero.
+            Some(_) => CountState::unknown(
+                "the store enumerates sessions but the scan produced no session \
+                 records, so what collect will stage is unproven",
+            ),
+            None => {
+                CountState::unknown("session count could not be enumerated (store not enumerable)")
+            }
+        },
+        // A root that measured absent hands collect nothing, exactly as in
+        // `probe_session_count`: the one case where 0 is earned.
+        ProbeState::Missing => CountState::known(0),
+        ProbeState::SkipWrongPlatform => {
+            CountState::not_applicable("registry has no cell for this platform")
+        }
+        ProbeState::Indeterminate => {
+            CountState::unknown("cannot even confirm whether the source exists")
+        }
+        ProbeState::SkipUnascertained => {
+            CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
+        }
+        ProbeState::SkipUnresolvable => {
+            CountState::unknown("template cannot be reduced to a static root path")
+        }
+    }
+}
+
+/// [`probe_json`] plus the `found_staged` tri-state — the per-harness count
+/// of distinct staged session ids ([`probe_found_staged`]). Only a scan that
+/// still holds its records can answer it, which is why the plain
+/// [`probe_json`] (the doctor's metadata-only shape) does not carry the key:
+/// a `doctor --json` probe row has no records to count, and writing
+/// `unknown` there would state an answer its contract never asks for.
+pub fn probe_json_with_found_staged(
+    p: &HarnessProbe,
+    found_staged: &json_out::CountState,
+) -> serde_json::Value {
+    let mut value = probe_json(p);
+    // Every existing field stays byte-identical; the staged-session count is
+    // purely additive, so consumers that read the old keys see no change.
+    value["found_staged"] = serde_json::to_value(found_staged)
+        .expect("CountState is a plain tagged enum and always serializes");
+    value
 }
 
 /// The `scanner` object of `status --json`, for a scan that succeeded. Every
@@ -871,6 +953,30 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         .iter()
         .filter(|p| p.record_count.is_some() && p.unreadable_count.is_none())
         .count() as u64;
+    let harnesses: Vec<_> = report
+        .probes
+        .iter()
+        .map(|p| {
+            // Distinct session ids among the records this harness emitted:
+            // collect stages one dir per id, so this is the staged-session
+            // count.
+            let staged_ids = match HarnessSource::from_id(&p.id) {
+                Some(source) => report
+                    .records
+                    .iter()
+                    .filter(|record| record.source == source)
+                    .map(|record| record.id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len() as u64,
+                // reason: a harness id the scan dispatch cannot map to a
+                // source is never scanned, so it cannot have emitted
+                // records — a measured empty, and the probe's own state
+                // still decides the tri-state below.
+                None => 0,
+            };
+            probe_json_with_found_staged(p, &probe_found_staged(p, staged_ids))
+        })
+        .collect();
     serde_json::json!({
         "kind": "ok",
         "total_sessions": CountState::known(report.records.len() as u64),
@@ -881,7 +987,7 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         "unreadable_sessions": CountState::known(unreadable_sessions),
         "unreadable_entries": CountState::known(unreadable_entries),
         "unreadable_uncounted_harnesses": CountState::known(unreadable_uncounted),
-        "harnesses": report.probes.iter().map(probe_json).collect::<Vec<_>>(),
+        "harnesses": harnesses,
     })
 }
 
@@ -5397,5 +5503,204 @@ mod tests {
                 "{state:?} must not count as probed"
             );
         }
+    }
+
+    /// GC-3 / W993 — `found_staged`, the per-harness staged-session tri-state.
+    ///
+    /// The positive branch is `known` whatever the probe state, because the
+    /// count is measured from the records the scan actually emitted and
+    /// `collect` stages exactly those; every zero is only `known` when the
+    /// absence itself was measured, and stays `unknown` / `not_applicable`
+    /// otherwise — an unlooked or un-enumerable harness must never read as
+    /// a staged zero. Every case below is one state or one shape, so the
+    /// partition is asserted, not assumed.
+    #[test]
+    fn found_staged_states_the_measured_unit_and_keeps_unproven_zeros_honest() {
+        fn probe_with(state: ProbeState, record_count: Option<u64>) -> HarnessProbe {
+            HarnessProbe {
+                id: "synthetic".to_string(),
+                display_name: "synthetic".to_string(),
+                root: None,
+                confidence: Confidence::Measured,
+                state,
+                record_count,
+                candidate_count: None,
+                unreadable_count: None,
+                unreadable_entry_count: None,
+                earliest: None,
+                latest: None,
+                bytes: None,
+                recognized_files: Vec::new(),
+                note: String::new(),
+            }
+        }
+
+        use crate::json_out::CountState;
+
+        // Measured from emitted records: known even where session_count
+        // would be unknown (record_count None), because this question —
+        // what collect will be handed — the scan's own emission answers.
+        // The count stands for a two-records-one-id population collapsing
+        // to one staged session, the W982 grok shape the key exists for.
+        for state in [
+            ProbeState::Scanned,
+            ProbeState::FileTarget,
+            ProbeState::Indeterminate,
+        ] {
+            assert_eq!(
+                probe_found_staged(&probe_with(state, None), 1),
+                CountState::known(1),
+                "{state:?}: emitted records are the complete answer to what collect stages"
+            );
+        }
+
+        // A scanned store that measured empty: the earned zero.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Scanned, Some(0)), 0),
+            CountState::known(0)
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, Some(0)), 0),
+            CountState::known(0)
+        );
+        // Missing root: same earned zero as `probe_session_count`.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Missing, None), 0),
+            CountState::known(0)
+        );
+
+        // Unproven zeros: a store that enumerates sessions but handed the
+        // scan no records (the enumeration-failure shape), and a store the
+        // scan could not enumerate at all — neither may claim a staged 0.
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, Some(9)), 0),
+            CountState::unknown(
+                "the store enumerates sessions but the scan produced no session \
+                 records, so what collect will stage is unproven"
+            )
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::FileTarget, None), 0),
+            CountState::unknown("session count could not be enumerated (store not enumerable)")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::Indeterminate, None), 0),
+            CountState::unknown("cannot even confirm whether the source exists")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipUnascertained, None), 0),
+            CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipUnresolvable, None), 0),
+            CountState::unknown("template cannot be reduced to a static root path")
+        );
+        assert_eq!(
+            probe_found_staged(&probe_with(ProbeState::SkipWrongPlatform, None), 0),
+            CountState::not_applicable("registry has no cell for this platform")
+        );
+
+        // The JSON shape: additive key on the scan-report side, absent on
+        // the doctor's metadata-only side, and every existing field
+        // byte-identical on both.
+        let probe = probe_with(ProbeState::FileTarget, Some(4));
+        let plain = probe_json(&probe);
+        let staged = probe_json_with_found_staged(&probe, &probe_found_staged(&probe, 6));
+        assert!(
+            plain.get("found_staged").is_none(),
+            "the metadata-only shape does not carry the key"
+        );
+        for (key, value) in plain.as_object().unwrap().iter() {
+            assert_eq!(
+                staged.get(key).unwrap(),
+                value,
+                "found_staged must be additive: {key} changed"
+            );
+        }
+        assert_eq!(
+            staged["found_staged"],
+            serde_json::json!({"kind": "known", "count": 6})
+        );
+    }
+
+    /// The per-harness grouping behind `found_staged`: distinct ids among
+    /// THIS harness's records only — two records sharing one id (the grok
+    /// row and its native transcript) stage one session, another harness's
+    /// records never leak into the count, and `total_sessions` keeps
+    /// counting records (GC-3's three counts deliberately disagree).
+    #[test]
+    fn scan_report_json_counts_staged_ids_per_harness_not_records() {
+        fn record(source: HarnessSource, native_id: &str) -> SessionRecord {
+            SessionRecord {
+                id: crate::id::SessionIdentity {
+                    source_short: source.short(),
+                    machine: "synthetic-machine".to_string(),
+                    native_id: native_id.to_string(),
+                }
+                .id(),
+                absolute_path: PathBuf::from("/synthetic"),
+                byte_size: 0,
+                mtime: SystemTime::UNIX_EPOCH,
+                source,
+                compressed: false,
+                sqlite_layout: None,
+                provenance: Default::default(),
+            }
+        }
+        let mut report = ScanReport::default();
+        // Grok: one session observed twice (row + native transcript), plus
+        // its usage sidecar under its own id — 3 records, 2 staged ids.
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a"));
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a"));
+        report
+            .records
+            .push(record(HarnessSource::Grok, "synthetic-a.usage"));
+        // Codex: a foreign harness whose records must not leak.
+        report
+            .records
+            .push(record(HarnessSource::Codex, "synthetic-b"));
+        for (id, display, state, count) in [
+            ("grok", "Grok CLI", ProbeState::FileTarget, 9u64),
+            ("codex", "Codex", ProbeState::Scanned, 1),
+        ] {
+            report.probes.push(HarnessProbe {
+                id: id.to_string(),
+                display_name: display.to_string(),
+                root: None,
+                confidence: Confidence::Measured,
+                state,
+                record_count: Some(count),
+                candidate_count: Some(count),
+                unreadable_count: Some(0),
+                unreadable_entry_count: Some(0),
+                earliest: None,
+                latest: None,
+                bytes: Some(0),
+                recognized_files: Vec::new(),
+                note: String::new(),
+            });
+        }
+
+        let value = scan_report_json(&report);
+        assert_eq!(
+            value["total_sessions"],
+            serde_json::json!({"kind": "known", "count": 4}),
+            "total_sessions keeps counting SessionRecords"
+        );
+        let harnesses = value["harnesses"].as_array().unwrap();
+        assert_eq!(
+            harnesses[0]["found_staged"],
+            serde_json::json!({"kind": "known", "count": 2}),
+            "grok stages two ids: the row-shared session id and the usage id"
+        );
+        assert_eq!(
+            harnesses[1]["found_staged"],
+            serde_json::json!({"kind": "known", "count": 1}),
+            "codex keeps records == staged ids"
+        );
     }
 }

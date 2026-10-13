@@ -678,6 +678,64 @@ fn census_ids(scan: &scanner::ScanReport) -> BTreeSet<&str> {
         .collect()
 }
 
+/// GC-3: the scan's own JSON must state, per harness, the unit the archive
+/// actually holds — DISTINCT staged session ids, not the record count and
+/// not the store's row count. On [`seed_id_census`]'s tree the three counts
+/// legitimately disagree (7 records over 6 ids over 3 rows) because a row
+/// and its transcript are two records under one id while a usage sidecar
+/// is one id of its own; the e2e gate compares `collected` against THIS
+/// number, and `status --json` is where it reads it from. The last assertion
+/// runs the real collector so the key is proven against the count of staged
+/// session dirs, not against the scanner's own arithmetic.
+#[test]
+fn scan_report_json_states_staged_session_ids_not_records_or_rows() {
+    let fixture = GrokFixture::new();
+    seed_id_census(&fixture);
+
+    let scan = fixture.scan();
+    let value = scanner::scan_report_json(&scan);
+
+    // Records, not ids: the row of session-012 and both-producers records
+    // all together.
+    assert_eq!(
+        value["total_sessions"],
+        json!({"kind": "known", "count": 7}),
+        "total_sessions keeps counting SessionRecords (7 on this tree)"
+    );
+    let harnesses = value["harnesses"].as_array().unwrap();
+    let probe = &harnesses
+        .iter()
+        .find(|p| p["harness"] == json!("grok"))
+        .expect("the grok fixture harness is probed");
+    assert_eq!(
+        probe["session_count"],
+        json!({"kind": "known", "count": 3}),
+        "session_count keeps counting the store's session_docs rows"
+    );
+    assert_eq!(
+        probe["found_staged"],
+        json!({"kind": "known", "count": 6}),
+        "found_staged counts DISTINCT staged ids: the 4 session ids \
+         (011, 012, 013, 014) plus the .usage sidecar ids of row sessions \
+         012 and 014"
+    );
+
+    // The promised unit is the collector's own: collect the tree and count
+    // the session dirs the stage actually gains.
+    let stage = fixture.collect_first(&scan);
+    let machine_root = stage.join("sessions/synthetic-machine");
+    let staged: Vec<_> = fs::read_dir(&machine_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().unwrap().is_dir())
+        .collect();
+    assert_eq!(
+        staged.len(),
+        6,
+        "collect stages exactly the distinct ids found_staged promised"
+    );
+}
+
 /// Byte-identity of the id census: for one synthetic tree, the ids the
 /// scanner produces must differ from the pre-native scanner's census by the
 /// native-only session bodies alone. A row id or a `.usage` id that changed
