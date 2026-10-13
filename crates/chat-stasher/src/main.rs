@@ -6467,6 +6467,9 @@ fn cmd_import_backup(
 /// library owns the run; this function resolves the collector context the
 /// run needs (machine, destination, state, persistence root), registers the
 /// interrupt handler, prints the report and maps the outcome's exit code.
+/// The macOS-only gate is this shell's too — the platform question belongs
+/// where the real driver is built, so nothing on an unmeasured platform
+/// reaches the run at all.
 #[allow(clippy::too_many_arguments)]
 fn cmd_backfill_grok_bot(
     harness: BackupHarness,
@@ -6483,6 +6486,19 @@ fn cmd_backfill_grok_bot(
     // this command does for it, and the compiler enforces that now rather
     // than a runtime guess answering later.
     let BackupHarness::GrokBot = harness;
+    // The macOS-only gate lives here, at the registration that builds the
+    // real, platform-specific driver: the route was measured on macOS and
+    // a build for any other platform refuses to drive it. The library run
+    // beneath is neutral orchestration over an injected driver, so its
+    // suite exercises it identically on every platform.
+    if !cfg!(target_os = "macos") {
+        println!("{}", chat_stasher::backfill::RISK_STATEMENT);
+        eprintln!(
+            "backfill: refused exit_code=3 — {}",
+            chat_stasher::backfill::MACOS_ONLY_REFUSAL
+        );
+        return ExitCode::from(3);
+    }
     if !stage.is_dir() {
         eprintln!(
             "backfill: FAILED exit_code=2 — stage {} is not a directory; backfill never \

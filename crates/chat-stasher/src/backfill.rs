@@ -59,8 +59,13 @@
 //!   flags, the close-out verified (no debugging port listening, sync
 //!   resumed) and reported. A failed restore is reported with the recorded
 //!   pid and port, never swallowed into a success exit.
-//! * **macOS only** — the only measured platform; other platforms refuse
-//!   before anything is touched.
+//! * **macOS only** — the only measured platform, and the gate is the CLI
+//!   registration's, there where the real, platform-specific driver is
+//!   built: a build for any other platform answers
+//!   [`MACOS_ONLY_REFUSAL`] before anything is touched. The run beneath
+//!   is platform-neutral orchestration — every platform contact sits
+//!   behind the injected [`AppDriver`] — so the suite drives it
+//!   identically on every platform it runs on.
 //!
 //! Known-unknowns stayed as known-unknowns: a conversation that does not
 //! finish loading within its wait is skipped as a whole — nothing partial
@@ -128,6 +133,15 @@ again with --i-accept-the-risk";
 
 pub const DELIVERING_NOTICE: &str = "--i-accept-the-risk given: this run delivers the \
 rows it finds that the archive does not already hold, each marked as backfilled";
+
+/// The refusal a build for any platform other than macOS answers before
+/// anything is touched: the app-driven route was measured on macOS, and
+/// this build refuses to drive anything it has not measured. The gate
+/// itself is the CLI registration's, where the real driver exists for
+/// macOS only — printed there (after the risk statement) so the wording
+/// stays owned by the module that owns every other run text.
+pub const MACOS_ONLY_REFUSAL: &str = "backfill is macOS only: the app-driven route was \
+ measured on macOS, and this build refuses to drive anything it has not measured";
 
 // ---------------------------------------------------------------------------
 // The injectable clock (the push_progress precedent: production uses the
@@ -573,14 +587,6 @@ pub fn run_grok_bot_backfill(mut req: BackfillRequest<'_>, out: &mut dyn Write) 
     writeln!(out, "{RISK_STATEMENT}").ok();
     let mut notices = vec![RISK_STATEMENT.to_string()];
 
-    if !cfg!(target_os = "macos") {
-        return refuse(
-            "backfill is macOS only: the app-driven route was measured on macOS, and \
-             this build refuses to drive anything it has not measured"
-                .to_string(),
-            false,
-        );
-    }
     if !req.stage.is_dir() {
         return refuse(
             format!(

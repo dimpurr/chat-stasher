@@ -809,39 +809,39 @@ crates/chat-stasher/src/main.rs:6388-6396  282348625c96  lines=9
   <- docs-dev/install.md:697  :: &state_dir,
 crates/chat-stasher/src/main.rs:6397-6409  a684cd148e76  lines=13
   <- docs-dev/install.md:694  :: about what it holds is proven and nothing was imported: {er…
-crates/chat-stasher/src/main.rs:6495-6503  91c920ea60b9  lines=9
+crates/chat-stasher/src/main.rs:6511-6519  91c920ea60b9  lines=9
   <- docs-dev/threat-model.md:877  :: Ok(config) => config,
-crates/chat-stasher/src/main.rs:7561-7616  b580b6b1c776  lines=56
+crates/chat-stasher/src/main.rs:7577-7632  b580b6b1c776  lines=56
   <- docs-dev/install.md:961  :: // W880: one summary line per pass, on every outcome — the
-crates/chat-stasher/src/main.rs:8309-8314  277527308823  lines=6
+crates/chat-stasher/src/main.rs:8325-8330  277527308823  lines=6
   <- docs-dev/privacy.md:1130  :: return ExitCode::FAILURE;
-crates/chat-stasher/src/main.rs:8427-8432  52d4b7130c7c  lines=6
+crates/chat-stasher/src/main.rs:8443-8448  52d4b7130c7c  lines=6
   <- docs-dev/privacy.md:767  :: eprintln!("schedule: {error:#}");
-crates/chat-stasher/src/main.rs:8497-8502  581bf6c44307  lines=6
+crates/chat-stasher/src/main.rs:8513-8518  581bf6c44307  lines=6
   <- docs-dev/install.md:607  :: /// (and a wrapper) inject through. One place names each va…
-crates/chat-stasher/src/main.rs:8712-8719  b54ca1b3e4d5  lines=8
+crates/chat-stasher/src/main.rs:8728-8735  b54ca1b3e4d5  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:866  :: let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
-crates/chat-stasher/src/main.rs:8739-8743  0d25cb363ccc  lines=5
+crates/chat-stasher/src/main.rs:8755-8759  0d25cb363ccc  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
-crates/chat-stasher/src/main.rs:9252-9412  1f1a0d8e77c3  lines=161
+crates/chat-stasher/src/main.rs:9268-9428  1f1a0d8e77c3  lines=161
   <- docs-dev/threat-model.md:928  :: }
-crates/chat-stasher/src/main.rs:13259-13267  74386b4959d3  lines=9
+crates/chat-stasher/src/main.rs:13275-13283  74386b4959d3  lines=9
   <- docs-dev/install.md:304  :: .join(session)
-crates/chat-stasher/src/main.rs:13277-13300  0f57696a75eb  lines=24
+crates/chat-stasher/src/main.rs:13293-13316  0f57696a75eb  lines=24
   <- docs-dev/install.md:304  :: cc_line("2025-01-15T13:45:07Z"),
-crates/chat-stasher/src/main.rs:14438-14452  e68b0a86ab0c  lines=15
+crates/chat-stasher/src/main.rs:14454-14468  e68b0a86ab0c  lines=15
   <- docs-dev/install.md:626  :: // A destination key `dest-init` created during this run is…
-crates/chat-stasher/src/main.rs:14875-14882  5af966bae16a  lines=8
+crates/chat-stasher/src/main.rs:14891-14898  5af966bae16a  lines=8
   <- docs-dev/install.md:625  :: "the only missing parameter was --masterkey-saved-elsewhere…
-crates/chat-stasher/src/main.rs:17389-17390  89ad81145ee0  lines=2
+crates/chat-stasher/src/main.rs:17405-17406  89ad81145ee0  lines=2
   <- docs-dev/install.md:994  :: impl SetupKeyScope {
-crates/chat-stasher/src/main.rs:17413-17447  cc8b2b74fa24  lines=35
+crates/chat-stasher/src/main.rs:17429-17463  cc8b2b74fa24  lines=35
   <- docs-dev/install.md:1033  :: "declaration_is_verified": false,
-crates/chat-stasher/src/main.rs:17874-17879  281f835c9a9e  lines=6
+crates/chat-stasher/src/main.rs:17890-17895  281f835c9a9e  lines=6
   <- docs-dev/install.md:1023  :: /// Everything `status` needs from the run-state record, so…
-crates/chat-stasher/src/main.rs:17887-17955  5aceccb336a8  lines=69
+crates/chat-stasher/src/main.rs:17903-17971  5aceccb336a8  lines=69
   <- docs-dev/install.md:1010  :: /// overdue threshold tracks whatever the user actually sch…
-crates/chat-stasher/src/main.rs:17898-17899  f29f6d7d1cb6  lines=2
+crates/chat-stasher/src/main.rs:17914-17915  f29f6d7d1cb6  lines=2
   <- docs-dev/install.md:989  :: // reason: NOT an honest default — recorded as (a)-fragile,…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:428, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…

@@ -873,8 +873,7 @@ fn sealed_shards_carry_backfill_provenance_and_the_gap_record_stands() {
     let body = stage_body(&harness, AGENT);
     let line = String::from_utf8_lossy(&body)
         .lines()
-        .filter(|line| line.contains("\"_chat_stasher\""))
-        .next_back()
+        .rfind(|line| line.contains("\"_chat_stasher\""))
         .expect("a metadata line exists")
         .to_string();
     assert!(line.contains("\"backfill\":true"), "{line}");
@@ -1052,6 +1051,40 @@ fn unusable_app_refuses_before_anything_is_touched() {
     }
 }
 
+/// ADR-058's platform line, behaviorally: a build for any platform other
+/// than macOS answers the command with the macOS-only refusal — the same
+/// exit-3 family, the risk statement still leading — before anything is
+/// touched. The property only exists where the build is not macOS, so the
+/// test is cfg'd to exactly those platforms; on macOS the gate cannot
+/// fire (macOS is the one measured platform), and the half every platform
+/// runs is the statics check inside
+/// `nothing_but_the_cli_registration_reaches_the_backfill`.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_the_cli_refuses_before_anything_is_touched() {
+    let sandbox = test_support::Sandbox::new();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_chat-stasher"))
+        .args(["backfill", "grok-bot", "--stage"])
+        .arg(sandbox.data_home().join("stage"))
+        .output()
+        .expect("the CLI binary runs");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a platform refusal is exit 3, not a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(backfill::MACOS_ONLY_REFUSAL),
+        "the refusal names the macOS-only line: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(backfill::RISK_STATEMENT),
+        "the risk statement still leads the refusal"
+    );
+}
+
 /// Spec §Tests 12 — no-reach statics: the backfill entry point is
 /// referenced only by the CLI registration; no config-loading, schedule,
 /// tick or daemon module references it.
@@ -1105,6 +1138,18 @@ fn nothing_but_the_cli_registration_reaches_the_backfill() {
             "{locked} must not reference the backfill"
         );
     }
+    // The platform gate, pinned positively: the macOS-only refusal is the
+    // CLI registration's own — the command shell is where the real,
+    // platform-specific driver is built, so that is where a build for any
+    // other platform must refuse before anything is touched. This is the
+    // statics half, the one that runs on every platform; the behavioral
+    // half exists only where the build is not macOS (the cfg'd test
+    // below), because on macOS the gate cannot fire.
+    let cli = std::fs::read_to_string(src.join("main.rs")).unwrap();
+    assert!(
+        cli.contains("MACOS_ONLY_REFUSAL"),
+        "the CLI registration must carry the macOS-only gate"
+    );
 }
 
 /// A renderer shape break stops the whole run rather than guessing: rows
