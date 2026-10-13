@@ -7456,6 +7456,22 @@ fn cmd_collect(
         // surface that does.
         return ExitCode::from(3);
     }
+    if !report.codebuff_torn_skips.is_empty() {
+        // ADR-054 D6: a transcript the pass read but could not validate as
+        // a JSON array skipped its session — sealed nothing, skipped with a
+        // bounded observation in the control stream. Silence here would
+        // make an incomplete scan look complete, the exact "unknown ≠
+        // empty" failure this exit-code family exists to prevent, so the
+        // run reports 3 ("did not finish reading") even though every other
+        // session archived cleanly and nothing failed outright.
+        eprintln!(
+            "collect: PARTIAL exit_code=3 — {} codebuff session(s) could not be read whole and \
+             skipped this pass (nothing sealed for them; bounded skip observations recorded; retry \
+             next pass)",
+            report.codebuff_torn_skips.len()
+        );
+        return ExitCode::from(3);
+    }
     ExitCode::SUCCESS
 }
 
@@ -7496,6 +7512,23 @@ fn print_collect_report(
         "[collect] grok records    : {} (session_docs rows, linked usage.json files, and native chat_history.jsonl transcripts)",
         report.scanned_grok_records
     );
+    if !report.codebuff_torn_skips.is_empty() {
+        // Bounded vocabulary only: how many sessions skipped, which reasons.
+        // The control stream holds the per-session records; this line and the
+        // exit code are what keep a run with skips from looking complete.
+        let mut reasons: Vec<&str> = report
+            .codebuff_torn_skips
+            .iter()
+            .map(|skip| skip.reason)
+            .collect();
+        reasons.sort_unstable();
+        reasons.dedup();
+        println!(
+            "[collect] codebuff skips : {} session(s) not archived this pass ({}); sealed nothing, recorded a bounded observation, retried next pass",
+            report.codebuff_torn_skips.len(),
+            reasons.join(",")
+        );
+    }
     println!(
         "[collect] not archivable  : {} harness(es) recognised sessions without enough SessionRecord values",
         report.archive_gaps.len()
@@ -7861,6 +7894,9 @@ fn run_once_pass(
     state.shards_written = report.shards_written;
     state.collect_errors = report.errors.len();
     state.archive_gaps = report.archive_gaps.len();
+    // ADR-054 D6: skipped codebuff sessions are an incomplete read, so the
+    // same pass-status surface that carries errors and gaps carries them.
+    state.torn_skips = report.codebuff_torn_skips.len();
     // W880: the collect-phase record the report already measured.
     state.phases.scan_ms = report.scan_ms;
     state.phases.collect_ms = report.collect_ms;
@@ -7873,11 +7909,15 @@ fn run_once_pass(
     state.phases.sqlite_sessions_exported = report.sqlite_sessions_exported;
     state.phases.state_saves = report.state_saves;
     print_collect_report(&report, stage, &state_dir, &machine_name);
-    if !report.errors.is_empty() || !report.archive_gaps.is_empty() {
+    if !report.errors.is_empty()
+        || !report.archive_gaps.is_empty()
+        || !report.codebuff_torn_skips.is_empty()
+    {
         eprintln!(
-            "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={}",
+            "[run-once] result: ERROR exit_code=1 collect_incomplete errors={} archive_gaps={} codebuff_torn_skips={}",
             report.errors.len(),
-            report.archive_gaps.len()
+            report.archive_gaps.len(),
+            report.codebuff_torn_skips.len()
         );
         state.failed_step = Some("collect-incomplete".to_string());
         return (ExitCode::FAILURE, state);
@@ -13055,6 +13095,7 @@ mod decision_surface_tests {
             compressed: false,
             sqlite_layout: Some(chat_stasher::models::SqliteSessionLayout::OpenCode),
             provenance: Default::default(),
+            session_dir: None,
         });
         let output = render_archive_gap_notice(&report);
         assert!(
@@ -13076,6 +13117,7 @@ mod decision_surface_tests {
                     compressed: false,
                     sqlite_layout: None,
                     provenance: Default::default(),
+                    session_dir: None,
                 })
                 .collect(),
             missing_roots: Vec::new(),

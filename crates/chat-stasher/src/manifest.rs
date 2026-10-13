@@ -35,6 +35,28 @@ pub const META_DIR: &str = "meta";
 /// File name of the version-1 session-summary index.
 pub const MANIFEST_FILE: &str = "manifest-v1.jsonl";
 
+/// A session's start time recorded at capture, with the source it was read
+/// from (ADR-054 D4). The time is the value the source itself wrote — for
+/// codebuff, the chat directory name's own RFC 3339 UTC instant, verbatim,
+/// millisecond precision kept — and `source` names where it came from, from
+/// a closed set this build writes one value into. Additive on every row that
+/// carries it: absent means *unknown* — the source stated no time this
+/// build accepts, or the row was written before the field existed — and it
+/// is never zero, never a file time, and never re-derived from the archive
+/// id, whose byte-bounding can drop the time-shaped tail entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedStart {
+    /// RFC 3339 UTC instant, written by the source itself and accepted by
+    /// an exact shape rule at capture; kept as written, not normalized to
+    /// coarser units.
+    pub time: String,
+    /// Closed set: `"chat-directory-name"` is the only member this build
+    /// writes. A reader renders the time *with this source named*, never
+    /// folded into a source that means "read from the conversation content"
+    /// (ADR-035).
+    pub source: String,
+}
+
 /// One persistent session summary: the digest triple L3 reconciles against,
 /// plus the bookkeeping timestamp of when the summary was sealed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +74,13 @@ pub struct SessionManifest {
     /// Unix seconds when this summary was generated (bookkeeping only, not
     /// part of the reconciliation comparison).
     pub sealed_at_unix: i64,
+    /// The session's captured start time with its source (ADR-054 D4).
+    /// `#[serde(default)]` so a row written before this field existed still
+    /// deserializes instead of failing the whole index read; absent
+    /// serializes as absent, never as a zero or empty value, and the field
+    /// is not part of the reconciliation comparison, like `sealed_at_unix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_start: Option<CapturedStart>,
 }
 
 /// Result of reading one machine's manifest file, keeping the three
@@ -141,6 +170,14 @@ pub fn generate_manifest_at(
             concat_bytes: concat.len() as u64,
             concat_sha256: hex_digest(&Sha256::digest(&concat)),
             sealed_at_unix,
+            // A capture-time fact — the codebuff chat directory name's own
+            // instant (ADR-054 D4) — is read back from the stage-side file
+            // the collector wrote beside the sealed shards, so a
+            // regeneration carries it into the fresh row instead of losing
+            // the recorded value. A session directory without the file
+            // records no start time: unknown, never approximated, and never
+            // invented from a file's own times.
+            captured_start: store::read_captured_start_in_dir(&entry.path())?,
         });
     }
     out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -502,6 +539,7 @@ mod tests {
             concat_bytes: 0,
             concat_sha256: "0".repeat(64),
             sealed_at_unix: 1,
+            captured_start: None,
         };
         fs::write(&path, to_jsonl(&wrong)).unwrap();
         let err = stored_manifest_rows(stage).unwrap_err();
@@ -522,6 +560,7 @@ mod tests {
             concat_bytes: 99,
             concat_sha256: "abc".into(),
             sealed_at_unix: 100,
+            captured_start: None,
         };
         let mut b = a.clone();
         // Bookkeeping time is not part of the comparison.
@@ -538,6 +577,7 @@ mod tests {
             concat_bytes: 99,
             concat_sha256: "abc".into(),
             sealed_at_unix: 100,
+            captured_start: None,
         };
         let mut other = base.clone();
         other.concat_sha256 = "different".into();
@@ -554,6 +594,7 @@ mod tests {
             concat_bytes: 1,
             concat_sha256: "a".into(),
             sealed_at_unix: 1,
+            captured_start: None,
         };
         let derived = SessionManifest {
             session_id: "s-2".into(),
@@ -562,6 +603,7 @@ mod tests {
             concat_bytes: 1,
             concat_sha256: "a".into(),
             sealed_at_unix: 2,
+            captured_start: None,
         };
         let err = compare_manifests(&[stored], &[derived]).unwrap_err();
         assert!(err.to_string().contains("session"));

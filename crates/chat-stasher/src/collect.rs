@@ -1187,10 +1187,51 @@ pub struct CollectReport {
     pub sqlite_sessions_exported: u64,
     /// W880: collector state saves this pass.
     pub state_saves: u64,
+    /// Codebuff sessions this pass read but did **not** archive, because the
+    /// transcript snapshot did not validate as a JSON array (ADR-054 D6):
+    /// the session skips the pass — nothing was sealed for it, not partial
+    /// bytes — and a skip is a third state, deliberately counted by no other
+    /// field here ("not archived this pass" is neither changed nor
+    /// unchanged). One row per skip, bounded fields only; the durable
+    /// observation lives in the stage's control stream
+    /// (`codebuff-skip-v1.jsonl`), and a non-empty list is what makes the
+    /// run itself exit `3`, "did not finish reading".
+    pub codebuff_torn_skips: Vec<CodebuffTornSkip>,
     /// Registry-scan evidence for the push-stage guard, derived from the scan
     /// this collection already performed. `run-once` passes it to `push` so
     /// the empty-stage guard does not rescan the registry.
     pub scan: ScanEvidence,
+}
+
+/// One codebuff torn-read skip, as the run report holds it (ADR-054 D6).
+/// Counts, closed-enum reasons and identity only — never content, never a
+/// path; the printed report renders the length of this vector and the
+/// reason vocabulary, nothing finer.
+#[derive(Debug, Clone)]
+pub struct CodebuffTornSkip {
+    /// Registry `source_roots[].id` (`codebuff` / `codebuff-dev` /
+    /// `codebuff-staging`), from the scan; empty only for a record no root
+    /// walk labelled.
+    pub root_id: String,
+    /// The native id (`<project-basename>.<chatId>`), in memory for tests
+    /// and the exit surface; never printed.
+    pub session_native_id: String,
+    /// The closed-enum reason the snapshot was refused for.
+    pub reason: &'static str,
+    /// Byte size of the unread snapshot.
+    pub byte_size: u64,
+}
+
+/// Identity and timestamp of one collecting pass, minted once per
+/// `collect_scan_report` run and shared by every skip observation the pass
+/// writes (ADR-054 D6: `run_id` names the run, `pass_ts` the pass).
+#[derive(Debug, Clone)]
+pub struct PassContext {
+    /// Bounded hex, minted per run: the pass's start time and destination
+    /// digest hashed — no hostname, no machine path, no content.
+    pub run_id: String,
+    /// Unix seconds the pass started.
+    pub pass_ts: i64,
 }
 
 /// W880: counters only the per-record read paths can measure. They
@@ -1480,6 +1521,23 @@ pub fn collect_scan_report(
     // W880: deep counters the read functions can only reach through
     // this handle; folded into the report once the pass ends.
     let mut counters = CollectCounters::default();
+    // ADR-054 D6: the run identity the pass's skip observations carry.
+    // Minted once from the pass's own start and destination digest —
+    // bounded, contentless, and distinct per pass without naming the
+    // machine or any path on it.
+    let pass_started_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        // reason: duration_since UNIX_EPOCH fails only on a system clock set before the epoch; 1970 is not a plausible pass time, and the observations it stamps may not either
+        .unwrap_or_default();
+    let pass = PassContext {
+        run_id: sha256_hex(format!("{pass_started_nanos}").as_bytes())
+            .chars()
+            .take(16)
+            .collect(),
+        // reason: now_unix_seconds fails only on the same clock-before-epoch case the nanos line above names; a 1970 pass_ts is the epoch itself, so the observation still says "stamped by a broken clock" rather than showing a plausible time
+        pass_ts: crate::manifest::now_unix_seconds().unwrap_or_default(),
+    };
     for mut record in records {
         // W880: the whole iteration is this record's collect work, so
         // the per-harness timer covers the cursor resolution and the
@@ -1534,8 +1592,9 @@ pub fn collect_scan_report(
             machine,
             bucket_cap,
             &mut counters,
+            &pass,
         ) {
-            Ok(processed) => {
+            Ok(ReadOutcome::Processed(processed)) => {
                 crate::activity::record_session_provenance(
                     stage,
                     machine,
@@ -1636,6 +1695,17 @@ pub fn collect_scan_report(
                     )?;
                 }
             }
+            Ok(ReadOutcome::Skipped(skip)) => {
+                // ADR-054 D6: a torn or non-array transcript skipped this
+                // pass. Nothing was sealed and no cursor was written — the
+                // stored debt, if any, still describes the generation that
+                // *was* archived — so this session is deliberately not
+                // counted changed, unchanged or reset. The observation
+                // stream already holds the bounded record, and the run
+                // surfaces the length of this vector as its one reason to
+                // report incompleteness.
+                report.codebuff_torn_skips.push(skip);
+            }
             Err(_) => report.errors.push(CollectError {
                 session_prefix: id_prefix(&record.id),
                 source_path_sha256: path_digest(&record.absolute_path),
@@ -1686,6 +1756,20 @@ struct Processed {
     dimensions: crate::provenance::SessionProvenance,
 }
 
+/// What one record's read path decided (ADR-054 D6 splits the last arm):
+/// the read either produced a cursor outcome, or — for the one harness whose
+/// contract makes an unvalidatable snapshot a *skip* rather than an error —
+/// it sealed nothing and says so.
+#[derive(Debug)]
+enum ReadOutcome {
+    Processed(Processed),
+    /// The session skipped this pass: nothing sealed, no cursor written
+    /// (the stored debt, if any, keeps describing the generation that *was*
+    /// archived), one skip observation in the control stream, and the run
+    /// is incomplete because of it.
+    Skipped(CodebuffTornSkip),
+}
+
 fn collect_one(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
@@ -1695,7 +1779,8 @@ fn collect_one(
     machine: &str,
     bucket_cap: usize,
     counters: &mut CollectCounters,
-) -> anyhow::Result<Processed> {
+    pass: &PassContext,
+) -> anyhow::Result<ReadOutcome> {
     if let Some(layout) = record.sqlite_layout {
         if layout == SqliteSessionLayout::GrokBot {
             process_grok_bot(
@@ -1708,6 +1793,7 @@ fn collect_one(
                 bucket_cap,
                 counters,
             )
+            .map(ReadOutcome::Processed)
         } else {
             process_sqlite(
                 record,
@@ -1719,18 +1805,19 @@ fn collect_one(
                 bucket_cap,
                 counters,
             )
+            .map(ReadOutcome::Processed)
         }
     } else if record.compressed || is_zstd_path(&record.absolute_path) {
-        Ok(process_compressed(
+        Ok(ReadOutcome::Processed(process_compressed(
             record,
             old,
             force_reset,
             stage,
             machine,
             bucket_cap,
-        )?)
+        )?))
     } else if is_jsonl_path(&record.absolute_path) {
-        Ok(process_jsonl(
+        Ok(ReadOutcome::Processed(process_jsonl(
             record,
             old,
             force_reset,
@@ -1738,16 +1825,18 @@ fn collect_one(
             machine,
             bucket_cap,
             counters,
-        )?)
+        )?))
+    } else if record.source == crate::models::HarnessSource::Codebuff {
+        process_codebuff_whole_file(record, old, force_reset, stage, machine, bucket_cap, pass)
     } else {
-        Ok(process_whole_file(
+        Ok(ReadOutcome::Processed(process_whole_file(
             record,
             old,
             force_reset,
             stage,
             machine,
             bucket_cap,
-        )?)
+        )?))
     }
 }
 
@@ -3218,6 +3307,215 @@ fn process_opencode(
     })
 }
 
+/// The codebuff whole-file arm (ADR-054 D2/D5/D6/D9). Distinct from
+/// [`process_whole_file`] because this harness's contract makes validation
+/// *before sealing* part of the read: the whole `chat-messages.json` must
+/// read into one buffer and parse as a JSON array — the harness's own
+/// reader refuses anything else, and ours takes a torn or non-array
+/// snapshot as a **skip**, never as a half-seal and never as an error.
+///
+/// One snapshot serves everything (D6 rev 2): the buffer that validated is
+/// the buffer that seals, and the path is never re-opened between the two.
+/// The harness writes atomically (temp + rename), so a replaced path leaves
+/// this read holding exactly the generation it opened — the sealed bytes
+/// are always the ones that validated, never a mix of two generations.
+///
+/// On a skip the session archives nothing **and keeps its cursor**: the
+/// stored debt, if one exists, still describes the generation that *was*
+/// archived, and a completed file on a later pass fails the digest
+/// comparison and seals normally. The skip itself is recorded once in the
+/// stage's control stream with bounded fields only, and the run reports it
+/// so nothing can exit clean while a session was left unread.
+fn process_codebuff_whole_file(
+    record: &SessionRecord,
+    old: Option<&OffsetEntry>,
+    force_reset: bool,
+    stage: &Path,
+    machine: &str,
+    bucket_cap: usize,
+    pass: &PassContext,
+) -> anyhow::Result<ReadOutcome> {
+    use crate::codebuff::TranscriptRead;
+    let bytes = match crate::codebuff::read_transcript(&record.absolute_path) {
+        TranscriptRead::Array(bytes) => bytes,
+        TranscriptRead::Rejected { bytes, reason } => {
+            // The skip observation's byte size is the read's own when the
+            // read got that far, else the scanner's stat — a measurement of
+            // the snapshot either way, never content.
+            let byte_size = bytes
+                .as_ref()
+                .map_or(record.byte_size, |bytes| bytes.len() as u64);
+            let facts = record.session_dir.as_ref();
+            let root_id = facts
+                .and_then(|facts| facts.root_id.clone())
+                // reason: only a record no registry root walk labelled has no root to name; the empty word says so rather than inventing one
+                .unwrap_or_default();
+            let session_native_id = native_session_id(record, "codebuff")?;
+            crate::codebuff::append_skip_observation(
+                stage,
+                machine,
+                crate::codebuff::SkipObservation {
+                    run_id: pass.run_id.clone(),
+                    pass_ts: pass.pass_ts,
+                    root_id: root_id.clone(),
+                    session_native_id: session_native_id.clone(),
+                    byte_size,
+                    reason: reason.as_str().to_string(),
+                    attempt: 0,
+                },
+            )?;
+            return Ok(ReadOutcome::Skipped(CodebuffTornSkip {
+                root_id,
+                session_native_id,
+                reason: reason.as_str(),
+                byte_size,
+            }));
+        }
+    };
+    let source_len = bytes.len() as u64;
+    let digest = sha256_hex(&bytes);
+    if !force_reset
+        && old.is_some_and(|entry| {
+            !entry.compressed
+                && entry.offset == source_len
+                && entry.prefix_len == source_len
+                && entry.prefix_sha256 == digest
+        })
+    {
+        // The stage already holds this exact generation, so the snapshot
+        // needs no seal — but the sidecars and the recorded start time are
+        // stamped from this scan too, and a stage whose metadata did not
+        // keep up (a first pass after the fields were introduced) repairs
+        // itself here without touching the body.
+        seal_codebuff_sidecars(record, stage, machine, pass)?;
+        return Ok(ReadOutcome::Processed(Processed {
+            state: old.expect("checked above").clone(),
+            outcome: unchanged_outcome(record, source_len, false),
+            dimensions: Default::default(),
+        }));
+    }
+    let lines = {
+        // A validated array is never zero bytes — `[]` is two — so the
+        // whole-file "empty source, no shard" branch cannot occur here; a
+        // zero-byte `chat-messages.json` fails validation above and skips
+        // instead of sealing a no-byte body.
+        vec![bytes]
+    };
+    let shard = Some(store::write_sealed_shard_bytes_with_cap(
+        store::StageWriter::Collect,
+        stage,
+        machine,
+        &record.id,
+        &lines,
+        bucket_cap,
+    )?);
+    let reset = old.is_some();
+    seal_codebuff_sidecars(record, stage, machine, pass)?;
+    Ok(ReadOutcome::Processed(Processed {
+        state: OffsetEntry {
+            offset: source_len,
+            prefix_len: source_len,
+            prefix_sha256: digest,
+            compressed: false,
+            opencode: None,
+            store_fingerprint: None,
+            grok_bot_row_digests: None,
+        },
+        outcome: CollectOutcome {
+            session_prefix: id_prefix(&record.id),
+            source_path_sha256: path_digest(&record.absolute_path),
+            source_bytes: source_len,
+            bytes_read: source_len,
+            prefix_bytes_validated: 0,
+            lines_written: lines.len(),
+            shard,
+            reset,
+            compressed: false,
+        },
+        dimensions: Default::default(),
+    }))
+}
+
+/// Stamp the codebuff capture-time sidecars beside the session's sealed
+/// shards (ADR-054 D4/D5/D9): the recorded start time (its stage file is
+/// what a manifest regeneration reads back, so the fact survives the
+/// reclaimed body), its directory-mtime cross-check, and the whitelist
+/// sidecar files — sealed as raw bytes under the same session identity,
+/// content-addressed so an unchanged sidecar costs nothing and a changed
+/// one appends a new generation the way a shard does.
+///
+/// Called on both the unchanged and the sealed paths, never on a skip
+/// (D6: a session that skips seals *nothing*, sidecars included). An
+/// unreadable sidecar is left unsealed: the sidecar is optional derived
+/// data whose absence is a normal state (D5), and an unread that archived
+/// nothing reads honestly as its still being absent.
+fn seal_codebuff_sidecars(
+    record: &SessionRecord,
+    stage: &Path,
+    machine: &str,
+    pass: &PassContext,
+) -> anyhow::Result<()> {
+    let Some(facts) = record.session_dir.as_ref() else {
+        return Ok(());
+    };
+    // D4: the recorded start time is written beside the shards the manifest
+    // will later regenerate from, so reuse — never re-derivation from the
+    // id — is what carries the value.
+    if let Some(captured) = facts.captured_start.as_ref() {
+        store::write_captured_start(stage, machine, &record.id, captured)?;
+        // D4 cross-check: the chat directory's own mtime must not precede
+        // the recorded start. A mismatch is an observation and the recorded
+        // time stands — it is never overwritten by a file time, and no
+        // system clock is "fixed" here either.
+        if let (Some(dir_mtime), Some(start_time)) = (
+            facts.dir_mtime,
+            crate::codebuff::captured_start_as_system_time(captured),
+        ) {
+            if dir_mtime < start_time {
+                crate::codebuff::append_crosscheck_observation(
+                    stage,
+                    machine,
+                    crate::codebuff::CrossCheckObservation {
+                        pass_ts: pass.pass_ts,
+                        root_id: facts
+                            .root_id
+                            .clone()
+                            // reason: no root walk labelled this record; the empty word, never an invented root
+                            .unwrap_or_default(),
+                        session_native_id: native_session_id(record, "codebuff")?,
+                        recorded_start: captured.time.clone(),
+                        recorded_start_source: captured.source.clone(),
+                        dir_mtime_unix: system_time_unix_seconds(dir_mtime),
+                        result: crate::codebuff::CROSSCHECK_RESULT_PRECEDES.to_string(),
+                    },
+                )?;
+            }
+        }
+    }
+    for extra in &facts.extra_files {
+        match fs::read(&extra.path) {
+            Ok(bytes) => {
+                store::write_session_extra_file(stage, machine, &record.id, &extra.name, &bytes)?;
+            }
+            Err(_) => {
+                // Absent-tolerant by contract (D5): an unreadable sidecar
+                // seals nothing and blocks nothing.
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unix seconds of a `SystemTime`, negative before the epoch — the
+/// cross-check record needs one bounded number, not a lossy wall-clock
+/// string.
+fn system_time_unix_seconds(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(before) => -(before.duration().as_secs() as i64),
+    }
+}
+
 fn process_whole_file(
     record: &SessionRecord,
     old: Option<&OffsetEntry>,
@@ -4313,6 +4611,7 @@ mod grok_bot_debt_key_tests {
             compressed: false,
             sqlite_layout: Some(SqliteSessionLayout::GrokBot),
             provenance: Default::default(),
+            session_dir: None,
         };
         let path_keyed = state_key(&from_root("/synthetic/first/persistence/replica.blob"));
         // Two paths, two records: one session, one key.

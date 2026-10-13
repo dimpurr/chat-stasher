@@ -243,6 +243,7 @@ fn b1_records_survive_a_racing_root_removal() {
         compressed: false,
         sqlite_layout: None,
         provenance: Default::default(),
+        session_dir: None,
     };
     let footprint = doctor::coverage_from_records("claude-code", root, [record].iter());
     assert!(

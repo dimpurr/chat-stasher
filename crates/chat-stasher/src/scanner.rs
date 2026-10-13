@@ -365,6 +365,23 @@ pub struct RegistryDimensions {
 pub struct RegistrySourceRoot {
     pub id: String,
     pub paths: RegistryPaths,
+    /// Marked `"entry"` (the only value today) when this root's
+    /// [`RegistryCell::env_override`] replaces the harness's whole base
+    /// directory — channel suffix included — for every build of the harness,
+    /// not just this root's (ADR-054 D7). An entry-wide override that is set
+    /// collapses the entry to exactly this root plus its override path, and
+    /// the entry's `default_only` roots stay unsuppressed only when the user
+    /// stated them explicitly themselves.
+    #[serde(default)]
+    pub override_scope: Option<String>,
+    /// This root is active only while no entry-wide override is in force
+    /// (ADR-054 D7). One registry entry's channels share one layout, and a
+    /// base-replacing override (`FREEBUFF_CONFIG_DIR`) makes the channel
+    /// roots meaningless: scanning the defaults as well would read the same
+    /// directory twice under two root ids, or read locations the harness no
+    /// longer writes.
+    #[serde(default)]
+    pub default_only: bool,
     #[serde(default)]
     pub provenance: crate::provenance::SessionProvenance,
 }
@@ -501,6 +518,26 @@ pub struct SessionDirRule {
     /// admit a second file per session and reintroduce the id collision this
     /// rule exists to prevent.
     pub file: String,
+    /// Indices (0-based, `/`-separated) into the components the pattern
+    /// matched, joined by `.` to compose the native id. The default —
+    /// omitted, or empty — is the last matched component, the pre-codebuff
+    /// behaviour of every existing rule. Codebuff declares `[1, 3]` for
+    /// `projects/*/chats/*`: the pair `<project-basename>.<chatId>` is the
+    /// chat's on-disk identity, and the chat directory name alone would
+    /// collapse two chats with the same millisecond id under different
+    /// projects into one archive slot (ADR-054 D3). Indices outside the
+    /// matched components fall back to the last component rather than
+    /// composing from a subset — a wrong selection is a registry bug, not a
+    /// licence to mint a narrower id.
+    #[serde(default)]
+    pub id_components: Vec<usize>,
+    /// Additional literal file names (never globs — see [`Self::file`])
+    /// sealed as raw bytes under the *same* session identity, when present
+    /// beside the transcript (ADR-054 D5/D9). Absent files are a normal
+    /// state, not an error: the sidecar rides along only when the harness
+    /// wrote it.
+    #[serde(default)]
+    pub extra_files: Vec<String>,
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -1478,6 +1515,7 @@ fn scan_hermes_legacy(
                 compressed: false,
                 sqlite_layout: None,
                 provenance: Default::default(),
+                session_dir: None,
             });
         }
     }
@@ -1524,10 +1562,41 @@ fn probe_harness(
             note: "a canonical harness_roots override is ambiguous across multiple source roots; declare every root with a quoted harness_roots key `<harness>:<source-root>`".to_string(),
         };
     }
+    // An entry-wide env override (ADR-054 D7): a root marked
+    // `override_scope: "entry"` declares a variable whose value replaces the
+    // harness's whole base directory — channel suffix included — for every
+    // build of the harness. While that variable is set, the entry is exactly
+    // one root: the override root, reading the override value. The entry's
+    // `default_only` roots are suppressed here in that state (scanning the
+    // defaults as well would read the same directory twice under two root
+    // ids, or read locations the harness no longer writes), with one
+    // exception: a root the user stated explicitly themselves, the same
+    // user-stated-path rule that outranks templates and confidence gates
+    // below — the variable has nothing to say about a path the user wrote
+    // down. With no such override in force the entry behaves as before:
+    // every declared root scans.
+    let entry_override_in_force = h.source_roots.iter().any(|root| {
+        root.override_scope.as_deref() == Some("entry")
+            && root
+                .paths
+                .cell_for(platform)
+                .and_then(|cell| cell.env_override.as_deref())
+                .is_some_and(|variable| {
+                    env::var_os(variable).is_some_and(|value| !value.is_empty())
+                })
+    });
     for root in &h.source_roots {
         let Some(cell) = root.paths.cell_for(platform) else {
             continue;
         };
+        if entry_override_in_force
+            && root.default_only
+            && config
+                .explicit_harness_root(&format!("{}:{}", h.id, root.id))
+                .is_none()
+        {
+            continue;
+        }
         let mut one = h.clone();
         one.paths = root.paths.clone();
         one.source_roots.clear();
@@ -1553,6 +1622,15 @@ fn probe_harness(
             // it: every dimension here is a distinct observation of one
             // session, not a single authoritative answer.
             crate::provenance::merge(&mut record.provenance, &root.provenance);
+            // The registry root that produced this record, for control
+            // records that must name a root instead of a path (ADR-054 D6:
+            // a path can carry a username; the root id is ours to name).
+            // A record without session-dir facts is not a codebuff record
+            // and has no root-bearing control stream to feed, so the stamp
+            // only exists where the facts do.
+            if let Some(facts) = record.session_dir.as_mut() {
+                facts.root_id = Some(root.id.clone());
+            }
         }
         total.records.extend(local.records);
         total.missing_roots.extend(local.missing_roots);
@@ -1889,6 +1967,7 @@ fn probe_harness_single(
                                                         SqliteSessionLayout::OpenCode,
                                                     ),
                                                     provenance: Default::default(),
+                                                    session_dir: None,
                                                 })
                                             })
                                             .collect();
@@ -2236,6 +2315,7 @@ fn probe_grok_bot_harness(
                     compressed: false,
                     sqlite_layout: Some(crate::models::SqliteSessionLayout::GrokBot),
                     provenance: Default::default(),
+                    session_dir: None,
                 });
             }
             base.root = Some(root);
@@ -2316,6 +2396,15 @@ fn root_from_env_override(cell: &RegistryCell) -> Option<(PathBuf, bool)> {
         // claims the override works — which is what happened here until the
         // real binary was run against a moved home.
         ".dsh/"
+    } else if template.contains(".config/manicode/") {
+        // `FREEBUFF_CONFIG_DIR` is Codebuff/Freebuff's config base, i.e. the
+        // `.config/manicode` layer itself; nothing hangs below it in the
+        // template (ADR-054 F3/F7: the value replaces the whole base,
+        // channel suffix included, for every build of the harness). The
+        // marker must not swallow the `-dev`/`-staging` siblings: only this
+        // exact spelling matches, so a dev-channel template can never
+        // resolve through another channel's override.
+        ".config/manicode/"
     } else {
         return None;
     };
@@ -2354,6 +2443,7 @@ fn sqlite_records_from_rows(
                 compressed: false,
                 sqlite_layout: Some(layout),
                 provenance: Default::default(),
+                session_dir: None,
             })
         })
         .collect()
@@ -2494,6 +2584,7 @@ fn grok_usage_records(
             compressed: false,
             sqlite_layout: None,
             provenance: Default::default(),
+            session_dir: None,
         });
     }
     scan
@@ -2555,6 +2646,7 @@ fn grok_history_records(dirs: &[GrokSessionDir], machine: &str) -> GrokHistorySc
             compressed: false,
             sqlite_layout: None,
             provenance: Default::default(),
+            session_dir: None,
         });
     }
     scan
@@ -2584,6 +2676,7 @@ fn hermes_records_from_rows(
             compressed: false,
             sqlite_layout: Some(SqliteSessionLayout::HermesAgent),
             provenance: Default::default(),
+            session_dir: None,
         })
         .collect()
 }
@@ -2707,6 +2800,7 @@ fn cursor_legacy_records_from_rows(
                 compressed: false,
                 sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
                 provenance: Default::default(),
+                session_dir: None,
             })
         })
         .collect()
@@ -2817,6 +2911,7 @@ fn probe_openclaw_agents(
                                 compressed: false,
                                 sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
                                 provenance: Default::default(),
+                                session_dir: None,
                             });
                         }
                         known += row_count;
@@ -2933,6 +3028,7 @@ fn scan_openclaw_cold_files(
                         compressed: true,
                         sqlite_layout: None,
                         provenance: Default::default(),
+                        session_dir: None,
                     });
                 }
                 Err(_) => *unreadable += 1,
@@ -3382,8 +3478,11 @@ enum SessionScope {
     /// No ancestor directory matched the rule's `pattern`.
     Outside,
     /// The current matching session-directory ancestor: its path and
-    /// name — the native id. Ordinary rules keep the first scope;
-    /// recursive rules replace it when a nested directory matches.
+    /// (usually) name — the native id. A rule that declares
+    /// `id_components` composes the id from selected matched components
+    /// instead (ADR-054 D3: codebuff's `<basename>.<chatId>`). Ordinary
+    /// rules keep the first scope; recursive rules replace it when a
+    /// nested directory matches.
     ///
     /// `container` is the segment immediately above the session
     /// directory when that segment is a workspace identity: Kimi
@@ -3396,11 +3495,61 @@ enum SessionScope {
     /// that segment a workspace meaning. Unrecognized hierarchies
     /// leave it `None`, and a `None` container is *not observed*,
     /// never "no workspace".
+    ///
+    /// `chat_dir_name` and `dir_mtime` ride the scope only for the
+    /// harness whose facts are captured from the session directory
+    /// itself (codebuff, ADR-054 D4): the chat directory's own name
+    /// for the start-time record, and the directory's own mtime for
+    /// the cross-check. They stay `None` for every other harness, and
+    /// no later stage may re-derive either from the archive id.
     In {
         dir: PathBuf,
         id: String,
         container: Option<String>,
+        chat_dir_name: Option<String>,
+        dir_mtime: Option<std::time::SystemTime>,
     },
+}
+
+/// Stat a matched codebuff chat directory for its capture-time facts
+/// (ADR-054 D4): the directory's own name — which is the session start time
+/// in the harness's encoding — and its own mtime (plus ctime under Unix,
+/// whichever is earlier) for the cross-check that a recorded start time is not
+/// preceded by the directory. `None` when the metadata cannot be read: an
+/// unstattable directory observes nothing, and the facts stay unknown rather
+/// than being fabricated from elsewhere.
+fn codebuff_chat_dir_facts(dir: &Path) -> Option<(String, std::time::SystemTime)> {
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let metadata = fs::metadata(dir).ok()?;
+    let mtime = metadata.modified().ok();
+    // std exposes no ctime on Windows; there the mtime alone guards the
+    // cross-check. On Unix both are read and the earlier one compared, so an
+    // either-way-precedence is caught on the platforms that can see it.
+    let ctime = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // reason: a ctime the platform reports before the epoch (an
+            // exotically back-dated inode) cannot live in the u64 seconds
+            // this stat feeds; the epoch itself stands in, which still
+            // precedes every chat directory name the D4 pattern accepts.
+            let secs = u64::try_from(metadata.ctime()).unwrap_or(0);
+            // reason: ctime_nsec is unsigned already; the try_from exists
+            // only for type juggling, and a nanos field that overflows u32
+            // (never seen on any supported filesystem) clamps to zero
+            // seconds-of-nanos, a sub-millisecond error in a cross-check
+            // that compares whole seconds.
+            let nanos = u32::try_from(metadata.ctime_nsec()).unwrap_or(0);
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+    let earlier = mtime.zip(ctime).map(|(mtime, ctime)| mtime.min(ctime));
+    let dir_mtime = earlier.or(mtime)?;
+    Some((name, dir_mtime))
 }
 
 /// The scope a child directory inherits: unchanged, or replaced when the
@@ -3460,6 +3609,37 @@ fn descend_scope(
     let Some(name) = components.last().cloned() else {
         return parent.clone();
     };
+    // The matched window: for the non-recursive rules every existing
+    // `session_dir` harness uses, the pattern covers exactly these
+    // components root-relative; for a recursive rule the `**` prefix matched
+    // the components above them.
+    let matched = &components[start..];
+    // The native id defaults to the session directory's own name — the
+    // pre-codebuff behaviour every existing rule relies on. `id_components`
+    // composes it from selected matched components instead, joined by `.`:
+    // codebuff's chats key themselves by the *pair* `<project-basename>.<chatId>`
+    // (projects/<basename>/chats/<chatId>, indices [1, 3]), and the name
+    // alone is unique only within one project basename — taking the last
+    // component would hand two chats under different basenames with the same
+    // timestamp id the same archive slot, the exact collapse this rule
+    // exists to prevent (ADR-054 D3). An out-of-range index set falls back
+    // to the last component: a wrong selection is a registry bug to be
+    // caught in review and tests, not a licence to compose from a subset
+    // and mint a narrower id.
+    let id = if !rule.id_components.is_empty()
+        && rule
+            .id_components
+            .iter()
+            .all(|index| *index < matched.len())
+    {
+        rule.id_components
+            .iter()
+            .map(|index| matched[*index].clone())
+            .collect::<Vec<String>>()
+            .join(".")
+    } else {
+        name.clone()
+    };
     // Kimi Code's measured layout is `<root>/<workspaceId>/<sessionId>`:
     // the segment immediately above the session directory is a workspace
     // identity, and only at that exact depth. One level (a session directly
@@ -3477,10 +3657,25 @@ fn descend_scope(
     // reads.
     let container =
         (source == HarnessSource::KimiCode && components.len() == 2).then(|| components[0].clone());
+    // Codebuff's chat directory name *is* the session start time (ADR-054
+    // F5), and its directory mtime crosses checks the time (D4): both are
+    // recorded at capture, from the scan that just matched the directory —
+    // later stages must never parse either out of the archive id, which can
+    // be bounded and lose the tail entirely. No other session-dir harness
+    // carries these facts, so the walk stats nothing for them.
+    let codebuff_facts = (source == HarnessSource::Codebuff)
+        .then(|| codebuff_chat_dir_facts(dir))
+        .flatten();
+    let (chat_dir_name, dir_mtime) = match codebuff_facts {
+        Some((dir_name, dir_mtime)) => (Some(dir_name), Some(dir_mtime)),
+        None => (None, None),
+    };
     SessionScope::In {
         dir: dir.to_path_buf(),
-        id: name,
+        id,
         container,
+        chat_dir_name,
+        dir_mtime,
     }
 }
 
@@ -3576,6 +3771,36 @@ fn collect_records(
                 RecordBuild::Record(record) => records.push(record),
                 RecordBuild::Unreadable => unreadable_count += 1,
                 RecordBuild::NotSession => {}
+            }
+        }
+    }
+    // Whitelist sidecars (ADR-054 D5/D9): a session-directory rule that
+    // declares `extra_files` seals those literal names beside the
+    // transcript under the *same* session identity whenever they exist.
+    // They attach here, after the walk, because the transcript file and
+    // its sidecars are visited in directory order and the record is the one
+    // thing tying them together. Absent files observe nothing — a session
+    // without its sidecars is still archived — and an unreadable sidecar is
+    // skipped the same way (its bytes are optional derived data, and a
+    // missing observation never blocks the transcript).
+    if let Some(rule) = session_dir.filter(|rule| !rule.extra_files.is_empty()) {
+        for record in &mut records {
+            let Some(chat_dir) = record.absolute_path.parent() else {
+                continue;
+            };
+            let facts = record.session_dir.get_or_insert_with(Default::default);
+            for name in &rule.extra_files {
+                let sidecar = chat_dir.join(name);
+                match fs::metadata(&sidecar) {
+                    Ok(md) if md.is_file() => {
+                        facts.extra_files.push(crate::models::ExtraFileSource {
+                            name: name.clone(),
+                            byte_size: md.len(),
+                            path: absolutize(&sidecar),
+                        })
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -3789,8 +4014,23 @@ fn build_record(
     // be labelled with — a harness_roots override relocates a tree without
     // losing the rule, and a file detected as another harness never gains it.
     let source = detect_source(path).unwrap_or(expected);
+    // The codebuff facts ride the scope; every other harness leaves them
+    // unset, and a record outside any session directory has none to take.
+    let codebuff_scope = match scope {
+        SessionScope::In {
+            chat_dir_name,
+            dir_mtime,
+            ..
+        } if source == HarnessSource::Codebuff => Some((chat_dir_name, dir_mtime)),
+        _ => None,
+    };
     let (native_id, container, indexed_cwd) = match (session_dir, scope) {
-        (Some(rule), SessionScope::In { dir, id, container }) => {
+        (
+            Some(rule),
+            SessionScope::In {
+                dir, id, container, ..
+            },
+        ) => {
             if !relpath_matches(dir, path, &rule.file) {
                 return RecordBuild::NotSession;
             }
@@ -3841,6 +4081,28 @@ fn build_record(
         provenance.insert_cwd(work_dir);
     }
 
+    // The session-directory facts codebuff captures at discovery (ADR-054
+    // D4/D9): the chat directory name's own instant, parsed here while the
+    // actual name is still in hand — a name that does not match the accepted
+    // shape records no start time rather than approximating one, and no
+    // later stage re-reads the time out of the archive id, whose bounding
+    // can drop the timestamp entirely — and the directory mtime for the
+    // cross-check. `extra_files` are attached to the record after the walk
+    // by [`collect_records`], which sees the sidecars beside the transcript
+    // it already found.
+    let session_dir_facts = codebuff_scope.map(|(chat_dir_name, dir_mtime)| {
+        crate::models::SessionDirFacts {
+            // The multi-root probe stamps the registry root id after this
+            // scan; a record that skips it carries no root to name.
+            root_id: None,
+            captured_start: chat_dir_name
+                .as_deref()
+                .and_then(crate::codebuff::captured_start_from_chat_dir_name),
+            dir_mtime: *dir_mtime,
+            extra_files: Vec::new(),
+        }
+    });
+
     RecordBuild::Record(SessionRecord {
         id: ident.id(),
         absolute_path: absolutize(path),
@@ -3850,6 +4112,7 @@ fn build_record(
         compressed,
         sqlite_layout: None,
         provenance,
+        session_dir: session_dir_facts,
     })
 }
 
@@ -4446,6 +4709,8 @@ mod tests {
             Some(&SessionDirRule {
                 pattern: "*/*".to_string(),
                 file: "transcript.jsonl".to_string(),
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
             }),
         );
         assert_eq!(scan.records.len(), 1);
@@ -5287,6 +5552,8 @@ mod tests {
             .map(|id| RegistrySourceRoot {
                 id: id.to_string(),
                 paths: harness.paths.clone(),
+                override_scope: None,
+                default_only: false,
                 provenance: Default::default(),
             })
             .collect();
@@ -5431,6 +5698,8 @@ mod tests {
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
             file: "agents/main/wire.jsonl".to_string(),
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         for path in [
             root.join("session_zero-prefix"),
@@ -5463,6 +5732,8 @@ mod tests {
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
             file: "agents/main/wire.jsonl".to_string(),
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         let outer_path = root.join("workspace").join("session_outer");
         let outer = descend_scope(
@@ -5508,6 +5779,8 @@ mod tests {
         let rule = SessionDirRule {
             pattern: "*/*".to_string(),
             file: "transcript.jsonl".to_string(),
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
         let root_session = root.join("workspace").join("session_one");
         let scope = descend_scope(
@@ -5565,6 +5838,8 @@ mod tests {
             let rule = SessionDirRule {
                 pattern: pattern.to_string(),
                 file: "agents/main/wire.jsonl".to_string(),
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
             };
             let matched = descend_scope(
                 &SessionScope::Outside,
@@ -5604,6 +5879,8 @@ mod tests {
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
             file: "agents/main/wire.jsonl".to_string(),
+            id_components: Vec::new(),
+            extra_files: Vec::new(),
         };
 
         // The measured layout: <root>/<workspaceId>/<sessionId>.
@@ -5907,6 +6184,7 @@ mod tests {
                 compressed: false,
                 sqlite_layout: None,
                 provenance: Default::default(),
+                session_dir: None,
             }
         }
         let mut report = ScanReport::default();

@@ -155,6 +155,7 @@ fn live_record(blob: &Path) -> SessionRecord {
         compressed: false,
         sqlite_layout: Some(SqliteSessionLayout::GrokBot),
         provenance: Default::default(),
+        session_dir: None,
     }
 }
 

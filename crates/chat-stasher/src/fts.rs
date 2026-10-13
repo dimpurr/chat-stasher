@@ -690,6 +690,10 @@ const HARNESS_SOURCE_FORMATS: &[(&str, &str)] = &[
     // archive holds, which is that file decoded (`collect` strips the frame
     // structure), so the word is `jsonl` exactly as it is for codex.
     ("deepseek-harness", "jsonl"),
+    // ADR-054 D2: the codebuff whitelist is whole-file JSON
+    // (`chat-messages.json`). The sidecar is the same format but never
+    // reaches fts: it seals beside the body under the same identity.
+    ("codebuff", FORMAT_JSON),
 ];
 
 fn declared_format(harness: &str) -> Option<&'static str> {
@@ -2824,6 +2828,14 @@ mod tests {
                 "continue",
                 br#"{"messages":[{"role":"user","content":"synthetic question"}]}"#,
                 Expected::Text("synthetic question"),
+            ),
+            (
+                // The codebuff body is one whole-file JSON array
+                // (ADR-054 D2); the reader takes the latest generation's
+                // turns, so an indexable body needs one renderable turn.
+                "codebuff",
+                br#"[{"variant":"user","content":"synthetic codebuff question"}]"#,
+                Expected::Text("synthetic codebuff question"),
             ),
         ];
 

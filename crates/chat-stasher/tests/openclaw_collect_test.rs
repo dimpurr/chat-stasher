@@ -58,6 +58,7 @@ fn record(db: &Path, machine: &str, native: String) -> SessionRecord {
         compressed: false,
         sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
         provenance: Default::default(),
+        session_dir: None,
     }
 }
 
