@@ -672,6 +672,29 @@ pub struct ArchiveGap {
 }
 
 impl ScanReport {
+    /// The distinct session ids among the records each source emitted,
+    /// grouped in one pass over the report's records. `collect` stages one
+    /// dir per id, so both per-harness consumers of a report's records —
+    /// the staged-session count behind `found_staged`
+    /// ([`probe_found_staged`], used by [`scan_report_json`]) and
+    /// [`archive_gaps`]'s session-records side — answer from these sets;
+    /// grouping once per report keeps each consumer at one record
+    /// traversal instead of one per probe. A source with no records
+    /// simply has no entry: its id set is the measured empty.
+    fn staged_id_sets_per_source(
+        &self,
+    ) -> std::collections::HashMap<HarnessSource, std::collections::BTreeSet<&str>> {
+        let mut grouped: std::collections::HashMap<_, std::collections::BTreeSet<_>> =
+            std::collections::HashMap::new();
+        for record in &self.records {
+            grouped
+                .entry(record.source)
+                .or_default()
+                .insert(record.id.as_str());
+        }
+        grouped
+    }
+
     /// Return installed harnesses whose recognised session count is greater
     /// than the number of records that `collect` can consume. Both sides
     /// count **distinct session ids** — mirroring the multi-root aggregation
@@ -680,6 +703,16 @@ impl ScanReport {
     /// made against the records actually produced by this scan, and no
     /// harness allowlist is involved.
     pub fn archive_gaps(&self) -> Vec<ArchiveGap> {
+        self.archive_gaps_with_id_sets(&self.staged_id_sets_per_source())
+    }
+
+    /// [`archive_gaps`] with the per-source id sets supplied, so a caller
+    /// that already grouped the report's records ([`scan_report_json`])
+    /// does not traverse them a second time.
+    fn archive_gaps_with_id_sets(
+        &self,
+        staged_id_sets: &std::collections::HashMap<HarnessSource, std::collections::BTreeSet<&str>>,
+    ) -> Vec<ArchiveGap> {
         self.probes
             .iter()
             .filter_map(|probe| {
@@ -689,12 +722,8 @@ impl ScanReport {
                 let Some(source) = HarnessSource::from_id(&probe.id) else {
                     return None;
                 };
-                let session_records: std::collections::BTreeSet<_> = self
-                    .records
-                    .iter()
-                    .filter(|record| record.source == source)
-                    .map(|record| record.id.as_str())
-                    .collect();
+                let empty: std::collections::BTreeSet<&str> = Default::default();
+                let session_records = staged_id_sets.get(&source).unwrap_or(&empty);
                 match probe.record_count {
                     Some(0) => None,
                     Some(recognized_sessions)
@@ -796,9 +825,10 @@ pub fn probe_session_count(p: &HarnessProbe) -> json_out::CountState {
         ProbeState::SkipUnascertained => {
             CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
         }
-        ProbeState::SkipUnresolvable => {
-            CountState::unknown("template cannot be reduced to a static root path")
-        }
+        ProbeState::SkipUnresolvable => CountState::unknown(
+            "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build",
+        ),
     }
 }
 
@@ -906,7 +936,13 @@ pub fn probe_found_staged(p: &HarnessProbe, staged_ids: u64) -> json_out::CountS
             CountState::unknown("confidence unascertained; scanning a guessed path is forbidden")
         }
         ProbeState::SkipUnresolvable => {
-            CountState::unknown("template cannot be reduced to a static root path")
+            // Two ways reach this state — an unresolvable template, and a
+            // registry id this build does not know (`probe_harness_single`
+            // skips both before any root resolves) — the why names both.
+            CountState::unknown(
+                "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build",
+            )
         }
     }
 }
@@ -953,6 +989,12 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         .iter()
         .filter(|p| p.record_count.is_some() && p.unreadable_count.is_none())
         .count() as u64;
+    // The distinct-id sets per source, grouped once, feed both per-harness
+    // consumers below: each probe's `found_staged` and the
+    // `archive_gap_harnesses` count. Without the shared grouping each
+    // consumer would rebuild one id set per probe — a full traversal of
+    // the report's records per probe.
+    let staged_id_sets = report.staged_id_sets_per_source();
     let harnesses: Vec<_> = report
         .probes
         .iter()
@@ -961,13 +1003,9 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
             // collect stages one dir per id, so this is the staged-session
             // count.
             let staged_ids = match HarnessSource::from_id(&p.id) {
-                Some(source) => report
-                    .records
-                    .iter()
-                    .filter(|record| record.source == source)
-                    .map(|record| record.id.as_str())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len() as u64,
+                Some(source) => staged_id_sets
+                    .get(&source)
+                    .map_or(0, |ids| ids.len() as u64),
                 // reason: a harness id the scan dispatch cannot map to a
                 // source is never scanned, so it cannot have emitted
                 // records — a measured empty, and the probe's own state
@@ -983,7 +1021,11 @@ pub fn scan_report_json(report: &ScanReport) -> serde_json::Value {
         "compressed_sessions": CountState::known(compressed),
         "missing_roots": CountState::known(report.missing_roots.len() as u64),
         "indeterminate_roots": CountState::known(report.indeterminate_roots.len() as u64),
-        "archive_gap_harnesses": CountState::known(report.archive_gaps().len() as u64),
+        "archive_gap_harnesses": CountState::known(
+            report
+                .archive_gaps_with_id_sets(&staged_id_sets)
+                .len() as u64,
+        ),
         "unreadable_sessions": CountState::known(unreadable_sessions),
         "unreadable_entries": CountState::known(unreadable_entries),
         "unreadable_uncounted_harnesses": CountState::known(unreadable_uncounted),
@@ -5542,11 +5584,12 @@ mod tests {
         // what collect will be handed — the scan's own emission answers.
         // The count stands for a two-records-one-id population collapsing
         // to one staged session, the W982 grok shape the key exists for.
-        for state in [
-            ProbeState::Scanned,
-            ProbeState::FileTarget,
-            ProbeState::Indeterminate,
-        ] {
+        // Only the record-producing states are asserted here: emitting a
+        // record requires a resolved, readable root, so no scan path pairs
+        // `Indeterminate` or a skip state with a positive staged count, and
+        // pinning such an impossible shape would state it as if it could
+        // occur.
+        for state in [ProbeState::Scanned, ProbeState::FileTarget] {
             assert_eq!(
                 probe_found_staged(&probe_with(state, None), 1),
                 CountState::known(1),
@@ -5593,7 +5636,10 @@ mod tests {
         );
         assert_eq!(
             probe_found_staged(&probe_with(ProbeState::SkipUnresolvable, None), 0),
-            CountState::unknown("template cannot be reduced to a static root path")
+            CountState::unknown(
+                "no root to scan: template not statically resolvable, or registry id unknown \
+                 in this build"
+            )
         );
         assert_eq!(
             probe_found_staged(&probe_with(ProbeState::SkipWrongPlatform, None), 0),

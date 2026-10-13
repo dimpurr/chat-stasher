@@ -8,7 +8,7 @@ use std::time::SystemTime;
 /// containing directory (`.claude` vs `.codex`), or — for the registry-driven
 /// scan — from the harness entry whose root is being walked, never guessed
 /// from session content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessSource {
     ClaudeCode,
     Codex,
