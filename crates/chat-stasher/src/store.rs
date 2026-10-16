@@ -987,7 +987,28 @@ impl BackupStore {
             .context("open repository for session content")?;
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
-        let Some(host_snaps) = crate::readback::snapshots_by_host_newest_first(snaps)
+        let grouped_hosts = crate::readback::snapshots_by_host_newest_first(snaps);
+        // ADR-046 (draft) Phase 1: an explicit session read is a reader, so
+        // the effective control stream is folded from the union of every
+        // host's newest snapshot before any body is fetched, and an omitted
+        // identity is a typed refusal the command layer distinguishes from a
+        // read that did not finish. An unreadable or conflicting control
+        // stream is an `Err`: this call fails closed — it never answers from
+        // a policy it could not establish.
+        let control_policy =
+            crate::deletion_control::load_strict_reader_policy(&repo, &grouped_hosts)?;
+        if let visibility @ (crate::deletion_control::Visibility::Hidden
+        | crate::deletion_control::Visibility::Purged
+        | crate::deletion_control::Visibility::RedactedThroughCutoff { .. }) =
+            control_policy.visibility(machine, session_id)
+        {
+            return Err(anyhow::anyhow!(crate::deletion_control::SessionOmitted {
+                machine: machine.to_string(),
+                session_id: session_id.to_string(),
+                state: visibility,
+            }));
+        }
+        let Some(host_snaps) = grouped_hosts
             .into_iter()
             .find(|(host, _)| host == machine)
             .map(|(_, snaps)| snaps)
