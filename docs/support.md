@@ -55,6 +55,26 @@ When you set the Hermes Agent root under
 the `state.db` and the legacy compatibility paths above are not consulted
 around it.
 
+## Desktop apps
+
+Claude Desktop's Cowork sessions are a second store of Claude Code, not the
+CLI's store: the app gives each session a sandboxed home of its own in its
+application-support tree, and the transcript inside is the same
+`.claude/projects` file shape the CLI writes. That tree is scanned as a second
+root of the same harness, measured on macOS. On Windows the location is
+recorded but unmeasured, so it is rendered `not supported` and the harness's
+combined count reports the measured CLI sessions as a marked lower bound
+(`≥N`, the desktop root named as unverified); no Linux location is declared,
+because the desktop app has no Linux build. See
+[Claude Code](sources/claude-code.md).
+
+Codex Desktop and the Codex CLI share one store: the desktop app drives the
+same codex through its app-server, so its threads are the `~/.codex/sessions/`
+rollouts the CLI writes — there is no separate desktop copy to add. Archiving
+a thread in the app moves its rollout into `~/.codex/archived_sessions/`,
+which is scanned as a second root of the same store, so an archived thread
+stays in the count. See [Codex](sources/codex.md).
+
 ## The support matrix
 
 <!-- support-matrix:full:start -->
