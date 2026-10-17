@@ -13,9 +13,9 @@
 | primary | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
 | primary | Linux | `$HOME/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
 | primary | Windows | `%USERPROFILE%\.codex\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
-| codex-archived | macOS | `~/.codex/archived_sessions/` | jsonl / jsonl.zst | measured-locally | verified end-to-end (2026-09-25) |
-| codex-archived | Linux | `$HOME/.codex/archived_sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
-| codex-archived | Windows | `%USERPROFILE%\.codex\archived_sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) |
+| codex-archived | macOS | `~/.codex/archived_sessions/` | jsonl / jsonl.zst | measured-locally | supported |
+| codex-archived | Linux | `$HOME/.codex/archived_sessions/` | jsonl / jsonl.zst | source-confirmed | supported |
+| codex-archived | Windows | `%USERPROFILE%\.codex\archived_sessions\` | jsonl / jsonl.zst | source-confirmed | supported |
 <!-- END GENERATED -->
 
 ## What it is

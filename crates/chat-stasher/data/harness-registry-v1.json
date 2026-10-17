@@ -120,7 +120,7 @@
               "managed_sources": [
                 "~/.claude/managed-settings.json",
                 "/Library/Application Support/ClaudeCode/managed-settings.json",
-                "$HOME/Library/Application Support/ClaudeCode/managed-settings.json",
+                "~/Library/Application Support/ClaudeCode/managed-settings.json",
                 "/etc/claude-code/managed-settings.json"
               ],
               "confidence": "measured-locally",
@@ -136,7 +136,7 @@
             },
             "linux": {
               "user_sources": [
-                "$HOME/.claude/settings.json"
+                "~/.claude/settings.json"
               ],
               "managed_sources": [],
               "confidence": "unascertained",

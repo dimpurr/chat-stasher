@@ -35,8 +35,13 @@ and must not collapse into one glyph:
                                  record on the harness — a human archived a real
                                  session on a real machine and wrote down when.
                                  Optional `platform` scopes the claim to one OS
-                                 cell; without it, the historical row-wide
-                                 meaning is retained.
+                                 cell; without it, the record speaks for the
+                                 harness's primary store, and paints only that
+                                 store's rows: additional source roots joined
+                                 the family after the pass ran, so their rows
+                                 render from their own confidence until a
+                                 verification of their own is recorded
+                                 (`root_verified_record`).
     supported                    the registry will scan this harness (at least
                                  one OS cell is source-confirmed / official-docs
                                  / measured-locally), or the extension ships the
@@ -703,6 +708,28 @@ def harness_root_entries(h: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return [("", primary)]
 
 
+def root_verified_record(
+    verified: dict[str, Any] | None,
+    root_name: str,
+) -> dict[str, Any] | None:
+    """The verification record one rendered root row may carry.
+
+    A harness-level record (`platform` unset) speaks for the harness's primary
+    store — the store the entry itself names, the one the recorded end-to-end
+    pass actually sealed — so it paints primary rows only. Additional source
+    roots joined the family after that pass ran (claude-desktop-cowork,
+    codex-archived), and a row whose store was at best measured read-only must
+    not print the end-to-end badge: an unmeasured path (the Cowork Windows
+    cell, unascertained) would otherwise read as verified. A platform-scoped
+    record (antigravity's names its macOS roots) carries its own narrower
+    claim, so it keeps painting every root row on its declared platform,
+    exactly as before this distinction existed.
+    """
+    if verified is None or verified.get("platform") is not None:
+        return verified
+    return verified if root_name in ("", "primary") else None
+
+
 def web_status(p: dict[str, Any]) -> str:
     # A recorded verification outranks the channel and credibility readings,
     # exactly as a `verified` record outranks them for a harness: it is the
@@ -852,7 +879,9 @@ def render_full(
         for root_name, paths in harness_root_entries(h):
             for os_name in OS_ORDER:
                 cell = paths.get(os_name)
-                status = cell_status(cell, verified, os_name)
+                status = cell_status(
+                    cell, root_verified_record(verified, root_name), os_name
+                )
                 label = name if not root_name else f"{name} ({root_name})"
                 if cell is None:
                     out.append(

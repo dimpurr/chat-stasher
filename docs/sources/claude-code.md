@@ -13,9 +13,9 @@
 | primary | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-09-25) |
 | primary | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) |
 | primary | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) |
-| claude-desktop-cowork | macOS | `~/Library/Application Support/Claude/local-agent-mode-sessions/` | jsonl | measured-locally | verified end-to-end (2026-09-25) |
+| claude-desktop-cowork | macOS | `~/Library/Application Support/Claude/local-agent-mode-sessions/` | jsonl | measured-locally | supported |
 | claude-desktop-cowork | Linux | - | - | - | not supported |
-| claude-desktop-cowork | Windows | `%APPDATA%\Claude\local-agent-mode-sessions\` | jsonl | unascertained | verified end-to-end (2026-09-25) |
+| claude-desktop-cowork | Windows | `%APPDATA%\Claude\local-agent-mode-sessions\` | jsonl | unascertained | not supported |
 <!-- END GENERATED -->
 
 ## What it is
@@ -38,7 +38,7 @@ The working-directory segment of a session path is sanitized, and its edge cases
 
 ## Known issues
 
-The registry's standing caveat for this harness is exactly the Windows quirk above: on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear, and the drive-letter and backslash sanitization of short paths is still unmeasured. The desktop root's Windows location is derived rather than measured — the same session-layout constant measured in the app bundle, resolved through Electron's Windows convention — so the scan refuses to walk that path on Windows until a real install confirms it; a Windows machine therefore reports the harness's session total as unknown rather than counting only what it can see. A machine without the desktop app installed reports the same unknown, for the same honesty: a declared root that is absent leaves the combined total unknowable, never silently smaller.
+The registry's standing caveat for this harness is exactly the Windows quirk above: on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear, and the drive-letter and backslash sanitization of short paths is still unmeasured. The desktop root's Windows location is derived rather than measured — the same session-layout constant measured in the app bundle, resolved through Electron's Windows convention — so the scan refuses to walk that path on Windows until a real install confirms it; a Windows machine therefore reports the harness's session total as unknown rather than counting only what it can see. A machine without the desktop app installed does not report that unknown: the desktop root was looked for and found absent, and beside a scanned CLI store that measured absence counts as zero, so doctor keeps the CLI count it measured instead of dimming it. Unknown survives only where nothing was scanned at all — a machine with neither store reports unknown, never a silently smaller zero.
 
 ## How to check it yourself
 

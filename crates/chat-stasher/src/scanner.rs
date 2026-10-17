@@ -1924,36 +1924,41 @@ fn probe_harness(
         .collect();
     let known_count = unique_records.len() as u64;
     // A root that was looked for and found ABSENT answers a known zero for
-    // the aggregate once another root of the same family was actually seen
-    // (DSK-1 / ADR-059 draft D6): the declared family is anchored by the
-    // scanned root, so the absent sibling's contribution is a measured
-    // nothing, and a machine without Claude Desktop must not have its known
-    // claude-code CLI count dimmed to an unknown. The earlier rule this
-    // replaces ("missing cells stay unknown") held before any shipped
-    // harness mixed a scanned primary with additional roots; the doctor's
-    // footprint/probe consistency contract forced the distinction, because
-    // the record-derived footprint could count what the aggregate refused
-    // to claim. Two limits guard against a semantic zero: a family whose
-    // roots were ALL absent still reports unknown (an absent harness is not
-    // an empty one), and a subprobe that never looked — unascertained,
-    // unresolvable, indeterminate — keeps the whole total unknown.
+    // the aggregate once another root of the same family was actually
+    // seen — but only in the primary-plus-roots shape DSK-1 introduced
+    // (ADR-059 draft D6, scoped in the W1006c review): the family is
+    // anchored by a PRIMARY store the entry itself declares, so the absent
+    // sibling's contribution is a measured nothing, and a machine without
+    // Claude Desktop must not have its known claude-code CLI count dimmed
+    // to an unknown. An all-roots family (codebuff's channels, antigravity's
+    // surfaces) declares no primary store, so nothing anchors it and the
+    // pre-DSK-1 rule stands there: a missing sibling keeps that family's
+    // combined total unknown, exactly as before this batch. The doctor's
+    // footprint/probe consistency contract forced the distinction for the
+    // primary shape, because the record-derived footprint could count what
+    // the aggregate refused to claim. Two limits guard against a semantic
+    // zero: a family whose roots were ALL absent still reports unknown
+    // (an absent harness is not an empty one), and a subprobe that never
+    // looked — unascertained, unresolvable, indeterminate — keeps the
+    // whole total unknown.
+    let absent_sibling_is_zero = primary_probeable;
     let unreadable = subprobes.iter().try_fold(0u64, |sum, probe| {
-        if probe.state == ProbeState::Missing {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
             return Some(sum);
         }
         sum.checked_add(probe.unreadable_count?)
     });
     let unreadable_entries = subprobes.iter().try_fold(0u64, |sum, probe| {
-        if probe.state == ProbeState::Missing {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
             return Some(sum);
         }
         sum.checked_add(probe.unreadable_entry_count?)
     });
     let counts_complete = !subprobes.is_empty()
         && any_scanned
-        && subprobes
-            .iter()
-            .all(|p| p.record_count.is_some() || p.state == ProbeState::Missing)
+        && subprobes.iter().all(|p| {
+            p.record_count.is_some() || (absent_sibling_is_zero && p.state == ProbeState::Missing)
+        })
         && unreadable.is_some()
         && unreadable_entries.is_some();
     let bytes_complete = !subprobes.is_empty() && subprobes.iter().all(|p| p.bytes.is_some());
@@ -4570,6 +4575,42 @@ mod tests {
         .unwrap()
     }
 
+    /// A roots-only family shaped like the codebuff channels: every declared
+    /// root is a sibling beside the others and the entry names no primary
+    /// `paths` store at all — the all-roots shape antigravity and codebuff
+    /// have always had. DSK-1's measured-zero sibling rule is scoped away
+    /// from this shape, so its aggregation must not change semantics here.
+    fn all_roots_channel_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let stable = serde_json::json!({
+            "template": "~/.synthetic-manicode/stable/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let dev = serde_json::json!({
+            "template": "~/.synthetic-manicode/dev/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let stable_paths = serde_json::json!({ platform_key: stable });
+        let dev_paths = serde_json::json!({ platform_key: dev });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "codebuff",
+                "display_name": "synthetic",
+                "source_roots": [
+                    { "id": "codebuff", "paths": stable_paths },
+                    { "id": "codebuff-dev", "paths": dev_paths }
+                ]
+            }]
+        }))
+        .unwrap()
+    }
+
     fn synthetic_grok_registry() -> HarnessRegistry {
         let cell = serde_json::json!({
             "template": "~/.grok/sessions/session_search.sqlite",
@@ -5422,9 +5463,10 @@ mod tests {
             .join(format!("{sid}.jsonl"));
         fs::create_dir_all(active.parent().unwrap()).unwrap();
         fs::write(&active, b"{\"synthetic\":\"rollout\"}\n").unwrap();
-        // Both roots exist before the first scan — an absent declared root
-        // makes the whole harness's total unknown (the multi-root honesty
-        // rule), and this test is about id stability, not that rule.
+        // Both roots are planted, though the aggregate rules below would
+        // tolerate the archived one being absent (a scanned primary keeps
+        // the family's total known): this test is about the id stability
+        // of the archive move, not the family's aggregate counting rules.
         fs::create_dir_all(archived.parent().unwrap()).unwrap();
 
         let registry = codex_plus_archived_registry();
@@ -5629,6 +5671,52 @@ mod tests {
         assert_eq!(
             probe.record_count, None,
             "an all-missing family is unknown, never a semantic zero"
+        );
+    }
+
+    /// W1006c (review of DSK-1): the measured-zero sibling rule is scoped to
+    /// the primary-plus-additional-roots shape ADR-059 draft D6 introduced,
+    /// and does not leak into the all-roots families that predate it. A
+    /// channel family (codebuff stable/dev/staging, antigravity's surfaces)
+    /// has no primary store that anchors it, so a scanned channel plus a
+    /// looked-for-but-absent sibling keeps the family's *combined* total
+    /// unknown — exactly the pre-DSK-1 rule, restored for these entries so
+    /// their aggregate semantics do not change under an unrelated harness's
+    /// desktop-store work.
+    #[test]
+    fn an_absent_sibling_in_an_all_roots_family_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let stable = sandbox
+            .home()
+            .join(".synthetic-manicode/stable")
+            .join("probe-stable-01.jsonl");
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&stable, b"{\"synthetic\":\"channel-session\"}\n").unwrap();
+        // The dev-channel root is deliberately NOT planted: looked for and
+        // absent, the ordinary machine that never ran a dev build.
+
+        let registry = all_roots_channel_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the scanned channel's record is collected either way"
+        );
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the family is available through its scanned channel"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "an all-roots family keeps the pre-DSK-1 rule: an absent sibling root leaves the combined total unknown — no primary store anchors this family, so the measured-zero rule does not apply; note={}",
+            probe.note
         );
     }
 
