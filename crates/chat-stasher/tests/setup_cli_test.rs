@@ -845,6 +845,12 @@ fn rule_1_wins_when_the_masterkey_declaration_and_a_remote_parameter_are_both_mi
 /// answer to the file; the comparison is against "a minute ago" rather than
 /// "now" because the probe answered milliseconds before this runs, and a test
 /// that can only pass when it does not straddle a minute boundary is a flake.
+///
+/// Unix-only because the property is: it reads a launchd plist, and both of
+/// its callers are `#[cfg(unix)]` tests. A Windows build would otherwise warn
+/// that the function is dead, which is true there — no such scheduler exists
+/// on that platform.
+#[cfg(unix)]
 fn assert_reported_slot_is_the_installed_one(value: &serde_json::Value, home: &Path) {
     use chrono::Timelike;
 

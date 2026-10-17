@@ -1,6 +1,6 @@
 # Command reference
 
-<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, `prune-orphans`, and the setup wizard's destination and scheduler steps. -->
+<!-- RELEASE GATE: written against main. Merged after 0.5.0-rc.2: `index`, `search --text` / `--scan`, `ui --destination a,b|all`, `ui --view extensions`, `overview --json --summary`, the `local` section of `status --json`, `prune-orphans`, the setup wizard's destination and scheduler steps, and `hide` / `unhide` / `purge` (dry-run preview) / `redact` (refused surface). -->
 
 Every `chat-stasher` command, its purpose, its main flags and its exit codes. This page is a map. The authority for your installed version is always:
 
@@ -26,6 +26,10 @@ chat-stasher <command> --help
 | [`search`](#search) | Finds sessions by machine, tool, date or text | No |
 | [`export`](#export) | Writes selected sessions out as files | Files in `--out` |
 | [`read`](#read) | Prints one session | No |
+| [`hide`](#hide--unhide) | Hides one archived session from readers, reversibly | Stage control record |
+| [`unhide`](#hide--unhide) | Restores a hidden session | Stage control record |
+| [`purge`](#purge) | Previews deleting one named session from selected destinations; the deletion itself is not implemented | No |
+| [`redact`](#redact) | Not implemented; refused with the phase boundary | No |
 | [`overview`](#overview) | Machine × tool activity matrix, in the terminal or as JSON | No |
 | [`index`](#index) | Builds, checks or deletes the local full-text index | Local index |
 | [`cache`](#cache) | Shows or clears the local body cache | Local cache (`clear`) |
@@ -69,7 +73,7 @@ Exceptions are listed per command. `ui` never exits `1`.
 
 ### JSON output
 
-`doctor`, `status`, `setup`, `overview`, `search` and `prune-orphans` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
+`doctor`, `status`, `setup`, `overview`, `search`, `prune-orphans` and `purge` accept `--json`. A value that could not be measured is written as `{"kind":"unknown","why":"…"}`, never as `0`, `null` or a missing field. Known values are `{"kind":"known",…}`, and values that do not apply are `{"kind":"not_applicable",…}`.
 
 ### Where output goes
 
@@ -404,6 +408,45 @@ Prints one session (`--session <id>`) and its SHA-256, without content: the shar
 Exit codes: `0` read · `1` completed and the result failed · `3` did not finish reading (no key, repository unreadable, session not in any snapshot it could read) · `2` usage error.
 
 `--session` here is the **whole** stored id, `<tool>.<machine>.<native id>`, and unlike `search --session` it accepts no prefix: anything shorter exits `3` with "holds no shards in any of the snapshots of machine …", which means it could not be resolved rather than that it is absent. The full ids are in an `export`'s `manifest.json`, and `read --all-machines --full-ids` prints them all at the cost of reading and hashing every shard. [Recover a lost machine's conversations](use-cases/lost-machine.md#5-read-one-back) is the worked version.
+
+### `hide` / `unhide`
+
+Hide is presentation state, not deletion: the session's archived bytes are untouched, and every ordinary reader omits the identity while it is in force — `read --all-machines`, `search`, `export`, the UI, `index build` and `read --session` (which refuses with exit `1`, a finished read that the policy refuses, not a `3` that would blame the archive). `unhide` appends a later record and restores visibility. The state is durable control data, not a local preference: it is appended to `meta/<machine>/deletion-control-v1.jsonl` — this machine's own metadata partition (ADR-017), one JSONL record per command — and the next ordinary `push` archives it with the stage, so every machine honors it from the destination it reads.
+
+| Flag | Meaning |
+|---|---|
+| `--stage <dir>` | The stage whose meta tree receives the record. Required; never created. |
+| `--machine <id>` | The recording machine partition, as everywhere; also the target's partition unless `--target-machine` is given. |
+| `--target-machine <id>` | The partition the target identity lives under, when it is not the recording machine's own. |
+| `--reason <label>` | Optional, at most 80 bytes, one line. Metadata the user chose to keep — never conversation text. |
+
+The identity is exact: the session id as named, in one machine partition. A session with the same id under another partition is a different identity and is never affected, and no id is prefix-matched. Hiding twice appends nothing (the state is already in force); un-hiding a visible session appends nothing. A destination whose control stream is unreadable or cannot be established fails the reads above closed (exit `3`) — an unknown control state is never treated as "nothing recorded".
+
+Exit codes: `0` the state is recorded or already in force · `1` the record could not be appended durably · `2` usage (missing `--stage`, invalid identity, over-long reason) · `3` this machine's identity could not be resolved, or the existing control stream is unreadable — nothing is written over an unknown state.
+
+Run `index build` after the next push so the full-text index reflects the state; the index is built from the same policy every reader applies, but it does not rebuild itself.
+
+### `purge`
+
+Read-only dry-run preview of deleting one named session from explicit destinations ([the design](../docs-dev/named-session-purge.md)). **The default is the dry run, and in this build there is no other mode**: the destructive purge — the exclusive maintenance gate, the tombstone publication barrier, snapshot rewrite, forget and prune — is not implemented. The preview reads every selected destination and reports, per destination, whether the exact named identity is **found** (with shard-file and byte counts across **every** snapshot that holds it, cumulatively — a session stays readable through older snapshots), **absent** (proved by a complete read of every snapshot), or **unknown** (the destination could not be read to completion — never spelled "absent"). Nothing is deleted: no archive, stage, destination or index is changed, and the preview never decrypts a session, only lists metadata.
+
+| Flag | Meaning |
+|---|---|
+| `--destination <name>` | One destination to inspect, repeatable. |
+| `--all-destinations` | Inspect every declared destination. Explicit: with neither this nor `--destination` the run is a usage error — there is no implicit destination set. |
+| `--machine <id>` | The machine partition of the target identity. Default: this machine's partition. |
+| `--confirm SESSION` | Refused (exit `3`): the destructive transaction does not exist in this build, so nothing was read or changed. A value that does not name the exact session is a usage error (exit `2`) either way. |
+| `--dry-run` | Accepted and implied. Scripts can say what they expect. |
+| `--json` | One object: per-destination status, occurrence and byte counts (unknowns as `{"kind":"unknown"}`, never `0`), snapshot ids. |
+| `--repo`, `--key-file`, `--connections`, `--option` | Single-repository mode, as everywhere. |
+
+The identity is exact: the session id as named, in one machine partition. The purge does not touch the source conversation, the staged copy, or any other machine's data — so a later `push` can archive the session again; "purged" would describe the selected destinations at the moment of the result, which is one of the reasons the destructive design requires a tombstone before any rewrite.
+
+Exit codes: `0` every selected destination was read to completion (each `found` — a would-purge inventory — or `absent`) · `3` a destination could not be read to completion, so the target's status there is unknown and an absence proves nothing · `2` usage.
+
+### `redact`
+
+Refused (exit `2`), and nothing is read or changed: redaction — cut one session at a described boundary, physically remove the old occurrences, seal a user-edited replacement — is the destructive transaction of a later phase ([design](../docs-dev/redaction-and-recollection.md)). The command exists so asking for it gets the phase boundary rather than an unknown-flag error. Until then, `purge SESSION` previews a whole-session version and `hide` is the reversible one.
 
 ### `overview`
 

@@ -15,6 +15,22 @@ under its own heading below.
 
 #### Added
 
+- **User-initiated hide, unhide, and a purge preview (ADR-046 draft, Phase 1).**
+  `hide` and `unhide` append durable one-record control events to this
+  machine's `meta/<machine>/deletion-control-v1.jsonl` stage file; the next
+  push archives them, and every reader (`read --all-machines`, `read --session`
+  as an exit-1 policy refusal, `search`, `export`, the UI, `index build`)
+  folds the destination's control union and omits the identity while it is
+  hidden — reversibly, with no archive byte touched, and with the identity
+  exact to one machine partition (`--target-machine` crosses partitions).
+  A destination whose control stream is unreadable fails reads closed
+  (exit 3), never as "nothing recorded". `purge SESSION --destination|-all-destinations`
+  is the read-only preview of deleting that named session: per destination it
+  reports found (occurrence and byte counts across every snapshot), absent
+  (proved by a complete read) or unknown, in human or `--json` form, writing
+  nothing anywhere; `--confirm` is refused because the destructive purge
+  transaction is a later phase. `redact` exists as a refused surface for the
+  same reason. See [Purge](docs/cli.md#purge) in the command reference.
 - **Letta API pull.** `pull letta` captures conversation exports and agent-window
   extras through the local inbox @3 sink, including hidden agents discovered
   from local IDs. Edits and source absence append observations; per-agent

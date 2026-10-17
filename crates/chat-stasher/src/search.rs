@@ -1171,7 +1171,32 @@ pub fn search_sessions(
     // existed. Machine-level state; see the report field of the same name.
     let mut legacy_index_machines: BTreeSet<String> = BTreeSet::new();
 
-    for (host, host_snaps) in snapshots_by_host_newest_first(snaps) {
+    // ADR-046 (draft) Phase 1: fold the effective control stream — each
+    // host's newest snapshot's copy, unioned across partitions — before any
+    // session slot resolves. `search`, and everything that reads through it
+    // (`export`, the UI, the overview layer), therefore omits hidden and
+    // tombstoned identities without each caller re-deriving the rule. An
+    // unreadable or conflicting control stream is an `Err`: search fails
+    // closed rather than present sessions whose policy it cannot establish.
+    //
+    // The snapshot session cache is deliberately **not** filtered at write
+    // time: an entry records what a snapshot holds, and hide state is policy
+    // about a snapshot, not content of one — so `unhide` needs no cache
+    // invalidation. Both the cached and the walked halves below apply the
+    // policy as they merge, which is the only direction that can resurrect a
+    // hidden identity through this path.
+    let grouped_hosts = snapshots_by_host_newest_first(snaps);
+    // Damage tolerance stays the readers' own contract (W257/W271): a
+    // snapshot this walk cannot list is recorded by the walk in the
+    // established vocabulary and makes the answer incomplete, which is how
+    // an unestablished control state surfaces on a summary path — sessions a
+    // damaged snapshot could have governed cannot be listed at all. The
+    // strict single-identity paths (`read --session`, the FTS build) close
+    // on that state instead.
+    let (control_policy, _damage_notes) =
+        crate::deletion_control::load_reader_policy_with_notes(&repo, &grouped_hosts)?;
+
+    for (host, host_snaps) in grouped_hosts {
         // The machine-level identity comes from the host's **newest** snapshot
         // (which run this host's row describes, and when it ran). The sessions
         // come from all of them.
@@ -1283,6 +1308,9 @@ pub fn search_sessions(
                             report.snapshots_from_cache += 1;
                             index_nodes.extend(index_nodes_from_cache);
                             for row in cached.sessions {
+                                if control_policy.omitted_from_readers(&row.machine, &row.session) {
+                                    continue;
+                                }
                                 sessions
                                     .entry((row.machine, row.session))
                                     .or_insert(SessionSlot {
@@ -1413,6 +1441,9 @@ pub fn search_sessions(
             }
 
             for (key, (shard_count, bytes, data_blobs)) in snap_sessions {
+                if control_policy.omitted_from_readers(&key.0, &key.1) {
+                    continue;
+                }
                 // `or_insert`, not `+=`: a snapshot holds a full (deduplicated)
                 // copy of the stage at its own moment, so a session's body is
                 // not spread across snapshots and the older appearances must

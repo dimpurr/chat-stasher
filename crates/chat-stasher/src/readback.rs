@@ -504,7 +504,7 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll, false)
     }
 
     /// Raw cumulative bytes for L3 reconciliation and duplicate inventory.
@@ -515,7 +515,7 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
     ) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll)
+        self.read_cumulative_sessions_inner(mk, wanted, DuplicateShardPolicy::KeepAll, false)
     }
 
     fn read_cumulative_sessions_inner(
@@ -523,6 +523,7 @@ impl BackupStore {
         mk: &MasterKey,
         wanted: Option<&BTreeSet<(String, String)>>,
         shard_policy: DuplicateShardPolicy,
+        apply_control_policy: bool,
     ) -> anyhow::Result<ReadAllReport> {
         let backends = self.backends()?;
         let (repo, _adoption) = crate::orphans::open_adopting(&self.cfg, &backends, mk)
@@ -535,13 +536,43 @@ impl BackupStore {
         let mut report = ReadAllReport::default();
         report.snapshots_in_repo = snapshots_in_repo;
 
+        // ADR-046 (draft) Phase 1: the *user-asking* walks fold the effective
+        // control stream — each host's newest snapshot's copy, unioned across
+        // partitions — before any session resolves, so a hide recorded by one
+        // machine is honored for identities this walk touches in any
+        // partition. The administrative walks (`verify` L3, duplicate
+        // inventory, collector debt) deliberately pass `false`: they ask what
+        // is *physically held*, and a hidden session is still held — L3 must
+        // keep proving the stage against it, or "hidden" would quietly stop
+        // meaning "presented differently" and start meaning "unchecked". An
+        // unreadable or conflicting control state is an `Err` either way:
+        // the walk fails closed rather than resolve sessions whose policy it
+        // cannot establish.
+        let grouped_hosts = snapshots_by_host_newest_first(snaps);
+        let control_policy = if apply_control_policy {
+            // Damage tolerance is the readers' own contract (W257/W271): a
+            // snapshot the walk cannot list is recorded by the walk, in the
+            // vocabulary every reader of this report expects, and makes the
+            // whole report partial — which is how an unestablished control
+            // state is surfaced here too, because sessions a damaged
+            // snapshot could have governed cannot be listed at all. The
+            // strict single-identity paths
+            // (`BackupStore::read_session_concat`, the FTS build) close on
+            // that state instead of summarizing beside it.
+            let (policy, _damage_notes) =
+                crate::deletion_control::load_reader_policy_with_notes(&repo, &grouped_hosts)?;
+            Some(policy)
+        } else {
+            None
+        };
+
         // Machine-log generations, accumulated across every snapshot of every
         // host this read walks — one row per (machine, harness, log-id) at the
         // end. Kept entirely out of `sessions_map` (ADR-053 D4).
         let mut machine_log_shards: MachineLogShards = BTreeMap::new();
 
         let mut merges = Vec::new();
-        for (_host, snaps) in snapshots_by_host_newest_first(snaps) {
+        for (_host, snaps) in grouped_hosts {
             let newest_snap = &snaps[0];
             let hostname = newest_snap.hostname.clone();
             let snapshot_id = newest_snap.id.to_hex().as_str().to_string();
@@ -637,6 +668,12 @@ impl BackupStore {
                     }
                     if let Some((m, session, shard)) = bucket_shard_path(&path) {
                         if m == hostname {
+                            if control_policy
+                                .as_ref()
+                                .is_some_and(|policy| policy.omitted_from_readers(&m, &session))
+                            {
+                                continue;
+                            }
                             if let Some(wanted_set) = wanted {
                                 if !wanted_set.contains(&(hostname.clone(), session.clone())) {
                                     continue;
@@ -768,7 +805,7 @@ impl BackupStore {
     /// Traverses all snapshots cumulatively, grouping sessions by their newest
     /// snapshot appearance (ADR-021).
     pub fn read_all_machines(&self, mk: &MasterKey) -> anyhow::Result<ReadAllReport> {
-        self.read_cumulative_sessions_inner(mk, None, self.shard_policy())
+        self.read_cumulative_sessions_inner(mk, None, self.shard_policy(), true)
     }
 
     /// Dump the individual sealed shards of selected sessions of one machine
@@ -937,7 +974,15 @@ impl BackupStore {
         self.require_sound_packs(&repo)?;
         let snaps = repo.get_all_snapshots().context("list snapshots")?;
         let snapshots_in_repo = snaps.len();
-        let Some(host_snaps) = snapshots_by_host_newest_first(snaps)
+        // ADR-046 (draft) Phase 1: a single-machine walk still loads the
+        // control union from every host's newest snapshot — control records
+        // sit in each writer's own partition, so machine A's hide of a
+        // machine B identity is honorably loadable here or not at all, and an
+        // unreadable stream fails the walk closed.
+        let grouped_hosts = snapshots_by_host_newest_first(snaps);
+        let control_policy =
+            crate::deletion_control::load_strict_reader_policy(&repo, &grouped_hosts)?;
+        let Some(host_snaps) = grouped_hosts
             .into_iter()
             .find(|(host, _)| host == machine)
             .map(|(_, snaps)| snaps)
@@ -1003,6 +1048,9 @@ impl BackupStore {
                     continue;
                 };
                 if found_machine != machine {
+                    continue;
+                }
+                if control_policy.omitted_from_readers(&found_machine, &session) {
                     continue;
                 }
                 let (identity, sequence) = archive_shard_identity(&path, &shard);

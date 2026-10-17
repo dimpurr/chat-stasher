@@ -1578,6 +1578,174 @@ enum Command {
         #[arg(long)]
         key_file: Option<String>,
     },
+    /// Hide one archived session from ordinary readers (ADR-046 draft,
+    /// Phase 1). Reversible: `unhide` restores it and no archive byte is
+    /// touched — `read`, `search`, `export`, the UI and the full-text index
+    /// omit the session while the state is in force.
+    ///
+    /// The state is a durable control record appended to this machine's
+    /// `meta/<machine>/deletion-control-v1.jsonl` in the stage; the next
+    /// ordinary `push` archives it with the stage, and every machine honors
+    /// it from the destination's control stream. The identity is exact: the
+    /// session id as named, in one machine partition — a session with the
+    /// same id in another partition is not affected, and no id is ever
+    /// prefix-matched.
+    ///
+    /// Exit codes: `0` the state is recorded (or the local stream already
+    /// holds it — idempotent, no new record) · `1` the record could not be
+    /// appended durably · `2` usage (`--stage` missing or not a directory,
+    /// an invalid identity, a reason over 80 bytes) · `3` this machine's
+    /// identity could not be established, or the existing control stream is
+    /// unreadable — a failed-closed append that never writes over an
+    /// unknown state.
+    Hide {
+        /// Stage directory whose meta tree receives the control record.
+        /// Must already exist; a stage is never created by this command.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Exact session id to hide, as it appears in the archive. Never
+        /// prefix-matched.
+        session_id: String,
+        /// Machine partition of the recording writer (`meta/<machine>/`),
+        /// as for every stage-writing command; also the partition of the
+        /// target identity unless `--target-machine` names another one.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Machine partition of the target identity
+        /// (`sessions/<machine>/<session-id>/`) when it is not the
+        /// recording machine's own partition. Default: the value of
+        /// `--machine`, else this machine's partition.
+        #[arg(long)]
+        target_machine: Option<String>,
+        /// Short reason label recorded with the state. It is metadata the
+        /// user chose to keep; at most 80 bytes on one line, never
+        /// conversation text.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Restore one hidden session to ordinary readers (ADR-046 draft,
+    /// Phase 1). Appends a later control record; it rewrites nothing, and the
+    /// session's archived bytes were never touched by `hide`.
+    ///
+    /// Exit codes as for `hide`: `0` recorded or already visible · `1` the
+    /// record could not be appended durably · `2` usage · `3` identity or
+    /// control stream unreadable.
+    Unhide {
+        /// Stage directory whose meta tree receives the control record.
+        #[arg(long)]
+        stage: PathBuf,
+        /// Exact session id to unhide, as it appears in the archive.
+        session_id: String,
+        /// Machine partition of the recording writer, as for every
+        /// stage-writing command; also the partition of the target identity
+        /// unless `--target-machine` names another one.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Machine partition of the target identity when it is not the
+        /// recording machine's own partition.
+        #[arg(long)]
+        target_machine: Option<String>,
+        /// Short reason label recorded with the state.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Purge one named session from selected destinations — a dry-run
+    /// preview only (W402 interaction design). It reads every selected
+    /// destination and reports, per destination, whether the exact named
+    /// identity was **found** (with shard-file and byte counts across every
+    /// snapshot that holds it), **absent** (proved by a complete read of
+    /// every snapshot), or **unknown** (the destination could not be read to
+    /// completion — never spelled "absent"). It deletes nothing and writes
+    /// nothing: no archive, stage, destination or index is changed.
+    ///
+    /// **The default is the dry run, and this build has no other mode.**
+    /// The destructive purge — the exclusive maintenance gate, the tombstone
+    /// publication barrier, snapshot rewrite, forget and prune (ADR-046
+    /// draft Phase 3) — is not implemented. `--confirm SESSION` exists so
+    /// that asking for the real deletion gets the phase boundary, not an
+    /// unknown-flag error; it is refused and this build deletes nothing,
+    /// ever.
+    ///
+    /// The identity is exact: the session id as named, in one machine
+    /// partition (`--machine`; default this machine's) — same-id sessions
+    /// in other partitions are not the target. Destinations are explicit:
+    /// repeat `--destination`, or pass `--all-destinations`; there is no
+    /// implicit destination set.
+    ///
+    /// Exit codes: `0` every selected destination was read to completion
+    /// (each reported `found`, a would-purge inventory, or `absent`) ·
+    /// `2` usage (no destinations selected, both selection modes at once, an
+    /// unknown destination name, a `--confirm` value that does not name
+    /// the exact session) · `3` `--confirm` was refused (the destructive
+    /// transaction does not exist in this build), or a destination could
+    /// not be read to completion — the target's status there is unknown,
+    /// and an absence proves nothing. `1` is not used by this command.
+    Purge {
+        /// Exact session id to purge. Never prefix-matched.
+        session_id: String,
+        /// Machine partition of the target identity. Default: this
+        /// machine's partition.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Named destination to inspect, repeatable. Required unless
+        /// `--all-destinations` is given (or a single-destination config).
+        #[arg(long = "destination", value_name = "NAME")]
+        destinations: Vec<String>,
+        /// Inspect every destination the config declares. Explicit: with
+        /// no `--destination` and no `--all-destinations` the command is a
+        /// usage error, because there is no implicit destination set.
+        #[arg(long)]
+        all_destinations: bool,
+        /// Preview and stop. This is also what happens without the
+        /// flag; the flag exists so a script can say what it expected.
+        #[arg(long)]
+        dry_run: bool,
+        /// Real execution — refused in this build. The value must name the
+        /// exact session being confirmed; anything else is a usage error
+        /// either way.
+        #[arg(long = "confirm", value_name = "SESSION")]
+        confirm: Option<String>,
+        /// Print exactly one JSON object on stdout and nothing else there.
+        #[arg(long)]
+        json: bool,
+        /// Repository path override (single-destination mode only).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Masterkey file override (single-destination mode only).
+        #[arg(long)]
+        key_file: Option<String>,
+        /// Concurrency cap override (single-destination mode only).
+        #[arg(long)]
+        connections: Option<usize>,
+        /// Backend option `key=value`, repeatable (single-destination mode
+        /// only).
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Keep the ssh ControlMaster processes open after this run.
+        #[arg(long)]
+        keep_ssh_masters: bool,
+    },
+    /// Redact an archived session by cutting it at a cutoff and re-sealing
+    /// user-edited content as a new version. **Not implemented; refused.**
+    ///
+    /// The command surface exists because the design names it
+    /// (`docs-dev/redaction-and-recollection.md`, ADR-046 draft §5):
+    /// redaction is the destructive transaction of a later phase — record
+    /// the cutoff tombstone, remove the old scoped occurrences from stage
+    /// and every destination, then seal the replacement. Until that phase
+    /// ships, asking for it gets this refusal rather than an unknown-flag
+    /// error, and nothing is read or changed.
+    ///
+    /// Exit codes: `2` always — a deliberate refusal, not a failure to run:
+    /// the operation does not exist in this build.
+    Redact {
+        /// Exact session id to redact. Never prefix-matched.
+        session_id: String,
+        /// Machine partition of the target identity. Default: this
+        /// machine's partition.
+        #[arg(long)]
+        machine: Option<String>,
+    },
 }
 
 /// `cache` subcommands.
@@ -2355,6 +2523,66 @@ fn run() -> ExitCode {
             &options,
             keep_ssh_masters,
         ),
+        Command::Hide {
+            stage,
+            session_id,
+            machine,
+            target_machine,
+            reason,
+        } => cmd_control_state(
+            "hide",
+            chat_stasher::deletion_control::ControlAction::Hide,
+            &stage,
+            &session_id,
+            machine.as_deref(),
+            target_machine.as_deref(),
+            reason.as_deref(),
+        ),
+        Command::Unhide {
+            stage,
+            session_id,
+            machine,
+            target_machine,
+            reason,
+        } => cmd_control_state(
+            "unhide",
+            chat_stasher::deletion_control::ControlAction::Unhide,
+            &stage,
+            &session_id,
+            machine.as_deref(),
+            target_machine.as_deref(),
+            reason.as_deref(),
+        ),
+        Command::Purge {
+            session_id,
+            machine,
+            destinations,
+            all_destinations,
+            dry_run: _,
+            confirm,
+            json,
+            repo,
+            key_file,
+            connections,
+            options,
+            keep_ssh_masters,
+        } => cmd_purge(
+            &session_id,
+            machine.as_deref(),
+            &destinations,
+            all_destinations,
+            confirm.as_deref(),
+            json,
+            repo,
+            key_file,
+            connections,
+            &options,
+            keep_ssh_masters,
+        ),
+        Command::Redact {
+            session_id: _,
+            machine: _,
+        } => cmd_redact(),
     }
 }
 
@@ -9925,6 +10153,22 @@ fn cmd_read(
         }) {
             Ok(v) => v,
             Err(e) => {
+                // A finished read that an effective control state refuses is
+                // a deliberate omission (ADR-046 draft Phase 1), not a read
+                // that did not finish: 1, never 3, so the user can tell a
+                // policy refusal from an unreachable archive. The typed
+                // error distinguishes it; reading the message back would be
+                // the string-matching this codebase refuses elsewhere.
+                if e.downcast_ref::<chat_stasher::deletion_control::SessionOmitted>()
+                    .is_some()
+                {
+                    eprintln!("read: {e}");
+                    eprintln!(
+                        "read: the control stream was read to completion; this refusal is the answer, not a read failure. `unhide` restores a hidden session."
+                    );
+                    reap_remote(&cfg, keep_ssh_masters);
+                    return ExitCode::FAILURE;
+                }
                 chat_stasher::remote_err::eprint_remote_error("read", &e, &cfg);
                 reap_remote(&cfg, keep_ssh_masters);
                 // Deliberately 3, not 1. A session readback that does not
@@ -10286,6 +10530,17 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                 let snapshots = repo
                     .get_all_snapshots()
                     .context("list archive snapshots for FTS")?;
+                // ADR-046 (draft) Phase 1: the index is a reader cache of the
+                // archive, so it is built from the same folded control policy
+                // every read applies. Hidden identities never enter the index,
+                // which — because the query path reads only this database —
+                // keeps `ui /search` and `index query` from resurrecting them.
+                // `index build` must be re-run after a hide or unhide for the
+                // index to reflect it; the commands say so.
+                let control_policy = chat_stasher::deletion_control::load_strict_reader_policy(
+                    &repo,
+                    &readback::snapshots_by_host_newest_first(snapshots.clone()),
+                )?;
                 let mut entries_all = Vec::new();
                 let mut paths_by_id = BTreeMap::<String, Vec<usize>>::new();
                 let mut titles = BTreeMap::<String, String>::new();
@@ -10315,9 +10570,11 @@ fn cmd_index(action: IndexAction) -> ExitCode {
                                 continue;
                             }
                             if let Some((machine, session, _)) = readback::bucket_shard_path(path) {
-                                let id = format!("{machine}/{session}");
-                                if snapshot_sessions.contains(&id) {
-                                    paths_by_id.entry(id).or_default().push(entries_all.len());
+                                if !control_policy.omitted_from_readers(&machine, &session) {
+                                    let id = format!("{machine}/{session}");
+                                    if snapshot_sessions.contains(&id) {
+                                        paths_by_id.entry(id).or_default().push(entries_all.len());
+                                    }
                                 }
                             } else if let Some(machine) = sidecar::activity_index_machine(path) {
                                 let mut bytes = Vec::new();
@@ -11612,7 +11869,6 @@ mod decision_surface_tests {
         );
     }
     use super::*;
-    use clap::CommandFactory;
     use std::fs;
 
     #[test]
@@ -11644,7 +11900,7 @@ mod decision_surface_tests {
 
     #[test]
     fn search_text_modes_parse_and_scan_requires_text() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -11662,7 +11918,7 @@ mod decision_surface_tests {
                 ..
             }
         ));
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -12170,7 +12426,7 @@ mod decision_surface_tests {
 
     #[test]
     fn setup_has_no_secret_valued_argv_options() {
-        let cli = Cli::command();
+        let cli = cli_command_on_worker_stack();
         let setup = cli
             .find_subcommand("setup")
             .expect("setup subcommand exists");
@@ -13024,7 +13280,7 @@ mod decision_surface_tests {
 
     #[test]
     fn seal_help_and_active_guard_follow_decision() {
-        let mut command = Cli::command();
+        let mut command = cli_command_on_worker_stack();
         let seal_command = command
             .find_subcommand_mut("seal")
             .expect("seal subcommand must remain user-visible");
@@ -19380,11 +19636,571 @@ fn cmd_api_pull_with(
     }
 }
 
+/// `hide` / `unhide` share one change flow (ADR-046 draft Phase 1): resolve
+/// this machine's writer partition and the exact target identity, refuse
+/// invalid input as usage, read the existing local control stream (never
+/// append over an unreadable one), and append one durable record unless the
+/// local stream already holds the requested state.
+fn cmd_control_state(
+    command: &str,
+    action: chat_stasher::deletion_control::ControlAction,
+    stage: &Path,
+    session_id: &str,
+    machine: Option<&str>,
+    target: Option<&str>,
+    reason: Option<&str>,
+) -> ExitCode {
+    let config = match config_or_refuse(command) {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if session_id.is_empty()
+        || session_id.contains(['/', '\\'])
+        || session_id == "."
+        || session_id == ".."
+    {
+        eprintln!("{command}: `{}` is not a valid session id", session_id);
+        return ExitCode::from(2);
+    }
+    if let Some(reason) = reason {
+        if reason.len() > chat_stasher::deletion_control::MAX_REASON_BYTES
+            || reason.contains(['\n', '\r'])
+        {
+            eprintln!(
+                "{command}: --reason is a metadata label of at most {} bytes on one line, \
+                 never conversation text",
+                chat_stasher::deletion_control::MAX_REASON_BYTES
+            );
+            return ExitCode::from(2);
+        }
+    }
+    if !stage.is_dir() {
+        eprintln!(
+            "{command}: --stage {} is not an existing directory; a stage is never created by this command",
+            stage.display()
+        );
+        return ExitCode::from(2);
+    }
+    // The recording partition follows the house rule (`--machine`, config,
+    // else this machine's identity); the target identity defaults to it and
+    // `--target-machine` names another partition's copy of the id (W402's
+    // exact-identity rule: same id, other partition, is a different
+    // identity).
+    let actor = match resolve_machine(command, &config, machine) {
+        Ok(actor) => actor,
+        Err(code) => return code,
+    };
+    let target_machine = target.unwrap_or(&actor).to_string();
+    let current = match chat_stasher::deletion_control::read_stage_events(stage, &actor) {
+        Ok(chat_stasher::deletion_control::StageControlRead::Absent) => {
+            chat_stasher::deletion_control::Visibility::Visible
+        }
+        Ok(chat_stasher::deletion_control::StageControlRead::Events(events)) => {
+            match chat_stasher::deletion_control::fold_events(events) {
+                Ok(policy) => policy.visibility(&target_machine, session_id),
+                Err(issue) => {
+                    eprintln!("{command}: the local control stream refuses a policy: {issue}");
+                    eprintln!("{command}: nothing was written — an unknown control state is never appended over.");
+                    return ExitCode::from(3);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            eprintln!("{command}: nothing was written — an unreadable control stream is unknown, and unknown is never \"nothing recorded\".");
+            return ExitCode::from(3);
+        }
+    };
+    let requested = match action {
+        chat_stasher::deletion_control::ControlAction::Hide
+            if matches!(
+                current,
+                chat_stasher::deletion_control::Visibility::Hidden
+                    | chat_stasher::deletion_control::Visibility::Purged
+            ) =>
+        {
+            true
+        }
+        chat_stasher::deletion_control::ControlAction::Unhide
+            if matches!(current, chat_stasher::deletion_control::Visibility::Visible) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    let verb = match action {
+        chat_stasher::deletion_control::ControlAction::Hide => "hide",
+        chat_stasher::deletion_control::ControlAction::Unhide => "unhide",
+        _ => unreachable!("state commands take only hide and unhide"),
+    };
+    println!("[{command}] action         : {verb}");
+    println!("[{command}] session        : {session_id}");
+    println!("[{command}] machine        : {target_machine}");
+    println!(
+        "[{command}] state          : {}",
+        match current {
+            chat_stasher::deletion_control::Visibility::Visible => "visible",
+            chat_stasher::deletion_control::Visibility::Hidden => "hidden",
+            chat_stasher::deletion_control::Visibility::Purged => "purged by tombstone",
+            chat_stasher::deletion_control::Visibility::RedactedThroughCutoff { .. } => {
+                "under a redaction tombstone"
+            }
+        }
+    );
+    if requested {
+        println!(
+            "[{command}] record         : not appended — the local control stream already holds this state"
+        );
+        return ExitCode::SUCCESS;
+    }
+    if matches!(current, chat_stasher::deletion_control::Visibility::Purged) {
+        eprintln!(
+            "{command}: this identity is under a whole-session purge tombstone, which no state record can undo (ADR-046 draft); nothing was written."
+        );
+        return ExitCode::from(2);
+    }
+    let event = match chat_stasher::deletion_control::new_state_event(
+        action,
+        &actor,
+        &target_machine,
+        session_id,
+        reason,
+    ) {
+        Ok(event) => event,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let site = chat_stasher::deletion_control::control_path(stage, &actor);
+    match chat_stasher::deletion_control::append_stage_event(stage, &event) {
+        Ok(()) => {
+            println!(
+                "[{command}] record         : appended to {}",
+                site.display()
+            );
+            println!("[{command}] operation id   : {}", event.operation_id);
+            if let Some(reason) = event.reason.as_deref() {
+                println!("[{command}] reason         : {reason}");
+            }
+            println!(
+                "[{command}] next           : the next `push` archives it with the stage; readers honor it from the destination's control stream"
+            );
+            println!(
+                "[{command}] note           : run `index build` after the next push so the full-text index reflects the state"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{command}: {e:#}");
+            // Deliberately 1, not 3: the failure is a completed write attempt,
+            // not an unfinished read. The site line below states what exists.
+            eprintln!(
+                "{command}: nothing is claimed written; the stream at {} is the state on disk",
+                site.display()
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `purge SESSION` — the W402 dry-run preview over explicitly selected
+/// destinations. Per destination: was the exact identity `found` (with
+/// counts), proved `absent`, or `unknown` because the read did not finish.
+/// This build has no destructive mode at all; `--confirm` names the phase that
+/// does not exist yet and is refused before any destination is read.
+#[allow(clippy::too_many_arguments)]
+fn cmd_purge(
+    session_id: &str,
+    machine: Option<&str>,
+    destinations: &[String],
+    all_destinations: bool,
+    confirm: Option<&str>,
+    json: bool,
+    repo: Option<String>,
+    key_file: Option<String>,
+    connections: Option<usize>,
+    options: &[String],
+    keep_ssh_masters: bool,
+) -> ExitCode {
+    let config = match config_or_refuse("purge") {
+        Ok(config) => config,
+        Err(code) => return code,
+    };
+    if let Some(confirmed) = confirm {
+        // Refused before anything is read, exactly like `prune-orphans
+        // --apply`: naming the missing capability honestly beats an
+        // unknown-flag error, and nothing in this build can delete.
+        if confirmed != session_id {
+            eprintln!(
+                "purge: --confirm must name the exact session being purged (`{session_id}`), not `{confirmed}`"
+            );
+            return ExitCode::from(2);
+        }
+        eprintln!("purge: --confirm is refused, and nothing was read or changed.");
+        eprintln!(
+            "purge: the destructive purge transaction (exclusive maintenance gate, tombstone publication barrier, snapshot rewrite, forget, prune — ADR-046 draft Phase 3) does not exist in this build."
+        );
+        eprintln!(
+            "purge: exit_code=3 — the requested deletion could not be performed, so nothing was deleted and no absence in any output proves otherwise. Run without --confirm for the read-only preview."
+        );
+        return ExitCode::from(3);
+    }
+    if session_id.is_empty()
+        || session_id.contains(['/', '\\'])
+        || session_id == "."
+        || session_id == ".."
+    {
+        eprintln!("purge: `{}` is not a valid session id", session_id);
+        return ExitCode::from(2);
+    }
+    let multi = !config.destinations.is_empty();
+    if all_destinations && !destinations.is_empty() {
+        eprintln!(
+            "purge: --all-destinations and --destination both given; select one (each destination is inspected once)"
+        );
+        return ExitCode::from(2);
+    }
+    if !all_destinations && destinations.is_empty() && repo.is_none() {
+        eprintln!(
+            "purge: no destinations selected. Pass `--destination <name>` (repeatable) or `--all-destinations`; there is no implicit destination set."
+        );
+        return ExitCode::from(2);
+    }
+    let target_machine = match resolve_machine("purge", &config, machine) {
+        Ok(machine) => machine,
+        Err(code) => return code,
+    };
+    let mut selected: Vec<(String, StoreConfig)> = Vec::new();
+    if !destinations.is_empty() {
+        if !multi {
+            eprintln!(
+                "purge: --destination names the config's destinations, and this config declares none; use `--repo` for a single repository"
+            );
+            return ExitCode::from(2);
+        }
+        for name in destinations {
+            if selected.iter().any(|(prior, _)| prior == name) {
+                continue;
+            }
+            let cfg = resolve_store_config(&config, Some(name.as_str()), None, None, None, &[]);
+            selected.push((name.clone(), cfg));
+        }
+    } else if all_destinations {
+        if multi {
+            for name in config.destinations.keys() {
+                let cfg = resolve_store_config(&config, Some(name), None, None, None, &[]);
+                selected.push((name.clone(), cfg));
+            }
+        } else {
+            selected.push((
+                "default".to_string(),
+                store_config_from(
+                    &config,
+                    repo.clone(),
+                    key_file.clone(),
+                    connections,
+                    options,
+                ),
+            ));
+        }
+    } else {
+        if multi && repo.is_some() {
+            eprintln!(
+                "purge: `--repo` only applies to a single-destination config; this run inspects the config's destinations, so pass `--destination` or `--all-destinations`"
+            );
+            return ExitCode::from(2);
+        }
+        selected.push((
+            "default".to_string(),
+            store_config_from(&config, repo, key_file, connections, options),
+        ));
+    }
+    selected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut rows: Vec<(String, DestinationPreview, String)> = Vec::new();
+    for (name, cfg) in &selected {
+        let store = BackupStore::for_metadata_query(cfg.clone());
+        let row = match store::load_key_file(cfg) {
+            Ok(mk) => {
+                match chat_stasher::reader_guard::catching_panic("purge", || {
+                    chat_stasher::deletion_control::occurrence_inventory(
+                        &store,
+                        &mk,
+                        &target_machine,
+                        session_id,
+                    )
+                }) {
+                    Ok(inventory) => {
+                        let status = if inventory.shard_occurrences > 0 {
+                            chat_stasher::deletion_control::DestinationStatus::Found
+                        } else {
+                            chat_stasher::deletion_control::DestinationStatus::Absent
+                        };
+                        DestinationPreview {
+                            status,
+                            why: None,
+                            inventory,
+                        }
+                    }
+                    Err(e) => {
+                        chat_stasher::remote_err::eprint_remote_error("purge", &e, cfg);
+                        DestinationPreview {
+                            status: chat_stasher::deletion_control::DestinationStatus::Unknown,
+                            why: Some(format!("{e:#}")),
+                            inventory: chat_stasher::deletion_control::OccurrenceInventory::default(
+                            ),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Never created here (that masterkey() does), and never
+                // treated as absent: an unopenable destination is unknown.
+                eprintln!("purge: destination `{name}`: cannot load the key: {e:#}");
+                DestinationPreview {
+                    status: chat_stasher::deletion_control::DestinationStatus::Unknown,
+                    why: Some("the destination key could not be loaded".to_string()),
+                    inventory: chat_stasher::deletion_control::OccurrenceInventory::default(),
+                }
+            }
+        };
+        rows.push((name.clone(), row, cfg.repo_root.clone()));
+        reap_remote(cfg, keep_ssh_masters);
+    }
+
+    let unknown = rows
+        .iter()
+        .filter(|(_, preview, _)| {
+            preview.status == chat_stasher::deletion_control::DestinationStatus::Unknown
+        })
+        .count();
+    let would_delete = rows.iter().any(|(_, preview, _)| {
+        preview.status == chat_stasher::deletion_control::DestinationStatus::Found
+    });
+
+    let code = if unknown > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
+    };
+    if json {
+        let shard_state = |preview: &DestinationPreview| match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                chat_stasher::json_out::CountState::unknown(preview.why.clone().unwrap_or_else(
+                    || "the destination could not be read to completion".to_string(),
+                ))
+            }
+            _ => chat_stasher::json_out::CountState::known(
+                preview.inventory.shard_occurrences as u64,
+            ),
+        };
+        let byte_state = |preview: &DestinationPreview| match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                chat_stasher::json_out::CountState::unknown(preview.why.clone().unwrap_or_else(
+                    || "the destination could not be read to completion".to_string(),
+                ))
+            }
+            _ => {
+                // reason: bytes are tree metadata sizes summed over a complete
+                // walk; the unknown/known vocabulary is kept anyway so the
+                // shape cannot silently become a bare number later.
+                chat_stasher::json_out::CountState::known(preview.inventory.bytes)
+            }
+        };
+        let destinations_json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(name, preview, root)| {
+                let mut value = serde_json::json!({
+                    "name": name,
+                    "repo_root": root,
+                    "status": match preview.status {
+                        chat_stasher::deletion_control::DestinationStatus::Found => "found",
+                        chat_stasher::deletion_control::DestinationStatus::Absent => "absent",
+                        chat_stasher::deletion_control::DestinationStatus::Unknown => "unknown",
+                    },
+                    "snapshots_in_repo": preview.inventory.snapshots_in_repo,
+                    "snapshots_scanned": if preview.status
+                        == chat_stasher::deletion_control::DestinationStatus::Unknown
+                    {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(preview.inventory.snapshots_scanned)
+                    },
+                    "snapshots_with_target":
+                        preview.inventory.snapshots_with_target.len(),
+                    "shard_occurrences": shard_state(preview),
+                    "bytes": byte_state(preview),
+                    "would_delete": matches!(
+                        preview.status,
+                        chat_stasher::deletion_control::DestinationStatus::Found
+                    ),
+                });
+                if let Some(why) = &preview.why {
+                    value["why"] = serde_json::json!(why);
+                }
+                let snapshots: Vec<serde_json::Value> = preview
+                    .inventory
+                    .snapshots_with_target
+                    .iter()
+                    .map(|snap| {
+                        serde_json::json!({
+                            "snapshot_id": snap.snapshot_id,
+                            "shard_files": snap.shard_files,
+                            "bytes": snap.bytes,
+                        })
+                    })
+                    .collect();
+                value["snapshots"] = serde_json::json!(snapshots);
+                value
+            })
+            .collect();
+        let exit_code_u8 = if unknown > 0 { 3 } else { 0 };
+        let summary = if unknown > 0 {
+            "unknown"
+        } else if would_delete {
+            "would-purge"
+        } else {
+            "absent"
+        };
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "command": "purge",
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "mode": "dry-run",
+            "session_id": session_id,
+            "machine_partition": target_machine,
+            "scope": "the exact named session id under the named machine partition",
+            "summary": summary,
+            "would_delete_any": would_delete,
+            "destinations": destinations_json,
+            "selected_destinations": rows.len(),
+            "unknown_destinations": unknown,
+            "exit_code": exit_code_u8,
+            "exit_semantics": status_exit_semantics(exit_code_u8),
+        });
+        println!("{}", json_string(&document));
+        return code;
+    }
+
+    println!("[purge] mode           : dry-run (preview; nothing is deleted)");
+    println!("[purge] session        : {session_id}");
+    println!("[purge] machine        : {target_machine}");
+    println!(
+        "[purge] scope          : the exact named session id under the named machine partition"
+    );
+    println!(
+        "[purge] destinations   : {} selected ({})",
+        rows.len(),
+        rows.iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (name, preview, root) in &rows {
+        match preview.status {
+            chat_stasher::deletion_control::DestinationStatus::Found => {
+                println!(
+                    "[purge] destination {name} : status=found shard-occurrences={} bytes={} ({}) across {} of {} snapshot(s)",
+                    preview.inventory.shard_occurrences,
+                    fmt_bytes(preview.inventory.bytes),
+                    preview.inventory.snapshots_with_target.len(),
+                    preview.inventory.snapshots_scanned,
+                    preview.inventory.snapshots_in_repo
+                );
+                for snap in preview.inventory.snapshots_with_target.iter().take(5) {
+                    println!(
+                        "[purge]   snapshot {} : shard-files={} bytes={}",
+                        snap.snapshot_id,
+                        snap.shard_files,
+                        fmt_bytes(snap.bytes)
+                    );
+                }
+                if preview.inventory.snapshots_with_target.len() > 5 {
+                    println!(
+                        "[purge]   and {} more snapshot(s) holding the target (counts above include every occurrence)",
+                        preview.inventory.snapshots_with_target.len() - 5
+                    );
+                }
+            }
+            chat_stasher::deletion_control::DestinationStatus::Absent => {
+                println!(
+                    "[purge] destination {name} : status=absent (a complete read of every one of {} snapshot(s) holds no occurrence)",
+                    preview.inventory.snapshots_in_repo
+                );
+            }
+            chat_stasher::deletion_control::DestinationStatus::Unknown => {
+                let why = preview.why.as_deref().unwrap_or("unread");
+                println!(
+                    "[purge] destination {name} : status=unknown ({why}) — not \"absent\": this destination was not read to completion"
+                );
+            }
+        }
+        println!("[purge]   repo root    : {root}");
+    }
+    println!(
+        "[purge] unknown        : {unknown} of {} selected destination(s)",
+        rows.len()
+    );
+    if unknown > 0 {
+        println!(
+            "[purge] RESULT         : UNKNOWN — {unknown} destination(s) were not read to completion; an absence there proves nothing and nothing was deleted."
+        );
+        println!(
+            "[purge] exit_code=3 — {}/{} destination(s) could not be checked; run again once they are reachable, and treat every count above as partial.",
+            unknown,
+            rows.len()
+        );
+        return code;
+    }
+    if would_delete {
+        println!(
+            "[purge] RESULT         : WOULD-PURGE — a real purge would remove every listed occurrence above, and only those. Applying it is not possible in this build."
+        );
+        println!("[purge] exit_code=0 — every selected destination was read to completion.");
+        return code;
+    }
+    println!(
+        "[purge] RESULT         : ABSENT — every selected destination was read to completion and none holds the target."
+    );
+    println!(
+        "[purge] exit_code=0 — a complete read of every snapshot in every selected destination proved the absence."
+    );
+    code
+}
+
+/// One destination's preview outcome plus the privacy-safe reason an unknown
+/// carries. Counts stay per-destination; no conversation text exists at this
+/// tier (the preview never dumps a shard).
+struct DestinationPreview {
+    status: chat_stasher::deletion_control::DestinationStatus,
+    why: Option<String>,
+    inventory: chat_stasher::deletion_control::OccurrenceInventory,
+}
+
+/// `redact SESSION` — deliberately refused: redaction is the destructive
+/// transaction of a later phase, and the surface exists so asking for it gets
+/// the phase boundary rather than an unknown-flag error. Nothing is read or
+/// changed.
+fn cmd_redact() -> ExitCode {
+    eprintln!("redact: not implemented — refused, and nothing was read or changed.");
+    eprintln!(
+        "redact: redaction is the destructive transaction of a later phase (record the cutoff tombstone, remove the old scoped occurrences, then seal the replacement — ADR-046 draft Phase 4, docs-dev/redaction-and-recollection.md)."
+    );
+    eprintln!(
+        "redact: until that phase ships there is no redact action to run. `purge SESSION` without --confirm previews a whole-session purge; `hide SESSION` hides one session reversibly."
+    );
+    eprintln!(
+        "redact: exit_code=2 — deliberate refusal: the operation does not exist in this build."
+    );
+    ExitCode::from(2)
+}
+
 #[cfg(test)]
 mod api_pull_boundary_tests {
     use super::*;
     fn args(account: &str, root: &Path) -> chat_stasher::letta::PullArgs {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_on_worker_stack(&[
             "chat-stasher",
             "pull",
             "letta",
@@ -19448,5 +20264,60 @@ mod api_pull_boundary_tests {
             );
             assert_eq!(code, ExitCode::from(3));
         }
+    }
+}
+
+// The two helpers below sit at the end of the file on purpose: nothing is
+// cited after this point (`docs-dev/citations.lock` anchors at most at line
+// 18310 of this file), so growing code here cannot drift a citation.
+
+/// Parse `argv` exactly as `main` does, on the same stack budget `main`
+/// already grants itself.
+///
+/// Why a thread at all: clap's derive walks every subcommand and argument in
+/// one builder frame, a debug build neither inlines nor reuses stack slots,
+/// and that chain measured ~944 KiB on arm64 debug in 2026-08-28 (see
+/// [`WORKER_STACK_BYTES`] above) and has grown with every subcommand since.
+/// `main` moved to a 16 MiB worker thread for exactly this reason. The bin's
+/// unit tests bypass `main`, and a libtest thread's default stack is small
+/// enough that CI run 38986096075 aborted inside
+/// `api_pull_boundary_tests` on both Ubuntu and Windows after four new
+/// subcommands (hide/unhide/purge/redact) pushed the chain past what the
+/// test thread could hold — while the same tests stayed green locally only
+/// because arm64 debug frames are smaller than x86-64 ones. What a test
+/// exercises is unchanged: the same argv goes through the same
+/// `Cli::try_parse_from`; only the stack under it matches what the product
+/// already promises itself. Panics from inside the parse re-panic on the
+/// test thread through `resume_unwind`, so failures keep their backtraces.
+#[cfg(test)]
+fn parse_cli_on_worker_stack(argv: &[&str]) -> Result<Cli, clap::Error> {
+    let owned: Vec<std::ffi::OsString> = argv
+        .iter()
+        .map(|arg| std::ffi::OsString::from(*arg))
+        .collect();
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(move || Cli::try_parse_from(owned))
+        .expect("spawn the worker-stack parse thread");
+    match handle.join() {
+        Ok(parsed) => parsed,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`clap::CommandFactory::command`] on the same budget: building the
+/// subcommand tree is the same one giant debug frame the parse helper above
+/// exists for, so tests that inspect the built command (its options, its
+/// help text) run that build on the worker stack too.
+#[cfg(test)]
+fn cli_command_on_worker_stack() -> clap::Command {
+    use clap::CommandFactory;
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(Cli::command)
+        .expect("spawn the worker-stack command-build thread");
+    match handle.join() {
+        Ok(command) => command,
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }

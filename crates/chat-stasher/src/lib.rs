@@ -14,6 +14,7 @@ pub mod codebuff;
 pub mod collect;
 pub mod config;
 pub mod credentials;
+pub mod deletion_control;
 pub mod destinit;
 pub mod doctor;
 pub mod export;
