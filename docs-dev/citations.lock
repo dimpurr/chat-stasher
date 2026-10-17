@@ -833,24 +833,24 @@ crates/chat-stasher/src/main.rs:9112-9116  0d25cb363ccc  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
 crates/chat-stasher/src/main.rs:9625-9785  1f1a0d8e77c3  lines=161
   <- docs-dev/threat-model.md:928  :: }
-crates/chat-stasher/src/main.rs:13671-13679  74386b4959d3  lines=9
-  <- docs-dev/install.md:304  :: .join(session)
-crates/chat-stasher/src/main.rs:13689-13712  0f57696a75eb  lines=24
-  <- docs-dev/install.md:304  :: cc_line("2025-01-15T13:45:07Z"),
-crates/chat-stasher/src/main.rs:14850-14864  e68b0a86ab0c  lines=15
-  <- docs-dev/install.md:626  :: // A destination key `dest-init` created during this run is…
-crates/chat-stasher/src/main.rs:15287-15294  5af966bae16a  lines=8
-  <- docs-dev/install.md:625  :: "the only missing parameter was --masterkey-saved-elsewhere…
-crates/chat-stasher/src/main.rs:17801-17802  89ad81145ee0  lines=2
-  <- docs-dev/install.md:994  :: impl SetupKeyScope {
-crates/chat-stasher/src/main.rs:17825-17859  cc8b2b74fa24  lines=35
-  <- docs-dev/install.md:1033  :: "declaration_is_verified": false,
-crates/chat-stasher/src/main.rs:18286-18291  281f835c9a9e  lines=6
-  <- docs-dev/install.md:1023  :: /// Everything `status` needs from the run-state record, so…
-crates/chat-stasher/src/main.rs:18299-18367  5aceccb336a8  lines=69
-  <- docs-dev/install.md:1010  :: /// overdue threshold tracks whatever the user actually sch…
-crates/chat-stasher/src/main.rs:18310-18311  f29f6d7d1cb6  lines=2
-  <- docs-dev/install.md:989  :: // reason: NOT an honest default — recorded as (a)-fragile,…
+crates/chat-stasher/src/main.rs:13671-13679  55fd954d72cf  lines=9
+  <- docs-dev/install.md:304  :: .join("000");
+crates/chat-stasher/src/main.rs:13689-13712  b78b3335ba4d  lines=24
+  <- docs-dev/install.md:304  :: ],
+crates/chat-stasher/src/main.rs:14850-14864  9e66de89cc0e  lines=15
+  <- docs-dev/install.md:626  :: // about either, for the same reason as the local key above…
+crates/chat-stasher/src/main.rs:15287-15294  393343fb317f  lines=8
+  <- docs-dev/install.md:625  :: repository and masterkey for you to copy failed ({error}), …
+crates/chat-stasher/src/main.rs:17801-17802  1f612aa2cf44  lines=2
+  <- docs-dev/install.md:994  :: fn slug(self) -> &'static str {
+crates/chat-stasher/src/main.rs:17825-17859  128ff4615579  lines=35
+  <- docs-dev/install.md:1033  :: });
+crates/chat-stasher/src/main.rs:18286-18291  84dbce637d8a  lines=6
+  <- docs-dev/install.md:1023  :: /// verdict line and the `--json` object are derived from t…
+crates/chat-stasher/src/main.rs:18299-18367  f1161f7029d2  lines=69
+  <- docs-dev/install.md:1010  :: /// explicit value is an unknown timer verdict, not permiss…
+crates/chat-stasher/src/main.rs:18310-18311  90cec3cab80c  lines=2
+  <- docs-dev/install.md:989  :: // after the gate's second blind spot was fixed (B93). It n…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:436, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…
 crates/chat-stasher/src/nativehost.rs:155-168  b160255bd493  lines=14

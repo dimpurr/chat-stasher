@@ -11869,7 +11869,6 @@ mod decision_surface_tests {
         );
     }
     use super::*;
-    use clap::CommandFactory;
     use std::fs;
 
     #[test]
@@ -11901,7 +11900,7 @@ mod decision_surface_tests {
 
     #[test]
     fn search_text_modes_parse_and_scan_requires_text() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -11919,7 +11918,7 @@ mod decision_surface_tests {
                 ..
             }
         ));
-        assert!(Cli::try_parse_from([
+        assert!(parse_cli_on_worker_stack(&[
             "chat-stasher",
             "search",
             "--repo",
@@ -12427,7 +12426,7 @@ mod decision_surface_tests {
 
     #[test]
     fn setup_has_no_secret_valued_argv_options() {
-        let cli = Cli::command();
+        let cli = cli_command_on_worker_stack();
         let setup = cli
             .find_subcommand("setup")
             .expect("setup subcommand exists");
@@ -13281,7 +13280,7 @@ mod decision_surface_tests {
 
     #[test]
     fn seal_help_and_active_guard_follow_decision() {
-        let mut command = Cli::command();
+        let mut command = cli_command_on_worker_stack();
         let seal_command = command
             .find_subcommand_mut("seal")
             .expect("seal subcommand must remain user-visible");
@@ -20201,7 +20200,7 @@ fn cmd_redact() -> ExitCode {
 mod api_pull_boundary_tests {
     use super::*;
     fn args(account: &str, root: &Path) -> chat_stasher::letta::PullArgs {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_on_worker_stack(&[
             "chat-stasher",
             "pull",
             "letta",
@@ -20265,5 +20264,60 @@ mod api_pull_boundary_tests {
             );
             assert_eq!(code, ExitCode::from(3));
         }
+    }
+}
+
+// The two helpers below sit at the end of the file on purpose: nothing is
+// cited after this point (`docs-dev/citations.lock` anchors at most at line
+// 18310 of this file), so growing code here cannot drift a citation.
+
+/// Parse `argv` exactly as `main` does, on the same stack budget `main`
+/// already grants itself.
+///
+/// Why a thread at all: clap's derive walks every subcommand and argument in
+/// one builder frame, a debug build neither inlines nor reuses stack slots,
+/// and that chain measured ~944 KiB on arm64 debug in 2026-08-28 (see
+/// [`WORKER_STACK_BYTES`] above) and has grown with every subcommand since.
+/// `main` moved to a 16 MiB worker thread for exactly this reason. The bin's
+/// unit tests bypass `main`, and a libtest thread's default stack is small
+/// enough that CI run 38986096075 aborted inside
+/// `api_pull_boundary_tests` on both Ubuntu and Windows after four new
+/// subcommands (hide/unhide/purge/redact) pushed the chain past what the
+/// test thread could hold — while the same tests stayed green locally only
+/// because arm64 debug frames are smaller than x86-64 ones. What a test
+/// exercises is unchanged: the same argv goes through the same
+/// `Cli::try_parse_from`; only the stack under it matches what the product
+/// already promises itself. Panics from inside the parse re-panic on the
+/// test thread through `resume_unwind`, so failures keep their backtraces.
+#[cfg(test)]
+fn parse_cli_on_worker_stack(argv: &[&str]) -> Result<Cli, clap::Error> {
+    let owned: Vec<std::ffi::OsString> = argv
+        .iter()
+        .map(|arg| std::ffi::OsString::from(*arg))
+        .collect();
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(move || Cli::try_parse_from(owned))
+        .expect("spawn the worker-stack parse thread");
+    match handle.join() {
+        Ok(parsed) => parsed,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// [`clap::CommandFactory::command`] on the same budget: building the
+/// subcommand tree is the same one giant debug frame the parse helper above
+/// exists for, so tests that inspect the built command (its options, its
+/// help text) run that build on the worker stack too.
+#[cfg(test)]
+fn cli_command_on_worker_stack() -> clap::Command {
+    use clap::CommandFactory;
+    let handle = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(Cli::command)
+        .expect("spawn the worker-stack command-build thread");
+    match handle.join() {
+        Ok(command) => command,
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
