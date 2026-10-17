@@ -151,6 +151,10 @@ SURFACE_DIMENSION_WORDS = {
     "ide": "ide",
     "app": "desktop app",
     "web": "web",
+    # The Claude Desktop Cowork surface is its own registry word — its
+    # transcripts are scanned as claude-code sessions — so the page word is
+    # its own too, not a reuse of the generic desktop-app one.
+    "desktop-cowork": "desktop app (Cowork)",
 }
 
 
@@ -424,7 +428,9 @@ def harness_os_table(h: dict[str, Any]) -> list[str]:
     for root_name, paths in roots:
         for os_name in sm.OS_ORDER:
             cell = paths.get(os_name)
-            status = sm.cell_status(cell, verified, os_name)
+            status = sm.cell_status(
+                cell, sm.root_verified_record(verified, root_name), os_name
+            )
             prefix = [f"{esc(root_name)}"] if multi else []
             if cell is None:
                 rows.append(

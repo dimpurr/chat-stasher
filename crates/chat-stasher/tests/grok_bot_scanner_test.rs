@@ -88,14 +88,35 @@ fn scanner_discovers_per_agent_replica_and_marks_it_partial() {
     let mut pinned: Vec<(String, Option<std::ffi::OsString>)> = Vec::new();
     for harness in &registry.harnesses {
         harness_roots.insert(harness.id.clone(), empty_source.clone());
-        for cell in [
+        // A harness with additional declared source roots reads those roots
+        // at their registered locations even while its canonical key points
+        // elsewhere (the canonical key names the primary store), so hermetic
+        // isolation has to name every root by its qualified key too —
+        // claude-code's desktop Cowork root and codex's archived root would
+        // otherwise be probed wherever this machine really keeps them.
+        for root in &harness.source_roots {
+            harness_roots.insert(format!("{}:{}", harness.id, root.id), empty_source.clone());
+        }
+        let mut cells: Vec<&chat_stasher::scanner::RegistryCell> = [
             harness.paths.macos.as_ref(),
             harness.paths.linux.as_ref(),
             harness.paths.windows.as_ref(),
         ]
         .into_iter()
         .flatten()
-        {
+        .collect();
+        for root in &harness.source_roots {
+            cells.extend(
+                [
+                    root.paths.macos.as_ref(),
+                    root.paths.linux.as_ref(),
+                    root.paths.windows.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            );
+        }
+        for cell in cells {
             let Some(name) = cell.env_override.as_deref() else {
                 continue;
             };

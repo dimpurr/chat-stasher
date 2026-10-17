@@ -298,6 +298,13 @@ pub struct RegistryHarness {
     /// root or measured from the source; this block is descriptive only.
     #[serde(default)]
     pub dimensions: RegistryDimensions,
+    /// Retention knobs of this harness's own settings store that a
+    /// doctor-class probe should read (ADR-059 draft, D5). Data first: the
+    /// item records where the key is read and how its values map to
+    /// retention, so the probe can never re-derive a location or guess a
+    /// default. Missing key deserializes to an empty list.
+    #[serde(default)]
+    pub retention_probes: Vec<RegistryRetentionProbe>,
     #[serde(default)]
     pub notes: Option<String>,
     /// Active-file sealing policy for this harness: `rename` / `no-rename` /
@@ -347,6 +354,93 @@ pub struct RegistryMachineLog {
     pub env_override: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+}
+
+/// One declared retention knob read from a harness's own settings store
+/// (ADR-059 draft, D5). The registry item is the *declaration* of the probe:
+/// which settings key, from which files, how each of the key's integer
+/// states maps to retention, and which other key can override it. The probe
+/// itself (doctor D1/D4 wiring) consumes this data later; the declaration
+/// exists so the read locations and semantics are recorded facts, never
+/// things the probe re-guesses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryRetentionProbe {
+    /// Stable probe id, unique inside one harness entry
+    /// (`desktop-session-cleanup`).
+    pub id: String,
+    /// The settings key the probe reads, e.g.
+    /// `desktopSessionCleanupPeriodDays`.
+    pub key: String,
+    /// How the three integer states of this key map to retention. Each value
+    /// is the registry's recorded statement of one state's meaning; the
+    /// probe reports the state a machine is in, never a re-derived default.
+    pub states: RegistryRetentionStates,
+    /// Recorded interaction with other keys: a managed source that sets
+    /// `cleanupPeriodDays` makes this key ignored, and a report must say
+    /// which source governed the effective value (user or managed).
+    #[serde(default)]
+    pub managed_override: String,
+    /// Where the probe may look and where it must not. Free text on purpose:
+    /// it is the recorded finding (measured, with the date), not a rule the
+    /// code re-derives.
+    #[serde(default)]
+    pub notes: String,
+    /// Per-platform read locations for the key.
+    #[serde(default)]
+    pub platforms: RegistryRetentionPaths,
+}
+
+/// The three integer states of a [`RegistryRetentionProbe`] key, as the
+/// registry records them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryRetentionStates {
+    /// The key is absent: the harness's built-in default applies. For
+    /// `desktopSessionCleanupPeriodDays` that default is 0 = no ceiling — a
+    /// different answer from the missing state of `cleanupPeriodDays`
+    /// itself (which defaults to 30-day cleanup).
+    #[serde(default)]
+    pub missing: String,
+    /// Explicit 0. Allowed for keys that bound an exemption from deletion
+    /// but never disable writes; also unbounded retention.
+    #[serde(default)]
+    pub zero: String,
+    /// A positive value in days; the effective retention is the longer of
+    /// this ceiling and the effective `cleanupPeriodDays`.
+    #[serde(default)]
+    pub positive_int: String,
+}
+
+/// Per-platform cells of a [`RegistryRetentionProbe`]: which files hold the
+/// user-level and the policy-managed values of the key.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryRetentionPaths {
+    #[serde(default)]
+    pub macos: Option<RegistryRetentionPlatform>,
+    #[serde(default)]
+    pub linux: Option<RegistryRetentionPlatform>,
+    #[serde(default)]
+    pub windows: Option<RegistryRetentionPlatform>,
+}
+
+/// One platform's read locations for a retention key. A cell with
+/// `confidence: "measured-locally"` must declare what its measurement found
+/// (the parser enforces that measured user *and* managed source lists are
+/// non-empty); a cell whose managed sources were not measured declares an
+/// empty list and says so in `source`, because a guessed path is not a fact.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryRetentionPlatform {
+    /// Files the runtime's *user* settings layer can hold the key in.
+    #[serde(default)]
+    pub user_sources: Vec<String>,
+    /// Files the runtime's *managed* (policy) settings layer can hold the
+    /// key in. Empty means the platform's managed locations were not
+    /// measured — never "there are none".
+    #[serde(default)]
+    pub managed_sources: Vec<String>,
+    #[serde(default)]
+    pub confidence: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -492,9 +586,9 @@ pub struct RegistryCell {
 }
 
 /// A harness that gives every session its own directory, and writes the
-/// transcript at a fixed path inside it.
+/// transcript at a declared path inside it.
 ///
-/// Kimi Code is the case this exists for:
+/// Kimi Code is the case the literal `file` target exists for:
 /// `<sessions>/<workspaceId>/session_<uuid>/agents/main/wire.jsonl`. The
 /// file's own stem is the constant `wire`, so the walk in
 /// [`collect_records`] cannot identify a session from the discovered path
@@ -502,6 +596,22 @@ pub struct RegistryCell {
 /// id (`wire`), and two different conversations would collapse into one
 /// archive slot. A cell that declares this rule takes the id from the
 /// directory instead.
+///
+/// `file_glob` is the target for stores whose transcript *name* is the
+/// session id and whose path inside the session directory is not fixed:
+/// Claude Desktop's Cowork sandboxes keep the transcript at
+/// `​.claude/projects/<sanitized-cwd>/<sid>.jsonl`, so neither the literal
+/// shape nor the directory-name id can express it. A glob rule ids every
+/// record by the matched file's own stem (the `<sid>` filename), which is
+/// what the sandbox's adjacent metadata json points to with its
+/// `cliSessionId`; the sandbox directory's own name is not the identity
+/// (ADR-059 draft, D2/D3). Two files matching the glob are two sessions,
+/// not one — the id-collision concern that keeps the literal target
+/// literal is answered here by the id coming from each file's own name.
+///
+/// Exactly one of `file` / `file_glob` must be declared per rule; the
+/// registry parser enforces that at load time (see [`parse_registry`]) so
+/// a data defect is a load error, never a silent empty scan.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionDirRule {
     /// Root-relative directory glob for the session directory. Without a
@@ -516,8 +626,16 @@ pub struct SessionDirRule {
     /// on every platform (compared component by component, so a Windows
     /// backslash path matches too). Literal on purpose: a glob here could
     /// admit a second file per session and reintroduce the id collision this
-    /// rule exists to prevent.
-    pub file: String,
+    /// rule exists to prevent. Mutually exclusive with [`Self::file_glob`].
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Glob path (same component-wise syntax as [`Self::pattern`], no
+    /// leading `**`) from the session directory to the transcript file.
+    /// The matched file's own filename stem — after the declared format
+    /// suffix is stripped — becomes the record's native id. Mutually
+    /// exclusive with [`Self::file`].
+    #[serde(default)]
+    pub file_glob: Option<String>,
     /// Indices (0-based, `/`-separated) into the components the pattern
     /// matched, joined by `.` to compose the native id. The default —
     /// omitted, or empty — is the last matched component, the pre-codebuff
@@ -528,7 +646,9 @@ pub struct SessionDirRule {
     /// projects into one archive slot (ADR-054 D3). Indices outside the
     /// matched components fall back to the last component rather than
     /// composing from a subset — a wrong selection is a registry bug, not a
-    /// licence to mint a narrower id.
+    /// licence to mint a narrower id. Applies to the literal `file` target
+    /// only: a `file_glob` record is id'd by the matched transcript's own
+    /// stem, which the pattern components never qualify.
     #[serde(default)]
     pub id_components: Vec<usize>,
     /// Additional literal file names (never globs — see [`Self::file`])
@@ -538,6 +658,30 @@ pub struct SessionDirRule {
     /// wrote it.
     #[serde(default)]
     pub extra_files: Vec<String>,
+}
+
+impl SessionDirRule {
+    /// The transcript target this rule matches files against: the literal
+    /// [`Self::file`] path or the [`Self::file_glob`] pattern. The parser
+    /// guarantees exactly one is declared, so the fallback is only a
+    /// never-matches guard against hand-built (test) rules.
+    fn transcript_target(&self) -> TranscriptTarget<'_> {
+        match (self.file.as_deref(), self.file_glob.as_deref()) {
+            (Some(_), Some(glob)) => TranscriptTarget::Glob(glob),
+            (Some(file), None) => TranscriptTarget::Literal(file),
+            (None, Some(glob)) => TranscriptTarget::Glob(glob),
+            (None, None) => TranscriptTarget::Glob(""),
+        }
+    }
+}
+
+/// Which transcript target a [`SessionDirRule`] matches against.
+#[derive(Debug, Clone, Copy)]
+enum TranscriptTarget<'a> {
+    /// The literal `/`-separated path from the session directory.
+    Literal(&'a str),
+    /// The `/`-separated component glob from the session directory.
+    Glob(&'a str),
 }
 
 /// Deserialize the registry from `path`. Returns a descriptive error on any
@@ -554,12 +698,103 @@ pub fn load_registry(path: &Path) -> io::Result<HarnessRegistry> {
 }
 
 fn parse_registry(raw: &str, source: &str) -> io::Result<HarnessRegistry> {
-    serde_json::from_str(raw).map_err(|e| {
+    let registry: HarnessRegistry = serde_json::from_str(raw).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("harness registry {source} is not valid JSON: {e}"),
         )
-    })
+    })?;
+    validate_registry(&registry, source)?;
+    Ok(registry)
+}
+
+/// Structural checks the shape alone cannot express (serde accepts both
+/// targets present, either absent, and a `**` component a `file_glob` is
+/// not defined to match). They run at load time so a registry data defect is
+/// a load error naming the harness and platform, never a silently empty
+/// scan or a glob that quietly behaves like `*`.
+fn validate_registry(registry: &HarnessRegistry, source: &str) -> io::Result<()> {
+    for harness in &registry.harnesses {
+        let mut cells: Vec<(String, &RegistryCell)> = Vec::new();
+        for platform in ["macos", "linux", "windows"] {
+            if let Some(cell) = harness.paths.cell_for(platform) {
+                cells.push((format!("{}/{platform}", harness.id), cell));
+            }
+            for root in &harness.source_roots {
+                if let Some(cell) = root.paths.cell_for(platform) {
+                    cells.push((format!("{}/:{}/{platform}", harness.id, root.id), cell));
+                }
+            }
+        }
+        for (where_, cell) in cells {
+            if let Some(rule) = cell.session_dir.as_ref() {
+                let declared = rule.file.is_some() as u8 + rule.file_glob.is_some() as u8;
+                if declared != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: session_dir rule for {where_} must \
+                             declare exactly one transcript target: `file` (literal) or \
+                             `file_glob` (the matched stem ids the session)"
+                        ),
+                    ));
+                }
+                if let Some(glob) = rule.file_glob.as_deref() {
+                    if glob
+                        .split('/')
+                        .filter(|part| !part.is_empty())
+                        .any(|part| part == "**")
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "harness registry {source}: session_dir file_glob for {where_} \
+                                 matches one exact component depth; a `**` component is not \
+                                 defined here — write the measured layout out in components"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        for probe in &harness.retention_probes {
+            for (platform, cell) in [
+                ("macos", probe.platforms.macos.as_ref()),
+                ("linux", probe.platforms.linux.as_ref()),
+                ("windows", probe.platforms.windows.as_ref()),
+            ] {
+                let Some(cell) = cell else { continue };
+                if cell.confidence == "measured-locally"
+                    && (cell.user_sources.is_empty() || cell.managed_sources.is_empty())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: retention probe `{}/{}` has a \
+                             measured-locally {platform} cell, but a measured cell declares \
+                             what it measured: both the user and the managed source lists \
+                             must be non-empty (an unmeasured managed list is declared \
+                             empty with an unascertained cell that says why)",
+                            harness.id, probe.id
+                        ),
+                    ));
+                }
+                if cell.confidence != "measured-locally" && !cell.managed_sources.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "harness registry {source}: retention probe `{}/{}` declares \
+                             managed sources on {platform} it does not claim to have \
+                             measured; measure them or move them behind a \
+                             measured-locally cell",
+                            harness.id, probe.id
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Locate the registry by walking **up from the cwd and the package manifest
@@ -617,6 +852,23 @@ pub enum ProbeState {
     SkipUnresolvable,
 }
 
+/// One declared source root of a family that this scan never verified — a
+/// root the probe refused to guess at (`unascertained`), never resolved a
+/// path for (`unresolvable`), or could not even establish the presence of
+/// (`indeterminate`) — while at least one sibling root of the same family
+/// **was** measured (ADR-059 draft D6, the qualified lower-bound rule the
+/// external review of the draft made mandatory, W1006d). The root is named by
+/// its registry root id (`claude-desktop-cowork`); the one shape where the
+/// unverified root is the entry's primary store names it by the canonical
+/// harness id, the key that store is configured under.
+#[derive(Debug, Clone)]
+pub struct UnverifiedRoot {
+    pub id: String,
+    /// Why the root stayed unverified, from the same closed vocabulary as
+    /// [`probe_state_word`] — never a path, never prose.
+    pub state: ProbeState,
+}
+
 /// One harness's fate on this machine, as decided by the registry.
 #[derive(Debug, Clone)]
 pub struct HarnessProbe {
@@ -627,6 +879,18 @@ pub struct HarnessProbe {
     pub root: Option<PathBuf>,
     pub confidence: Confidence,
     pub state: ProbeState,
+    /// Roots of this family that stayed **unverified** while a sibling root
+    /// was measured. Non-empty exactly when the counts below are a
+    /// *qualified lower bound* over the measured roots: `record_count` (and
+    /// every sibling count) is then the exact count of the measured roots
+    /// only, and must be rendered as `≥N` with these roots named beside it —
+    /// never as an unknown that erases the measured part (the D6 side
+    /// effect the ADR-059 draft review rejected) and never as a plain
+    /// number that silently claims the family total. The rule is scoped to
+    /// the primary-plus-additional-roots shape (the W1006c narrowing): a
+    /// family whose every root stayed unknown keeps the older aggregate
+    /// semantics and this field empty.
+    pub unverified_roots: Vec<UnverifiedRoot>,
     /// Session records found at this harness's root, counted by **distinct
     /// session id** — the quantity collect can address, and the quantity the
     /// multi-source-root aggregation already counted (a file count cannot
@@ -990,6 +1254,13 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
 /// records can answer that question, and the doctor's report keeps probes
 /// and drops records. Every count is a tri-state; none can be `0`-or-null
 /// because a value was never looked at.
+///
+/// `unverified_roots` (W1006d) is additive in the found_staged sense: it
+/// appears on every row, empty wherever a family was fully measured (or
+/// fully unknown — the state already says that). Where it is non-empty the
+/// sibling `session_count` is a *qualified lower bound* — the exact count
+/// of the measured roots only — and a consumer must not read it as the
+/// family total; the listed roots are the reason it cannot be one.
 pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
     serde_json::json!({
         "harness": p.id,
@@ -997,6 +1268,14 @@ pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
         "state": probe_state_word(p.state),
         "installed": p.installed_p(),
         "root": p.root.as_ref().map(|root| root.display().to_string()),
+        "unverified_roots": p
+            .unverified_roots
+            .iter()
+            .map(|root| serde_json::json!({
+                "root": root.id,
+                "state": probe_state_word(root.state),
+            }))
+            .collect::<Vec<_>>(),
         "session_count": probe_session_count(p),
         "unreadable_count": probe_unreadable_count(p),
         "unreadable_entry_count": probe_unreadable_entry_count(p),
@@ -1534,7 +1813,34 @@ fn probe_harness(
     }
 
     let mut subprobes = Vec::new();
+    // The registry root id each subprobe stands for, parallel to
+    // `subprobes`: the canonical harness id for the primary store, the
+    // root's own id for every additional source root. The unverified
+    // marking below names roots by these ids — a path can carry a
+    // username, an id is ours to name.
+    let mut subprobe_root_ids = Vec::new();
     let mut total = ScanReport::default();
+    // DSK-1 (plan C, ADR-059 draft): an entry may declare BOTH its primary
+    // store (the `paths` cells) and additional `source_roots` — the desktop
+    // Cowork root beside the claude-code CLI store, the archived-rollouts
+    // root beside codex's active ones. The primary store stays an implicit
+    // root of the same entry, first in the aggregate, so its records, its
+    // canonical `harness_roots` override and its display root keep the
+    // meaning they had before any root was declared. An entry with no
+    // platform cell for its primary store (antigravity, codebuff) keeps the
+    // all-roots shape it has always had — nothing below changes for it.
+    let primary_probeable = h.paths.cell_for(platform).is_some();
+    if primary_probeable {
+        let mut one = h.clone();
+        one.source_roots.clear();
+        let mut local = ScanReport::default();
+        let probe = probe_harness_single(config, &one, platform, machine, &mut local);
+        total.records.extend(local.records);
+        total.missing_roots.extend(local.missing_roots);
+        total.indeterminate_roots.extend(local.indeterminate_roots);
+        subprobes.push(probe);
+        subprobe_root_ids.push(h.id.clone());
+    }
     let canonical_override = config.explicit_harness_root(&h.id).is_some();
     let root_keys: Vec<_> = h
         .source_roots
@@ -1544,13 +1850,19 @@ fn probe_harness(
     let has_all_root_overrides = root_keys
         .iter()
         .all(|key| config.explicit_harness_root(key).is_some());
-    if canonical_override && !has_all_root_overrides {
+    // The canonical override is ambiguous only when it cannot mean one root:
+    // a harness whose primary `paths` cell it names is not ambiguous (it is
+    // the primary's override, probed above); a harness whose cells are all
+    // source_roots has no primary for it to name, so the historical refusal
+    // stands there.
+    if canonical_override && !has_all_root_overrides && !primary_probeable {
         return HarnessProbe {
             id: h.id.clone(),
             display_name: h.display_name.clone(),
             root: None,
             confidence: Confidence::Unascertained,
             state: ProbeState::Indeterminate,
+            unverified_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -1601,6 +1913,16 @@ fn probe_harness(
         one.paths = root.paths.clone();
         one.source_roots.clear();
         let mut root_config = config.clone();
+        // The canonical `<harness>` harness_roots key names the entry's
+        // primary store, which was probed above — a source root never
+        // inherits it, or every additional root would re-walk the primary's
+        // override instead of its own declared template. For an all-roots
+        // entry (antigravity, codebuff) this is the same removal the
+        // `has_all_root_overrides` case always did, and any other canonical
+        // override was refused by the guard above, so nothing changes for
+        // those entries; a per-root override is re-inserted below by its
+        // own key.
+        root_config.harness_roots.remove(&h.id);
         if has_all_root_overrides {
             root_config.harness_roots.remove(&h.id);
         }
@@ -1639,6 +1961,7 @@ fn probe_harness(
         // any other declared root, including their honest unknown state.
         let _ = cell;
         subprobes.push(probe);
+        subprobe_root_ids.push(root.id.clone());
     }
     let any_unknown = subprobes.iter().any(HarnessProbe::not_probed_p)
         || subprobes
@@ -1653,19 +1976,91 @@ fn probe_harness(
         .map(|record| record.id.as_str())
         .collect();
     let known_count = unique_records.len() as u64;
-    // Missing cells stay unknown through aggregation; they are never filled
-    // with a semantic zero.
-    let unreadable = subprobes
-        .iter()
-        .try_fold(0u64, |sum, probe| sum.checked_add(probe.unreadable_count?));
+    // A root that was looked for and found ABSENT answers a known zero for
+    // the aggregate once another root of the same family was actually
+    // seen — but only in the primary-plus-roots shape DSK-1 introduced
+    // (ADR-059 draft D6, scoped in the W1006c review): the family is
+    // anchored by a PRIMARY store the entry itself declares, so the absent
+    // sibling's contribution is a measured nothing, and a machine without
+    // Claude Desktop must not have its known claude-code CLI count dimmed
+    // to an unknown. An all-roots family (codebuff's channels, antigravity's
+    // surfaces) declares no primary store, so nothing anchors it and the
+    // pre-DSK-1 rule stands there: a missing sibling keeps that family's
+    // combined total unknown, exactly as before this batch. The doctor's
+    // footprint/probe consistency contract forced the distinction for the
+    // primary shape, because the record-derived footprint could count what
+    // the aggregate refused to claim. One limit guards against a semantic
+    // zero: a family whose roots were ALL absent still reports unknown
+    // (an absent harness is not an empty one).
+    //
+    // W1006d — the same review's D6 correction, one step further: a root
+    // that was never LOOKED at (unascertained, unresolvable,
+    // indeterminate) must not erase a measured total either. That was the
+    // D6 side effect the draft shipped with — on Windows the desktop
+    // Cowork cell is `unascertained`, so an installed CLI's measured count
+    // turned into a blanket unknown — and the rule the W1006c paragraph
+    // above still kept ("a subprobe that never looked keeps the whole
+    // total unknown") is exactly what the review rejected. In the anchored
+    // (primary-plus-roots) shape the measured roots' count is instead
+    // reported as a QUALIFIED LOWER BOUND: the exact count of what the
+    // scan measured, its unverified siblings named beside it. Never an
+    // unknown — that erases a measurement already taken; never a plain
+    // number — that silently claims the family total. The lower bound is
+    // marked, in `unverified_roots`, everywhere the aggregate is shown.
+    // When NO root of the family was measured, nothing anchors a lower
+    // bound and the total stays unknown, exactly as before.
+    let absent_sibling_is_zero = primary_probeable;
+    let family_measured = subprobes.iter().any(HarnessProbe::probed_p);
+    let qualified_lower_bound = primary_probeable && any_unknown && family_measured;
+    let unverified_roots: Vec<UnverifiedRoot> = if qualified_lower_bound {
+        subprobes
+            .iter()
+            .zip(&subprobe_root_ids)
+            .filter(|(probe, _)| probe.not_probed_p())
+            .map(|(probe, id)| UnverifiedRoot {
+                id: id.clone(),
+                state: probe.state,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let unreadable = subprobes.iter().try_fold(0u64, |sum, probe| {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
+            return Some(sum);
+        }
+        // An unverified root contributes nothing to a lower bound for the
+        // same reason an absent one contributes a zero: it never looked,
+        // so it holds no unreadable tally to add — the marking, not the
+        // fold, is where its existence is stated. Outside the lower-bound
+        // shape the fold still refuses, keeping the whole total unknown.
+        if qualified_lower_bound && probe.not_probed_p() {
+            return Some(sum);
+        }
+        sum.checked_add(probe.unreadable_count?)
+    });
     let unreadable_entries = subprobes.iter().try_fold(0u64, |sum, probe| {
+        if absent_sibling_is_zero && probe.state == ProbeState::Missing {
+            return Some(sum);
+        }
+        if qualified_lower_bound && probe.not_probed_p() {
+            return Some(sum);
+        }
         sum.checked_add(probe.unreadable_entry_count?)
     });
     let counts_complete = !subprobes.is_empty()
-        && subprobes.iter().all(|p| p.record_count.is_some())
+        && (any_scanned || qualified_lower_bound)
+        && subprobes.iter().all(|p| {
+            p.record_count.is_some()
+                || (absent_sibling_is_zero && p.state == ProbeState::Missing)
+                || (qualified_lower_bound && p.not_probed_p())
+        })
         && unreadable.is_some()
         && unreadable_entries.is_some();
-    let bytes_complete = !subprobes.is_empty() && subprobes.iter().all(|p| p.bytes.is_some());
+    let bytes_complete = !subprobes.is_empty()
+        && subprobes
+            .iter()
+            .all(|p| p.bytes.is_some() || (qualified_lower_bound && p.not_probed_p()));
     let confidence = subprobes
         .iter()
         .map(|p| p.confidence)
@@ -1687,55 +2082,72 @@ fn probe_harness(
         // Every root was skipped by policy before any filesystem probe. Keep
         // that precise reason; mixed measured/unknown roots remain indeterminate.
         ProbeState::SkipUnascertained
-    } else if any_unknown {
+    } else if any_unknown && !qualified_lower_bound {
         ProbeState::Indeterminate
-    } else if all_missing {
+    } else if all_missing || (qualified_lower_bound && !any_scanned) {
+        // The W1006d lower-bound shape with no scanned root: every MEASURED
+        // root of the family is absent (that is what `probed_p` can mean
+        // here once the unverified roots are subtracted), so the state that
+        // tells the truth about presence is still `Missing` — while
+        // `unverified_roots` and the note carry the "≥" qualification.
         ProbeState::Missing
     } else if any_scanned {
         ProbeState::Scanned
     } else {
         ProbeState::SkipWrongPlatform
     };
+    // Whether the aggregate may claim a count at all: fully measured, or the
+    // qualified-lower-bound shape where the claim is the measured roots'
+    // count carrying its own qualification.
+    let counts_claimable = counts_complete && (!any_unknown || qualified_lower_bound);
     let roots: Vec<_> = subprobes.iter().filter_map(|p| p.root.clone()).collect();
     report.records.extend(total.records);
     report.missing_roots.extend(total.missing_roots);
     report.indeterminate_roots.extend(total.indeterminate_roots);
+    let note = if qualified_lower_bound {
+        format!(
+            "{} declared source roots checked; total is a lower bound — {} unverified \
+             source root(s): {}",
+            subprobes.len(),
+            unverified_roots.len(),
+            unverified_roots
+                .iter()
+                .map(|root| format!("{} ({})", root.id, probe_state_word(root.state)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if any_unknown {
+        "one or more declared source roots could not be fully checked; total is unknown".to_string()
+    } else if all_missing {
+        "all declared source roots are absent".to_string()
+    } else {
+        format!("{} declared source roots checked", roots.len())
+    };
     HarnessProbe {
         id: h.id.clone(),
         display_name: h.display_name.clone(),
         root: roots.first().cloned(),
         confidence,
         state,
-        record_count: (!any_unknown && counts_complete).then_some(known_count),
+        unverified_roots,
+        record_count: counts_claimable.then_some(known_count),
         // An unreadable source root has no native id to deduplicate against
         // the other roots, so candidate totals remain unknown in that case.
-        candidate_count: (!any_unknown
-            && counts_complete
+        candidate_count: (counts_claimable
             && unreadable == Some(0)
             && unreadable_entries == Some(0))
         .then_some(known_count),
-        unreadable_count: (!any_unknown && counts_complete)
-            .then_some(unreadable)
-            .flatten(),
-        unreadable_entry_count: (!any_unknown && counts_complete)
-            .then_some(unreadable_entries)
-            .flatten(),
+        unreadable_count: counts_claimable.then_some(unreadable).flatten(),
+        unreadable_entry_count: counts_claimable.then_some(unreadable_entries).flatten(),
         earliest: subprobes.iter().filter_map(|p| p.earliest).min(),
         latest: subprobes.iter().filter_map(|p| p.latest).max(),
-        bytes: (!any_unknown && bytes_complete)
+        bytes: (bytes_complete && (!any_unknown || qualified_lower_bound))
             .then(|| subprobes.iter().filter_map(|p| p.bytes).sum()),
         recognized_files: subprobes
             .into_iter()
             .flat_map(|p| p.recognized_files)
             .collect(),
-        note: if any_unknown {
-            "one or more declared source roots could not be fully checked; total is unknown"
-                .to_string()
-        } else if all_missing {
-            "all declared source roots are absent".to_string()
-        } else {
-            format!("{} declared source roots checked", roots.len())
-        },
+        note,
     }
 }
 
@@ -1752,6 +2164,7 @@ fn probe_harness_single(
         root: None,
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
+        unverified_roots: Vec::new(),
         record_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -3693,6 +4106,28 @@ fn relpath_matches(dir: &Path, file: &Path, expected: &str) -> bool {
     got.len() == want.len() && got.iter().zip(&want).all(|(got, want)| got == want)
 }
 
+/// True when `file`'s path below `dir` matches the `/`-separated component
+/// glob `glob`: same depth, each component matched with the same `*` syntax
+/// [`matches_session_pattern`] applies (so a Windows backslash relpath
+/// compares equal too). The depth is exact on purpose — a `session_dir`
+/// rule with a `file_glob` declares a measured layout, and anything at a
+/// different depth is noise the rule must reject, not a session.
+fn relpath_glob_matches(dir: &Path, file: &Path, glob: &str) -> bool {
+    let Ok(rel) = file.strip_prefix(dir) else {
+        return false;
+    };
+    let want: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
+    let got: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(&want)
+            .all(|(got, want)| matches_session_pattern(got, Some(want)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_records(
     root: &Path,
@@ -4031,11 +4466,29 @@ fn build_record(
                 dir, id, container, ..
             },
         ) => {
-            if !relpath_matches(dir, path, &rule.file) {
-                return RecordBuild::NotSession;
+            match rule.transcript_target() {
+                TranscriptTarget::Literal(file) => {
+                    if !relpath_matches(dir, path, file) {
+                        return RecordBuild::NotSession;
+                    }
+                    let cwd = session_index.get(id.as_str()).cloned();
+                    (id.clone(), container.clone(), cwd)
+                }
+                TranscriptTarget::Glob(glob) => {
+                    // The glob is the file-name-ids-the-session shape
+                    // (ADR-059 draft D2/D3): the matched transcript's own
+                    // stem — with the declared format suffix stripped by
+                    // the caller above — is the native id, so a sandbox
+                    // directory named `local_<uuid>` never becomes the
+                    // identity and two transcripts in one sandbox are two
+                    // sessions, never one.
+                    if !relpath_glob_matches(dir, path, glob) {
+                        return RecordBuild::NotSession;
+                    }
+                    let cwd = session_index.get(stem.as_str()).cloned();
+                    (stem.clone(), container.clone(), cwd)
+                }
             }
-            let cwd = session_index.get(id.as_str()).cloned();
-            (id.clone(), container.clone(), cwd)
         }
         (Some(_), SessionScope::Outside) => return RecordBuild::NotSession,
         // Claude Code's workflow journals sit at a fixed path whose stem is
@@ -4159,6 +4612,230 @@ mod tests {
             "schema_version": 1,
             "generated": "synthetic fixture",
             "harnesses": [{"id": "claude-code", "display_name": "synthetic", "paths": paths}]
+        }))
+        .unwrap()
+    }
+
+    /// A claude-code-shaped registry with the DSK-1 (plan C) shape: the CLI
+    /// store stays the entry's primary `paths`, and the desktop Cowork store
+    /// is a `claude-desktop-cowork` source root beside it — the same harness
+    /// id, a different surface, expressed per-root.
+    fn claude_code_cli_plus_desktop_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture",
+            "session_dir": {
+                "pattern": "*/*/local_*",
+                "file_glob": ".claude/projects/*/*.jsonl"
+            }
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// The DSK-1 claude-code shape with the desktop Cowork root UNVERIFIED
+    /// on this platform: the registry declares the root's cell but refuses
+    /// to vouch for its path (`unascertained`), so the probe skips it by
+    /// policy — the exact cell the shipped registry carries for Windows,
+    /// replayable on every platform for the aggregation rules the external
+    /// review of ADR-059 draft D6 made mandatory (W1006d).
+    fn claude_code_cli_plus_unverified_desktop_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A claude-code-shaped registry whose WHOLE family stays unverified on
+    /// this platform: the primary cell is measurable but its template is
+    /// not statically resolvable, and the desktop root's cell is
+    /// `unascertained` — one root never resolved a path, one the scan
+    /// refuses to guess at, and nothing in the family was ever measured.
+    fn claude_code_all_unverified_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "$CWD/sessions",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// The all-unverified family with BOTH cells skipped by the same
+    /// policy reason (`unascertained`), for the `skip unascertained`
+    /// aggregate word — the confidence gate runs before any path is
+    /// resolved, so a vouched-for template under an unvouched confidence
+    /// is still a refusal to scan, not a path choice.
+    fn claude_code_all_unverified_registry_with_unascertained_primary() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A codex-shaped registry with the DSK-1 movable-root shape: the active
+    /// rollouts root stays the entry's primary `paths`, and the archive the
+    /// desktop's `thread/archive` moves rollouts into is a `codex-archived`
+    /// source root beside it — the same store, the same ids.
+    fn codex_plus_archived_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let sessions = serde_json::json!({
+            "template": "~/.codex/sessions/",
+            "format": "jsonl / jsonl.zst",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let archived = serde_json::json!({
+            "template": "~/.codex/archived_sessions/",
+            "format": "jsonl / jsonl.zst",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let paths = serde_json::json!({ platform_key: sessions });
+        let archived_paths = serde_json::json!({ platform_key: archived });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "codex",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "codex-archived",
+                    "paths": archived_paths
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A roots-only family shaped like the codebuff channels: every declared
+    /// root is a sibling beside the others and the entry names no primary
+    /// `paths` store at all — the all-roots shape antigravity and codebuff
+    /// have always had. DSK-1's measured-zero sibling rule is scoped away
+    /// from this shape, so its aggregation must not change semantics here.
+    fn all_roots_channel_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let stable = serde_json::json!({
+            "template": "~/.synthetic-manicode/stable/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let dev = serde_json::json!({
+            "template": "~/.synthetic-manicode/dev/",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        });
+        let stable_paths = serde_json::json!({ platform_key: stable });
+        let dev_paths = serde_json::json!({ platform_key: dev });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "codebuff",
+                "display_name": "synthetic",
+                "source_roots": [
+                    { "id": "codebuff", "paths": stable_paths },
+                    { "id": "codebuff-dev", "paths": dev_paths }
+                ]
+            }]
         }))
         .unwrap()
     }
@@ -4708,7 +5385,8 @@ mod tests {
             None,
             Some(&SessionDirRule {
                 pattern: "*/*".to_string(),
-                file: "transcript.jsonl".to_string(),
+                file: Some("transcript.jsonl".to_string()),
+                file_glob: None,
                 id_components: Vec::new(),
                 extra_files: Vec::new(),
             }),
@@ -4864,6 +5542,766 @@ mod tests {
             .records
             .iter()
             .any(|row| row.absolute_path == default_app));
+    }
+
+    /// A claude-code-shaped sandbox home for the DSK-1 fixtures: the real
+    /// Cowork layout, nested three levels under the given desktop root,
+    /// with the sandbox's own noise (audit log, uploads, config-clone
+    /// history) planted beside the one true transcript. Returns the
+    /// transcript path and the sid it is named by. The root is a parameter
+    /// so the registry tests can spell the real app-support path and the
+    /// unit test can root the same tree anywhere.
+    fn plant_cowork_session(store_root: &Path) -> (PathBuf, &'static str) {
+        let sid = "019d5c02-0000-7000-8000-0000000000d2";
+        let account = store_root.join("space-fixture").join("account-fixture");
+        fs::create_dir_all(&account).unwrap();
+        let home_dir_name = "local_019d5c00-0000-7000-8000-0000000000b3";
+        let session_home = account.join(home_dir_name);
+        // The metadata json the app keeps beside the sandbox: fields the
+        // reader may use for title/time only, never identity.
+        fs::write(
+            account.join(format!("{home_dir_name}.json")),
+            format!(r#"{{"cliSessionId":"{sid}","title":"synthetic fixture title"}}"#).as_bytes(),
+        )
+        .unwrap();
+        let transcript = session_home
+            .join(".claude")
+            .join("projects")
+            .join("-Users-fixture-desktop")
+            .join(format!("{sid}.jsonl"));
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, b"{\"synthetic\":\"cowork-transcript\"}\n").unwrap();
+        for rel in [
+            "audit.jsonl",
+            "uploads/upload.jsonl",
+            ".claude/history.jsonl",
+            // A jsonl directly under projects/ (no sanitized-cwd layer) is
+            // not the measured session shape, and must not count as one.
+            ".claude/projects/loose-notes.jsonl",
+        ] {
+            let noise = session_home.join(rel);
+            fs::create_dir_all(noise.parent().unwrap()).unwrap();
+            fs::write(&noise, b"{\"synthetic\":\"noise\"}\n").unwrap();
+        }
+        (transcript, sid)
+    }
+
+    /// DSK-1 (ADR-059 draft D1/D2/D3). The desktop Cowork store is a second
+    /// source root of the claude-code harness, declared beside the entry's
+    /// primary `paths`. The scan must keep both stores: the primary CLI root
+    /// keeps producing its records exactly as before — a harness that
+    /// declares source_roots must not lose the store its `paths` names — and
+    /// the desktop root contributes its sandbox transcripts, each id'd by
+    /// its own jsonl filename and carrying the `desktop-cowork` surface
+    /// observation, with the sandbox's noise and the metadata json counted
+    /// as nothing.
+    #[test]
+    fn desktop_cowork_root_scans_sandbox_transcripts_beside_the_cli_store() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c01-0000-7000-8000-0000000000c1";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (transcript, cowork_sid) = plant_cowork_session(&desktop_store);
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            format!("claude-code.synthetic-machine.{cli_sid}"),
+            format!("claude-code.synthetic-machine.{cowork_sid}"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            ids, expected,
+            "the primary CLI root and the desktop root each contribute their sessions; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| (record.id.as_str(), record.absolute_path.clone()))
+                .collect::<Vec<_>>()
+        );
+        let desktop = report
+            .records
+            .iter()
+            .find(|record| record.id.ends_with(cowork_sid))
+            .expect("the cowork record exists");
+        assert_eq!(
+            desktop.provenance.surface,
+            ["desktop-cowork"],
+            "the desktop root's declared observation rides the record"
+        );
+        assert_eq!(
+            desktop.absolute_path, transcript,
+            "the record is the sandbox transcript, not the metadata json"
+        );
+        assert!(
+            report.records.iter().all(|record| record
+                .absolute_path
+                .file_name()
+                .map(|name| name != "audit.jsonl")
+                .unwrap_or(true)),
+            "the sandbox's audit log is not a session; noise must not count"
+        );
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Scanned);
+        assert_eq!(
+            probe.record_count,
+            Some(2),
+            "the aggregate count spans the primary and the desktop root"
+        );
+    }
+
+    /// DSK-1 (ADR-059 draft D4). Codex `thread/archive` moves a rollout from
+    /// `sessions/` to `archived_sessions/` and `thread/unarchive` moves it
+    /// back; the archived directory is therefore a *movable* source root of
+    /// the same harness. The rollout's id comes from its filename, so the
+    /// move must not fork the archive-holding identity: the id set before,
+    /// between and after the archive round-trip is the same one session.
+    #[test]
+    fn codex_archive_move_and_unarchive_keep_one_session_id() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let sid = "rollout-2026-09-01T10-00-00-019bf00d-0000-7000-8000-00000000000a";
+        let active = sandbox
+            .home()
+            .join(".codex/sessions/2026/09/01")
+            .join(format!("{sid}.jsonl"));
+        let archived = sandbox
+            .home()
+            .join(".codex/archived_sessions/2026/09/01")
+            .join(format!("{sid}.jsonl"));
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::write(&active, b"{\"synthetic\":\"rollout\"}\n").unwrap();
+        // Both roots are planted, though the aggregate rules below would
+        // tolerate the archived one being absent (a scanned primary keeps
+        // the family's total known): this test is about the id stability
+        // of the archive move, not the family's aggregate counting rules.
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+
+        let registry = codex_plus_archived_registry();
+        let scan_ids = |report: &ScanReport| -> Vec<String> {
+            let mut ids: Vec<String> = report
+                .records
+                .iter()
+                .map(|record| record.id.as_str().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let expected_id = format!("codex.synthetic-machine.{sid}");
+
+        let before =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&before),
+            [expected_id.clone()],
+            "the active rollout is scanned before the archive move"
+        );
+        assert_eq!(before.probes[0].record_count, Some(1));
+
+        // thread/archive: the rollout moves into the archived directory.
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::rename(&active, &archived).unwrap();
+        let archived_report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&archived_report),
+            [expected_id.clone()],
+            "the archived root re-scans the same session: the move must not fork the id"
+        );
+        assert_eq!(
+            archived_report.records[0].absolute_path, archived,
+            "the record follows the file to its new root"
+        );
+
+        // thread/unarchive: the rollout moves back; a rescan of the same
+        // tree is also idempotent — scanning twice changes nothing.
+        fs::rename(&archived, &active).unwrap();
+        let back =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&back),
+            [expected_id],
+            "the id survives the round trip"
+        );
+        let rescan =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            scan_ids(&rescan),
+            scan_ids(&back),
+            "a repeated scan is idempotent"
+        );
+    }
+
+    /// DSK-1. Overriding the canonical `harness_roots["claude-code"]` key
+    /// keeps its historical meaning once source_roots exist: it names the
+    /// entry's primary store, and does not become an ambiguous
+    /// every-root-override the way it would for a harness whose registry
+    /// cells are all source_roots.
+    #[test]
+    fn canonical_override_keeps_naming_the_primary_store_when_source_roots_exist() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (_, cowork_sid) = plant_cowork_session(&desktop_store);
+        let moved_projects = sandbox.home().join("moved-projects");
+        let cli_sid = "019d5c03-0000-7000-8000-0000000000c3";
+        let moved_cli = moved_projects
+            .join("-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(moved_cli.parent().unwrap()).unwrap();
+        fs::write(&moved_cli, b"{\"synthetic\":\"moved-cli-session\"}\n").unwrap();
+
+        let config = Config {
+            harness_roots: [(
+                "claude-code".to_string(),
+                moved_projects.to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Config::default()
+        };
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&config, &registry, "synthetic-machine").unwrap();
+        let probe = &report.probes[0];
+        assert_ne!(
+            probe.state,
+            ProbeState::Indeterminate,
+            "the canonical override is not ambiguous once it names the primary store; note={}",
+            probe.note
+        );
+        let ids: std::collections::BTreeSet<String> = report
+            .records
+            .iter()
+            .map(|record| record.id.as_str().to_string())
+            .collect();
+        assert!(
+            ids.contains(&format!("claude-code.synthetic-machine.{cli_sid}")),
+            "the primary root follows the canonical override; ids={ids:?}"
+        );
+        assert!(
+            ids.contains(&format!("claude-code.synthetic-machine.{cowork_sid}")),
+            "the desktop root still scans at its declared default; ids={ids:?}"
+        );
+    }
+
+    /// DSK-1. A declared desktop root that is simply NOT THERE on this
+    /// machine (no Claude Desktop app installed) must not dim the harness's
+    /// known CLI count to an unknown: the root was looked for and found
+    /// absent, which is a measured zero contribution once the primary root
+    /// anchored the family by being scanned. The doctor's footprint row
+    /// counts records directly, so an aggregate that refused to claim what
+    /// the records already count is the exact two-table contradiction
+    /// `doctor_consistency_test` exists to catch.
+    #[test]
+    fn an_absent_declared_root_keeps_the_scanned_primary_count_known() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c04-0000-7000-8000-0000000000c4";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        // The desktop root is deliberately NOT planted: the machine has no
+        // Claude Desktop install, which is the ordinary case.
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the CLI record is collected either way; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "a scanned primary plus an absent sibling root is a known total, not an unknown; note={}",
+            probe.note
+        );
+        assert_eq!(probe.state, ProbeState::Scanned);
+
+        // And the symmetric shape — only the desktop store, no CLI store —
+        // keeps the desktop session countable the same way.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        let (transcript, desktop_sid) = plant_cowork_session(&desktop_store);
+        let _ = transcript;
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "the absent CLI root contributes a known zero to the desktop count; note={}",
+            probe.note
+        );
+        assert!(
+            report
+                .records
+                .iter()
+                .any(|record| record.id.ends_with(desktop_sid)),
+            "the desktop session itself was collected"
+        );
+
+        // But a family whose roots were ALL absent stays unknown — an
+        // absent store is not an empty one.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Missing);
+        assert_eq!(
+            probe.record_count, None,
+            "an all-missing family is unknown, never a semantic zero"
+        );
+    }
+
+    /// W1006d — ADR-059 draft D6, the one required change of the external
+    /// review: an *unverified* additional root (one the scan never looked
+    /// at — a cell the registry will not vouch for) must not make an
+    /// already-measured CLI total disappear. The Windows shape of the
+    /// shipped registry is exactly this family: CLI store scanned, desktop
+    /// Cowork root `unascertained`. The aggregate must report the measured
+    /// roots' count as a QUALIFIED LOWER BOUND — `record_count` set to what
+    /// the scan measured, the unverified sibling named in
+    /// `unverified_roots`, `status`/`doctor` rendering it `≥N` — never the
+    /// blanket unknown the pre-W1006d rule produced (the rejected D6 side
+    /// effect), never a bare number that silently claims the family total.
+    #[test]
+    fn an_unverified_sibling_qualifies_the_measured_total_as_a_lower_bound() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c05-0000-7000-8000-0000000000c5";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        // The desktop root's cell is `unascertained`, so the machine's real
+        // desktop directory — planted or not — is never looked at; plant
+        // nothing, which is the ordinary machine that has the CLI only.
+
+        let registry = claude_code_cli_plus_unverified_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the CLI record is collected either way; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the measured primary keeps the family available; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "the measured CLI count is reported, not erased by the unverified sibling; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe
+                .unverified_roots
+                .iter()
+                .map(|root| (root.id.as_str(), root.state))
+                .collect::<Vec<_>>(),
+            vec![("claude-desktop-cowork", ProbeState::SkipUnascertained)],
+            "the unverified root is named so the count reads as a lower bound"
+        );
+        assert!(
+            probe.note.contains("lower bound") && probe.note.contains("claude-desktop-cowork"),
+            "the note qualifies the total and names the root; note={}",
+            probe.note
+        );
+
+        // The same family with the CLI store absent as well: the primary
+        // root was still MEASURED (found absent), so the rule that only an
+        // all-unknown family stays unknown does not bite — the total is the
+        // measured zero, still qualified by the unverified sibling
+        // (`≥0`), never an unqualified 0.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Missing,
+            "the measured primary was found absent; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(0),
+            "the measured absence is kept as the lower bound's floor, but the mark must \
+             keep it from reading as an exact total; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.unverified_roots.len(),
+            1,
+            "the unverified sibling still qualifies the missing family's total; note={}",
+            probe.note
+        );
+    }
+
+    /// W1006d — the other half of the rule: only when ALL roots of the
+    /// family stayed unverified does the combined total stay unknown. No
+    /// root was measured, so nothing anchors a lower bound and the
+    /// aggregate keeps the pre-DSK-1 unknown — with no unverified-roots
+    /// marking, because there is no measured count for it to qualify.
+    #[test]
+    fn a_family_whose_roots_all_stayed_unknown_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = claude_code_all_unverified_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Indeterminate);
+        assert_eq!(
+            probe.record_count, None,
+            "no root of the family was measured, so the total is unknown — a lower bound \
+             needs a measured floor; note={}",
+            probe.note
+        );
+        assert!(
+            probe.unverified_roots.is_empty(),
+            "an unknown total carries no lower-bound marking; there is no measured count \
+             for it to qualify; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.note,
+            "one or more declared source roots could not be fully checked; total is unknown"
+        );
+
+        // And the sub-case where every root was skipped by the SAME policy
+        // reason: the aggregate keeps the precise `skip unascertained`
+        // word rather than collapsing it into indeterminate.
+        let both_unascertained = claude_code_all_unverified_registry_with_unascertained_primary();
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &both_unascertained,
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::SkipUnascertained,
+            "an all-unascertained family keeps the precise skip word"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "the family total stays unknown when every root stayed unknown"
+        );
+        assert!(probe.unverified_roots.is_empty());
+    }
+
+    /// W1006c (review of DSK-1): the measured-zero sibling rule is scoped to
+    /// the primary-plus-additional-roots shape ADR-059 draft D6 introduced,
+    /// and does not leak into the all-roots families that predate it. A
+    /// channel family (codebuff stable/dev/staging, antigravity's surfaces)
+    /// has no primary store that anchors it, so a scanned channel plus a
+    /// looked-for-but-absent sibling keeps the family's *combined* total
+    /// unknown — exactly the pre-DSK-1 rule, restored for these entries so
+    /// their aggregate semantics do not change under an unrelated harness's
+    /// desktop-store work.
+    #[test]
+    fn an_absent_sibling_in_an_all_roots_family_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let stable = sandbox
+            .home()
+            .join(".synthetic-manicode/stable")
+            .join("probe-stable-01.jsonl");
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&stable, b"{\"synthetic\":\"channel-session\"}\n").unwrap();
+        // The dev-channel root is deliberately NOT planted: looked for and
+        // absent, the ordinary machine that never ran a dev build.
+
+        let registry = all_roots_channel_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the scanned channel's record is collected either way"
+        );
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the family is available through its scanned channel"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "an all-roots family keeps the pre-DSK-1 rule: an absent sibling root leaves the combined total unknown — no primary store anchors this family, so the measured-zero rule does not apply; note={}",
+            probe.note
+        );
+    }
+
+    /// A `file_glob` session-directory rule selects only the transcripts the
+    /// declared glob names and takes each record's native id from the matched
+    /// file's own stem — the metadata json beside the sandbox, the audit log,
+    /// the uploads and the config-clone files are not sessions, and a
+    /// mismatched depth is not either.
+    #[test]
+    fn session_dir_file_glob_takes_the_id_from_the_transcript_filename() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.root().join("lam");
+        let (transcript, sid) = plant_cowork_session(&root);
+        let scan = collect_records(
+            &root,
+            HarnessSource::ClaudeCode,
+            "synthetic-machine",
+            "jsonl",
+            None,
+            Some(&SessionDirRule {
+                pattern: "*/*/local_*".to_string(),
+                file: None,
+                file_glob: Some(".claude/projects/*/*.jsonl".to_string()),
+                id_components: Vec::new(),
+                extra_files: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            scan.records.len(),
+            1,
+            "only the sandbox transcript counts; records={:?}",
+            scan.records
+                .iter()
+                .map(|record| record.absolute_path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(scan.records[0].id.ends_with(sid));
+        assert_eq!(scan.records[0].absolute_path, transcript);
+        assert_eq!(
+            scan.records[0].byte_size,
+            transcript.metadata().unwrap().len()
+        );
+    }
+
+    /// A session-directory rule must declare exactly one transcript target:
+    /// the literal `file` or the `file_glob`. Both at once is ambiguous data,
+    /// neither is a rule that can never match, and neither may reach the
+    /// walk (a registry is data anyone can edit; it is validated at load so
+    /// the defect is a load error, not an empty scan).
+    #[test]
+    fn session_dir_rules_declare_exactly_one_transcript_target() {
+        let cell = |session_dir: &str| {
+            let platform = current_platform();
+            format!(
+                r#"{{ "schema_version": 1, "generated": "synthetic fixture",
+                      "harnesses": [
+                        {{ "id": "claude-code", "display_name": "fixture",
+                           "paths": {{ "{platform}": {{
+                             "template": "/fixture", "format": "jsonl",
+                             "confidence": "measured-locally",
+                             "source": "synthetic fixture",
+                             "session_dir": {session_dir} }}}}
+                        }} ]}}"#
+            )
+        };
+        let neither = cell(r#"{ "pattern": "*" }"#);
+        let err = parse_registry(neither.as_str(), "neither fixture")
+            .expect_err("a rule with no transcript target must not load");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "the load error must say what to fix: {err}"
+        );
+
+        let both = cell(
+            r#"{ "pattern": "*", "file": "transcript.jsonl",
+                 "file_glob": "*/*.jsonl" }"#,
+        );
+        let err = parse_registry(both.as_str(), "both fixture")
+            .expect_err("a rule with two transcript targets must not load");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "the load error must say what to fix: {err}"
+        );
+
+        let glob_only = cell(r#"{ "pattern": "*", "file_glob": "*/*.jsonl" }"#);
+        parse_registry(glob_only.as_str(), "glob fixture")
+            .expect("a file_glob rule without a literal file loads");
+
+        let literal_only = cell(r#"{ "pattern": "*", "file": "transcript.jsonl" }"#);
+        parse_registry(literal_only.as_str(), "literal fixture")
+            .expect("a literal-file rule without a glob loads");
+    }
+
+    /// DSK-1 (ADR-059 draft D5). The shipped registry declares the desktop
+    /// transcript retention probe, in the shape the later doctor wiring will
+    /// read: the settings key, its three integer states, the longer-of-two
+    /// interaction, the managed-override reporting duty, and — only where
+    /// the read locations were measured — the user and managed files to
+    /// read. An unmeasured platform declares no managed files and says why,
+    /// because an empty measurement is a fact and a guessed path is not.
+    #[test]
+    fn registry_declares_the_desktop_session_cleanup_retention_probe() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = env::var_os(REGISTRY_ENV);
+        env::remove_var(REGISTRY_ENV);
+
+        let registry = load_registry_from_repo().expect("the shipped registry must load");
+        let claude = registry
+            .harnesses
+            .iter()
+            .find(|h| h.id == "claude-code")
+            .expect("the shipped registry must carry claude-code");
+        let probe = claude
+            .retention_probes
+            .iter()
+            .find(|probe| probe.key == "desktopSessionCleanupPeriodDays")
+            .expect("claude-code must declare the desktop transcript retention probe");
+        assert_eq!(probe.id, "desktop-session-cleanup");
+        for state in [
+            &probe.states.missing,
+            &probe.states.zero,
+            &probe.states.positive_int,
+        ] {
+            assert!(
+                !state.is_empty(),
+                "every integer state is recorded: {probe:?}"
+            );
+        }
+        assert!(
+            probe.states.missing.contains("0"),
+            "a missing key defaults to 0 (unbounded), which is NOT the cleanupPeriodDays default of 30 days"
+        );
+        assert!(
+            probe
+                .managed_override
+                .to_ascii_lowercase()
+                .contains("cleanupperioddays"),
+            "the managed override is reported against cleanupPeriodDays: {}",
+            probe.managed_override
+        );
+        let macos = probe
+            .platforms
+            .macos
+            .as_ref()
+            .expect("the measured platform cell exists");
+        assert!(
+            macos
+                .user_sources
+                .iter()
+                .any(|path| path.ends_with(".claude/settings.json")),
+            "the user settings file is where the User scope is read: {:?}",
+            macos.user_sources
+        );
+        assert!(
+            !macos.managed_sources.is_empty(),
+            "a measured cell never claims 'no managed files': the managed source list is a fact"
+        );
+        assert!(
+            macos
+                .source
+                .to_ascii_lowercase()
+                .contains("application support"),
+            "the measured cell states the desktop app-support tree is a disproved source: {}",
+            macos.source
+        );
+        for (platform, cell, reason) in [
+            (
+                "linux",
+                probe.platforms.linux.as_ref(),
+                "the linux cell declares the user file and no measured managed list",
+            ),
+            (
+                "windows",
+                probe.platforms.windows.as_ref(),
+                "the windows cell declares the user file and no measured managed list",
+            ),
+        ] {
+            let Some(cell) = cell else {
+                panic!("the {platform} cell exists with its {} state", reason)
+            };
+            assert!(
+                cell.user_sources
+                    .iter()
+                    .any(|path| path.contains("settings.json")),
+                "{platform}: the user settings file is declared: {:?}",
+                cell.user_sources
+            );
+            assert!(
+                cell.managed_sources.is_empty(),
+                "{platform}: managed locations were not measured, so none are guessed"
+            );
+        }
+
+        match previous {
+            Some(value) => env::set_var(REGISTRY_ENV, value),
+            None => env::remove_var(REGISTRY_ENV),
+        }
     }
 
     #[test]
@@ -5697,7 +7135,8 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
             id_components: Vec::new(),
             extra_files: Vec::new(),
         };
@@ -5731,7 +7170,8 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
             id_components: Vec::new(),
             extra_files: Vec::new(),
         };
@@ -5778,7 +7218,8 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "*/*".to_string(),
-            file: "transcript.jsonl".to_string(),
+            file: Some("transcript.jsonl".to_string()),
+            file_glob: None,
             id_components: Vec::new(),
             extra_files: Vec::new(),
         };
@@ -5837,7 +7278,8 @@ mod tests {
         ] {
             let rule = SessionDirRule {
                 pattern: pattern.to_string(),
-                file: "agents/main/wire.jsonl".to_string(),
+                file: Some("agents/main/wire.jsonl".to_string()),
+                file_glob: None,
                 id_components: Vec::new(),
                 extra_files: Vec::new(),
             };
@@ -5878,7 +7320,8 @@ mod tests {
         let root = Path::new("/fixture/sessions");
         let rule = SessionDirRule {
             pattern: "**/session_*".to_string(),
-            file: "agents/main/wire.jsonl".to_string(),
+            file: Some("agents/main/wire.jsonl".to_string()),
+            file_glob: None,
             id_components: Vec::new(),
             extra_files: Vec::new(),
         };
@@ -5994,6 +7437,7 @@ mod tests {
             root: None,
             confidence: Confidence::Unascertained,
             state,
+            unverified_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -6058,6 +7502,7 @@ mod tests {
                 root: None,
                 confidence: Confidence::Measured,
                 state,
+                unverified_roots: Vec::new(),
                 record_count,
                 candidate_count: None,
                 unreadable_count: None,
@@ -6213,6 +7658,7 @@ mod tests {
                 root: None,
                 confidence: Confidence::Measured,
                 state,
+                unverified_roots: Vec::new(),
                 record_count: Some(count),
                 candidate_count: Some(count),
                 unreadable_count: Some(0),

@@ -880,6 +880,12 @@ fn assert_reported_slot_is_the_installed_one(value: &serde_json::Value, home: &P
 /// assertion that uses it is that the reported fire time comes from this plist.
 /// The label is the documented one for a machine with no destination
 /// (`docs/schedule.md`, "Coming from start.md").
+///
+/// Gated for the same reason as its caller: nothing outside
+/// `assert_reported_slot_is_the_installed_one` uses it, so on a Windows build
+/// the gate above is what keeps this from becoming the next dead-code
+/// warning one platform down.
+#[cfg(unix)]
 fn installed_hourly_minute(home: &Path) -> u32 {
     let path = home.join("Library/LaunchAgents/com.chat-stasher.run-once.plist");
     let plist = fs::read_to_string(&path)

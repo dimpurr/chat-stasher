@@ -11,6 +11,15 @@
       },
       "dev_priority": "high",
       "known_issue": "on Windows the long-path directory hash is case-sensitive, so sessions can seem to disappear; the drive-letter and backslash sanitization of short paths is still unmeasured",
+      "dimensions": {
+        "supported": [
+          "surface"
+        ],
+        "surfaces": [
+          "cli",
+          "desktop-cowork"
+        ]
+      },
       "paths": {
         "macos": {
           "template": "~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl",
@@ -59,7 +68,84 @@
           "notes": "A per-machine input log, NOT sessions: captured raw and incrementally by the JSONL prefix-hash arm; stored under machine-logs/<machine>/<harness>/<log-id>/, outside session lists, counts and coverage; the read side derives a user-prompts-only view for transcript-less sessionIds (ADR-053). rotation/truncation unverified; head rewrites keep prior sealed generations and are recorded as an observation (ADR-053 D3). cleanupPeriodDays sweeps it only when the HIPAA configuration applies, `claude purge` rewrites matching lines (deletes the file outright with --all) and CLAUDE_CODE_SKIP_PROMPT_HISTORY suppresses writes (official directory docs, checked 2026-10-08), so a head rewrite is reachable and is handled by D3. dimensions: none (not a session; no 4D projection)."
         }
       ],
-      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days. Claude Code Workflows also writes one journal.jsonl per workflow run at <parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl; the scanner ids those journals by the wf_<run-uuid> directory (measured on macOS; the constant filename stem would otherwise merge every run into one session id).",
+      "source_roots": [
+        {
+          "id": "claude-desktop-cowork",
+          "paths": {
+            "macos": {
+              "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+              "format": "jsonl",
+              "confidence": "measured-locally",
+              "source": "measured locally on macOS, read-only, 2026-10-16: paths/counts/field names only. The desktop app stores Cowork / local-agent-mode sessions here, one local_<uuid>.json metadata file plus a local_<uuid>/ sandbox home per session; the session_dir rule walks <space>/<account>/local_<uuid> and the transcript is .claude/projects/<sanitized-cwd>/<sid>.jsonl inside the sandbox, whose filename id the metadata's cliSessionId resolves to 1:1 (5/5 measured; 0 ids overlap ~/.claude/projects).",
+              "notes": "Session id = the sandbox transcript's jsonl filename (the sid the metadata's cliSessionId names); the local_<uuid>.json metadata beside the sandbox supplies title/time display fields only, never identity. The desktop app writes these transcripts with the same bundled Claude Code binary the CLI store uses.",
+              "session_dir": {
+                "pattern": "*/*/local_*",
+                "file_glob": ".claude/projects/*/*.jsonl"
+              }
+            },
+            "windows": {
+              "template": "%APPDATA%\\Claude\\local-agent-mode-sessions\\",
+              "format": "jsonl",
+              "confidence": "unascertained",
+              "source": "derived, not measured: the session layout constant is the same one measured in the app bundle on macOS (join(app userData, 'local-agent-mode-sessions'), 2026-10-16), and Electron resolves userData to %APPDATA%\\Claude on Windows. No Windows install has been measured; the confidence gate refuses to walk this guessed path until one is.",
+              "session_dir": {
+                "pattern": "*/*/local_*",
+                "file_glob": ".claude/projects/*/*.jsonl"
+              }
+            }
+          },
+          "provenance": {
+            "surface": [
+              "desktop-cowork"
+            ]
+          }
+        }
+      ],
+      "retention_probes": [
+        {
+          "id": "desktop-session-cleanup",
+          "key": "desktopSessionCleanupPeriodDays",
+          "states": {
+            "missing": "the key is not set: the built-in default 0 applies, which means no ceiling — transcripts created or last written by a desktop-host surface (Claude Desktop, Cowork) are kept until deleted some other way. This default is unbounded retention and is NOT the cleanupPeriodDays default of 30 days; those transcripts are exempt from that sweep by default. Requires Claude Code v2.1.248 or later.",
+            "zero": "an explicit 0 is allowed (the key bounds an exemption from deletion; it never disables writes) and also means no ceiling.",
+            "positive_int": "a hard ceiling in days for desktop-hosted transcripts; the effective retention is the longer of this ceiling and the effective cleanupPeriodDays."
+          },
+          "managed_override": "a managed source that sets cleanupPeriodDays makes this key ignored entirely, so a probe report must show which source governed the effective value (user settings vs managed policy), never just the number.",
+          "notes": "Read only the stores the runtime itself consults: the User settings file and managed policy files. Never look under the desktop app's Application Support tree for this key — measured locally on 2026-10-16 (two machines, read-only), no retention key lives there. A one-run --settings flag also feeds the runtime but is per-session and invisible on disk; its absence from a disk probe is expected, not a gap.",
+          "platforms": {
+            "macos": {
+              "user_sources": [
+                "~/.claude/settings.json"
+              ],
+              "managed_sources": [
+                "~/.claude/managed-settings.json",
+                "/Library/Application Support/ClaudeCode/managed-settings.json",
+                "~/Library/Application Support/ClaudeCode/managed-settings.json",
+                "/etc/claude-code/managed-settings.json"
+              ],
+              "confidence": "measured-locally",
+              "source": "read-only census 2026-10-16, two macOS machines: the desktop key is absent from every settings store, all four managed locations are absent on both, and the desktop app's Application Support tree carries no retention key at all (disproved as a source); the key itself is defined by the Claude Code settings schema shipped inside the CLI and the desktop app (int(), nonnegative(), default 0). Official scope: code.claude.com/docs/en/settings-reference ('Privacy and telemetry', scope 'User or managed'), retrieved 2026-10-16."
+            },
+            "windows": {
+              "user_sources": [
+                "%USERPROFILE%\\.claude\\settings.json"
+              ],
+              "managed_sources": [],
+              "confidence": "unascertained",
+              "source": "the user settings file follows the documented settings location on every platform; managed-policy locations were not measured on Windows hardware, so none are guessed here."
+            },
+            "linux": {
+              "user_sources": [
+                "~/.claude/settings.json"
+              ],
+              "managed_sources": [],
+              "confidence": "unascertained",
+              "source": "the same documented user settings file as the other platforms; managed-policy locations were not measured on Linux, so none are guessed here."
+            }
+          }
+        }
+      ],
+      "notes": "Windows uses %USERPROFILE%, not %APPDATA%\\Claude. Windows short paths use a readable slug; long paths (>~200chars) use a path-hash directory(issue #84354); this hash remains case-sensitive on Windows(c:\\ vs C:\\ produces different directories -> sessions disappear). drive-letter colon : and backslash \\ sanitization for short paths: unascertained, needs measurement on real Windows hardware. CLAUDE_CONFIG_DIR overrides the entire base; cleanup defaults to 30 days. Claude Code Workflows also writes one journal.jsonl per workflow run at <parent-session>/subagents/workflows/wf_<run-uuid>/journal.jsonl; the scanner ids those journals by the wf_<run-uuid> directory (measured on macOS; the constant filename stem would otherwise merge every run into one session id). Desktop (Cowork / local-agent-mode) sessions are a second source root of this same harness (claude-desktop-cowork): the app keeps each one as a sandbox home under its local-agent-mode-sessions tree, the transcript is the sandbox's own .claude/projects/<sanitized-cwd>/<sid>.jsonl, and the id is that jsonl filename — the adjacent local_<uuid>.json metadata carries cliSessionId plus title/time display fields and never contributes to the identity. The macos cell is measured-locally; the windows cell is declared but unascertained (the confidence gate refuses to walk it until a real Windows install is measured); no linux cell is declared because the desktop app has no Linux build. CLI-surface sessions keep no surface observation; absence of a surface observation is 'not observed', never 'cli'. Desktop/Cowork transcripts are exempt from the cleanupPeriodDays sweep by default — desktopSessionCleanupPeriodDays bounds that exemption (see retention_probes).",
       "seal_policy": "rename",
       "seal_source": "A9 measured(macOS): 201 sample points across real write windows(172210->194561 B, 11 size changes)all lsof=0 => reopens by path each time, rename seal is safe",
       "reference": {
@@ -106,7 +192,36 @@
           "notes": "CODEX_HOME, when set and non-empty, replaces the `.codex` layer (sessions then live at %CODEX_HOME%\\sessions\\); unset, the default is %USERPROFILE%\\.codex\\sessions\\ (W285: same unresolvable-template defect as the linux cell)."
         }
       },
-      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override.",
+      "source_roots": [
+        {
+          "id": "codex-archived",
+          "paths": {
+            "macos": {
+              "template": "~/.codex/archived_sessions/",
+              "env_override": "CODEX_HOME",
+              "format": "jsonl / jsonl.zst",
+              "confidence": "measured-locally",
+              "source": "measured locally on macOS, read-only, 2026-10-16: 5 archived rollouts under ~/.codex/archived_sessions/ with the rollout-yyyy-mm-ddThh-mm-ss-<uuid>.jsonl naming of the active store and 0 id overlap against sessions/ (archive moves, not copies); the app-server's thread/archive 'moves a thread's log file into the archived directory' and thread/unarchive moves it back (developers.openai.com/codex/app-server, retrieved 2026-10-16).",
+              "notes": "A movable root of the same store: a rollout's id is its filename, so the sessions <-> archived_sessions move never forks the session."
+            },
+            "linux": {
+              "template": "$HOME/.codex/archived_sessions/",
+              "env_override": "CODEX_HOME",
+              "format": "jsonl / jsonl.zst",
+              "confidence": "source-confirmed",
+              "source": "same rollout store and CODEX_HOME resolution as the sessions root (codex-rs/utils/home-dir/src/lib.rs find_codex_home()); the archived layer is named by the shipped binary's own store strings (sessions.archived_sessions; rows under archived_sessions are archived and rows under sessions are active — measured in the vendored @openai/codex 0.160.0 binary, 2026-10-16) and by the app-server thread/archive semantics."
+            },
+            "windows": {
+              "template": "%USERPROFILE%\\.codex\\archived_sessions\\",
+              "env_override": "CODEX_HOME",
+              "format": "jsonl / jsonl.zst",
+              "confidence": "source-confirmed",
+              "source": "same as the linux cell (dirs::home_dir() returns %USERPROFILE% on Windows; the archived_sessions layer is the same rollout-store constant beside sessions)."
+            }
+          }
+        }
+      ],
+      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override. Archived threads: the desktop app's thread/archive moves a rollout from sessions/ into archived_sessions/ and thread/unarchive moves it back — codex-archived is a movable source root of the same CODEX_HOME store, and because a rollout's id is its filename the move does not fork the session; the scan counts the same thread once wherever it currently sits.",
       "seal_policy": "no-rename",
       "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746(ensure_writer_open does not reopen if already open)+ :1928(JsonlWriter holds tokio::fs::File)=> holds fd; new writes after rename go to old inode",
       "reference": {
