@@ -422,6 +422,20 @@ pub struct RegistryRetentionPaths {
     pub windows: Option<RegistryRetentionPlatform>,
 }
 
+impl RegistryRetentionPaths {
+    /// The read-location cell for `platform` ("macos"/"linux"/"windows"),
+    /// if the registry declares one — `None` is "no declared locations for
+    /// this platform", never "the key cannot exist here".
+    pub fn cell_for(&self, platform: &str) -> Option<&RegistryRetentionPlatform> {
+        match platform {
+            "macos" => self.macos.as_ref(),
+            "linux" => self.linux.as_ref(),
+            "windows" => self.windows.as_ref(),
+            _ => None,
+        }
+    }
+}
+
 /// One platform's read locations for a retention key. A cell with
 /// `confidence: "measured-locally"` must declare what its measurement found
 /// (the parser enforces that measured user *and* managed source lists are
@@ -881,6 +895,47 @@ pub struct UnverifiedRoot {
     pub state: ProbeState,
 }
 
+/// One declared source root of a *primary-plus-roots* family, measured on its
+/// own beside the family aggregate (W1009, DSK-3: doctor D3 prints one row
+/// per source root; ADR-059 draft D5/D6). A row exists for every root the
+/// registry declares **for this platform** — the primary store first, then
+/// every additional `source_roots` entry in declaration order — so an
+/// unverified root keeps its own marked row instead of being folded into a
+/// number that reads as the family total. A root whose cell this platform does
+/// not declare never gets a probe (the scan loop skips it before probing, the
+/// same way a platform without a harness cell skips that harness:
+/// `SkipWrongPlatform`'s "nothing here to have missed"), so it gets no row
+/// either. All-roots families (codebuff's channels, antigravity's surfaces)
+/// keep their pre-DSK-1 aggregate semantics and carry no rows, per the same
+/// D6 scope the aggregate rules use.
+#[derive(Debug, Clone)]
+pub struct SourceRootProbe {
+    /// The registry root id this row stands for — the canonical harness id
+    /// for the primary store (the same id [`UnverifiedRoot`] names it by),
+    /// the root's own id for every additional source root.
+    pub id: String,
+    /// True when this row is the family's primary store (the harness's own
+    /// `paths` cells) rather than a declared `source_roots` entry.
+    pub primary: bool,
+    pub state: ProbeState,
+    /// The root path this row's own subprobe resolved, when it resolved one.
+    pub root: Option<PathBuf>,
+    /// Distinct session ids this root's own walk produced. `None` when this
+    /// root was not measured (the state says why). The row's scope is the
+    /// root only: one session id sitting in two roots of a movable store
+    /// (W1007's `thread/archive` copy) counts in each row it appears in,
+    /// while the family aggregate counts it once — that is the scope each
+    /// number claims, and neither is the other.
+    pub record_count: Option<u64>,
+    pub unreadable_count: Option<u64>,
+    pub unreadable_entry_count: Option<u64>,
+    /// Sum of this root's records' byte sizes. `Some(0)` for a scanned root
+    /// that holds nothing (a measured empty); `None` when no walk produced
+    /// records for this root.
+    pub total_bytes: Option<u64>,
+    pub note: String,
+}
+
 /// One harness's fate on this machine, as decided by the registry.
 #[derive(Debug, Clone)]
 pub struct HarnessProbe {
@@ -903,6 +958,13 @@ pub struct HarnessProbe {
     /// family whose every root stayed unknown keeps the older aggregate
     /// semantics and this field empty.
     pub unverified_roots: Vec<UnverifiedRoot>,
+    /// One row per declared, platform-relevant source root of this family
+    /// (W1009/DSK-3): the same roots the aggregate merged, measured on
+    /// their own so `doctor` D3 can print one row per source root with
+    /// unverified roots explicitly marked rather than folded away. Empty
+    /// for every family outside the primary-plus-roots shape (see
+    /// [`SourceRootProbe`] for the scope rule).
+    pub source_roots: Vec<SourceRootProbe>,
     /// Session records found at this harness's root, counted by **distinct
     /// session id** — the quantity collect can address, and the quantity the
     /// multi-source-root aggregation already counted (a file count cannot
@@ -1273,6 +1335,51 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
 /// sibling `session_count` is a *qualified lower bound* — the exact count
 /// of the measured roots only — and a consumer must not read it as the
 /// family total; the listed roots are the reason it cannot be one.
+/// One [`SourceRootProbe`] row as JSON (W1009/DSK-3). Shared by `probe_json`
+/// and doctor's footprint serialisation so the same row can never render two
+/// different answers in the two doctor tables. Counts are tri-states like
+/// every other count here: a root that was not measured is `unknown` (the row
+/// also names why through `state`), `not_applicable` when the platform has
+/// no such root.
+pub fn source_root_row_json(row: &SourceRootProbe) -> serde_json::Value {
+    use crate::json_out::CountState;
+    let session_count = match row.record_count {
+        Some(count) => CountState::known(count),
+        None => match row.state {
+            ProbeState::Missing => CountState::known(0),
+            ProbeState::SkipWrongPlatform => {
+                CountState::not_applicable("registry has no cell for this platform")
+            }
+            _ => CountState::unknown(format!(
+                "this root was not measured ({})",
+                probe_state_word(row.state)
+            )),
+        },
+    };
+    let total_bytes = match row.total_bytes {
+        Some(bytes) => CountState::known(bytes),
+        None => match row.state {
+            ProbeState::Missing => CountState::not_applicable("root not present"),
+            ProbeState::SkipWrongPlatform => {
+                CountState::not_applicable("registry has no cell for this platform")
+            }
+            _ => CountState::unknown(format!(
+                "this root's bytes were not measured ({})",
+                probe_state_word(row.state)
+            )),
+        },
+    };
+    serde_json::json!({
+        "id": row.id,
+        "primary": row.primary,
+        "state": probe_state_word(row.state),
+        "root": row.root.as_ref().map(|root| root.display().to_string()),
+        "session_count": session_count,
+        "total_bytes": total_bytes,
+        "note": row.note,
+    })
+}
+
 pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
     serde_json::json!({
         "harness": p.id,
@@ -1287,6 +1394,17 @@ pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
                 "root": root.id,
                 "state": probe_state_word(root.state),
             }))
+            .collect::<Vec<_>>(),
+        // W1009/DSK-3: additive in the same sense as `unverified_roots` —
+        // present on every row, empty wherever the family is not a
+        // primary-plus-roots shape. A consumer summing `source_roots`'
+        // counts where it is non-empty reads a *lower bound*, and must
+        // consult `unverified_roots` before reading the aggregate above as
+        // a total.
+        "source_roots": p
+            .source_roots
+            .iter()
+            .map(source_root_row_json)
             .collect::<Vec<_>>(),
         "session_count": probe_session_count(p),
         "unreadable_count": probe_unreadable_count(p),
@@ -1832,6 +1950,10 @@ fn probe_harness(
     // marking below names roots by these ids — a path can carry a
     // username, an id is ours to name.
     let mut subprobe_root_ids = Vec::new();
+    // W1009/DSK-3: one `SourceRootProbe` row per subprobe. Filled only in
+    // the primary-plus-roots shape (the D6 scope the aggregate rules use);
+    // an all-roots family keeps its aggregate-only surface.
+    let mut source_rows: Vec<SourceRootProbe> = Vec::new();
     let mut total = ScanReport::default();
     // DSK-1 (plan C, ADR-059 draft): an entry may declare BOTH its primary
     // store (the `paths` cells) and additional `source_roots` — the desktop
@@ -1848,6 +1970,7 @@ fn probe_harness(
         one.source_roots.clear();
         let mut local = ScanReport::default();
         let probe = probe_harness_single(config, &one, platform, machine, &mut local);
+        source_rows.push(source_root_row(h.id.clone(), true, &probe, &local));
         total.records.extend(local.records);
         total.missing_roots.extend(local.missing_roots);
         total.indeterminate_roots.extend(local.indeterminate_roots);
@@ -1876,6 +1999,7 @@ fn probe_harness(
             confidence: Confidence::Unascertained,
             state: ProbeState::Indeterminate,
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -1950,6 +2074,9 @@ fn probe_harness(
         }
         let mut local = ScanReport::default();
         let probe = probe_harness_single(&root_config, &one, platform, machine, &mut local);
+        if primary_probeable {
+            source_rows.push(source_root_row(root.id.clone(), false, &probe, &local));
+        }
         for record in &mut local.records {
             // The cell's declared observation joins whatever the record's own
             // discovery already observed — a Kimi Code session's workspace
@@ -2147,6 +2274,7 @@ fn probe_harness(
         confidence,
         state,
         unverified_roots,
+        source_roots: source_rows,
         record_count: counts_claimable.then_some(known_count),
         // An unreadable source root has no native id to deduplicate against
         // the other roots, so candidate totals remain unknown in that case.
@@ -2168,6 +2296,47 @@ fn probe_harness(
     }
 }
 
+/// Build one [`SourceRootProbe`] row from a root's own subprobe and the same
+/// scan-local record set the aggregate folded away (W1009/DSK-3).
+///
+/// Only the subprobe state decides which tallies may be claimed: a `Scanned`
+/// root earned its byte census from the very records the walk handed out —
+/// the same standard the family footprint's byte total uses in doctor's
+/// `coverage_from_records`, with `Some(0)` as that standard's measured empty
+/// for a scanned root that holds nothing — and any other state has no byte
+/// measurement at all (`None`, never a guessed zero). Count, unreadable and
+/// entry tallies, note and root path all come from the subprobe verbatim, so
+/// a root's own row and the family aggregate can never disagree about what
+/// that root's walk saw.
+fn source_root_row(
+    id: String,
+    primary: bool,
+    probe: &HarnessProbe,
+    local: &ScanReport,
+) -> SourceRootProbe {
+    let total_bytes = match probe.state {
+        ProbeState::Scanned => Some(local.records.iter().map(|record| record.byte_size).sum()),
+        // A single-file root carries no per-record bytes in its subprobe's
+        // local report; the store-level figure the probe measured stands in.
+        // No primary-plus-roots family has a file-target root today; this
+        // arm exists so a future one cannot silently read as `None`-bytes
+        // for a store the probe did measure.
+        ProbeState::FileTarget => probe.bytes,
+        _ => None,
+    };
+    SourceRootProbe {
+        id,
+        primary,
+        state: probe.state,
+        root: probe.root.clone(),
+        record_count: probe.record_count,
+        unreadable_count: probe.unreadable_count,
+        unreadable_entry_count: probe.unreadable_entry_count,
+        total_bytes,
+        note: probe.note.clone(),
+    }
+}
+
 fn probe_harness_single(
     config: &Config,
     h: &RegistryHarness,
@@ -2182,6 +2351,7 @@ fn probe_harness_single(
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
         unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         record_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -3757,7 +3927,12 @@ fn explicit_root_is_file(root: &Path) -> bool {
 /// points at a single file (an extension-bearing basename, e.g. `opencode.db`).
 /// Returns `None` for templates that cannot be anchored at all
 /// (e.g. `$CWD/...`).
-fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
+///
+/// `pub(crate)` since W1009 (DSK-3): doctor's Desktop retention probe
+/// expands the registry's declared settings-file templates through the same
+/// expander every session root uses, so a template can never resolve two
+/// different ways in one binary.
+pub(crate) fn static_prefix_root(template: &str) -> Option<(PathBuf, bool)> {
     let mut out = String::with_capacity(template.len() + 64);
     let mut rest = template;
     let mut seen_placeholder = false;
@@ -6032,6 +6207,152 @@ mod tests {
         );
     }
 
+    /// W1009/DSK-3: doctor D3 prints one row per source root, so the probe
+    /// carries one [`SourceRootProbe`] per declared, platform-relevant root
+    /// beside the aggregate — the primary first (named by the canonical
+    /// harness id, marked `primary`), then every additional root by its own
+    /// registry id, each with its own walk's count and bytes. The rows are
+    /// the roots' own scopes: a root's count is exact, and the aggregate is
+    /// where the D6 lower-bound marking stays.
+    #[test]
+    fn a_primary_plus_roots_family_carries_one_row_per_source_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join("019d5c07-0000-7000-8000-0000000000c7.jsonl");
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        let desktop_store = sandbox
+            .home()
+            .join("Library/Application Support/Claude/local-agent-mode-sessions");
+        plant_cowork_session(&desktop_store);
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.source_roots.len(), 2, "one row per declared root");
+        let (primary, cowork) = (&probe.source_roots[0], &probe.source_roots[1]);
+        assert!(
+            primary.primary,
+            "the first row is the family's primary store"
+        );
+        assert_eq!(primary.id, "claude-code");
+        assert_eq!(primary.state, ProbeState::Scanned);
+        assert_eq!(primary.record_count, Some(1));
+        assert_eq!(
+            primary.total_bytes,
+            Some(cli_file.metadata().unwrap().len()),
+            "a scanned root's byte census is the sum of its records' sizes"
+        );
+        assert!(
+            !cowork.primary,
+            "the desktop root is an additional source root, not the primary"
+        );
+        assert_eq!(cowork.id, "claude-desktop-cowork");
+        assert_eq!(cowork.state, ProbeState::Scanned);
+        assert_eq!(cowork.record_count, Some(1));
+        assert!(
+            cowork.total_bytes.is_some_and(|bytes| bytes > 0),
+            "the desktop root's own walk measured its own bytes"
+        );
+    }
+
+    /// W1009/DSK-3: an unverified root keeps a row of its own — the whole
+    /// point of the per-root breakdown is that a root the scan never looked
+    /// at cannot be folded into a number that reads as the family total.
+    /// The row carries the skip state and no fabricated count or bytes,
+    /// while the aggregate keeps the W1006d qualified lower bound.
+    #[test]
+    fn an_unverified_source_root_keeps_its_own_marked_row() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join("019d5c08-0000-7000-8000-0000000000c8.jsonl");
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+
+        let registry = claude_code_cli_plus_unverified_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.source_roots.len(), 2);
+        let (primary, cowork) = (&probe.source_roots[0], &probe.source_roots[1]);
+        assert_eq!(primary.state, ProbeState::Scanned);
+        assert_eq!(primary.record_count, Some(1));
+        assert_eq!(
+            (cowork.id.as_str(), cowork.state),
+            ("claude-desktop-cowork", ProbeState::SkipUnascertained),
+            "the unverified root's row says why it never measured"
+        );
+        assert_eq!(
+            cowork.record_count, None,
+            "a root nobody looked at carries no count, not a zero"
+        );
+        assert_eq!(
+            cowork.total_bytes, None,
+            "a root nobody looked at carries no byte census either"
+        );
+    }
+
+    /// W1009/DSK-3: a family whose every root was looked for and found
+    /// absent still carries its rows — each a measured absence (`0`, the
+    /// state saying it) — while the aggregate keeps the W1006c "all absent
+    /// is unknown, not empty" rule.
+    #[test]
+    fn an_all_absent_family_carries_measured_absent_rows() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = claude_code_cli_plus_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.record_count, None, "all absent stays unknown");
+        assert_eq!(probe.source_roots.len(), 2);
+        for row in &probe.source_roots {
+            assert_eq!(
+                (row.state, row.record_count, row.total_bytes),
+                (ProbeState::Missing, None, None),
+                "each missing root's row is the measured absence itself; id={}",
+                row.id
+            );
+        }
+    }
+
+    /// W1009/DSK-3: the rows are scoped to the D6 primary-plus-roots shape.
+    /// An all-roots family (codebuff's channels, antigravity's surfaces)
+    /// keeps the aggregate surface it has always had — no rows — so this
+    /// change widens no family's output it was not scoped for.
+    #[test]
+    fn an_all_roots_family_carries_no_source_root_rows() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = all_roots_channel_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert!(
+            probe.source_roots.is_empty(),
+            "all-roots families keep the aggregate-only surface"
+        );
+    }
+
     /// W1006d — the other half of the rule: only when ALL roots of the
     /// family stayed unverified does the combined total stay unknown. No
     /// root was measured, so nothing anchors a lower bound and the
@@ -7466,6 +7787,7 @@ mod tests {
             confidence: Confidence::Unascertained,
             state,
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -7531,6 +7853,7 @@ mod tests {
                 confidence: Confidence::Measured,
                 state,
                 unverified_roots: Vec::new(),
+                source_roots: Vec::new(),
                 record_count,
                 candidate_count: None,
                 unreadable_count: None,
@@ -7688,6 +8011,7 @@ mod tests {
                 confidence: Confidence::Measured,
                 state,
                 unverified_roots: Vec::new(),
+                source_roots: Vec::new(),
                 record_count: Some(count),
                 candidate_count: Some(count),
                 unreadable_count: Some(0),

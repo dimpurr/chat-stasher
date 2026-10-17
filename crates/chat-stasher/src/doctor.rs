@@ -357,6 +357,550 @@ impl GeminiRetention {
 }
 
 // ---------------------------------------------------------------------------
+// D1½ — Claude Code `desktopSessionCleanupPeriodDays` (Desktop/Cowork
+// transcripts), the registry-declared retention probe (ADR-059 draft D5,
+// DSK-0a / W1009 DSK-3).
+// ---------------------------------------------------------------------------
+
+/// Which settings layer one probed file belongs to. The registry declares
+/// both lists per platform; the probe must report which one governed the
+/// effective value, or "managed overridden" reads as "the user set X"
+/// (DSK-0a, the retention-probe semantics section, item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopSourceKind {
+    User,
+    Managed,
+}
+
+impl DesktopSourceKind {
+    fn word(self) -> &'static str {
+        match self {
+            DesktopSourceKind::User => "user",
+            DesktopSourceKind::Managed => "managed",
+        }
+    }
+}
+
+/// What one settings file said (or why it could not say anything). The three
+/// broken states are kept apart for the same reason every other tri-state in
+/// this file is: an absent file is a measured absence, an unreadable or
+/// unparseable one is an unknown, and a value this probe cannot interpret is
+/// its own finding — never a silent default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopSourceOutcome {
+    /// The declared file is not on this machine. For managed locations this
+    /// is the ordinary case (measured locally on two machines: every
+    /// declared managed location was absent on both).
+    Absent,
+    /// The file is there but its bytes could not be read (permissions, I/O).
+    Unreadable(String),
+    /// The file read but is not parseable JSON. The runtime's fail-destructive
+    /// fallback applies to its own load — the desktop key's fallback is the
+    /// built-in default, which for *this* key is 0 = no ceiling (the
+    /// opposite direction of `cleanupPeriodDays`' 30-day fallback) — so this
+    /// is reported loudly, never assumed.
+    ParseFailed(String),
+    /// The file holds the key but the value is not a plain nonnegative
+    /// integer (the runtime's schema is `int().nonnegative().optional()`; an
+    /// invalid value is never applied — but which value it *would* apply is
+    /// exactly what no probe may guess).
+    InvalidValue(String),
+    /// Parsed cleanly. Each key is `None` when the file simply does not set
+    /// it — an absent key is a fact about the file, not about retention.
+    Read {
+        desktop_days: Option<u64>,
+        cleanup_days: Option<u64>,
+    },
+}
+
+/// One settings source the probe consulted, in declared order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopRetentionSource {
+    pub path: PathBuf,
+    /// The declared list the registry put this file in. Reported so the
+    /// effective value can never be attributed to the wrong layer.
+    pub kind: DesktopSourceKind,
+    pub outcome: DesktopSourceOutcome,
+}
+
+impl DesktopRetentionSource {
+    /// One `D1`-table-style line for this source.
+    fn line(&self) -> String {
+        let said = match &self.outcome {
+            DesktopSourceOutcome::Absent => "absent".to_string(),
+            DesktopSourceOutcome::Unreadable(e) => format!("unreadable: {e}"),
+            DesktopSourceOutcome::ParseFailed(e) => format!("parse failed: {e}"),
+            DesktopSourceOutcome::InvalidValue(w) => format!("invalid value: {w}"),
+            DesktopSourceOutcome::Read {
+                desktop_days,
+                cleanup_days,
+            } => {
+                let mut parts = Vec::new();
+                parts.push(match desktop_days {
+                    Some(days) => format!("{days}"),
+                    None => "not set".to_string(),
+                });
+                if let Some(days) = cleanup_days {
+                    parts.push(format!("cleanupPeriodDays={days}"));
+                }
+                parts.join(", ")
+            }
+        };
+        format!(
+            "    {:<52} [{:<7}] {}",
+            self.path.display(),
+            self.kind.word(),
+            said
+        )
+    }
+}
+
+/// The three readable states of `desktopSessionCleanupPeriodDays`, plus the
+/// managed-override shape that short-circuits all three, plus unknown. The
+/// semantics are the registry's recorded ones (`retention_probes` of
+/// `claude-code`, written in ADR-059 draft D5 from DSK-0a's measurement):
+///
+/// * **missing** — the built-in default 0 applies: no ceiling. This is NOT
+///   the `cleanupPeriodDays` missing-state default of 30; Desktop/Cowork
+///   transcripts are *exempt* from that sweep by default. Never worded as
+///   30 here.
+/// * **explicit 0** — also no ceiling (0 is allowed because this key bounds
+///   an exemption from deletion; it never disables writes).
+/// * **positive** — a hard ceiling in days; the effective retention is the
+///   *longer* of this ceiling and the effective `cleanupPeriodDays`.
+/// * **managed override** — a managed source that sets `cleanupPeriodDays`
+///   makes this key ignored entirely, so the report must name the managed
+///   source that governed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DesktopRetention {
+    /// The key is not set in any readable source → default 0 = no ceiling.
+    DefaultZero,
+    /// The key is explicitly 0 in `source` → no ceiling, by choice.
+    ExplicitZero { source: PathBuf },
+    /// A positive ceiling in `source`. `cleanup_days` is the effective
+    /// `cleanupPeriodDays` D1 measured (None when D1 could not classify,
+    /// e.g. a parse failure); `effective_days` is the longer of the two
+    /// periods where both are known.
+    Ceiling {
+        days: u64,
+        source: PathBuf,
+        cleanup_days: Option<u64>,
+        effective_days: Option<u64>,
+    },
+    /// A managed source sets `cleanupPeriodDays` → the desktop key is
+    /// ignored entirely; `days` is the policy value in `source`.
+    ManagedOverride { days: u64, source: PathBuf },
+    /// A source that could have spoken could not be read, did not parse,
+    /// or held a value this probe cannot interpret. Never fallen back to
+    /// the default — the runtime's own parse-failure fallback for a
+    /// *deletion-optional* key would be "no ceiling", but reporting that
+    /// as the user's configuration is exactly the "parsed failure read as
+    /// unset" lie D1 exists to prevent.
+    Unknown { why: String },
+}
+
+impl DesktopRetention {
+    /// The effective retention in days for Desktop/Cowork transcripts, when
+    /// known: unbounded shapes are `None` (no ceiling — kept until deleted
+    /// another way), a ceiling/override carries its effective number.
+    fn effective_days(&self) -> Option<u64> {
+        match self {
+            DesktopRetention::DefaultZero | DesktopRetention::ExplicitZero { .. } => None,
+            DesktopRetention::Ceiling { effective_days, .. } => *effective_days,
+            DesktopRetention::ManagedOverride { days, .. } => Some(*days),
+            DesktopRetention::Unknown { .. } => None,
+        }
+    }
+
+    /// True when this state hands Claude Code a live deletion window for
+    /// desktop-hosted transcripts — the same threshold D1 applies to
+    /// `cleanupPeriodDays` (never a separate standard the two knobs drift
+    /// into): a bounded retention under half a year is "still rotating".
+    fn is_dangerous(&self) -> bool {
+        matches!(self, DesktopRetention::Unknown { .. })
+            || self
+                .effective_days()
+                .is_some_and(|days| days < CLEANUP_SAFE_DAYS)
+    }
+
+    /// Short label for the D1 block's headline.
+    pub fn label(&self) -> String {
+        match self {
+            DesktopRetention::DefaultZero => {
+                "not set → default 0 = no ceiling (≠ the 30-day cleanupPeriodDays default)"
+                    .to_string()
+            }
+            DesktopRetention::ExplicitZero { source } => {
+                format!("explicit 0 = no ceiling ({})", source.display())
+            }
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                effective_days: _,
+                cleanup_days: _,
+            } => format!(
+                "{days} days ({}); effective retention is the longer of this and cleanupPeriodDays",
+                source.display()
+            ),
+            DesktopRetention::ManagedOverride { days, source } => format!(
+                "ignored — cleanupPeriodDays is managed ({days} days, {})",
+                source.display()
+            ),
+            DesktopRetention::Unknown { why } => format!("unknown ({why})"),
+        }
+    }
+}
+
+/// The full result of the Desktop retention probe.
+#[derive(Debug, Clone)]
+pub struct DesktopRetentionCheck {
+    /// Registry probe id (`desktop-session-cleanup`) and the settings key.
+    pub probe_id: String,
+    pub key: String,
+    /// Every source the probe consulted, in the registry's declared order —
+    /// user sources first, then managed — with what each said. Presence + a
+    /// kind word per row; never file contents.
+    pub sources: Vec<DesktopRetentionSource>,
+    /// The merged verdict, per [`DesktopRetention`].
+    pub state: DesktopRetention,
+}
+
+/// The effective `cleanupPeriodDays` as D1 measured it, for the
+/// longer-of-two comparison. Unset → the runtime's documented 30-day default
+/// (the same number D1's own label prints); a parse failure → `None`, which
+/// the ceiling state carries so the comparison never fabricates a floor.
+fn d1_effective_cleanup_days(verdict: &ClaudeRetention) -> Option<u64> {
+    match verdict {
+        // reason: Claude Code's documented built-in default when the key is
+        // unset is 30 days (D1 prints the same number); this is the runtime's
+        // documented default, not an unknown collapsed into a concrete value.
+        ClaudeRetention::UnsetDefault => Some(30),
+        ClaudeRetention::Safe { days, .. } | ClaudeRetention::SmallValue { days, .. } => {
+            Some(*days)
+        }
+        ClaudeRetention::ParseFailed { .. } => None,
+    }
+}
+
+/// Read one integer settings key out of a parsed settings file. `Ok(None)`
+/// = the file does not set it; `Err(_) ` = the key is present but this
+/// probe cannot interpret it (never silently dropped: the caller reports it).
+fn settings_int(value: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match value.get(key) {
+        None => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(days) => Ok(Some(days)),
+            None => Err(format!(
+                "{key} is present but not a nonnegative integer (found {})",
+                kind_word(v)
+            )),
+        },
+    }
+}
+
+/// The JSON kind word for a value this probe cannot read as a day count —
+/// so an `InvalidValue` row says what was actually there, without printing a
+/// value that may carry anything else.
+fn kind_word(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(n) if n.is_f64() => "a non-integer number",
+        serde_json::Value::Number(_) => "a negative number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Read one declared settings source and classify what it said.
+fn inspect_desktop_source(
+    template: &str,
+    kind: DesktopSourceKind,
+    key: &str,
+) -> DesktopRetentionSource {
+    // The registry's template is a settings **file**: expand it through the
+    // same expander every session root uses, refuse (as one refused probe
+    // row, not a crash) if it cannot be anchored, and treat an unanchorable
+    // template as an unreadable source — this build cannot read a value from
+    // a path it cannot name.
+    let path = match scanner::static_prefix_root(template) {
+        // reason: an unanchorable template (a variable this build does not
+        // resolve) still *names a file that may exist*; reporting the source
+        // as unreadable keeps the three states — absent / broken / read —
+        // intact instead of dropping the source and reading its absence as
+        // "the key is not set".
+        Some((path, _)) => path,
+        None => {
+            return DesktopRetentionSource {
+                path: PathBuf::from(template),
+                kind,
+                outcome: DesktopSourceOutcome::Unreadable(format!(
+                    "template cannot be resolved to a path this build knows"
+                )),
+            };
+        }
+    };
+    let outcome = match fs::read_to_string(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => DesktopSourceOutcome::Absent,
+        Err(e) => DesktopSourceOutcome::Unreadable(format!("{e}")),
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Err(e) => DesktopSourceOutcome::ParseFailed(format!("{e}")),
+            Ok(v) => match (settings_int(&v, key), settings_int(&v, "cleanupPeriodDays")) {
+                (Err(desktop), _) => DesktopSourceOutcome::InvalidValue(desktop),
+                (_, Err(cleanup)) => DesktopSourceOutcome::InvalidValue(cleanup),
+                (Ok(desktop_days), Ok(cleanup_days)) => DesktopSourceOutcome::Read {
+                    desktop_days,
+                    cleanup_days,
+                },
+            },
+        },
+    };
+    DesktopRetentionSource {
+        path,
+        kind,
+        outcome,
+    }
+}
+
+/// D1½ — read the registry-declared `desktopSessionCleanupPeriodDays` probe
+/// (claude-code's `retention_probes`, ADR-059 draft D5) and classify the
+/// machine's state, so D4 can state the Desktop/Cowork retention risk
+/// without re-deriving a location or a default.
+///
+/// Reads exactly the sources the registry declares for this platform — the
+/// User settings file plus managed policy files — and never looks under the
+/// desktop app's Application Support tree (measured there and disproved as a
+/// source, DSK-0a). `None` when this registry declares no such probe (a
+/// scratch registry, an older registry) — the check is then *not performed*
+/// rather than performed against guessed paths.
+pub fn inspect_desktop_retention(
+    registry: &scanner::HarnessRegistry,
+    claude: &ClaudeCheck,
+) -> Option<DesktopRetentionCheck> {
+    let harness = registry.harnesses.iter().find(|h| h.id == "claude-code")?;
+    let probe = harness
+        .retention_probes
+        .iter()
+        .find(|probe| probe.key == "desktopSessionCleanupPeriodDays")?;
+    let platform = scanner::current_platform();
+    let cell = probe.platforms.cell_for(platform)?;
+    let mut sources = Vec::new();
+    for template in &cell.user_sources {
+        sources.push(inspect_desktop_source(
+            template,
+            DesktopSourceKind::User,
+            &probe.key,
+        ));
+    }
+    for template in &cell.managed_sources {
+        sources.push(inspect_desktop_source(
+            template,
+            DesktopSourceKind::Managed,
+            &probe.key,
+        ));
+    }
+
+    // Managed override first (DSK-0a item 3): a managed source that sets
+    // `cleanupPeriodDays` makes the desktop key ignored entirely, whatever
+    // any user file says — so this must be decided before the key's own
+    // value, or "overridden by org policy" reads as "the user set X".
+    let managed_override = sources.iter().find_map(|source| match source {
+        DesktopRetentionSource {
+            kind: DesktopSourceKind::Managed,
+            outcome:
+                DesktopSourceOutcome::Read {
+                    cleanup_days: Some(days),
+                    ..
+                },
+            path,
+            ..
+        } => Some((*days, path.clone())),
+        _ => None,
+    });
+    let state = if let Some((days, source)) = managed_override {
+        DesktopRetention::ManagedOverride { days, source }
+    } else {
+        // The key's own value, in the runtime's precedence order: managed
+        // (policySettings) before user — the scope's own "User or managed"
+        // recorded in the registry, and the same order the runtime's settings
+        // merge consults (DSK-0a §3: policySettings first).
+        let desktop_value = sources
+            .iter()
+            .filter(|source| source.kind == DesktopSourceKind::Managed)
+            .chain(
+                sources
+                    .iter()
+                    .filter(|source| source.kind == DesktopSourceKind::User),
+            )
+            .find_map(|source| match source {
+                DesktopRetentionSource {
+                    outcome:
+                        DesktopSourceOutcome::Read {
+                            desktop_days: Some(days),
+                            ..
+                        },
+                    path,
+                    ..
+                } => Some((*days, path.clone())),
+                _ => None,
+            });
+        // Anything that could have spoken but could not be read keeps the
+        // state unknown — the same rule D1 applies to an unparsed layer,
+        // and the opposite direction of this key's fail-open runtime
+        // fallback, which is exactly why it must be said rather than lived.
+        let broken = sources.iter().find_map(|source| match &source.outcome {
+            DesktopSourceOutcome::Unreadable(e)
+            | DesktopSourceOutcome::ParseFailed(e)
+            | DesktopSourceOutcome::InvalidValue(e) => {
+                Some(format!("{}: {e}", source.path.display()))
+            }
+            _ => None,
+        });
+        match desktop_value {
+            Some((days, source)) => {
+                // 0 is allowed and means no ceiling (the key bounds an
+                // exemption from deletion; it never disables writes).
+                if days == 0 {
+                    DesktopRetention::ExplicitZero { source }
+                } else {
+                    let cleanup_days = d1_effective_cleanup_days(&claude.verdict);
+                    // The ceiling is a hard cap; the effective retention is
+                    // the *longer* of the two periods — never max-of-knowns
+                    // with a fabricated floor when the CLI side is unknown.
+                    let effective_days = cleanup_days.map(|cleanup| days.max(cleanup));
+                    DesktopRetention::Ceiling {
+                        days,
+                        source,
+                        cleanup_days,
+                        effective_days,
+                    }
+                }
+            }
+            None => match broken {
+                Some(why) => DesktopRetention::Unknown { why },
+                None => DesktopRetention::DefaultZero,
+            },
+        }
+    };
+    Some(DesktopRetentionCheck {
+        probe_id: probe.id.clone(),
+        key: probe.key.clone(),
+        sources,
+        state,
+    })
+}
+
+impl DesktopRetentionCheck {
+    /// The `--settings` invisibility note, printed with the state: a value
+    /// handed to a single run through the CLI's `--settings` flag is real to
+    /// that run and invisible to a disk probe — its absence here is expected,
+    /// not a gap (DSK-0a item 4).
+    fn invisibility_note() -> &'static str {
+        "probe reads the registry-declared user and managed settings files only; a \
+         one-run --settings value is invisible on disk and its absence is expected"
+    }
+
+    /// The D4 "so what" line for this state.
+    fn risk_line(&self) -> String {
+        let today = format_date(SystemTime::now());
+        match &self.state {
+            DesktopRetention::DefaultZero => format!(
+                "🟢 Claude Desktop/Cowork transcripts: {} is not set → default 0 = no \
+                 ceiling. Desktop/Cowork transcripts are exempt from the cleanupPeriodDays \
+                 sweep by default and are kept until deleted some other way — this is NOT \
+                 the 30-day default that governs CLI transcripts (today {today}). \
+                 — {}",
+                self.key,
+                Self::invisibility_note()
+            ),
+            DesktopRetention::ExplicitZero { source } => format!(
+                "🟢 Claude Desktop/Cowork transcripts: {} = 0 (explicitly set by {}) → \
+                 no ceiling; kept until deleted some other way (today {today}). \
+                 — 0 is allowed here because the key bounds an exemption from deletion; \
+                 it never disables writes. {}",
+                self.key,
+                source.display(),
+                Self::invisibility_note()
+            ),
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                cleanup_days,
+                effective_days,
+            } => {
+                let head = if self.state.is_dangerous() {
+                    format!(
+                        "🔴 Claude Desktop/Cowork transcripts: {} = {days} days",
+                        self.key
+                    )
+                } else {
+                    format!(
+                        "🟡 Claude Desktop/Cowork transcripts: {} = {days} days",
+                        self.key
+                    )
+                };
+                let effective = match (cleanup_days, effective_days) {
+                    (Some(cleanup), Some(effective)) => format!(
+                        "the effective retention is the longer of the two periods = \
+                         {effective} days (cleanupPeriodDays = {cleanup})"
+                    ),
+                    // D1's parse failure: the ceiling is a fact; the floor
+                    // under it is not, and saying `days` is the effective
+                    // retention would fabricate the smaller number.
+                    _ => "the effective retention cannot be computed: the \
+                          cleanupPeriodDays state is unknown (settings parse failed)"
+                        .to_string(),
+                };
+                format!(
+                    "{head} (source {}) → the desktop-kept transcripts now carry a \
+                     hard age cap where they were exempt before. {effective}. \
+                     — {}",
+                    source.display(),
+                    Self::invisibility_note()
+                )
+            }
+            DesktopRetention::ManagedOverride { days, source } => {
+                let emoji = if self.state.is_dangerous() {
+                    "🔴"
+                } else {
+                    "🟡"
+                };
+                format!(
+                    "{emoji} Claude Desktop/Cowork transcripts: {} is ignored — a managed \
+                     source ({}) sets cleanupPeriodDays = {days} days, so org policy \
+                     governs rotation and the desktop exemption is out of the user's \
+                     hands. — the report names the managing source so this never \
+                     reads as \"the user set X\"; {}",
+                    self.key,
+                    source.display(),
+                    Self::invisibility_note()
+                )
+            }
+            DesktopRetention::Unknown { why } => format!(
+                "🟡 Claude Desktop/Cowork transcripts: {} state unknown ({why}) — not \
+                 guessing the retention risk from a default. — {}",
+                self.key,
+                Self::invisibility_note()
+            ),
+        }
+    }
+
+    /// The D1-block lines: the state headline, then one row per source read.
+    fn print(&self) {
+        eprintln!(
+            "  {} (Desktop/Cowork transcripts): {}",
+            self.key,
+            self.state.label()
+        );
+        for source in &self.sources {
+            eprintln!("{}", source.line());
+        }
+        eprintln!("    ({})", Self::invisibility_note());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // D3 — coverage: which harnesses exist, and all of them accounted for?
 // ---------------------------------------------------------------------------
 
@@ -447,6 +991,15 @@ pub struct HarnessFootprint {
     /// a fully measured row and for a fully unknown one (the state says
     /// that already, and there is no measured count to qualify).
     pub unverified_roots: Vec<String>,
+    /// One row per declared source root of this family (W1009/DSK-3):
+    /// the probe's own per-root rows, carried through so the footprint
+    /// table can print one row per source root beside the aggregate —
+    /// with unverified roots explicitly marked instead of folded into a
+    /// number that reads as the family total. Copied from the probe
+    /// (`footprint_from_dir_probe`) like `unverified_roots` is, so the
+    /// two doctor tables can never disagree about a root either. Empty
+    /// for families outside the primary-plus-roots shape.
+    pub source_roots: Vec<scanner::SourceRootProbe>,
     /// The clock `earliest` / `latest` were read from. Printed with them, so a
     /// row can never be read as the other clock — see [`TimeBasis`].
     pub time_basis: TimeBasis,
@@ -511,6 +1064,7 @@ pub fn coverage_from_records<'a>(
         unreadable_entry_count: None,
         total_bytes,
         unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         time_basis,
         earliest,
         latest,
@@ -716,6 +1270,10 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
             .iter()
             .map(|root| root.id.clone())
             .collect(),
+        // A single-file family today has no additional source roots, but the
+        // W1009 rows travel the same seam the counts do — a future sqlite
+        // entry that declares `source_roots` cannot lose them here.
+        source_roots: probe.source_roots.clone(),
         // The probe read the store's own time column, not the .db file's mtime,
         // so this row is on the conversation clock.
         time_basis: TimeBasis::SessionTime,
@@ -783,6 +1341,9 @@ fn footprint_from_dir_probe<'a>(
                     .iter()
                     .map(|root| root.id.clone())
                     .collect(),
+                // W1009: a partially-unknown family still names its roots —
+                // the unverified one's own row is where the mark lives now.
+                source_roots: probe.source_roots.clone(),
                 note: if probe.note.is_empty() {
                     "one or more declared source roots are unverified; total is a lower \
                      bound"
@@ -800,11 +1361,16 @@ fn footprint_from_dir_probe<'a>(
             } else {
                 probe.note.clone()
             },
+            // W1009: carry the per-root rows for the data (a family whose
+            // roots were all measured absent still has rows); the human
+            // table decides which of them to print.
+            source_roots: probe.source_roots.clone(),
             ..default_footprint(name, root)
         };
     }
     let mut footprint = coverage_from_records(name, root, recs);
     footprint.installed = true;
+    footprint.source_roots = probe.source_roots.clone();
     footprint.candidate_count = probe.candidate_count;
     footprint.unreadable_count = probe.unreadable_count;
     footprint.unreadable_entry_count = probe.unreadable_entry_count;
@@ -843,6 +1409,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         unreadable_entry_count: None,
         total_bytes: None,
         unverified_roots: Vec::new(),
+        source_roots: Vec::new(),
         time_basis: TimeBasis::Unmeasured,
         earliest: None,
         latest: None,
@@ -852,7 +1419,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
     }
 }
 
-/// Turn the D1/D2/D3 findings into a short list of "so what + when" lines.
+/// Turn the D1/D2/D1½/D3 findings into a short list of "so what + when" lines.
 ///
 /// `scan_failed` means the registry-driven scan could not run: the
 /// claude/codex risk lines depend on session counts and are *omitted* rather
@@ -860,6 +1427,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
 fn build_risks(
     claude: &ClaudeCheck,
     gemini: &GeminiRetention,
+    desktop_retention: &Option<DesktopRetentionCheck>,
     footprints: &[HarnessFootprint],
     scan_failed: bool,
 ) -> Vec<String> {
@@ -941,6 +1509,16 @@ fn build_risks(
             ));
             }
         }
+    }
+
+    // --- Claude Desktop/Cowork retention (D1½ → D4, W1009/DSK-3) --------
+    // Present only when the registry declares the probe — a registry that
+    // declares none gets no line, which reads as "not checked here", never
+    // as "no risk". The line speaks even when the scan failed, because the
+    // settings files it reads are not scan-derived (the same standing the
+    // Claude line above has within its own scan-dependent half).
+    if let Some(check) = desktop_retention {
+        risks.push(check.risk_line());
     }
 
     // --- Gemini -----------------------------------------------------------
@@ -1084,6 +1662,13 @@ pub struct DoctorReport {
     pub config_error: Option<String>,
     pub claude: ClaudeCheck,
     pub gemini: GeminiRetention,
+    /// D1½ — the registry-declared `desktopSessionCleanupPeriodDays` probe
+    /// (ADR-059 draft D5, W1009/DSK-3): the Desktop/Cowork retention state
+    /// and the sources that decided it. `None` when this registry declares
+    /// no such probe (so the check was not performed — never "performed and
+    /// found nothing"); `Some` even on a config the run could not read,
+    /// because the settings files it probes are not config-derived.
+    pub desktop_retention: Option<DesktopRetentionCheck>,
     pub footprints: Vec<HarnessFootprint>,
     pub other_present: Vec<PathBuf>,
     pub risks: Vec<String>,
@@ -1673,11 +2258,20 @@ pub fn config_unreadable(error: String) -> DoctorReport {
     let cache = error.contains("rustic_cache_dir:").then(|| CacheCheck::Unavailable {
         detail: "`rustic_cache_dir` could not be expanded; fix that value in the config and run `chat-stasher doctor` again".to_string(),
     });
+    // D1 runs off the machine's own settings files, so a broken config does
+    // not silence it — and D1½ reads the same class of file, through the
+    // registry's declared probe locations, so the two keep the same
+    // standing here (W1009/DSK-3).
+    let claude = inspect_claude_settings(&home);
+    let desktop_retention = scanner::load_registry_from_repo()
+        .ok()
+        .and_then(|registry| inspect_desktop_retention(&registry, &claude));
     DoctorReport {
         config_source: crate::config::ConfigSource::Unreadable,
         config_error: Some(error),
-        claude: inspect_claude_settings(&home),
+        claude,
         gemini: inspect_gemini_settings(&home),
+        desktop_retention,
         footprints: Vec::new(),
         other_present,
         risks: Vec::new(),
@@ -1998,11 +2592,21 @@ pub fn run() -> DoctorReport {
 
     // D3 — use the registry-driven scanner for every directory harness. The
     // doctor no longer has a second Gemini suffix/pattern implementation.
-    let (scan, scan_failed) = match scanner::scan(&config) {
-        Ok(s) => (s, false),
+    // The registry is loaded once and shared with the D1½ retention probe
+    // (W1009/DSK-3): the scan that failed is the same registry the probe
+    // would have read, so the two checks can never disagree about what the
+    // registry declares.
+    let (registry, scan, scan_failed) = match scanner::load_registry_from_repo() {
+        Ok(registry) => match scanner::scan_with_registry(&config, &registry) {
+            Ok(s) => (Some(registry), s, false),
+            Err(e) => {
+                eprintln!("doctor: scan failed: {e}");
+                (Some(registry), scanner::ScanReport::default(), true)
+            }
+        },
         Err(e) => {
             eprintln!("doctor: scan failed: {e}");
-            (scanner::ScanReport::default(), true)
+            (None, scanner::ScanReport::default(), true)
         }
     };
     let archive_gaps = scan.archive_gaps();
@@ -2084,8 +2688,23 @@ pub fn run() -> DoctorReport {
         .map(|d| home.join(d))
         .collect();
 
+    // D1½ — the Desktop/Cowork retention state, from the same registry the
+    // scan ran with. `None` only when that registry declares no probe or
+    // could not be read — in which shape `scan_failed` is true too (or the
+    // config is unreadable, which `config_unreadable` handles), and the
+    // report says the check was not performed rather than finding nothing.
+    let desktop_retention = registry
+        .as_ref()
+        .and_then(|registry| inspect_desktop_retention(registry, &claude));
+
     // D4
-    let risks = build_risks(&claude, &gemini, &footprints, scan_failed);
+    let risks = build_risks(
+        &claude,
+        &gemini,
+        &desktop_retention,
+        &footprints,
+        scan_failed,
+    );
 
     // D5
     let reclaim = inspect_reclaim(&config);
@@ -2118,6 +2737,7 @@ pub fn run() -> DoctorReport {
         config_error: None,
         claude,
         gemini,
+        desktop_retention,
         footprints,
         other_present,
         risks,
@@ -3268,6 +3888,14 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
         "not_checked": r.not_checked(),
         "claude": claude_json(&r.claude),
         "gemini": gemini_json(&r.gemini),
+        // W1009/DSK-3: the Desktop/Cowork retention probe, additive in the
+        // same `checked` style as `keys` — `checked: false` means this run
+        // never looked (the registry declares no probe / could not be read),
+        // which no state value could say by itself.
+        "desktop_retention": match &r.desktop_retention {
+            Some(check) => desktop_retention_json(check),
+            None => serde_json::json!({"checked": false}),
+        },
         "footprints": r.footprints.iter().map(footprint_json).collect::<Vec<_>>(),
         // ADR-053 D4: machine logs are a product of their own, so they get
         // their own object rather than a row in `footprints`. A count that was
@@ -3399,6 +4027,98 @@ fn claude_json(check: &ClaudeCheck) -> serde_json::Value {
     })
 }
 
+/// The `desktop_retention` object of `doctor --json` (W1009/DSK-3). Every
+/// source the probe consulted is a row whose outcome *is* its state, and the
+/// merged verdict is tagged so a script can never read `unbounded` as
+/// `bounded` or a managed override as a user choice. `effective_days` is
+/// the state's own answer to "how long do Desktop/Cowork transcripts
+/// survive": `unbounded` carries the never-a-number shapes, and a `null`
+/// inside `ceiling` means the longer-of-two comparison itself is unknown
+/// (D1 could not classify the CLI side), never the absence of a cap.
+fn desktop_retention_json(check: &DesktopRetentionCheck) -> serde_json::Value {
+    let sources: Vec<serde_json::Value> = check
+        .sources
+        .iter()
+        .map(|source| {
+            let outcome = match &source.outcome {
+                DesktopSourceOutcome::Absent => serde_json::json!({"kind": "absent"}),
+                DesktopSourceOutcome::Unreadable(e) => {
+                    serde_json::json!({"kind": "unreadable", "why": e})
+                }
+                DesktopSourceOutcome::ParseFailed(e) => {
+                    serde_json::json!({"kind": "parse_failed", "why": e})
+                }
+                DesktopSourceOutcome::InvalidValue(w) => {
+                    serde_json::json!({"kind": "invalid_value", "why": w})
+                }
+                DesktopSourceOutcome::Read {
+                    desktop_days,
+                    cleanup_days,
+                } => serde_json::json!({
+                    "kind": "read",
+                    "desktop_session_cleanup_period_days": desktop_days,
+                    "cleanup_period_days": cleanup_days,
+                }),
+            };
+            serde_json::json!({
+                "path": source.path.display().to_string(),
+                "kind": source.kind.word(),
+                "outcome": outcome,
+            })
+        })
+        .collect();
+    let state = match &check.state {
+        DesktopRetention::DefaultZero => serde_json::json!({
+            "kind": "default_zero_unbounded",
+            "unbounded": true,
+            "effective_days": serde_json::Value::Null,
+        }),
+        DesktopRetention::ExplicitZero { source } => serde_json::json!({
+            "kind": "explicit_zero_unbounded",
+            "unbounded": true,
+            "source": source.display().to_string(),
+            "effective_days": serde_json::Value::Null,
+        }),
+        DesktopRetention::Ceiling {
+            days,
+            source,
+            cleanup_days,
+            effective_days,
+        } => serde_json::json!({
+            "kind": "ceiling",
+            "unbounded": false,
+            "days": days,
+            "source": source.display().to_string(),
+            "cleanup_period_days": cleanup_days,
+            "effective_days": effective_days,
+        }),
+        DesktopRetention::ManagedOverride { days, source } => serde_json::json!({
+            "kind": "managed_override",
+            "unbounded": false,
+            "ignored_key": true,
+            "days": days,
+            "source": source.display().to_string(),
+            "effective_days": days,
+        }),
+        DesktopRetention::Unknown { why } => serde_json::json!({
+            "kind": "unknown",
+            "unbounded": serde_json::Value::Null,
+            "why": why,
+            "effective_days": serde_json::Value::Null,
+        }),
+    };
+    serde_json::json!({
+        "checked": true,
+        "probe_id": check.probe_id,
+        "key": check.key,
+        "sources": sources,
+        "state": state,
+        // The D1½ line the D4 risk is synthesized from, carried verbatim so
+        // a script and a human never read two different verdicts.
+        "risk_line": check.risk_line(),
+    })
+}
+
 /// Gemini's retention: a known policy or an explicit unknown (a settings file
 /// that exists but could not be read). An unreadable policy is never guessed
 /// from the CLI default.
@@ -3444,6 +4164,18 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
         // measured roots only; a consumer summing these counts without
         // consulting this key reads a floor as a total.
         "unverified_roots": f.unverified_roots,
+        // W1009/DSK-3: the family's per-root rows, rendered by the same
+        // scanner-side function the registry probe rows use, so the two
+        // doctor tables can never disagree about a root. Additive in the
+        // `unverified_roots` sense: present on every row, empty where the
+        // family is not a primary-plus-roots shape. Where it is non-empty
+        // the family's `session_count` stays the D6-qualified aggregate —
+        // a consumer summing these rows' counts is summing a floor.
+        "source_roots": f
+            .source_roots
+            .iter()
+            .map(scanner::source_root_row_json)
+            .collect::<Vec<_>>(),
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
             None if f.installed || f.presence_unknown => CountState::unknown(
@@ -3640,6 +4372,98 @@ fn footprint_count_label(f: &HarnessFootprint) -> String {
     }
 }
 
+/// One source root's own D3 row (W1009/DSK-3, ADR-059 draft D5/D6): the
+/// per-root companion of the family row above it, printed one per declared
+/// root so the count a reader acts on is never "the family total" by
+/// accident.
+///
+/// The count's scope is the root only — one session id sitting in two roots
+/// of a movable store counts in each row it appears in, while the family row
+/// above counts it once — which is also why this row never carries a `≥`:
+/// a measured root's own count is exact (the family aggregate is where the
+/// D6 lower-bound marking lives). A root this scan never looked at stays
+/// `unknown` **with its state word and an explicit tie to that marking** —
+/// the row exists precisely so an unverified root cannot be silently folded
+/// into a number that reads as the family total.
+///
+/// Never a path in the label: the id is ours to name (D6's rule), and the
+/// `primary` role word is the registry's own term for the harness's `paths`
+/// store.
+fn source_root_row_line(row: &scanner::SourceRootProbe) -> String {
+    let label = if row.primary {
+        "primary".to_string()
+    } else {
+        row.id.clone()
+    };
+    let state = scanner::probe_state_word(row.state);
+    let unverified = matches!(
+        row.state,
+        scanner::ProbeState::SkipUnascertained
+            | scanner::ProbeState::SkipUnresolvable
+            | scanner::ProbeState::Indeterminate
+    );
+    let count = match row.record_count {
+        Some(count) => count.to_string(),
+        None => match row.state {
+            // A root that was looked for and found absent earns its zero —
+            // the same measured-absence rule every other count here follows.
+            scanner::ProbeState::Missing => "0".to_string(),
+            scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
+            // reason: a root this scan never measured — `state` and the mark
+            // below name why; a number here would be the exact fabricated
+            // zero the family aggregate refuses.
+            _ => "unknown".to_string(),
+        },
+    };
+    let bytes = match row.total_bytes {
+        Some(bytes) => format!("{} ({} B)", fmt_bytes(bytes), bytes),
+        None => match row.state {
+            scanner::ProbeState::Missing => "root not present".to_string(),
+            scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
+            _ => "unknown".to_string(),
+        },
+    };
+    let mark = if unverified {
+        " — unverified root: never looked at; the family count above is a \
+         ≥ lower bound over its measured roots only"
+            .to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "    {:<24} sessions {:<7} · {:<24} [{}]{}",
+        label, count, bytes, state, mark
+    )
+}
+
+/// Whether a family's per-root rows are worth their lines: a family whose
+/// every visible root was measured absent already said "not installed", and
+/// repeating measured zeros one level down is noise — while a family with
+/// any measuring **or any unverified root** keeps its rows, because the
+/// marks are the point of the change and `never silently smaller` wins over
+/// quiet (W1009/DSK-3).
+fn source_root_rows_worth_printing(rows: &[scanner::SourceRootProbe]) -> bool {
+    rows.iter().any(|row| {
+        !matches!(
+            row.state,
+            scanner::ProbeState::Missing | scanner::ProbeState::SkipWrongPlatform
+        )
+    })
+}
+
+/// Print the per-root rows of one footprint row's family (W1009/DSK-3).
+fn print_source_root_rows(f: &HarnessFootprint) {
+    if !f.source_roots.is_empty() && source_root_rows_worth_printing(&f.source_roots) {
+        for row in &f.source_roots {
+            let line = source_root_row_line(row);
+            eprintln!("{line}");
+            if !row.note.is_empty() {
+                eprintln!("        ({})", row.note);
+            }
+        }
+    }
+}
+
 fn footprint_count_detail(f: &HarnessFootprint) -> String {
     let mut parts: Vec<String> = Vec::new();
     if f.name == "cursor" {
@@ -3739,6 +4563,14 @@ pub fn print_report(r: &DoctorReport) {
     );
     for (path, v) in &r.claude.layers {
         eprintln!("    {:<52} {}", path.display(), v.label());
+    }
+    // D1½ — the Desktop/Cowork half of Claude Code's retention story
+    // (W1009/DSK-3): a second, separately-governed key the sweep reads.
+    // Its state is next to D1's because it *is* a Claude Code rotation
+    // setting; the synthesized risk is D4's.
+    if let Some(check) = &r.desktop_retention {
+        eprintln!();
+        check.print();
     }
     eprintln!();
 
@@ -3883,6 +4715,10 @@ pub fn print_report(r: &DoctorReport) {
         if !f.note.is_empty() {
             eprintln!("             ({})", f.note);
         }
+        // W1009/DSK-3 (45-DESKTOP-STORES §5 item 4): one row per source root
+        // beside the family row, unverified roots explicitly marked per the
+        // D6 lower-bound language (`≥N` stays on the family row above).
+        print_source_root_rows(f);
     }
     print_machine_logs(&r.machine_logs);
     if !r.other_present.is_empty() {
@@ -4837,6 +5673,7 @@ mod b90_unknown_count_tests {
             unreadable_entry_count: Some(0),
             total_bytes: None,
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             time_basis: TimeBasis::Unmeasured,
             earliest: None,
             latest: None,
@@ -4915,6 +5752,7 @@ mod json_tests {
             unreadable_entry_count: Some(0),
             total_bytes: Some(4096),
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             time_basis: TimeBasis::SessionTime,
             earliest: Some(UNIX_EPOCH),
             latest: None,
@@ -4932,6 +5770,7 @@ mod json_tests {
             confidence: crate::scanner::Confidence::Confirmed,
             state: scanner::ProbeState::Scanned,
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: Some(2),
             candidate_count: Some(2),
             unreadable_count: Some(0),
@@ -4957,6 +5796,9 @@ mod json_tests {
                 verdict: ClaudeRetention::UnsetDefault,
             },
             gemini: GeminiRetention::default(),
+            // No registry in this no-IO fixture, so the retention probe
+            // was not performed — `checked: false`, never a state.
+            desktop_retention: None,
             footprints: vec![fp()],
             other_present: vec![PathBuf::from("/nowhere/.cursor")],
             risks: vec![
@@ -5007,6 +5849,11 @@ mod json_tests {
     /// `keys` follows the same rule: every archive copy has its own key file
     /// (ADR-013/ADR-039), so "which keys does this machine hold" has no answer
     /// to fold into an existing field. New key, nothing renamed or removed.
+    ///
+    /// W1009 (DSK-3) adds `desktop_retention` under the same rule: the
+    /// Desktop/Cowork retention probe is a distinct check (its own sources,
+    /// its own three-state vocabulary, `checked: false` when the registry
+    /// declares no probe) that has no half of an existing field to live in.
     #[test]
     fn doctor_json_top_level_field_names_are_stable() {
         let v = report_to_json(&report());
@@ -5021,6 +5868,7 @@ mod json_tests {
                 "command",
                 "config_error",
                 "config_source",
+                "desktop_retention",
                 "destinations",
                 "footprints",
                 "fts_indexes",
@@ -5453,6 +6301,7 @@ mod report_to_json_shape_tests {
                 verdict: ClaudeRetention::UnsetDefault,
             },
             gemini: GeminiRetention::default(),
+            desktop_retention: None,
             footprints: Vec::new(),
             other_present: Vec::new(),
             risks: Vec::new(),
@@ -5628,6 +6477,7 @@ mod w285_coverage_and_clock_tests {
             confidence: Confidence::Unascertained,
             state,
             unverified_roots: Vec::new(),
+            source_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -5881,6 +6731,7 @@ mod w1006d_lower_bound_tests {
                 id: "claude-desktop-cowork".to_string(),
                 state: scanner::ProbeState::SkipUnascertained,
             }],
+            source_roots: Vec::new(),
             record_count: Some(count),
             candidate_count: Some(count),
             unreadable_count: Some(0),
@@ -5933,5 +6784,771 @@ mod w1006d_lower_bound_tests {
             vec!["claude-desktop-cowork".to_string()]
         );
         assert_eq!(fp.session_count, absent.record_count);
+    }
+}
+
+#[cfg(test)]
+mod w1009_doctor_desktop_tests {
+    use super::*;
+    use crate::scanner::{HarnessRegistry, ProbeState, SourceRootProbe};
+
+    // -----------------------------------------------------------------
+    // D3 — per-root rows
+    // -----------------------------------------------------------------
+
+    fn row(id: &str, primary: bool, state: ProbeState) -> SourceRootProbe {
+        SourceRootProbe {
+            id: id.to_string(),
+            primary,
+            state,
+            root: Some(PathBuf::from("/nowhere/roots").join(id)),
+            record_count: (state == ProbeState::Scanned).then_some(1),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            total_bytes: (state == ProbeState::Scanned).then_some(23),
+            note: String::new(),
+        }
+    }
+
+    /// W1009/DSK-3, the row's scope rule: a measured root's own count is
+    /// exact — no `≥`, because the D6 lower-bound marking belongs to the
+    /// family aggregate the row sits under, and a root cannot qualify itself.
+    #[test]
+    fn a_scanned_root_row_prints_its_exact_count_and_state() {
+        let line = source_root_row_line(&row("codex-archived", false, ProbeState::Scanned));
+        assert!(
+            line.contains("codex-archived") && line.contains("sessions 1"),
+            "the row names its root and its own count; got: {line:?}"
+        );
+        assert!(
+            line.contains("[scanned]"),
+            "the state word travels with the row; got: {line:?}"
+        );
+        assert!(
+            !line.contains('≥'),
+            "a per-root count is the root's own measurement, never a lower bound"
+        );
+        assert!(
+            !line.contains("primary"),
+            "an additional root is named by id"
+        );
+    }
+
+    /// The primary row is named by its role, not by a guessed store name —
+    /// `primary` is the registry's own term for the harness's `paths` store.
+    #[test]
+    fn the_primary_row_is_named_by_its_role() {
+        let line = source_root_row_line(&row("claude-code", true, ProbeState::Scanned));
+        assert!(
+            line.contains("primary") && !line.contains("claude-code"),
+            "the primary row's label is the role word; got: {line:?}"
+        );
+    }
+
+    /// The unverified mark: a root this scan never looked at prints `unknown`
+    /// with its state word and the explicit tie back to the family aggregate
+    /// — exactly the "explicitly marked" D6 language asks for, so the family
+    /// number can never silently count as exact.
+    #[test]
+    fn an_unverified_root_row_prints_the_mark_and_no_count() {
+        let mut unverified = row(
+            "claude-desktop-cowork",
+            false,
+            ProbeState::SkipUnascertained,
+        );
+        unverified.record_count = None;
+        unverified.total_bytes = None;
+        let line = source_root_row_line(&unverified);
+        assert!(
+            line.contains("sessions unknown"),
+            "a root nobody looked at carries no count; got: {line:?}"
+        );
+        assert!(
+            line.contains("[skip_unascertained]"),
+            "the row names why it never measured; got: {line:?}"
+        );
+        assert!(
+            line.contains("unverified root") && line.contains("lower bound"),
+            "the mark ties the row to the family's ≥ aggregate; got: {line:?}"
+        );
+    }
+
+    /// A measured absence is the one count that is earned: a root that was
+    /// looked for and found absent prints `0` — the same rule every other
+    /// count in this file follows.
+    #[test]
+    fn a_missing_root_row_prints_its_earned_zero() {
+        let mut missing = row("codex-archived", false, ProbeState::Missing);
+        missing.record_count = None;
+        missing.total_bytes = None;
+        let line = source_root_row_line(&missing);
+        assert!(
+            line.contains("sessions 0") && line.contains("root not present"),
+            "a missing root's row is the measured absence; got: {line:?}"
+        );
+        assert!(
+            !line.contains("unknown") && !line.contains("unverified"),
+            "a measured absence is neither an unknown nor a mark; got: {line:?}"
+        );
+    }
+
+    /// The print rule: rows stay quiet only when every visible root was
+    /// measured absent (the family already said "not installed"); anything
+    /// else — a measurement, an unverified root, an indeterminate one —
+    /// keeps its rows, because `never silently smaller` beats quiet.
+    #[test]
+    fn rows_print_unless_every_root_was_measured_absent() {
+        assert!(
+            !source_root_rows_worth_printing(&[]),
+            "no rows, nothing to print"
+        );
+        assert!(
+            !source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Missing),
+                row("claude-desktop-cowork", false, ProbeState::Missing),
+            ]),
+            "an all-absent family already said 'not installed'; rows would repeat zeros"
+        );
+        assert!(
+            source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Scanned),
+                row("claude-desktop-cowork", false, ProbeState::Missing),
+            ]),
+            "a scanned primary keeps its rows beside the measured-absent sibling"
+        );
+        assert!(
+            source_root_rows_worth_printing(&[
+                row("claude-code", true, ProbeState::Missing),
+                row(
+                    "claude-desktop-cowork",
+                    false,
+                    ProbeState::SkipUnascertained
+                ),
+            ]),
+            "the W1006e floor shape keeps its rows — the unverified mark is the point"
+        );
+    }
+
+    /// The two doctor tables share one renderer per root, so they can never
+    /// disagree about a root (`doctor_consistency_test` joins the family
+    /// counts; this pins the root rows to the same single source).
+    #[test]
+    fn the_footprint_row_and_the_registry_probe_row_agree_per_root() {
+        let mut probe = scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: Some(PathBuf::from("/nowhere/projects")),
+            confidence: crate::scanner::Confidence::Confirmed,
+            state: ProbeState::Scanned,
+            unverified_roots: Vec::new(),
+            source_roots: vec![
+                row("claude-code", true, ProbeState::Scanned),
+                row("claude-desktop-cowork", false, ProbeState::Scanned),
+            ],
+            record_count: Some(2),
+            candidate_count: Some(2),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        };
+        let records = [w1006d_lower_bound_records(0), w1006d_lower_bound_records(1)];
+        let footprint = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&probe),
+            records.iter(),
+        );
+        assert_eq!(footprint.source_roots.len(), 2);
+        assert_eq!(
+            footprint.source_roots[0].id, probe.source_roots[0].id,
+            "the footprint row carries the probe's own rows, id for id"
+        );
+        let footprint_json_rows: Vec<serde_json::Value> = footprint_json(&footprint)
+            ["source_roots"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let probe_json_rows: Vec<serde_json::Value> = scanner::probe_json(&probe)["source_roots"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            footprint_json_rows, probe_json_rows,
+            "the two tables render each root through the same function"
+        );
+        probe.source_roots.clear();
+    }
+
+    // -----------------------------------------------------------------
+    // D1½ — the desktop retention probe
+    // -----------------------------------------------------------------
+
+    /// A scratch registry whose retention probe declares *absolute* source
+    /// files inside `dir` — no `~` expansion, so the test never touches the
+    /// machine's real settings files and needs no env mutation.
+    fn retention_registry(dir: &Path) -> HarnessRegistry {
+        let platform_key = scanner::current_platform();
+        let cell = serde_json::json!({
+            "user_sources": [dir.join("user-settings.json").to_str().unwrap()],
+            "managed_sources": [dir.join("managed-settings.json").to_str().unwrap()],
+            "confidence": "measured-locally",
+            "source": "synthetic fixture",
+        });
+        let platforms = serde_json::json!({ platform_key: cell });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+                "retention_probes": [{
+                    "id": "desktop-session-cleanup",
+                    "key": "desktopSessionCleanupPeriodDays",
+                    "states": {
+                        "missing": "synthetic missing",
+                        "zero": "synthetic zero",
+                        "positive_int": "synthetic positive"
+                    },
+                    "platforms": platforms,
+                }],
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn claude_verdict(days: Option<u64>) -> ClaudeCheck {
+        let verdict = match days {
+            None => ClaudeRetention::UnsetDefault,
+            Some(days) => ClaudeRetention::Safe {
+                days,
+                source: PathBuf::from("/nowhere/.claude/settings.json"),
+            },
+        };
+        ClaudeCheck {
+            layers: vec![(
+                PathBuf::from("/nowhere/.claude/settings.json"),
+                verdict.clone(),
+            )],
+            verdict,
+        }
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn inspect(dir: &Path, user: &str, managed: &str, days: Option<u64>) -> DesktopRetentionCheck {
+        write(dir, "user-settings.json", user);
+        write(dir, "managed-settings.json", managed);
+        inspect_desktop_retention(&retention_registry(dir), &claude_verdict(days))
+            .expect("the fixture registry declares the probe")
+    }
+
+    /// Missing → the built-in default 0 = no ceiling — and the state is
+    /// worded as exactly that, never as the 30-day CLI default, because the
+    /// desktop exemption is governed by a *different* key with a different
+    /// default (DSK-0a, the retention-probe semantics section, item 2).
+    #[test]
+    fn a_missing_desktop_key_is_the_unbounded_default_never_thirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{\"cleanupPeriodDays\": 90}", "{}", Some(90));
+        assert!(matches!(check.state, DesktopRetention::DefaultZero));
+        let line = check.risk_line();
+        assert!(
+            line.contains("default 0 = no ceiling"),
+            "the line states the real default; got: {line:?}"
+        );
+        assert!(
+            line.contains("NOT the 30-day"),
+            "the line distinguishes the CLI default explicitly; got: {line:?}"
+        );
+        assert!(
+            !check.state.is_dangerous(),
+            "unbounded retention is not a deletion window"
+        );
+    }
+
+    /// Explicit 0 is the same retention as the default (no ceiling) but a
+    /// different fact about who set it — the state says the user did.
+    #[test]
+    fn an_explicit_zero_is_unbounded_by_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 0, \"cleanupPeriodDays\": 36500}",
+            "{}",
+            Some(36500),
+        );
+        match &check.state {
+            DesktopRetention::ExplicitZero { source } => assert_eq!(
+                source,
+                &dir.path().join("user-settings.json"),
+                "the state names which file set the explicit zero"
+            ),
+            other => panic!("expected ExplicitZero, got {other:?}"),
+        }
+    }
+
+    /// A positive ceiling makes the effective retention the LONGER of the two
+    /// periods — never the smaller one, and never the ceiling alone when D1
+    /// could classify the CLI side. Both sides of the max are pinned.
+    #[test]
+    fn a_positive_ceiling_takes_the_longer_of_the_two_periods() {
+        let dir = tempfile::tempdir().unwrap();
+        // Desktop ceiling below the CLI cleanup: the CLI side wins.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 14, \"cleanupPeriodDays\": 36500}",
+            "{}",
+            Some(36500),
+        );
+        match &check.state {
+            DesktopRetention::Ceiling {
+                days,
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*days, 14);
+                assert_eq!(*cleanup_days, Some(36500));
+                assert_eq!(*effective_days, Some(36500));
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        // Desktop ceiling above the CLI cleanup: the ceiling wins — the key
+        // bounds an exemption, so it can only loosen, never tighten the
+        // effective retention below cleanupPeriodDays.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 20000, \"cleanupPeriodDays\": 30}",
+            "{}",
+            Some(30),
+        );
+        match &check.state {
+            DesktopRetention::Ceiling { effective_days, .. } => {
+                assert_eq!(*effective_days, Some(20000))
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        // Unset cleanupPeriodDays means the runtime's 30-day default is the
+        // comparison floor — and a ceiling below the safe threshold is a
+        // live deletion window for transcripts that were exempt before.
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 15}",
+            "{}",
+            None,
+        );
+        match &check.state {
+            DesktopRetention::Ceiling {
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*cleanup_days, Some(30));
+                assert_eq!(*effective_days, Some(30));
+            }
+            other => panic!("expected Ceiling, got {other:?}"),
+        }
+        assert!(
+            check.state.is_dangerous(),
+            "an effective 30 days is the same live window D1 flags for the CLI side"
+        );
+        let line = check.risk_line();
+        assert!(
+            line.starts_with('🔴'),
+            "a small effective ceiling is red; got: {line:?}"
+        );
+    }
+
+    /// When D1's cleanupPeriodDays layer could not classify (parse failure),
+    /// the longer-of-two comparison itself is unknown — stated as such,
+    /// never silently dropped to the ceiling's own number.
+    #[test]
+    fn an_unclassifiable_cleanup_side_keeps_the_comparison_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path(),
+            "user-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 90}",
+        );
+        write(&dir.path(), "managed-settings.json", "{}");
+        // A parse-failed D1 verdict, which no day count can be built from.
+        let parse_failed = ClaudeCheck {
+            layers: vec![(
+                PathBuf::from("/nowhere/.claude/settings.json"),
+                ClaudeRetention::UnsetDefault,
+            )],
+            verdict: ClaudeRetention::ParseFailed {
+                path: PathBuf::from("/nowhere/.claude/settings.json"),
+                error: "synthetic parse failure".to_string(),
+            },
+        };
+        let check = inspect_desktop_retention(&retention_registry(dir.path()), &parse_failed)
+            .expect("the fixture registry declares the probe");
+        match &check.state {
+            DesktopRetention::Ceiling {
+                cleanup_days,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*cleanup_days, None);
+                assert_eq!(
+                    *effective_days, None,
+                    "the comparison cannot fabricate a floor from a parse failure"
+                );
+            }
+            other => panic!("expected Ceiling with unknown floor, got {other:?}"),
+        }
+        let line = check.risk_line();
+        assert!(
+            line.contains("cannot be computed"),
+            "the risk line states the comparison itself is unknown; got: {line:?}"
+        );
+    }
+
+    /// The managed override (DSK-0a item 3): a managed source that sets
+    /// `cleanupPeriodDays` makes the desktop key ignored entirely, whatever
+    /// the user's file says — the state must name the managing source, or
+    /// "overridden by org policy" reads as "the user set X".
+    #[test]
+    fn a_managed_cleanup_period_overrides_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 20000, \"cleanupPeriodDays\": 36500}",
+            "{\"cleanupPeriodDays\": 45}",
+            Some(45),
+        );
+        match &check.state {
+            DesktopRetention::ManagedOverride { days, source } => {
+                assert_eq!(*days, 45);
+                assert_eq!(
+                    source,
+                    &dir.path().join("managed-settings.json"),
+                    "the state names the managed source that governs"
+                );
+            }
+            other => panic!("expected ManagedOverride, got {other:?}"),
+        }
+        let line = check.risk_line();
+        assert!(
+            line.contains("ignored") && line.contains("managed"),
+            "the line says the desktop key is ignored, and why; got: {line:?}"
+        );
+        assert!(
+            check.state.is_dangerous(),
+            "a 45-day policy window is a live deletion window"
+        );
+    }
+
+    /// The runtime's own precedence for the key: managed (policySettings)
+    /// before user — the scope is "User or managed", so a managed desktop
+    /// value wins over the user's, while a managed cleanup override never
+    /// leaves room for the user's desktop value at all.
+    #[test]
+    fn a_managed_desktop_value_outranks_the_user_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path(),
+            "user-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 5}",
+        );
+        write(
+            dir.path(),
+            "managed-settings.json",
+            "{\"desktopSessionCleanupPeriodDays\": 400}",
+        );
+        let check = inspect_desktop_retention(
+            &retention_registry(dir.path()),
+            &claude_verdict(Some(36500)),
+        )
+        .expect("the fixture registry declares the probe");
+        match &check.state {
+            DesktopRetention::Ceiling {
+                days,
+                source,
+                effective_days,
+                ..
+            } => {
+                assert_eq!(*days, 400, "the managed value wins for this key");
+                assert_eq!(
+                    source,
+                    &dir.path().join("managed-settings.json"),
+                    "the governed value is attributed to the managed file"
+                );
+                assert_eq!(*effective_days, Some(36500));
+            }
+            other => panic!("expected Ceiling from the managed value, got {other:?}"),
+        }
+    }
+
+    /// A settings file that is there but cannot be parsed (or holds a value
+    /// this probe cannot interpret) keeps the state unknown — the runtime's
+    /// fail-destructive fallback for this key would read as *unbounded*, but
+    /// reporting that as if it were the configured value is exactly the
+    /// "parse failure read as unset" lie D1 exists to prevent.
+    #[test]
+    fn broken_or_uninterpretable_sources_stay_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": ",
+            "{}",
+            None,
+        );
+        assert!(
+            matches!(check.state, DesktopRetention::Unknown { .. }),
+            "a parse failure is unknown, never the (fail-open) default; got {:?}",
+            check.state
+        );
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": -7}",
+            "{}",
+            None,
+        );
+        match &check.state {
+            DesktopRetention::Unknown { why } => assert!(
+                why.contains("not a nonnegative integer"),
+                "an invalid value says what was found; got: {why:?}"
+            ),
+            other => panic!("expected Unknown for an invalid value, got {other:?}"),
+        }
+        for check in [&check] {
+            let line = check.risk_line();
+            assert!(
+                line.starts_with('🟡') && line.contains("not guessing"),
+                "an unknown state is yellow and refuses to guess; got: {line:?}"
+            );
+        }
+    }
+
+    // The desktop key present in an unreadable file + the key's real value
+    // in others? A file that exists but cannot be read: `fs::read_to_string`
+    // with a directory in the path is the deterministic shape.
+    #[test]
+    fn an_unreadable_source_keeps_the_state_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = retention_registry(dir.path());
+        let unreadable = dir.path().join("user-settings.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::write(dir.path().join("managed-settings.json"), "{}").unwrap();
+        let check = inspect_desktop_retention(&registry, &claude_verdict(None))
+            .expect("the fixture registry declares the probe");
+        assert!(
+            matches!(check.state, DesktopRetention::Unknown { .. }),
+            "a source that cannot be read keeps the state unknown; got {:?}",
+            check.state
+        );
+    }
+
+    /// A registry that declares no such probe means the check was not
+    /// performed — `None`, never a state, never a default. The same answer
+    /// a platform without a retention cell gives.
+    #[test]
+    fn a_registry_without_the_probe_is_not_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_probe: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+            }]
+        }))
+        .unwrap();
+        assert!(
+            inspect_desktop_retention(&no_probe, &claude_verdict(None)).is_none(),
+            "no declared probe → not performed"
+        );
+        // A probe whose cells name only *other* platforms: same answer.
+        let platform_key = scanner::current_platform();
+        let other = if platform_key == "macos" {
+            "linux"
+        } else {
+            "macos"
+        };
+        let only_elsewhere: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": {},
+                "retention_probes": [{
+                    "id": "desktop-session-cleanup",
+                    "key": "desktopSessionCleanupPeriodDays",
+                    "states": {},
+                    "platforms": { other: {
+                        "user_sources": ["/nowhere/elsewhere/settings.json"],
+                        "managed_sources": [],
+                        "confidence": "measured-locally",
+                        "source": "synthetic fixture"
+                    }},
+                }],
+            }]
+        }))
+        .unwrap();
+        assert!(
+            inspect_desktop_retention(&only_elsewhere, &claude_verdict(None)).is_none(),
+            "no cell for this platform → not performed"
+        );
+    }
+
+    /// The D4 line rides the risks list when (and only when) the check ran —
+    /// a script and a human read the same verdict, and the risks list grows
+    /// by exactly one Claude-desktop line beside the existing Claude one.
+    #[test]
+    fn build_risks_carries_the_desktop_line_only_when_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{}", "{}", None);
+        let claude = claude_verdict(Some(36500));
+        let gemini = GeminiRetention {
+            enabled: false,
+            ..GeminiRetention::default()
+        };
+        let with = build_risks(&claude, &gemini, &Some(check.clone()), &[], false);
+        assert_eq!(with.len(), 3, "claude + desktop + gemini lines");
+        assert!(
+            with[1].starts_with('🟢') && with[1].contains("Claude Desktop/Cowork"),
+            "the desktop line sits beside the Claude line, green for the unbounded default; got: {:?}",
+            with[1]
+        );
+        let without = build_risks(&claude, &gemini, &None, &[], false);
+        assert_eq!(without.len(), 2, "no declared probe → no desktop line");
+        assert!(
+            !without
+                .iter()
+                .any(|line| line.contains("Claude Desktop/Cowork")),
+            "the only Claude lines left are the pre-existing ones"
+        );
+        // JSON mirrors the state: checked with tagged kinds, unchecked null.
+        let value = desktop_retention_json(&check);
+        assert_eq!(
+            value["checked"],
+            serde_json::json!(true),
+            "a performed check says so"
+        );
+        assert_eq!(
+            value["state"]["kind"],
+            serde_json::json!("default_zero_unbounded")
+        );
+    }
+
+    /// The sources table: one row per declared file, stating its kind and
+    /// what it said — a managed source that set nothing renders "not set"
+    /// beside an absent one, so which layer spoke is always readable.
+    #[test]
+    fn every_declared_source_gets_a_row_with_its_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 60}",
+            "{\"cleanupPeriodDays\": 90}",
+            Some(90),
+        );
+        assert_eq!(check.sources.len(), 2);
+        let user = &check.sources[0];
+        assert_eq!(user.kind, DesktopSourceKind::User);
+        assert_eq!(
+            user.outcome,
+            DesktopSourceOutcome::Read {
+                desktop_days: Some(60),
+                cleanup_days: None,
+            }
+        );
+        let managed = &check.sources[1];
+        assert_eq!(managed.kind, DesktopSourceKind::Managed);
+        // The managed file sets cleanupPeriodDays, so the override rule
+        // decides the state — the desktop key the user file set is ignored
+        // entirely. The source rows still record what each file said,
+        // which is what makes the override readable instead of silent.
+        assert_eq!(
+            managed.outcome,
+            DesktopSourceOutcome::Read {
+                desktop_days: None,
+                cleanup_days: Some(90),
+            }
+        );
+        assert!(
+            matches!(
+                check.state,
+                DesktopRetention::ManagedOverride { days: 90, .. }
+            ),
+            "a managed cleanupPeriodDays overrides the desktop key; got {:?}",
+            check.state
+        );
+    }
+
+    /// The JSON state variants a script needs: a managed override is tagged
+    /// `ignored_key`, matching the "never read the override as a user
+    /// choice" rule in two channels, not one.
+    #[test]
+    fn the_json_tags_the_managed_override_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(
+            &dir.path(),
+            "{\"desktopSessionCleanupPeriodDays\": 400}",
+            "{\"cleanupPeriodDays\": 30}",
+            None,
+        );
+        let value = desktop_retention_json(&check);
+        assert_eq!(
+            value["state"]["kind"],
+            serde_json::json!("managed_override")
+        );
+        assert_eq!(
+            value["state"]["ignored_key"],
+            serde_json::json!(true),
+            "a script must be able to tell a policy override from a user choice"
+        );
+        assert_eq!(value["state"]["days"], serde_json::json!(30));
+    }
+
+    /// The `--settings` invisibility note travels with every state — a
+    /// one-run flag value that never lands on disk is expected to be absent
+    /// from this probe, and the reader must not mistake that absence for a
+    /// gap (DSK-0a item 4).
+    #[test]
+    fn every_state_carries_the_settings_flag_invisibility_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = inspect(&dir.path(), "{}", "{}", None);
+        assert!(
+            check.risk_line().contains("--settings"),
+            "the note names the invisible source; got: {}",
+            check.risk_line()
+        );
+        // And the D1-block headline states the state, not just the risk.
+        let label = check.state.label();
+        assert!(
+            label.contains("default 0 = no ceiling"),
+            "the label answers 'what is the desktop retention' directly; got: {label:?}"
+        );
+    }
+
+    // Helper: synthetic SessionRecords for the dir-probe seam test above,
+    // in the shape W1006d's `session_record` helper uses.
+    fn w1006d_lower_bound_records(i: u8) -> crate::models::SessionRecord {
+        crate::models::SessionRecord {
+            id: format!("claude-code.fixture.0000000{i}"),
+            absolute_path: PathBuf::from(format!("/nowhere/projects/s{i}.jsonl")),
+            byte_size: 1,
+            mtime: UNIX_EPOCH,
+            source: crate::models::HarnessSource::ClaudeCode,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+            movable_root: false,
+        }
     }
 }
