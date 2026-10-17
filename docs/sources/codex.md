@@ -20,7 +20,7 @@
 
 ## What it is
 
-Codex is the OpenAI coding agent CLI. It writes each session as a rollout file under `~/.codex/sessions/`, one JSONL stream of records per session, compressing the file with zstandard once it goes idle. The whole tree can be relocated with `CODEX_HOME`, which replaces the `.codex` layer entirely; the CLI does not follow the XDG variables. The desktop app drives the same CLI through its app-server and moves a thread's rollout into `~/.codex/archived_sessions/` when you archive it (and back when you unarchive), so that directory is scanned as a second root of the same store. This tool scans and archives both roots read-only, decompressing the idle `.jsonl.zst` files as it goes.
+Codex is the OpenAI coding agent CLI. It writes each session as a rollout file under `~/.codex/sessions/`, one JSONL stream of records per session, compressing the file with zstandard once it goes idle. The whole tree can be relocated with `CODEX_HOME`, which replaces the `.codex` layer entirely; the CLI does not follow the XDG variables. The desktop app drives the same CLI through its app-server — [Codex's app-server interface](https://developers.openai.com/codex/app-server), which when checked on 2026-10-16 documented `thread/archive` as moving a thread's log file into the archived directory and `thread/unarchive` as restoring it to the active sessions directory — and moves a thread's rollout into `~/.codex/archived_sessions/` when you archive it (and back when you unarchive), so that directory is scanned as a second root of the same store. This tool scans and archives both roots read-only, decompressing the idle `.jsonl.zst` files as it goes.
 
 ## What we collect
 
