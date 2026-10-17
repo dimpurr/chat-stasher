@@ -77,6 +77,16 @@ fn plant_dir_sessions(home: &Path) {
             "{}\n",
         );
     }
+    // The SAME rollout uuid under the archived root beside the active one
+    // (thread/archive moves rollouts between the two roots of one store;
+    // a copy left behind is the same thread, not a second one). Both
+    // tables must count the thread once — this is the W1007 uuid-dedup
+    // join: the footprint's record-derived count and the probe's
+    // unique-id aggregate have to agree through this shape too.
+    write(
+        &home.join(".codex/archived_sessions/2026-08-01/019bf00d-0000.jsonl"),
+        "{}\n",
+    );
     write(&home.join(".gemini/tmp/session-a.json"), "{}\n");
     write(&home.join(".gemini/tmp/session-b.jsonl"), "{}\n");
     // A non-session JSON that the registry session_pattern must reject.
@@ -303,6 +313,18 @@ fn doctor_tables_never_contradict_any_harness() {
         opencode.session_count,
         Some(OPENCODE_SESSIONS),
         "footprint table self-check against known ground truth: should recognize our {OPENCODE_SESSIONS} planted SQLite sessions"
+    );
+    let codex = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "codex")
+        .unwrap();
+    assert_eq!(
+        codex.session_count,
+        Some(CODEX_SESSIONS),
+        "footprint table self-check against known ground truth: the same rollout \
+         uuid in both codex roots (sessions/ and the archived_sessions/ move \
+         target) is {CODEX_SESSIONS} thread, counted once"
     );
     let cursor = report
         .footprints

@@ -108,6 +108,7 @@ fn live_source(sandbox_root: &Path, name: &str, entries: &[Value]) -> (SessionRe
         sqlite_layout: Some(SqliteSessionLayout::GrokBot),
         provenance: Default::default(),
         session_dir: None,
+        movable_root: false,
     };
     (record, source)
 }

@@ -13353,6 +13353,7 @@ mod decision_surface_tests {
             sqlite_layout: Some(chat_stasher::models::SqliteSessionLayout::OpenCode),
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         });
         let output = render_archive_gap_notice(&report);
         assert!(
@@ -13375,6 +13376,7 @@ mod decision_surface_tests {
                     sqlite_layout: None,
                     provenance: Default::default(),
                     session_dir: None,
+                    movable_root: false,
                 })
                 .collect(),
             missing_roots: Vec::new(),

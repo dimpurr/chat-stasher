@@ -478,6 +478,18 @@ pub struct RegistrySourceRoot {
     pub default_only: bool,
     #[serde(default)]
     pub provenance: crate::provenance::SessionProvenance,
+    /// This root belongs to a store that MOVES its files between the roots
+    /// of one registry entry, keeping the file's own name as the session's
+    /// identity wherever it sits (W1007, ADR-059 draft D4): codex's
+    /// `archived_sessions/` to and from which the desktop's
+    /// `thread/archive` / `thread/unarchive` moves rollouts. The flag rides
+    /// every record discovered through this root as
+    /// [`crate::models::SessionRecord::movable_root`], where it lets the
+    /// collector treat a same-id discovery at a new path as the same file —
+    /// recovering its position from the stage by content instead of
+    /// re-sealing bytes the archive already holds.
+    #[serde(default)]
+    pub movable: bool,
 }
 
 /// The three platform cells. Missing keys deserialize to `None`.
@@ -1795,6 +1807,7 @@ fn scan_hermes_legacy(
                 sqlite_layout: None,
                 provenance: Default::default(),
                 session_dir: None,
+                movable_root: false,
             });
         }
     }
@@ -1944,6 +1957,10 @@ fn probe_harness(
             // it: every dimension here is a distinct observation of one
             // session, not a single authoritative answer.
             crate::provenance::merge(&mut record.provenance, &root.provenance);
+            // A movable root's records carry the movability fact the
+            // collector needs to treat a same-id discovery at a new path
+            // as the same file rather than a fresh source (W1007).
+            record.movable_root = root.movable;
             // The registry root that produced this record, for control
             // records that must name a root instead of a path (ADR-054 D6:
             // a path can carry a username; the root id is ours to name).
@@ -2381,6 +2398,7 @@ fn probe_harness_single(
                                                     ),
                                                     provenance: Default::default(),
                                                     session_dir: None,
+                                                    movable_root: false,
                                                 })
                                             })
                                             .collect();
@@ -2729,6 +2747,7 @@ fn probe_grok_bot_harness(
                     sqlite_layout: Some(crate::models::SqliteSessionLayout::GrokBot),
                     provenance: Default::default(),
                     session_dir: None,
+                    movable_root: false,
                 });
             }
             base.root = Some(root);
@@ -2857,6 +2876,7 @@ fn sqlite_records_from_rows(
                 sqlite_layout: Some(layout),
                 provenance: Default::default(),
                 session_dir: None,
+                movable_root: false,
             })
         })
         .collect()
@@ -2998,6 +3018,7 @@ fn grok_usage_records(
             sqlite_layout: None,
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         });
     }
     scan
@@ -3060,6 +3081,7 @@ fn grok_history_records(dirs: &[GrokSessionDir], machine: &str) -> GrokHistorySc
             sqlite_layout: None,
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         });
     }
     scan
@@ -3090,6 +3112,7 @@ fn hermes_records_from_rows(
             sqlite_layout: Some(SqliteSessionLayout::HermesAgent),
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         })
         .collect()
 }
@@ -3214,6 +3237,7 @@ fn cursor_legacy_records_from_rows(
                 sqlite_layout: Some(SqliteSessionLayout::CursorLegacy),
                 provenance: Default::default(),
                 session_dir: None,
+                movable_root: false,
             })
         })
         .collect()
@@ -3325,6 +3349,7 @@ fn probe_openclaw_agents(
                                 sqlite_layout: Some(SqliteSessionLayout::OpenClaw),
                                 provenance: Default::default(),
                                 session_dir: None,
+                                movable_root: false,
                             });
                         }
                         known += row_count;
@@ -3442,6 +3467,7 @@ fn scan_openclaw_cold_files(
                         sqlite_layout: None,
                         provenance: Default::default(),
                         session_dir: None,
+                        movable_root: false,
                     });
                 }
                 Err(_) => *unreadable += 1,
@@ -4566,6 +4592,7 @@ fn build_record(
         sqlite_layout: None,
         provenance,
         session_dir: session_dir_facts,
+        movable_root: false,
     })
 }
 
@@ -6993,6 +7020,7 @@ mod tests {
                 override_scope: None,
                 default_only: false,
                 provenance: Default::default(),
+                movable: false,
             })
             .collect();
         let report = scan_with_registry(&Config::default(), &registry).unwrap();
@@ -7630,6 +7658,7 @@ mod tests {
                 sqlite_layout: None,
                 provenance: Default::default(),
                 session_dir: None,
+                movable_root: false,
             }
         }
         let mut report = ScanReport::default();

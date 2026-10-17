@@ -798,6 +798,80 @@ fn jsonl_stage_prefix_entry(
     jsonl_prefix_entry_from_shards(path, &sealed, counters)
 }
 
+/// The sealed byte length the stage holds for one session, from directory
+/// metadata only — the sum of its sealed shard file sizes — so an
+/// unchanged pass costs a directory walk, never a body read.
+fn session_stage_len(stage: &Path, machine: &str, session_id: &str) -> anyhow::Result<u64> {
+    let dir = store::session_shard_dir(stage, machine, session_id);
+    let entries = store::sealed_shard_entries(&dir)?;
+    let mut total = 0u64;
+    for (_, path) in entries {
+        total = total
+            .checked_add(fs::metadata(&path)?.len())
+            .ok_or_else(|| anyhow!("sealed shard sizes overflowed"))?;
+    }
+    Ok(total)
+}
+
+/// The cursor a record with a stored debt should read from (W1007).
+///
+/// Normally that is the stored cursor itself, and nothing here changes that.
+/// The one exception is a plain JSONL source whose session's stage body is
+/// LONGER than the cursor's position: the stage then holds bytes this
+/// cursor never accounted for — delivered through a SIBLING source root of a
+/// movable store (codex `thread/archive` moves the rollout between roots, so
+/// the other root's pass seals the appends first) or by a pass whose cursor
+/// save was lost after sealing. Reading from the stored position would seal
+/// those bytes a second time — the stage-in-twice shape [`stage_prefix_entry`]
+/// exists to repair — so the pass instead asks the stage what it truest
+/// holds: the covered-prefix position [`stage_prefix_entry`] derives, which
+/// never exceeds the bytes the archive verifiably holds for this session,
+/// and which the ordinary read path re-validates against the source exactly
+/// as if it were a stored cursor.
+///
+/// The trigger is metadata-only, so an ordinary append (stage body length
+/// exactly the cursor's position) never pays for the stage's body. The
+/// advance never loses a legitimate repeated turn either: the covered
+/// prefix is a prefix of the source, and anything after it inside the file
+/// is still read as a delta and sealed with its multiplicity intact.
+fn cursor_or_stage_covered_position(
+    record: &SessionRecord,
+    entry: &DebtEntry,
+    verified: bool,
+    stage: &Path,
+    machine: &str,
+    counters: &mut CollectCounters,
+) -> anyhow::Result<OffsetEntry> {
+    // An unverifiable stored cursor is handed down unchanged: `force_reset`
+    // is what stops its reuse, and spending the stage's body read under a
+    // flag that discards the result would be pure cost.
+    if !verified {
+        return Ok(entry.cursor.clone());
+    }
+    // Only the plain JSONL read has a byte-offset cursor whose position a
+    // sibling root can out-run. A SQLite session's cursor is logical (its
+    // own call site judges reuse), and the compressed and whole-file
+    // shapes have no partial cursor at all — their reuse question is the
+    // whole-content one their own read paths already answer.
+    if record.sqlite_layout.is_some()
+        || record.compressed
+        || is_zstd_path(&record.absolute_path)
+        || !is_jsonl_path(&record.absolute_path)
+    {
+        return Ok(entry.cursor.clone());
+    }
+    let stage_len = session_stage_len(stage, machine, &record.id)?;
+    if stage_len <= entry.cursor.offset {
+        return Ok(entry.cursor.clone());
+    }
+    Ok(
+        match stage_prefix_entry(record, stage, machine, counters)? {
+            Some(covered) if covered.offset > entry.cursor.offset => covered,
+            _ => entry.cursor.clone(),
+        },
+    )
+}
+
 /// Observe what the stage currently holds for one session.
 pub(crate) fn stage_shard_fact(
     stage: &Path,
@@ -1572,12 +1646,26 @@ pub fn collect_scan_report(
         // this destination actually starts from. A stage that disagrees with
         // the source yields nothing here and the full read happens as before.
         let old = match stored.as_ref() {
-            Some(entry) => Some(entry.cursor.clone()),
+            Some(entry) => Some(cursor_or_stage_covered_position(
+                &record,
+                entry,
+                unverifiable.is_none(),
+                stage,
+                machine,
+                &mut counters,
+            )?),
             // One native UUID may appear in multiple source roots. Without a
             // persisted cursor for this exact scanned source, a matching
             // stage prefix cannot establish whether it is a replay or a new
             // repeated turn; conservatively capture measured provenance rows.
-            None if !record.provenance.is_empty() => None,
+            // A movable root is the exception that is not ambiguous: it
+            // belongs to a store that MOVES its files between the roots of
+            // one entry (codex `thread/archive`), so a same-id discovery at a
+            // new path is the same file by the store's own rules (W1007, ADR-
+            // 059 draft D4) — it recovers its position from the stage by
+            // content like any cursor-less source, instead of re-sealing the
+            // bytes the archive already holds.
+            None if !record.provenance.is_empty() && !record.movable_root => None,
             None => stage_prefix_entry(&record, stage, machine, &mut counters)?,
         };
         // The cursor is still handed down so the outcome can report this as a
@@ -2622,14 +2710,20 @@ fn process_jsonl(
     let shard = if lines.is_empty() {
         None
     } else if (!data.reset && data.base_offset > 0)
-        || (old.is_none() && !record.provenance.is_empty())
+        || (old.is_none() && !record.provenance.is_empty() && !record.movable_root)
     {
         // A validated non-zero cursor proves these are newly appended source
         // bytes. They may be byte-identical to an earlier turn (`a\n` followed
         // by another real `a\n`) and still belong in the archive.
         // A fresh provenance-bearing source is ambiguous even at offset zero:
         // byte equality with a different root cannot establish event identity.
-        // Its complete capture must therefore retain the same multiplicity.
+        // Its complete capture must therefore retain the same multiplicity —
+        // with one exception. Through a movable root (a store that moves its
+        // files between the roots of one registry entry, W1007) byte equality
+        // with the sibling IS the same file by the store's own rules, so a
+        // fresh movable capture takes the deduplicating writer instead: an
+        // exact whole-shard repeat of bytes the stage already holds is
+        // skipped, never sealed twice.
         Some(store::write_sealed_shard_bytes_allow_exact_repeat_with_cap(
             store::StageWriter::Collect,
             stage,
@@ -3615,20 +3709,6 @@ fn process_compressed(
             dimensions: Default::default(),
         });
     }
-    let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
-    let (lines, _) = complete_lines(&decoded);
-    let shard = if lines.is_empty() {
-        None
-    } else {
-        Some(store::write_sealed_shard_bytes_with_cap(
-            store::StageWriter::Collect,
-            stage,
-            machine,
-            &record.id,
-            &lines,
-            bucket_cap,
-        )?)
-    };
     // Decoding is all-or-nothing, so a compressed cursor records the whole
     // source it observed — length and digest — whether that pass sealed
     // lines or found none to seal. That is what lets a stable source
@@ -3648,6 +3728,50 @@ fn process_compressed(
         store_fingerprint: None,
         grok_bot_row_digests: None,
     };
+    let decoded = zstd::stream::decode_all(&compressed[..]).context("decompress jsonl.zst")?;
+    let (lines, _) = complete_lines(&decoded);
+    // A snapshot whose cursor no longer matches (the file moved between the
+    // roots of a movable store, or its bytes were rewritten) must not seal
+    // a second copy of content the stage already holds as its tail. That is
+    // the same whole-content question [`stage_prefix_entry`]'s compressed
+    // arm asks a destination that has no cursor at all, asked here for a
+    // stored cursor that just failed its digest comparison: the compressed
+    // cursor names the whole source it observed (length and digest), so a
+    // digest mismatch alone cannot say whether the DECODED content is new
+    // (a genuinely changed snapshot, sealed as its own generation) or the
+    // same content re-read at a new path (a re-observation, sealed as
+    // nothing). A stage that disagrees decodes-and-seals exactly as before.
+    let already_held = !lines.is_empty() && {
+        let sealed = stage_sealed_shards(stage, machine, &record.id)?;
+        !sealed.is_empty() && stage_tail_is(&sealed, &seal_framed(&lines))
+    };
+    if already_held {
+        // The state names the content just read (length and digest — a
+        // compressed cursor is always whole-source), so the next pass over
+        // a stable source answers from the digest comparison; the
+        // observation stays unchanged: no shard, no reset.
+        return Ok(Processed {
+            state,
+            outcome: unchanged_outcome(record, source_len, true),
+            dimensions: Default::default(),
+        });
+    }
+    let shard = if lines.is_empty() {
+        None
+    } else {
+        Some(store::write_sealed_shard_bytes_with_cap(
+            store::StageWriter::Collect,
+            stage,
+            machine,
+            &record.id,
+            &lines,
+            bucket_cap,
+        )?)
+    };
+    // Decoding is all-or-nothing, so a compressed cursor records the whole
+    // source it observed. The comment above the hoisted `state` explains the
+    // convergence this buys; the mismatch paths re-derive it from the bytes
+    // they just read, which is the same statement made again.
     Ok(Processed {
         state,
         outcome: CollectOutcome {
@@ -4612,6 +4736,7 @@ mod grok_bot_debt_key_tests {
             sqlite_layout: Some(SqliteSessionLayout::GrokBot),
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         };
         let path_keyed = state_key(&from_root("/synthetic/first/persistence/replica.blob"));
         // Two paths, two records: one session, one key.
