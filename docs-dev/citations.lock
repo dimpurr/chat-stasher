@@ -665,19 +665,19 @@ crates/chat-stasher/src/destinit.rs:122-141  8546544e08a8  lines=20
   <- docs-dev/threat-model.md:873  :: /// How a run was able (or unable) to account for one exist…
 crates/chat-stasher/src/destinit.rs:391-399  d2438d975abb  lines=9
   <- docs-dev/threat-model.md:873  :: Ok(true) => continue,
-crates/chat-stasher/src/doctor.rs:1149-1159  e88e5fd731c5  lines=11
+crates/chat-stasher/src/doctor.rs:1734-1744  e88e5fd731c5  lines=11
   <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: /// What one read-only connection to a declared destination…
-crates/chat-stasher/src/doctor.rs:1177-1284  bbabec918aa9  lines=108
+crates/chat-stasher/src/doctor.rs:1762-1869  bbabec918aa9  lines=108
   <- docs-dev/install.md:1067  :: /// Whether the activity indexes a destination carries were…
-crates/chat-stasher/src/doctor.rs:1287-1308  7b4d69687a1b  lines=22
+crates/chat-stasher/src/doctor.rs:1872-1893  7b4d69687a1b  lines=22
   <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: pub enum DestinationOutcome {
-crates/chat-stasher/src/doctor.rs:1440-1493  4176d416bb38  lines=54
+crates/chat-stasher/src/doctor.rs:2025-2078  4176d416bb38  lines=54
   <- docs-dev/install.md:1063, docs-dev/install.md:1072  :: pub fn probe_destinations(config: &Config) -> Vec<Destinati…
-crates/chat-stasher/src/doctor.rs:1666-1706  e17a52efdcf6  lines=41
+crates/chat-stasher/src/doctor.rs:2251-2301  8f2566c21de8  lines=51
   <- docs-dev/install.md:311  :: pub fn config_unreadable(error: String) -> DoctorReport {
-crates/chat-stasher/src/doctor.rs:2099-2100  c49d6fc9ccfa  lines=2
+crates/chat-stasher/src/doctor.rs:2718-2719  c49d6fc9ccfa  lines=2
   <- docs-dev/install.md:1070  :: // D10 — local-only, no repository connection and no docume…
-crates/chat-stasher/src/doctor.rs:2631-2693  0d89a3dbd659  lines=63
+crates/chat-stasher/src/doctor.rs:3251-3313  0d89a3dbd659  lines=63
   <- docs-dev/install.md:1070  :: /// D10 — inspect only local index files; this never opens …
 crates/chat-stasher/src/export.rs:962-979  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
@@ -833,23 +833,23 @@ crates/chat-stasher/src/main.rs:9112-9116  0d25cb363ccc  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
 crates/chat-stasher/src/main.rs:9625-9785  1f1a0d8e77c3  lines=161
   <- docs-dev/threat-model.md:928  :: }
-crates/chat-stasher/src/main.rs:13721-13729  55fd954d72cf  lines=9
+crates/chat-stasher/src/main.rs:13723-13731  55fd954d72cf  lines=9
   <- docs-dev/install.md:304  :: .join("000");
-crates/chat-stasher/src/main.rs:13739-13762  b78b3335ba4d  lines=24
+crates/chat-stasher/src/main.rs:13741-13764  b78b3335ba4d  lines=24
   <- docs-dev/install.md:304  :: ],
-crates/chat-stasher/src/main.rs:14900-14914  9e66de89cc0e  lines=15
+crates/chat-stasher/src/main.rs:14902-14916  9e66de89cc0e  lines=15
   <- docs-dev/install.md:626  :: // about either, for the same reason as the local key above…
-crates/chat-stasher/src/main.rs:15337-15344  393343fb317f  lines=8
+crates/chat-stasher/src/main.rs:15339-15346  393343fb317f  lines=8
   <- docs-dev/install.md:625  :: repository and masterkey for you to copy failed ({error}), …
-crates/chat-stasher/src/main.rs:17875-17909  128ff4615579  lines=35
+crates/chat-stasher/src/main.rs:17877-17911  128ff4615579  lines=35
   <- docs-dev/install.md:1033  :: });
-crates/chat-stasher/src/main.rs:18336-18341  84dbce637d8a  lines=6
+crates/chat-stasher/src/main.rs:18338-18343  84dbce637d8a  lines=6
   <- docs-dev/install.md:1023  :: /// verdict line and the `--json` object are derived from t…
-crates/chat-stasher/src/main.rs:18349-18417  f1161f7029d2  lines=69
+crates/chat-stasher/src/main.rs:18351-18419  f1161f7029d2  lines=69
   <- docs-dev/install.md:1010  :: /// explicit value is an unknown timer verdict, not permiss…
-crates/chat-stasher/src/main.rs:18354-18355  1c2a7e49dfee  lines=2
+crates/chat-stasher/src/main.rs:18356-18357  1c2a7e49dfee  lines=2
   <- docs-dev/install.md:994  :: let state_dir = chat_stasher::collect::default_state_dir();
-crates/chat-stasher/src/main.rs:18360-18361  90cec3cab80c  lines=2
+crates/chat-stasher/src/main.rs:18362-18363  90cec3cab80c  lines=2
   <- docs-dev/install.md:989  :: // after the gate's second blind spot was fixed (B93). It n…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:436, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -985,11 +985,11 @@ crates/chat-stasher/src/runstate.rs:296-344  036d69fcbd03  lines=49
   <- docs-dev/install.md:995  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:298-304  525f5b894e82  lines=7
   <- docs-dev/install.md:1290  :: }
-crates/chat-stasher/src/scanner.rs:2965-3025  9db74cb60f65  lines=61
+crates/chat-stasher/src/scanner.rs:3135-3195  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1130  :: /// through the ordinary whole-file collector.
-crates/chat-stasher/src/scanner.rs:3027-3088  d8480d0822d0  lines=62
+crates/chat-stasher/src/scanner.rs:3197-3258  d8480d0822d0  lines=62
   <- docs-dev/privacy.md:1130  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
-crates/chat-stasher/src/scanner.rs:3245-3255  3f94015d6ac2  lines=11
+crates/chat-stasher/src/scanner.rs:3415-3425  3f94015d6ac2  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: /// Probe Cursor's current global store and, when it cannot…
 crates/chat-stasher/src/schedule.rs:208-243  31cde3d34520  lines=36
   <- docs-dev/install.md:939  :: /// Resolve the executable that a persistent scheduler may …
