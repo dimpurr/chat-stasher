@@ -218,10 +218,14 @@
               "confidence": "source-confirmed",
               "source": "same as the linux cell (dirs::home_dir() returns %USERPROFILE% on Windows; the archived_sessions layer is the same rollout-store constant beside sessions)."
             }
+          },
+          "movable": true,
+          "provenance": {
+            "status": ["archived"]
           }
         }
       ],
-      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override. Archived threads: the desktop app's thread/archive moves a rollout from sessions/ into archived_sessions/ and thread/unarchive moves it back — codex-archived is a movable source root of the same CODEX_HOME store, and because a rollout's id is its filename the move does not fork the session; the scan counts the same thread once wherever it currently sits.",
+      "notes": "does not honor XDG_DATA_HOME(home-dir crate has no XDG references). idle rollouts are compressed to .jsonl.zst. session_index.jsonl is at the codex home root. CODEX_HOME can override. Archived threads: the desktop app's thread/archive moves a rollout from sessions/ into archived_sessions/ and thread/unarchive moves it back — codex-archived is a movable source root of the same CODEX_HOME store, and because a rollout's id is its filename the move does not fork the session; the scan counts the same thread once wherever it currently sits, the collector recovers the moved file's position from the archive by content (W1007), and a discovery under archived_sessions/ is recorded as a status observation on the one session (archive moves are the store's own archived-state record; a session back under sessions/ records no status — an absence is never turned into 'active').",
       "seal_policy": "no-rename",
       "seal_source": "codex-rs/rollout/src/recorder.rs:1743-1746(ensure_writer_open does not reopen if already open)+ :1928(JsonlWriter holds tokio::fs::File)=> holds fd; new writes after rename go to old inode",
       "reference": {

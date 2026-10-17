@@ -478,13 +478,31 @@ pub fn coverage_from_records<'a>(
     let earliest = recs.iter().map(|r| r.mtime).min();
     let latest = recs.iter().map(|r| r.mtime).max();
     let compressed_count = recs.iter().filter(|r| r.compressed).count() as u64;
+    // Sessions counted by identity, records kept by observation. The two are
+    // the same number for every ordinary store — one transcript file per
+    // session — and come apart exactly once: the same session id discovered
+    // through more than one declared source root of the same harness family
+    // (W1007's codex uuid sitting in both `sessions/` and the
+    // `archived_sessions/` the store moves it through; a copy left behind is
+    // the same thread, not a second one). The registry probe table's
+    // aggregate counts unique ids for the same reason, and doctor's two
+    // tables must agree, so the count here is the distinct-id count too.
+    // Everything below keeps a per-record view on purpose: the byte total,
+    // the mtimes and the recognised-file set describe the files that are
+    // physically there, and a copy is one more file on disk even when it is
+    // not one more conversation.
+    let distinct_sessions = recs
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     HarnessFootprint {
         name: name.to_string(),
         root: Some(root),
         installed,
         presence_unknown: false,
         session_count: if installed {
-            Some(recs.len() as u64)
+            Some(distinct_sessions as u64)
         } else {
             None
         },
@@ -5842,6 +5860,7 @@ mod w1006d_lower_bound_tests {
             sqlite_layout: None,
             provenance: Default::default(),
             session_dir: None,
+            movable_root: false,
         }
     }
 

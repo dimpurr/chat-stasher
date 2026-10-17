@@ -149,6 +149,21 @@ pub struct SessionRecord {
     /// (ADR-054 D6/D7). Absent for every record a session-directory rule did
     /// not produce; never identity, never content.
     pub session_dir: Option<SessionDirFacts>,
+    /// Discovered through a registry source root marked `movable`: a root of
+    /// a store that MOVES its files between the roots of one registry entry
+    /// (codex's `thread/archive` moves a rollout from `sessions/` into
+    /// `archived_sessions/` and `thread/unarchive` moves it back), so the
+    /// file's own name is the session's identity and the same native id seen
+    /// at another path is the same file, never a second copy of the store's
+    /// bytes (W1007, ADR-059 draft D4).
+    ///
+    /// In the collector this is what lets a movable carrier recover its
+    /// position from the stage by content even when the record also declares
+    /// captured dimensions: for a store that moves files, byte-equal
+    /// discovery is the same file — the "byte equality cannot establish
+    /// event identity" ambiguity that makes a fresh provenance-bearing
+    /// source re-seal its whole bytes cannot arise.
+    pub movable_root: bool,
 }
 
 /// Per-session facts the scanner records at discovery for a harness whose
