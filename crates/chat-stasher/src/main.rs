@@ -13324,6 +13324,7 @@ mod decision_surface_tests {
                 root: Some(dir.path().join("store.db")),
                 confidence: scanner::Confidence::Confirmed,
                 state: scanner::ProbeState::FileTarget,
+                unverified_roots: Vec::new(),
                 record_count: Some(1),
                 candidate_count: Some(1),
                 unreadable_count: Some(0),
@@ -13418,6 +13419,53 @@ mod decision_surface_tests {
             detailed.lines().count() > 500,
             "--sessions must still print one line per session, got {} lines",
             detailed.lines().count()
+        );
+    }
+
+    /// W1006d (ADR-059 draft D6): when a harness family's combined total is
+    /// a qualified lower bound — a measured root beside a declared root the
+    /// scan never verified — `status` must not let its session counts read
+    /// as machine totals. Both bodies carry the same clause, naming each
+    /// unverified root and pointing at `doctor`; a machine with no marked
+    /// family must see the byte-for-byte body it saw before, which is what
+    /// the tests around this one pin for plain, unmarked reports.
+    #[test]
+    fn status_marks_lower_bound_totals_with_their_unverified_roots() {
+        let mut report = report_with_sessions(0);
+        report.probes.push(scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: None,
+            confidence: scanner::Confidence::Confirmed,
+            state: scanner::ProbeState::Scanned,
+            unverified_roots: vec![scanner::UnverifiedRoot {
+                id: "claude-desktop-cowork".to_string(),
+                state: scanner::ProbeState::SkipUnascertained,
+            }],
+            record_count: Some(0),
+            candidate_count: None,
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: String::new(),
+        });
+        for body in [render_status(&report, false), render_status(&report, true)] {
+            assert!(
+                body.contains("lower bounds") && body.contains("1 unverified source root(s)")
+                    && body.contains("claude-code: claude-desktop-cowork"),
+                "both status bodies must qualify the total and name the unverified root; got:\n{body}"
+            );
+        }
+        // A report without a marked family: the clause is absent, so the
+        // default body stays what `default_status_body_does_not_grow_with_
+        // session_count` pins.
+        let unmarked = render_status(&report_with_sessions(0), false);
+        assert!(
+            !unmarked.contains("lower bound"),
+            "an unmarked family keeps the pre-W1006d body byte-for-byte; got:\n{unmarked}"
         );
     }
 
@@ -18620,6 +18668,9 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
         // and an empty string here means a clean machine sees the byte-for-
         // byte output it saw before.
         let unreadable = unreadable_notice(report);
+        // W1006d: the same line's lower-bound qualification — empty, and
+        // therefore byte-invisible, on a machine with no marked family.
+        let lower_bound = lower_bound_notice(report);
         if report.records.is_empty() {
             // B82: "No sessions were found on this machine" is a claim about the whole
             // machine, and this branch used to make it from
@@ -18627,14 +18678,18 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             // this run never got to look at. Zero records plus places we did
             // not look is not "there is nothing here".
             out.push_str(&format!(
-                "[scan] No sessions were found on this machine.{}{unreadable}",
-                unlooked_notice(report)
+                "[scan] No sessions were found on this machine.{}{}{}",
+                lower_bound,
+                unlooked_notice(report),
+                unreadable
             ));
             out.push('\n');
         } else {
             out.push_str(&format!(
-                "[scan] {} session(s) ({compressed} compressed): {breakdown}{unreadable}",
-                report.records.len()
+                "[scan] {} session(s) ({compressed} compressed): {breakdown}{}{}",
+                report.records.len(),
+                lower_bound,
+                unreadable
             ));
             out.push('\n');
         }
@@ -18685,6 +18740,14 @@ fn render_status(report: &scanner::ScanReport, sessions: bool) -> String {
             "  (unreadable root, existence unknown: {})\n",
             unknown.display()
         ));
+    }
+    // W1006d: the per-session table's total is a lower bound when a family
+    // still has unverified roots; say so in place, not only in the JSON —
+    // the same clause the default body carries on its `[scan]` line.
+    let lower_bound = lower_bound_notice(report);
+    if !lower_bound.is_empty() {
+        out.push_str(&lower_bound);
+        out.push('\n');
     }
     out.push_str(&render_archive_gap_notice(report));
     out.push('\n');
@@ -18760,6 +18823,47 @@ fn unlooked_notice(report: &scanner::ScanReport) -> String {
         "  ⚠ but {} harness(es) were not probed at all ({}) — \"did not scan\" is not \"there is none\"; see chat-stasher doctor",
         unlooked.len(),
         unlooked.join(" · ")
+    )
+}
+
+/// The clause `status` appends to its `[scan]` line when a harness family's
+/// combined total is a *qualified lower bound* (W1006d, ADR-059 draft D6):
+/// at least one of the family's roots was measured while another declared
+/// root stayed unverified — never looked at, so the scan counts only what
+/// it measured. The notice keeps the printed count from reading as the
+/// machine total: it names each marked harness and its unverified roots,
+/// and points at `doctor`, where the same marking rides the probe rows and
+/// the footprint rows.
+///
+/// Text-shape rules shared with [`unreadable_notice`] and
+/// [`unlooked_notice`]: the clause is separated from the number before it
+/// (it qualifies that count, it is not part of it), each unverified root is
+/// named, and the string is empty on a machine with no marked family — a
+/// healthy scan keeps the byte-for-byte output it had before.
+fn lower_bound_notice(report: &scanner::ScanReport) -> String {
+    let marked: Vec<String> = report
+        .probes
+        .iter()
+        .filter(|p| !p.unverified_roots.is_empty())
+        .map(|p| {
+            format!(
+                "{}: {}",
+                p.id,
+                p.unverified_roots
+                    .iter()
+                    .map(|root| root.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    if marked.is_empty() {
+        return String::new();
+    }
+    let total_roots: usize = report.probes.iter().map(|p| p.unverified_roots.len()).sum();
+    format!(
+        "  ⚠ the totals are lower bounds — {total_roots} unverified source root(s) ({}); see chat-stasher doctor",
+        marked.join(" · ")
     )
 }
 

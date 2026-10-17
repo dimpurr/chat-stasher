@@ -852,6 +852,23 @@ pub enum ProbeState {
     SkipUnresolvable,
 }
 
+/// One declared source root of a family that this scan never verified — a
+/// root the probe refused to guess at (`unascertained`), never resolved a
+/// path for (`unresolvable`), or could not even establish the presence of
+/// (`indeterminate`) — while at least one sibling root of the same family
+/// **was** measured (ADR-059 draft D6, the qualified lower-bound rule the
+/// external review of the draft made mandatory, W1006d). The root is named by
+/// its registry root id (`claude-desktop-cowork`); the one shape where the
+/// unverified root is the entry's primary store names it by the canonical
+/// harness id, the key that store is configured under.
+#[derive(Debug, Clone)]
+pub struct UnverifiedRoot {
+    pub id: String,
+    /// Why the root stayed unverified, from the same closed vocabulary as
+    /// [`probe_state_word`] — never a path, never prose.
+    pub state: ProbeState,
+}
+
 /// One harness's fate on this machine, as decided by the registry.
 #[derive(Debug, Clone)]
 pub struct HarnessProbe {
@@ -862,6 +879,18 @@ pub struct HarnessProbe {
     pub root: Option<PathBuf>,
     pub confidence: Confidence,
     pub state: ProbeState,
+    /// Roots of this family that stayed **unverified** while a sibling root
+    /// was measured. Non-empty exactly when the counts below are a
+    /// *qualified lower bound* over the measured roots: `record_count` (and
+    /// every sibling count) is then the exact count of the measured roots
+    /// only, and must be rendered as `≥N` with these roots named beside it —
+    /// never as an unknown that erases the measured part (the D6 side
+    /// effect the ADR-059 draft review rejected) and never as a plain
+    /// number that silently claims the family total. The rule is scoped to
+    /// the primary-plus-additional-roots shape (the W1006c narrowing): a
+    /// family whose every root stayed unknown keeps the older aggregate
+    /// semantics and this field empty.
+    pub unverified_roots: Vec<UnverifiedRoot>,
     /// Session records found at this harness's root, counted by **distinct
     /// session id** — the quantity collect can address, and the quantity the
     /// multi-source-root aggregation already counted (a file count cannot
@@ -1225,6 +1254,13 @@ pub fn probe_unreadable_entry_count(p: &HarnessProbe) -> json_out::CountState {
 /// records can answer that question, and the doctor's report keeps probes
 /// and drops records. Every count is a tri-state; none can be `0`-or-null
 /// because a value was never looked at.
+///
+/// `unverified_roots` (W1006d) is additive in the found_staged sense: it
+/// appears on every row, empty wherever a family was fully measured (or
+/// fully unknown — the state already says that). Where it is non-empty the
+/// sibling `session_count` is a *qualified lower bound* — the exact count
+/// of the measured roots only — and a consumer must not read it as the
+/// family total; the listed roots are the reason it cannot be one.
 pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
     serde_json::json!({
         "harness": p.id,
@@ -1232,6 +1268,14 @@ pub fn probe_json(p: &HarnessProbe) -> serde_json::Value {
         "state": probe_state_word(p.state),
         "installed": p.installed_p(),
         "root": p.root.as_ref().map(|root| root.display().to_string()),
+        "unverified_roots": p
+            .unverified_roots
+            .iter()
+            .map(|root| serde_json::json!({
+                "root": root.id,
+                "state": probe_state_word(root.state),
+            }))
+            .collect::<Vec<_>>(),
         "session_count": probe_session_count(p),
         "unreadable_count": probe_unreadable_count(p),
         "unreadable_entry_count": probe_unreadable_entry_count(p),
@@ -1769,6 +1813,12 @@ fn probe_harness(
     }
 
     let mut subprobes = Vec::new();
+    // The registry root id each subprobe stands for, parallel to
+    // `subprobes`: the canonical harness id for the primary store, the
+    // root's own id for every additional source root. The unverified
+    // marking below names roots by these ids — a path can carry a
+    // username, an id is ours to name.
+    let mut subprobe_root_ids = Vec::new();
     let mut total = ScanReport::default();
     // DSK-1 (plan C, ADR-059 draft): an entry may declare BOTH its primary
     // store (the `paths` cells) and additional `source_roots` — the desktop
@@ -1789,6 +1839,7 @@ fn probe_harness(
         total.missing_roots.extend(local.missing_roots);
         total.indeterminate_roots.extend(local.indeterminate_roots);
         subprobes.push(probe);
+        subprobe_root_ids.push(h.id.clone());
     }
     let canonical_override = config.explicit_harness_root(&h.id).is_some();
     let root_keys: Vec<_> = h
@@ -1811,6 +1862,7 @@ fn probe_harness(
             root: None,
             confidence: Confidence::Unascertained,
             state: ProbeState::Indeterminate,
+            unverified_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -1909,6 +1961,7 @@ fn probe_harness(
         // any other declared root, including their honest unknown state.
         let _ = cell;
         subprobes.push(probe);
+        subprobe_root_ids.push(root.id.clone());
     }
     let any_unknown = subprobes.iter().any(HarnessProbe::not_probed_p)
         || subprobes
@@ -1936,14 +1989,52 @@ fn probe_harness(
     // combined total unknown, exactly as before this batch. The doctor's
     // footprint/probe consistency contract forced the distinction for the
     // primary shape, because the record-derived footprint could count what
-    // the aggregate refused to claim. Two limits guard against a semantic
+    // the aggregate refused to claim. One limit guards against a semantic
     // zero: a family whose roots were ALL absent still reports unknown
-    // (an absent harness is not an empty one), and a subprobe that never
-    // looked — unascertained, unresolvable, indeterminate — keeps the
-    // whole total unknown.
+    // (an absent harness is not an empty one).
+    //
+    // W1006d — the same review's D6 correction, one step further: a root
+    // that was never LOOKED at (unascertained, unresolvable,
+    // indeterminate) must not erase a measured total either. That was the
+    // D6 side effect the draft shipped with — on Windows the desktop
+    // Cowork cell is `unascertained`, so an installed CLI's measured count
+    // turned into a blanket unknown — and the rule the W1006c paragraph
+    // above still kept ("a subprobe that never looked keeps the whole
+    // total unknown") is exactly what the review rejected. In the anchored
+    // (primary-plus-roots) shape the measured roots' count is instead
+    // reported as a QUALIFIED LOWER BOUND: the exact count of what the
+    // scan measured, its unverified siblings named beside it. Never an
+    // unknown — that erases a measurement already taken; never a plain
+    // number — that silently claims the family total. The lower bound is
+    // marked, in `unverified_roots`, everywhere the aggregate is shown.
+    // When NO root of the family was measured, nothing anchors a lower
+    // bound and the total stays unknown, exactly as before.
     let absent_sibling_is_zero = primary_probeable;
+    let family_measured = subprobes.iter().any(HarnessProbe::probed_p);
+    let qualified_lower_bound = primary_probeable && any_unknown && family_measured;
+    let unverified_roots: Vec<UnverifiedRoot> = if qualified_lower_bound {
+        subprobes
+            .iter()
+            .zip(&subprobe_root_ids)
+            .filter(|(probe, _)| probe.not_probed_p())
+            .map(|(probe, id)| UnverifiedRoot {
+                id: id.clone(),
+                state: probe.state,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let unreadable = subprobes.iter().try_fold(0u64, |sum, probe| {
         if absent_sibling_is_zero && probe.state == ProbeState::Missing {
+            return Some(sum);
+        }
+        // An unverified root contributes nothing to a lower bound for the
+        // same reason an absent one contributes a zero: it never looked,
+        // so it holds no unreadable tally to add — the marking, not the
+        // fold, is where its existence is stated. Outside the lower-bound
+        // shape the fold still refuses, keeping the whole total unknown.
+        if qualified_lower_bound && probe.not_probed_p() {
             return Some(sum);
         }
         sum.checked_add(probe.unreadable_count?)
@@ -1952,16 +2043,24 @@ fn probe_harness(
         if absent_sibling_is_zero && probe.state == ProbeState::Missing {
             return Some(sum);
         }
+        if qualified_lower_bound && probe.not_probed_p() {
+            return Some(sum);
+        }
         sum.checked_add(probe.unreadable_entry_count?)
     });
     let counts_complete = !subprobes.is_empty()
-        && any_scanned
+        && (any_scanned || qualified_lower_bound)
         && subprobes.iter().all(|p| {
-            p.record_count.is_some() || (absent_sibling_is_zero && p.state == ProbeState::Missing)
+            p.record_count.is_some()
+                || (absent_sibling_is_zero && p.state == ProbeState::Missing)
+                || (qualified_lower_bound && p.not_probed_p())
         })
         && unreadable.is_some()
         && unreadable_entries.is_some();
-    let bytes_complete = !subprobes.is_empty() && subprobes.iter().all(|p| p.bytes.is_some());
+    let bytes_complete = !subprobes.is_empty()
+        && subprobes
+            .iter()
+            .all(|p| p.bytes.is_some() || (qualified_lower_bound && p.not_probed_p()));
     let confidence = subprobes
         .iter()
         .map(|p| p.confidence)
@@ -1983,55 +2082,72 @@ fn probe_harness(
         // Every root was skipped by policy before any filesystem probe. Keep
         // that precise reason; mixed measured/unknown roots remain indeterminate.
         ProbeState::SkipUnascertained
-    } else if any_unknown {
+    } else if any_unknown && !qualified_lower_bound {
         ProbeState::Indeterminate
-    } else if all_missing {
+    } else if all_missing || (qualified_lower_bound && !any_scanned) {
+        // The W1006d lower-bound shape with no scanned root: every MEASURED
+        // root of the family is absent (that is what `probed_p` can mean
+        // here once the unverified roots are subtracted), so the state that
+        // tells the truth about presence is still `Missing` — while
+        // `unverified_roots` and the note carry the "≥" qualification.
         ProbeState::Missing
     } else if any_scanned {
         ProbeState::Scanned
     } else {
         ProbeState::SkipWrongPlatform
     };
+    // Whether the aggregate may claim a count at all: fully measured, or the
+    // qualified-lower-bound shape where the claim is the measured roots'
+    // count carrying its own qualification.
+    let counts_claimable = counts_complete && (!any_unknown || qualified_lower_bound);
     let roots: Vec<_> = subprobes.iter().filter_map(|p| p.root.clone()).collect();
     report.records.extend(total.records);
     report.missing_roots.extend(total.missing_roots);
     report.indeterminate_roots.extend(total.indeterminate_roots);
+    let note = if qualified_lower_bound {
+        format!(
+            "{} declared source roots checked; total is a lower bound — {} unverified \
+             source root(s): {}",
+            subprobes.len(),
+            unverified_roots.len(),
+            unverified_roots
+                .iter()
+                .map(|root| format!("{} ({})", root.id, probe_state_word(root.state)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if any_unknown {
+        "one or more declared source roots could not be fully checked; total is unknown".to_string()
+    } else if all_missing {
+        "all declared source roots are absent".to_string()
+    } else {
+        format!("{} declared source roots checked", roots.len())
+    };
     HarnessProbe {
         id: h.id.clone(),
         display_name: h.display_name.clone(),
         root: roots.first().cloned(),
         confidence,
         state,
-        record_count: (!any_unknown && counts_complete).then_some(known_count),
+        unverified_roots,
+        record_count: counts_claimable.then_some(known_count),
         // An unreadable source root has no native id to deduplicate against
         // the other roots, so candidate totals remain unknown in that case.
-        candidate_count: (!any_unknown
-            && counts_complete
+        candidate_count: (counts_claimable
             && unreadable == Some(0)
             && unreadable_entries == Some(0))
         .then_some(known_count),
-        unreadable_count: (!any_unknown && counts_complete)
-            .then_some(unreadable)
-            .flatten(),
-        unreadable_entry_count: (!any_unknown && counts_complete)
-            .then_some(unreadable_entries)
-            .flatten(),
+        unreadable_count: counts_claimable.then_some(unreadable).flatten(),
+        unreadable_entry_count: counts_claimable.then_some(unreadable_entries).flatten(),
         earliest: subprobes.iter().filter_map(|p| p.earliest).min(),
         latest: subprobes.iter().filter_map(|p| p.latest).max(),
-        bytes: (!any_unknown && bytes_complete)
+        bytes: (bytes_complete && (!any_unknown || qualified_lower_bound))
             .then(|| subprobes.iter().filter_map(|p| p.bytes).sum()),
         recognized_files: subprobes
             .into_iter()
             .flat_map(|p| p.recognized_files)
             .collect(),
-        note: if any_unknown {
-            "one or more declared source roots could not be fully checked; total is unknown"
-                .to_string()
-        } else if all_missing {
-            "all declared source roots are absent".to_string()
-        } else {
-            format!("{} declared source roots checked", roots.len())
-        },
+        note,
     }
 }
 
@@ -2048,6 +2164,7 @@ fn probe_harness_single(
         root: None,
         confidence: Confidence::Unascertained,
         state: ProbeState::SkipUnresolvable,
+        unverified_roots: Vec::new(),
         record_count: None,
         candidate_count: None,
         unreadable_count: None,
@@ -4539,6 +4656,118 @@ mod tests {
         .unwrap()
     }
 
+    /// The DSK-1 claude-code shape with the desktop Cowork root UNVERIFIED
+    /// on this platform: the registry declares the root's cell but refuses
+    /// to vouch for its path (`unascertained`), so the probe skips it by
+    /// policy — the exact cell the shipped registry carries for Windows,
+    /// replayable on every platform for the aggregation rules the external
+    /// review of ADR-059 draft D6 made mandatory (W1006d).
+    fn claude_code_cli_plus_unverified_desktop_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A claude-code-shaped registry whose WHOLE family stays unverified on
+    /// this platform: the primary cell is measurable but its template is
+    /// not statically resolvable, and the desktop root's cell is
+    /// `unascertained` — one root never resolved a path, one the scan
+    /// refuses to guess at, and nothing in the family was ever measured.
+    fn claude_code_all_unverified_registry() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "$CWD/sessions",
+            "format": "jsonl",
+            "confidence": "measured-locally",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// The all-unverified family with BOTH cells skipped by the same
+    /// policy reason (`unascertained`), for the `skip unascertained`
+    /// aggregate word — the confidence gate runs before any path is
+    /// resolved, so a vouched-for template under an unvouched confidence
+    /// is still a refusal to scan, not a path choice.
+    fn claude_code_all_unverified_registry_with_unascertained_primary() -> HarnessRegistry {
+        let platform_key = current_platform();
+        let paths = serde_json::json!({ platform_key: {
+            "template": "~/.claude/projects",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        }});
+        let desktop = serde_json::json!({
+            "template": "~/Library/Application Support/Claude/local-agent-mode-sessions/",
+            "format": "jsonl",
+            "confidence": "unascertained",
+            "source": "synthetic fixture"
+        });
+        let desktop_paths = serde_json::json!({ platform_key: desktop });
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [{
+                "id": "claude-code",
+                "display_name": "synthetic",
+                "paths": paths,
+                "source_roots": [{
+                    "id": "claude-desktop-cowork",
+                    "paths": desktop_paths,
+                    "provenance": { "surface": ["desktop-cowork"] }
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
     /// A codex-shaped registry with the DSK-1 movable-root shape: the active
     /// rollouts root stays the entry's primary `paths`, and the archive the
     /// desktop's `thread/archive` moves rollouts into is a `codex-archived`
@@ -5672,6 +5901,165 @@ mod tests {
             probe.record_count, None,
             "an all-missing family is unknown, never a semantic zero"
         );
+    }
+
+    /// W1006d — ADR-059 draft D6, the one required change of the external
+    /// review: an *unverified* additional root (one the scan never looked
+    /// at — a cell the registry will not vouch for) must not make an
+    /// already-measured CLI total disappear. The Windows shape of the
+    /// shipped registry is exactly this family: CLI store scanned, desktop
+    /// Cowork root `unascertained`. The aggregate must report the measured
+    /// roots' count as a QUALIFIED LOWER BOUND — `record_count` set to what
+    /// the scan measured, the unverified sibling named in
+    /// `unverified_roots`, `status`/`doctor` rendering it `≥N` — never the
+    /// blanket unknown the pre-W1006d rule produced (the rejected D6 side
+    /// effect), never a bare number that silently claims the family total.
+    #[test]
+    fn an_unverified_sibling_qualifies_the_measured_total_as_a_lower_bound() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let cli_sid = "019d5c05-0000-7000-8000-0000000000c5";
+        let cli_file = sandbox
+            .home()
+            .join(".claude/projects/-fixture-proj")
+            .join(format!("{cli_sid}.jsonl"));
+        fs::create_dir_all(cli_file.parent().unwrap()).unwrap();
+        fs::write(&cli_file, b"{\"synthetic\":\"cli-session\"}\n").unwrap();
+        // The desktop root's cell is `unascertained`, so the machine's real
+        // desktop directory — planted or not — is never looked at; plant
+        // nothing, which is the ordinary machine that has the CLI only.
+
+        let registry = claude_code_cli_plus_unverified_desktop_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            report.records.len(),
+            1,
+            "the CLI record is collected either way; records={:?}",
+            report
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.state,
+            ProbeState::Scanned,
+            "the measured primary keeps the family available; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(1),
+            "the measured CLI count is reported, not erased by the unverified sibling; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe
+                .unverified_roots
+                .iter()
+                .map(|root| (root.id.as_str(), root.state))
+                .collect::<Vec<_>>(),
+            vec![("claude-desktop-cowork", ProbeState::SkipUnascertained)],
+            "the unverified root is named so the count reads as a lower bound"
+        );
+        assert!(
+            probe.note.contains("lower bound") && probe.note.contains("claude-desktop-cowork"),
+            "the note qualifies the total and names the root; note={}",
+            probe.note
+        );
+
+        // The same family with the CLI store absent as well: the primary
+        // root was still MEASURED (found absent), so the rule that only an
+        // all-unknown family stays unknown does not bite — the total is the
+        // measured zero, still qualified by the unverified sibling
+        // (`≥0`), never an unqualified 0.
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::Missing,
+            "the measured primary was found absent; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.record_count,
+            Some(0),
+            "the measured absence is kept as the lower bound's floor, but the mark must \
+             keep it from reading as an exact total; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.unverified_roots.len(),
+            1,
+            "the unverified sibling still qualifies the missing family's total; note={}",
+            probe.note
+        );
+    }
+
+    /// W1006d — the other half of the rule: only when ALL roots of the
+    /// family stayed unverified does the combined total stay unknown. No
+    /// root was measured, so nothing anchors a lower bound and the
+    /// aggregate keeps the pre-DSK-1 unknown — with no unverified-roots
+    /// marking, because there is no measured count for it to qualify.
+    #[test]
+    fn a_family_whose_roots_all_stayed_unknown_keeps_the_total_unknown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let sandbox = Sandbox::new();
+        env::set_var("HOME", sandbox.home());
+
+        let registry = claude_code_all_unverified_registry();
+        let report =
+            scan_with_registry_and_machine(&Config::default(), &registry, "synthetic-machine")
+                .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(probe.state, ProbeState::Indeterminate);
+        assert_eq!(
+            probe.record_count, None,
+            "no root of the family was measured, so the total is unknown — a lower bound \
+             needs a measured floor; note={}",
+            probe.note
+        );
+        assert!(
+            probe.unverified_roots.is_empty(),
+            "an unknown total carries no lower-bound marking; there is no measured count \
+             for it to qualify; note={}",
+            probe.note
+        );
+        assert_eq!(
+            probe.note,
+            "one or more declared source roots could not be fully checked; total is unknown"
+        );
+
+        // And the sub-case where every root was skipped by the SAME policy
+        // reason: the aggregate keeps the precise `skip unascertained`
+        // word rather than collapsing it into indeterminate.
+        let both_unascertained = claude_code_all_unverified_registry_with_unascertained_primary();
+        let report = scan_with_registry_and_machine(
+            &Config::default(),
+            &both_unascertained,
+            "synthetic-machine",
+        )
+        .unwrap();
+        let probe = &report.probes[0];
+        assert_eq!(
+            probe.state,
+            ProbeState::SkipUnascertained,
+            "an all-unascertained family keeps the precise skip word"
+        );
+        assert_eq!(
+            probe.record_count, None,
+            "the family total stays unknown when every root stayed unknown"
+        );
+        assert!(probe.unverified_roots.is_empty());
     }
 
     /// W1006c (review of DSK-1): the measured-zero sibling rule is scoped to
@@ -7049,6 +7437,7 @@ mod tests {
             root: None,
             confidence: Confidence::Unascertained,
             state,
+            unverified_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -7113,6 +7502,7 @@ mod tests {
                 root: None,
                 confidence: Confidence::Measured,
                 state,
+                unverified_roots: Vec::new(),
                 record_count,
                 candidate_count: None,
                 unreadable_count: None,
@@ -7268,6 +7658,7 @@ mod tests {
                 root: None,
                 confidence: Confidence::Measured,
                 state,
+                unverified_roots: Vec::new(),
                 record_count: Some(count),
                 candidate_count: Some(count),
                 unreadable_count: Some(0),

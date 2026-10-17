@@ -439,6 +439,14 @@ pub struct HarnessFootprint {
     pub unreadable_entry_count: Option<u64>,
     /// `None` means the footprint was not measured; it is not an empty store.
     pub total_bytes: Option<u64>,
+    /// Registry ids of the harness family's roots that stayed unverified
+    /// while a sibling root was measured (ADR-059 draft D6, W1006d).
+    /// Non-empty exactly when `session_count` is a *qualified lower
+    /// bound* — the exact count of the measured roots only — and the
+    /// label prints it as `≥N` beside the note that names why. Empty for
+    /// a fully measured row and for a fully unknown one (the state says
+    /// that already, and there is no measured count to qualify).
+    pub unverified_roots: Vec<String>,
     /// The clock `earliest` / `latest` were read from. Printed with them, so a
     /// row can never be read as the other clock — see [`TimeBasis`].
     pub time_basis: TimeBasis,
@@ -484,6 +492,7 @@ pub fn coverage_from_records<'a>(
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes,
+        unverified_roots: Vec::new(),
         time_basis,
         earliest,
         latest,
@@ -681,6 +690,14 @@ fn footprint_from_sqlite_probe(probe: &scanner::HarnessProbe) -> HarnessFootprin
         unreadable_count: probe.unreadable_count,
         unreadable_entry_count: probe.unreadable_entry_count,
         total_bytes: probe.bytes,
+        // W1006d: a single-file family has no additional roots today, but
+        // the marking travels the same seam the counts do, so a future
+        // sqlite entry declaring source_roots cannot lose it here.
+        unverified_roots: probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.clone())
+            .collect(),
         // The probe read the store's own time column, not the .db file's mtime,
         // so this row is on the conversation clock.
         time_basis: TimeBasis::SessionTime,
@@ -726,6 +743,38 @@ fn footprint_from_dir_probe<'a>(
     };
     let root = probe.root.clone().unwrap_or(fallback_root);
     if !probe.installed_p() {
+        // W1006d: the lower-bound shape with no scanned root — the
+        // measured primary was found ABSENT while a declared sibling
+        // stayed unverified. The family is partially unknown, so this row
+        // is presence-unknown (never a measured "not installed"), and the
+        // session count is the probe's qualified floor: what the measured
+        // roots hold (`≥0`), never a bare 0 that reads as the family
+        // total. `doctor_consistency_test` joins this to the registry
+        // probe row, so taking the count from the probe is what keeps the
+        // two tables from contradicting each other.
+        if !probe.unverified_roots.is_empty() {
+            return HarnessFootprint {
+                installed: false,
+                presence_unknown: true,
+                session_count: probe.record_count,
+                candidate_count: probe.candidate_count,
+                unreadable_count: probe.unreadable_count,
+                unreadable_entry_count: probe.unreadable_entry_count,
+                unverified_roots: probe
+                    .unverified_roots
+                    .iter()
+                    .map(|root| root.id.clone())
+                    .collect(),
+                note: if probe.note.is_empty() {
+                    "one or more declared source roots are unverified; total is a lower \
+                     bound"
+                        .to_string()
+                } else {
+                    probe.note.clone()
+                },
+                ..default_footprint(name, root)
+            };
+        }
         return HarnessFootprint {
             presence_unknown: probe.not_probed_p(),
             note: if probe.note.is_empty() {
@@ -746,6 +795,21 @@ fn footprint_from_dir_probe<'a>(
     {
         footprint.note = probe.note.clone();
     }
+    // W1006d: the installed lower-bound shape (a scanned primary beside an
+    // unverified sibling). The count stays the records' own — the same set
+    // the probe counted, so the two tables agree by construction — and the
+    // marking plus the note are what keeps it from reading as a family
+    // total. The note wins over any unreadable wording above for the same
+    // reason the count wins over silence: the qualification is the more
+    // important of two true things this row has to say.
+    if !probe.unverified_roots.is_empty() {
+        footprint.unverified_roots = probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.clone())
+            .collect();
+        footprint.note = probe.note.clone();
+    }
     footprint
 }
 
@@ -760,6 +824,7 @@ fn default_footprint(name: &str, root: PathBuf) -> HarnessFootprint {
         unreadable_count: None,
         unreadable_entry_count: None,
         total_bytes: None,
+        unverified_roots: Vec::new(),
         time_basis: TimeBasis::Unmeasured,
         earliest: None,
         latest: None,
@@ -3354,6 +3419,13 @@ fn footprint_json(f: &HarnessFootprint) -> serde_json::Value {
             serde_json::json!(f.installed)
         },
         "root": f.root.as_ref().map(|root| root.display().to_string()),
+        // W1006d: additive in the `found_staged` sense — present on every
+        // row, empty where the family was fully measured (or fully
+        // unknown: the state fields already say that). Where it is
+        // non-empty, `session_count` is a qualified lower bound over the
+        // measured roots only; a consumer summing these counts without
+        // consulting this key reads a floor as a total.
+        "unverified_roots": f.unverified_roots,
         "session_count": match f.session_count {
             Some(n) => CountState::known(n),
             None if f.installed || f.presence_unknown => CountState::unknown(
@@ -3529,13 +3601,24 @@ fn archive_gap_json(g: &scanner::ArchiveGap) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn footprint_count_label(f: &HarnessFootprint) -> String {
-    match f.session_count {
-        Some(count) => count.to_string(),
-        // Installed but the store is not enumerable (schema not recognised):
-        // "unknown", never a fake zero. A source whose presence was
-        // never established is the same answer for the same reason.
-        None if f.installed || f.presence_unknown => "unknown".to_string(),
-        None => "N/A".to_string(),
+    // W1006d: a count beside unverified roots is a *qualified lower
+    // bound* — the measured roots' exact count. `≥` is the whole point:
+    // an unqualified `N` would silently claim the family total, and
+    // `unknown` would erase a measurement already taken. Either of those
+    // is the exact rendering the ADR-059 draft review rejected.
+    if let Some(count) = f.session_count {
+        if f.unverified_roots.is_empty() {
+            return count.to_string();
+        }
+        return format!("≥{count}");
+    }
+    // Installed but the store is not enumerable (schema not recognised):
+    // "unknown", never a fake zero. A source whose presence was
+    // never established is the same answer for the same reason.
+    if f.installed || f.presence_unknown {
+        "unknown".to_string()
+    } else {
+        "N/A".to_string()
     }
 }
 
@@ -4439,20 +4522,30 @@ fn print_probes(probes: &[scanner::HarnessProbe]) {
         // skip(template), and could-not-determine are all "I didn't look"; printing 0 equates not-checked
         // with checked-and-empty — exactly the falsehood eliminated here. "missing" retains 0 because
         // it was genuinely checked: the path does not exist.
+        // W1006d: a count beside unverified roots is the measured roots'
+        // floor — `≥N` (or `≥0`), never the plain number, which is exactly
+        // the silent-family-total reading the ADR-059 draft review
+        // rejected. The unverified roots themselves are already named in
+        // the probe's note, printed in the same row.
         let count = match p.state {
-            scanner::ProbeState::FileTarget => match p.record_count {
-                Some(c) => c.to_string(),
-                None => "unknown".to_string(),
-            },
-            // B90: `unwrap_or(0)` here is unreachable today (a Scanned probe
-            // always carries a count) — which is exactly why it was worth
-            // removing: it is a fallback that would print the B82 lie again
-            // the moment the invariant moves. Same shape as FileTarget above.
-            scanner::ProbeState::Scanned => match p.record_count {
-                Some(c) => c.to_string(),
-                None => "unknown".to_string(),
-            },
-            scanner::ProbeState::Missing => "0".to_string(),
+            scanner::ProbeState::FileTarget | scanner::ProbeState::Scanned => {
+                match p.record_count {
+                    Some(c) if !p.unverified_roots.is_empty() => format!("≥{c}"),
+                    // B90: `unwrap_or(0)` here is unreachable today (a Scanned
+                    // probe always carries a count) — which is exactly why it
+                    // was worth removing: it is a fallback that would print the
+                    // B82 lie again the moment the invariant moves.
+                    Some(c) => c.to_string(),
+                    None => "unknown".to_string(),
+                }
+            }
+            scanner::ProbeState::Missing => {
+                if p.unverified_roots.is_empty() {
+                    "0".to_string()
+                } else {
+                    "≥0".to_string()
+                }
+            }
             scanner::ProbeState::SkipWrongPlatform => "N/A".to_string(),
             scanner::ProbeState::Indeterminate
             | scanner::ProbeState::SkipUnascertained
@@ -4725,6 +4818,7 @@ mod b90_unknown_count_tests {
             unreadable_count: unreadable,
             unreadable_entry_count: Some(0),
             total_bytes: None,
+            unverified_roots: Vec::new(),
             time_basis: TimeBasis::Unmeasured,
             earliest: None,
             latest: None,
@@ -4802,6 +4896,7 @@ mod json_tests {
             unreadable_count: None,
             unreadable_entry_count: Some(0),
             total_bytes: Some(4096),
+            unverified_roots: Vec::new(),
             time_basis: TimeBasis::SessionTime,
             earliest: Some(UNIX_EPOCH),
             latest: None,
@@ -4818,6 +4913,7 @@ mod json_tests {
             root: Some(PathBuf::from("/nowhere/.claude")),
             confidence: crate::scanner::Confidence::Confirmed,
             state: scanner::ProbeState::Scanned,
+            unverified_roots: Vec::new(),
             record_count: Some(2),
             candidate_count: Some(2),
             unreadable_count: Some(0),
@@ -5513,6 +5609,7 @@ mod w285_coverage_and_clock_tests {
             root: None,
             confidence: Confidence::Unascertained,
             state,
+            unverified_roots: Vec::new(),
             record_count: None,
             candidate_count: None,
             unreadable_count: None,
@@ -5677,5 +5774,145 @@ mod w285_coverage_and_clock_tests {
             !threshold_phrase(47.0, 30.0).contains("from"),
             "a session older than the window is past the threshold, not still approaching it"
         );
+    }
+}
+
+#[cfg(test)]
+mod w1006d_lower_bound_tests {
+    use super::*;
+
+    /// W1006d (ADR-059 draft D6): the doctor's two count surfaces state a
+    /// *qualified lower bound* as one — a `≥` prefixed number in the human
+    /// tables, the unverified roots listed in the JSON row, and never a
+    /// plain number that reads as the family total, never an unknown that
+    /// erases the measured part (the D6 side effect the draft's external review
+    /// rejected).
+    #[test]
+    fn a_marked_footprint_prints_a_lower_bound_and_names_its_unverified_roots() {
+        let mut f = default_footprint("claude-code", PathBuf::from("/nowhere/projects"));
+        f.installed = true;
+        f.session_count = Some(2);
+        f.unverified_roots = vec!["claude-desktop-cowork".to_string()];
+        assert_eq!(
+            footprint_count_label(&f),
+            "≥2",
+            "a count beside unverified roots is a floor, not the family total"
+        );
+        let v = footprint_json(&f);
+        assert_eq!(
+            v["unverified_roots"],
+            serde_json::json!(["claude-desktop-cowork"]),
+            "the JSON row lists the roots the count excludes"
+        );
+        assert_eq!(
+            v["session_count"],
+            serde_json::json!({"kind": "known", "count": 2})
+        );
+
+        // The measured-absent floor: the family's presence is partially
+        // unknown, so the row is presence-unknown (never a measured "not
+        // installed") and its floor renders `≥0`, not a plain 0.
+        f.installed = false;
+        f.presence_unknown = true;
+        f.session_count = Some(0);
+        assert_eq!(footprint_count_label(&f), "≥0");
+    }
+
+    #[test]
+    fn an_unmarked_footprint_keeps_its_plain_number() {
+        let mut f = default_footprint("claude-code", PathBuf::from("/nowhere/projects"));
+        f.installed = true;
+        f.session_count = Some(2);
+        assert_eq!(footprint_count_label(&f), "2");
+        assert_eq!(
+            footprint_json(&f)["unverified_roots"],
+            serde_json::json!([]),
+            "a fully measured family keeps its exact-count reading"
+        );
+    }
+
+    fn session_record(i: u8) -> crate::models::SessionRecord {
+        crate::models::SessionRecord {
+            id: format!("claude-code.fixture.0000000{i}"),
+            absolute_path: PathBuf::from(format!("/nowhere/projects/s{i}.jsonl")),
+            byte_size: 1,
+            mtime: UNIX_EPOCH,
+            source: crate::models::HarnessSource::ClaudeCode,
+            compressed: false,
+            sqlite_layout: None,
+            provenance: Default::default(),
+            session_dir: None,
+        }
+    }
+
+    /// The dir-probe seam is where the footprint row and the registry probe
+    /// row could drift apart (`doctor_consistency_test` joins them), so the
+    /// lower-bound marking and count must both travel from the probe:
+    /// count for count, root id for root id, in the scanned shape and in
+    /// the measured-absent shape alike.
+    #[test]
+    fn the_dir_probe_carries_the_marking_in_the_scanned_and_measured_absent_shapes() {
+        let marked = |state, count| scanner::HarnessProbe {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            root: Some(PathBuf::from("/nowhere/projects")),
+            confidence: crate::scanner::Confidence::Confirmed,
+            state,
+            unverified_roots: vec![scanner::UnverifiedRoot {
+                id: "claude-desktop-cowork".to_string(),
+                state: scanner::ProbeState::SkipUnascertained,
+            }],
+            record_count: Some(count),
+            candidate_count: Some(count),
+            unreadable_count: Some(0),
+            unreadable_entry_count: Some(0),
+            earliest: None,
+            latest: None,
+            bytes: None,
+            recognized_files: Vec::new(),
+            note: "2 declared source roots checked; total is a lower bound — 1 unverified \
+                   source root(s): claude-desktop-cowork (skip_unascertained)"
+                .to_string(),
+        };
+
+        let records = vec![session_record(0), session_record(1)];
+        let records_ref: Vec<&crate::models::SessionRecord> = records.iter().collect();
+        let scanned = marked(scanner::ProbeState::Scanned, 2);
+        let fp = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&scanned),
+            records_ref.into_iter(),
+        );
+        assert_eq!(fp.session_count, Some(2), "count for count");
+        assert_eq!(
+            fp.unverified_roots,
+            vec!["claude-desktop-cowork".to_string()],
+            "root id for root id"
+        );
+        assert_eq!(fp.note, scanned.note, "note for note");
+
+        let absent = marked(scanner::ProbeState::Missing, 0);
+        let fp = footprint_from_dir_probe(
+            "claude-code",
+            PathBuf::from("/fallback"),
+            Some(&absent),
+            [].into_iter(),
+        );
+        assert_eq!(
+            fp.session_count,
+            Some(0),
+            "the measured-absent floor, taken from the probe so the tables agree"
+        );
+        assert!(
+            fp.presence_unknown,
+            "a family with an unverified sibling is partially unknown, never a measured \
+             \"not installed\""
+        );
+        assert_eq!(
+            fp.unverified_roots,
+            vec!["claude-desktop-cowork".to_string()]
+        );
+        assert_eq!(fp.session_count, absent.record_count);
     }
 }
