@@ -8,7 +8,7 @@ One page per source chat-stasher can archive: what it is, what we collect from i
 
 | Page | Surface | Status | Last verified |
 |---|---|---|---|
-| [Claude Code](claude-code.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
+| [Claude Code](claude-code.md) | cli, desktop app (Cowork) | verified end-to-end (2026-09-25) | 2026-09-25 |
 | [OpenAI Codex CLI](codex.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
 | [Gemini CLI](gemini-cli.md) | cli | verified end-to-end (2026-09-25) | 2026-09-25 |
 | [Google Antigravity](google-antigravity.md) | cli, ide, desktop app | verified end-to-end (2026-10-03) | 2026-10-03 (macOS) |

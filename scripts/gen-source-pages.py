@@ -151,6 +151,10 @@ SURFACE_DIMENSION_WORDS = {
     "ide": "ide",
     "app": "desktop app",
     "web": "web",
+    # The Claude Desktop Cowork surface is its own registry word — its
+    # transcripts are scanned as claude-code sessions — so the page word is
+    # its own too, not a reuse of the generic desktop-app one.
+    "desktop-cowork": "desktop app (Cowork)",
 }
 
 

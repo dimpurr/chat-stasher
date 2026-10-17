@@ -2,12 +2,18 @@
 
 | Harness | OS | Session path template | Format | Confidence | Status | Source |
 |---|---|---|---|---|---|---|
-| Claude Code | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
-| Claude Code | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
-| Claude Code | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
-| OpenAI Codex CLI | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
-| OpenAI Codex CLI | Linux | `$HOME/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
-| OpenAI Codex CLI | Windows | `%USERPROFILE%\.codex\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| Claude Code (primary) | macOS | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code (primary) | Linux | `~/.claude/projects/<sanitized-cwd>/<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code (primary) | Windows | `%USERPROFILE%\.claude\projects\<sanitized-cwd>\<session-uuid>.jsonl` | jsonl | official-docs | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code (claude-desktop-cowork) | macOS | `~/Library/Application Support/Claude/local-agent-mode-sessions/` | jsonl | measured-locally | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| Claude Code (claude-desktop-cowork) | Linux | - | - | - | not supported | - |
+| Claude Code (claude-desktop-cowork) | Windows | `%APPDATA%\Claude\local-agent-mode-sessions\` | jsonl | unascertained | verified end-to-end (2026-09-25) | https://code.claude.com/docs/en/claude-directory |
+| OpenAI Codex CLI (primary) | macOS | `~/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI (primary) | Linux | `$HOME/.codex/sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI (primary) | Windows | `%USERPROFILE%\.codex\sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI (codex-archived) | macOS | `~/.codex/archived_sessions/` | jsonl / jsonl.zst | measured-locally | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI (codex-archived) | Linux | `$HOME/.codex/archived_sessions/` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
+| OpenAI Codex CLI (codex-archived) | Windows | `%USERPROFILE%\.codex\archived_sessions\` | jsonl / jsonl.zst | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/openai/codex/main/codex-rs/utils/home-dir/src/lib.rs |
 | Gemini CLI | macOS | `~/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
 | Gemini CLI | Linux | `$HOME/.gemini/tmp/<projectId>/chats/` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |
 | Gemini CLI | Windows | `%USERPROFILE%\.gemini\tmp\<projectId>\chats\` | json / jsonl | source-confirmed | verified end-to-end (2026-09-25) | https://raw.githubusercontent.com/google-gemini/gemini-cli/main/packages/core/src/utils/paths.ts |

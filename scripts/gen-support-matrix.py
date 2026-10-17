@@ -683,9 +683,24 @@ def harness_status(h: dict[str, Any]) -> str:
 def harness_root_entries(h: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Return each measured source root independently; never flatten roots."""
     roots = h.get("source_roots") or []
+    primary = h.get("paths") or {}
+    primary_cells = sum(
+        1 for p in ("macos", "linux", "windows") if primary.get(p)
+    )
+    if roots and primary_cells:
+        # An entry may declare BOTH its primary store and additional source
+        # roots (ADR-059 draft: the desktop Cowork root beside the claude-code
+        # CLI store, the archived-rollouts root beside codex's active ones).
+        # The primary stays a root in its own right — first, under the
+        # reserved label `primary` — so per-OS status aggregation can never
+        # drop the store the entry itself names, and the tables show it
+        # separately from the additional roots exactly as the scan treats it.
+        return [("primary", primary)] + [
+            (str(root.get("id") or "source"), root.get("paths") or {}) for root in roots
+        ]
     if roots:
         return [(str(root.get("id") or "source"), root.get("paths") or {}) for root in roots]
-    return [("", h.get("paths") or {})]
+    return [("", primary)]
 
 
 def web_status(p: dict[str, Any]) -> str:

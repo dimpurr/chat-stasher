@@ -54,6 +54,10 @@
 #
 # on macOS, where the Grok Bot desktop app's persistence lives, grok-bot is
 # seedable too — one replica blob, the same shape the scanner test plants.
+# claude-code and codex now also seed their declared second roots on machines
+# whose registry cells anchor them (the desktop Cowork sandboxes and the
+# archived rollouts), each through its own cell template, so the doctor count
+# exercises the additive primary-plus-roots scan, not the primary alone.
 #
 # `codex` needs one configured line on Linux/Windows and this script writes it
 # (see the CODEX note at the init step). The remaining eight are *not* seeded
@@ -328,6 +332,58 @@ def plant_codex(root, n):
         write(f"{root}/2026-08-01/{UUID.format(100 + i)}.jsonl", "{}\n")
 
 
+def plant_codex_archived(root, n):
+    # The same date-nested layout, in the archived directory the desktop's
+    # thread/archive moves rollouts into — distinct rollout ids, because two
+    # files sharing a name are ONE session under the scanner's distinct-id
+    # counting (they are what an archive move looks like at rest), and this
+    # fixture seeds two sessions, not one session filed twice.
+    for i in range(n):
+        write(f"{root}/2026-08-01/{UUID.format(200 + i)}.jsonl", "{}\n")
+
+
+def plant_by_kind(kind, cell, root, n):
+    """Dispatch one root recipe: `codex` reuses the shared rollout planter,
+    `session_dir` plants straight from the root cell's own session_dir rule."""
+    if kind == "codex":
+        plant_codex_archived(root, n)
+        return n
+    if kind == "session_dir":
+        return plant_session_dir_cell(cell, root, n)
+    raise RuntimeError(f"unknown root recipe kind {kind!r}")
+
+
+def plant_session_dir_cell(cell, root, n):
+    """Plant `n` sessions shaped by a cell's own `session_dir` rule.
+
+    The rule is the source the scanner really consumes, so the fixture is
+    derived from it rather than hand-drawn: every pattern component becomes a
+    synthetic directory name, the file target's components become the path
+    below it (the literal `file` field as-is, or a `file_glob` whose `*`
+    parts get synthetic values), and each session gets its own values so `n`
+    sessions produce `n` distinct transcripts the rule must then select —
+    the same shape the scanner tests plant for the desktop Cowork sandboxes.
+    """
+    rule = cell["session_dir"]
+    target = rule.get("file_glob") or rule.get("file")
+    planted = 0
+    for i in range(n):
+        dirs = [part.replace("*", f"smoke{i}") for part in rule["pattern"].split("/") if part]
+        parts = [part for part in target.split("/") if part]
+        # The last component of the file target is the transcript's own name:
+        # where the rule says the file name itself varies (`*.jsonl`), each
+        # session needs its own stem, or n sessions collapse to one file.
+        parts = [
+            part.replace("*", f"session-{i:02d}" if idx == len(parts) - 1 else f"smoke{i}")
+            for idx, part in enumerate(parts)
+        ]
+        p = pathlib.Path(root).joinpath(*dirs, *parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}\n", encoding="utf-8")
+        planted += 1
+    return planted
+
+
 def plant_gemini(root, n):
     # tests/doctor_consistency_test.rs: session-a.json + session-b.jsonl counted,
     # settings.json rejected by the cell's `session-*` pattern. Planted here
@@ -588,6 +644,19 @@ NO_RECIPE = {
     "github-copilot-cli": "id_not_keyable",
 }
 
+# Recipes for the *source roots* a harness declares beside its primary store
+# (the primary is RECIPES above). Each is the sessions the recipe plants and
+# the planting function. A root whose cell declares a `session_dir` rule uses
+# the rule itself as the fixture's blueprint, so the smoker never invents a
+# layout the registry does not state.
+ROOT_RECIPES = {
+    # Claude Desktop's Cowork sandboxes: planted from the cell's own
+    # `*/*/local_*` + `.claude/projects/*/*.jsonl` rule.
+    "claude-desktop-cowork": (1, "session_dir"),
+    # Codex archived rollout files keep the active store's date-nested layout.
+    "codex-archived": (1, "codex"),
+}
+
 # Where a harness lives when the registry cell for this platform cannot anchor
 # it, and the config key that says so. This is the tool's *documented* remedy for
 # a cell it will not guess at, and each path is the registry's own stated default
@@ -612,9 +681,18 @@ configured = []
 manifest = []
 for harness in registry["harnesses"]:
     hid = harness["id"]
-    source_roots = harness.get("source_roots") or [harness]
-    cells = [root.get("paths", {}).get(platform) for root in source_roots]
-    if not cells or any(cell is None for cell in cells):
+    # One additive scan reads the entry's primary cell plus every declared
+    # source root that itself declares a cell for this platform — a root with
+    # no cell here is one the probe never looks at, so planting it would put
+    # fixtures where the registry says nothing lives.
+    primary_cell = (harness.get("paths") or {}).get(platform)
+    source_roots = harness.get("source_roots") or []
+    root_cells = [
+        (root["id"], (root.get("paths") or {}).get(platform))
+        for root in source_roots
+        if (root.get("paths") or {}).get(platform) is not None
+    ]
+    if primary_cell is None and not root_cells:
         manifest.append((hid, "not_seeded", "no_cell_for_platform"))
         continue
     # The registry's own gate: an `unascertained` cell is one this build refuses
@@ -623,7 +701,10 @@ for harness in registry["harnesses"]:
     # A *configured* root is not gated that way — it is the user stating a fact,
     # not the registry guessing — but the fallback below is only reached for a
     # template this build cannot anchor, which is a different case.
-    if any(cell.get("confidence") == "unascertained" for cell in cells):
+    active_cells = ([primary_cell] if primary_cell is not None else []) + [
+        cell for _, cell in root_cells
+    ]
+    if any(cell.get("confidence") == "unascertained" for cell in active_cells):
         manifest.append((hid, "not_seeded", "confidence_unascertained"))
         continue
     if hid == "google-antigravity":
@@ -635,12 +716,32 @@ for harness in registry["harnesses"]:
     if recipe is None:
         manifest.append((hid, "not_seeded", NO_RECIPE.get(hid, "no_fixture_recipe")))
         continue
-    if len(cells) > 1:
-        # A single seed recipe cannot represent several independent native
-        # roots without explicit fixture support for each root.
+    missing_root_recipes = [
+        root_id for root_id, _ in root_cells if root_id not in ROOT_RECIPES
+    ]
+    if missing_root_recipes:
+        # A recipe for the primary store alone cannot honestly represent the
+        # harness once it declares roots the doctor will also count: seeding
+        # only half the family would understate the expected count.
         manifest.append((hid, "not_seeded", "multi_root_fixture_required"))
         continue
-    cell = cells[0]
+    if primary_cell is None:
+        # Roots but no primary on this platform: every root needs its recipe.
+        planted = 0
+        for root_id, cell in root_cells:
+            n, kind = ROOT_RECIPES[root_id]
+            root = resolve(cell["template"], env)
+            if root is None:
+                manifest.append((hid, "not_seeded", "template_unresolvable"))
+                planted = None
+                break
+            planted += plant_by_kind(kind, cell, root, n)
+        if planted is None:
+            continue
+        counts[hid] = planted
+        manifest.append((hid, "seeded", str(planted)))
+        continue
+    cell = primary_cell
     root = resolve(cell["template"], env)
     if root is None:
         # The cell's template starts with a per-install override (`$CODEX_HOME`,
@@ -653,10 +754,30 @@ for harness in registry["harnesses"]:
         rel, config_key = fallback
         root = str(home / rel)
         configured.append((hid, config_key, root))
+    # Resolve every additional root's template before planting anything: a
+    # root that cannot anchor this platform leaves the harness unseeded
+    # (doctor could count what was planted) — never half-seeded.
+    root_roots = []
+    for root_id, root_cell in root_cells:
+        root_root = resolve(root_cell["template"], env)
+        if root_root is None:
+            manifest.append((hid, "not_seeded", "template_unresolvable"))
+            root_roots = None
+            break
+        root_roots.append((root_id, root_cell, root_root))
+    if root_roots is None:
+        continue
     n, fn = recipe
     fn(root, n)
-    counts[hid] = n
-    manifest.append((hid, "seeded", str(n)))
+    planted = n
+    # Seed every additional root beside the primary, through the root's own
+    # recipe and the root cell's own template — the additive scan counts them
+    # in the same harness total the doctor reports.
+    for root_id, root_cell, root_root in root_roots:
+        rn, kind = ROOT_RECIPES[root_id]
+        planted += plant_by_kind(kind, root_cell, root_root, rn)
+    counts[hid] = planted
+    manifest.append((hid, "seeded", str(planted)))
 
 pathlib.Path(manifest_path).write_text(
     "".join(f"{hid}\t{status}\t{note}\n" for hid, status, note in manifest)

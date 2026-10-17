@@ -2,8 +2,8 @@
   "schema_version": 1,
   "generated": "2026-10-13",
   "harness_surface": {
-    "claude-code": "cli",
-    "codex": "cli",
+  "claude-code": "cli, desktop app (Cowork)",
+  "codex": "cli",
     "gemini-cli": "cli",
     "google-antigravity": "cli, ide, desktop app",
     "opencode": "cli",
