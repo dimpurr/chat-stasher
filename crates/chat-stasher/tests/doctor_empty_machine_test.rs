@@ -9,6 +9,18 @@
 //! `ubuntu-latest`. `Some(0)` claims "I enumerated it, it is empty"; `None`
 //! claims "I could not determine". Only one of those was earned.
 //!
+//! W1006d (ADR-059 draft D6) then taught absence a third shape, and the
+//! `windows-latest` CI run (39017091742) reached it through the *shipped*
+//! registry: a family whose measured roots were all found absent while a
+//! declared sibling stayed unverified — claude-code's desktop Cowork cell is
+//! `unascertained` on Windows only — keeps the measured zero as a
+//! **qualified lower-bound floor**: `Some(0)` in the count, but never a bare
+//! 0, because the same row carries the never-verified roots in
+//! `unverified_roots`, reports presence as unknown, and prints `>=0` beside
+//! the root that was not looked at. That floor is a measurement stated with
+//! its own qualification, so it is not the `Some(0)` lie this file exists to
+//! catch. A `Some(0)` without the marking is, and stays, one.
+//!
 //! Both tests here run against an isolated temporary HOME and never look at,
 //! walk, or depend on any real harness directory on the machine running them —
 //! so they take the identical code path on a machine with every harness
@@ -101,11 +113,28 @@ fn assert_absence_semantics_agree(report: &doctor::DoctorReport) {
             pr.installed_p(),
             pr.state
         );
+        assert_eq!(
+            fp.unverified_roots,
+            pr.unverified_roots
+                .iter()
+                .map(|root| root.id.clone())
+                .collect::<Vec<_>>(),
+            "harness {fp_name} footprint row and registry probe row must carry the same \
+             lower-bound marking — a count printed as >= has to name the same unverified \
+             roots in both tables (footprint={:?} probe={:?})",
+            fp.unverified_roots,
+            pr.unverified_roots
+        );
     }
 }
 
 /// A machine with **nothing installed**: an empty HOME and the shipped
-/// registry. Every harness must resolve to "unknown", never to a count.
+/// registry. Every harness must report plain absence as 'unknown', never as a
+/// count — with the one exception the file header documents: where the
+/// shipped registry leaves a declared sibling root unverified on this
+/// platform (claude-code's desktop Cowork cell on Windows), the family's
+/// measured zero may appear as the W1006d qualified lower-bound floor,
+/// carried with its marking and with presence reported unknown.
 ///
 /// Note what this does *not* assert: it does not care whether a given cell
 /// ends up `Missing`, `SkipUnascertained` or `SkipUnresolvable` — those differ
@@ -131,11 +160,29 @@ fn nothing_installed_reports_unknown_not_zero() {
             "under isolated HOME {probe_id} should not be judged as installed (state={:?}) — test leaked to machine's real directory",
             pr.state
         );
-        assert_eq!(
-            fp.session_count, None,
-            "on empty machine {fp_name} footprint session count must be 'unknown', not {:?}",
-            fp.session_count
-        );
+        // The count itself. `None` is the plain absence — unknown, never a
+        // zero nobody earned. The only `Some` this premise can produce is
+        // the W1006d qualified lower-bound floor: the measured roots' zero,
+        // traveling together with the unverified-roots marking that keeps it
+        // reading as `>=0` rather than as a family total, and with presence
+        // reported unknown. Any other `Some` — a bare `Some(0)` above all —
+        // is exactly the "I enumerated this family" claim that nothing here
+        // enumerated, the failure this test exists to catch.
+        match fp.session_count {
+            None => {}
+            Some(0) if !fp.unverified_roots.is_empty() && fp.presence_unknown => {
+                assert_eq!(
+                    fp.session_count, pr.record_count,
+                    "the floor is the measured roots' count, so both tables carry it: \
+                     footprint={:?} registry={:?} (probe state={:?})",
+                    fp.session_count, pr.record_count, pr.state
+                );
+            }
+            Some(other) => panic!(
+                "on empty machine {fp_name} footprint session count must be 'unknown', \
+                 or the marked >=0 floor with presence reported unknown — not {other:?}"
+            ),
+        }
         assert!(
             !fp.installed,
             "on empty machine {fp_name} footprint should not be judged as installed"

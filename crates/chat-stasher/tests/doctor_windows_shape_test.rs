@@ -27,6 +27,7 @@
 //! that supplies the shape there).
 
 use chat_stasher::doctor;
+use chat_stasher::scanner::ProbeState;
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -327,6 +328,97 @@ fn windows_unverified_desktop_cell_keeps_the_measured_cli_count_marked() {
     assert!(
         footprint.note.contains("lower bound"),
         "the footprint note qualifies the count too; note={}",
+        footprint.note
+    );
+
+    std::env::remove_var("CHAT_STASHER_REGISTRY");
+}
+
+/// The empty-machine half of the W1006d shape above: the same Windows family
+/// — scannable CLI primary beside an `unascertained` desktop Cowork root —
+/// with **nothing installed at all**. The primary root was still MEASURED
+/// (looked for, found absent), so the scanner's aggregate keeps the measured
+/// zero as the lower bound's floor instead of collapsing the family into an
+/// unknown: `record_count == Some(0)` with the unverified sibling named in
+/// `unverified_roots`, the state that tells the truth about presence staying
+/// `missing`, and doctor's two tables carrying the same marked `>=0` — the
+/// "an absent harness is not an empty one" sentence is spoken by the
+/// marking plus the unknown presence, not by faking the zero as a family
+/// total.
+///
+/// This is the exact shape the `windows-latest` CI run caught through the
+/// shipped registry (claude-code on a bare runner: `footprint session count
+/// must be 'unknown', not Some(0)`); the shipped desktop cell is
+/// `unascertained` on Windows only, so the shipped-registry form of it is
+/// unreachable on macOS and Linux. The replay makes the *invariant* — the
+/// floor is always carried with its qualification — run on every platform,
+/// so the suite cannot again be green everywhere except one OS it never
+/// exercised.
+#[test]
+fn windows_unverified_desktop_cell_empty_machine_keeps_the_floor_marked() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let base = tempfile::tempdir().unwrap();
+    let home = windows_shaped_home(base.path());
+    isolate_home(&home);
+    write_windows_desktop_store_registry(&home);
+
+    let report = doctor::run();
+    assert!(!report.scan_failed, "scratch registry must load");
+
+    let probe = report
+        .probes
+        .iter()
+        .find(|p| p.id == "claude-code")
+        .expect("registry probe row for claude-code");
+    assert_eq!(
+        probe.state,
+        ProbeState::Missing,
+        "the measured primary was found absent; note={}",
+        probe.note
+    );
+    assert_eq!(
+        probe.record_count,
+        Some(0),
+        "the measured zero is kept as the lower bound's floor, never a blanket unknown; note={}",
+        probe.note
+    );
+    assert_eq!(
+        probe
+            .unverified_roots
+            .iter()
+            .map(|root| root.id.as_str())
+            .collect::<Vec<_>>(),
+        ["claude-desktop-cowork"],
+        "the unverified sibling still qualifies the floor; note={}",
+        probe.note
+    );
+
+    let footprint = report
+        .footprints
+        .iter()
+        .find(|f| f.name == "claude-code")
+        .expect("footprint row for claude-code");
+    assert!(
+        !footprint.installed,
+        "nothing is installed; the row must not claim otherwise"
+    );
+    assert!(
+        footprint.presence_unknown,
+        "a family with an unverified root is partially unknown, not a measured 'not installed'"
+    );
+    assert_eq!(
+        footprint.session_count, probe.record_count,
+        "the two doctor tables must keep agreeing on the count (session_count={:?})",
+        footprint.session_count
+    );
+    assert_eq!(
+        footprint.unverified_roots,
+        vec!["claude-desktop-cowork".to_string()],
+        "the footprint row carries the same marking as the probe row"
+    );
+    assert!(
+        footprint.note.contains("lower bound"),
+        "the footprint note qualifies the floor too; note={}",
         footprint.note
     );
 
