@@ -712,6 +712,18 @@ enum Command {
     /// "0 matched" answer cannot be trusted while any remain, so the exit code
     /// is `3` rather than `1`.
     ///
+    /// `--surface` filters on the **observed** surface dimension (ADR-059):
+    /// a session matches only if its records name the value — claude-code's
+    /// Cowork transcripts record `desktop-cowork` — and a session whose
+    /// records carry no surface at all (the CLI library records none: an
+    /// absent observation is never read as an implicit `cli`) is listed as
+    /// unplaceable while the filter is active. The value must be one the
+    /// registry declares in its `dimensions.surfaces` (`cli`,
+    /// `desktop-cowork`, …); anything else is a usage error, because a typo
+    /// named as a filter must not come back as an empty result. With the
+    /// flag absent every surface is in scope and the search behaves exactly
+    /// as it did before the dimension existed.
+    ///
     /// `--text` searches the local FTS5 trigram index (substring matching for
     /// runs of at least three characters). A shorter query is refused, not
     /// answered: the report says `matched=unknown` and the run exits `3`.
@@ -727,7 +739,7 @@ enum Command {
         /// Destination to search. Required unless an explicit `--repo` is given.
         #[arg(long)]
         destination: Option<String>,
-        /// The shared filters (session / machine / harness / time window).
+        /// The shared filters (session / machine / harness / surface / time window).
         #[command(flatten)]
         filters: chat_stasher::selector::SelectorArgs,
         /// Search indexed titles and user/assistant text with SQLite's trigram tokenizer.
@@ -803,7 +815,9 @@ enum Command {
         /// Directory to write into. Must be empty or absent unless `--force`.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
-        /// The shared filters (session / machine / harness / time window).
+        /// The shared filters (session / machine / harness / surface / time window),
+        /// resolved by the same code as `search` — a `--surface` value the
+        /// registry does not declare is refused here too.
         #[command(flatten)]
         filters: chat_stasher::selector::SelectorArgs,
         /// Which lines to write: `all` (default), or `user` for only the user's
@@ -4986,9 +5000,13 @@ fn cmd_search(
         }
     }
     // Resolve the filter before touching the network: a date that is not a
-    // date, or a window that cannot be satisfied, is a usage error and must
-    // cost nothing and read nothing.
-    let resolved = match filters.resolve() {
+    // date, a window that cannot be satisfied, or a surface value the
+    // registry does not declare (`--surface`, ADR-059 — a value no source
+    // records can never match a session, so it must not come back dressed
+    // as an empty result), is a usage error and must cost nothing and read
+    // nothing of the destination. The registry read the surface check needs
+    // happens here, only when a surface was named.
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(filters) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("search: {e}");
@@ -5531,7 +5549,11 @@ fn cmd_export(
     options: &[String],
     keep_ssh_masters: bool,
 ) -> ExitCode {
-    let resolved = match filters.resolve() {
+    // Same resolve as `search` — including the DSK-5 surface-vocabulary
+    // check, so the dry run and this command cannot disagree about what a
+    // flag means: the flags are resolved by the one function, before any
+    // network is touched.
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(filters) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("export: {e}");
@@ -5893,11 +5915,13 @@ fn cmd_ui(args: UiArgs, deprecated_alias: Option<&str>) -> ExitCode {
             }
         }
     }
-    let resolved = match filters.resolve() {
+    let resolved = match chat_stasher::scanner::resolve_selector_flags(&filters) {
         Ok(r) => r,
         Err(e) => {
             // Same rule as `search`: a filter that cannot be resolved is a
-            // usage error, never an empty result.
+            // usage error, never an empty result — and the surface check is
+            // part of the resolve, so a launch `--surface` the registry does
+            // not declare is refused before any destination is read (DSK-5).
             eprintln!("ui: {e}");
             return ExitCode::from(2);
         }

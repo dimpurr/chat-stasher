@@ -961,7 +961,13 @@ pub(super) fn param<'a>(params: &'a Query, key: &str) -> Option<&'a str> {
 /// and resolved by the *same* [`SelectorArgs::resolve`], so a query string can
 /// express exactly what a command line can and nothing more. A value that
 /// cannot be resolved is a usage error — reported as a 400, never as "0 rows",
-/// because a typo must not be dressed up as a measurement.
+/// because a typo must not be dressed up as a measurement. A `surface`
+/// parameter is held to the same standard as the command-line flag: it must
+/// be one the registry declares in its `dimensions.surfaces` union, so a
+/// link a user hand-edited into a typo comes back as a refused query rather
+/// than a dashboard that quietly matched nothing (DSK-5); the dashboard's own
+/// links only ever carry a value the launch flags or the URL already named,
+/// so nothing the page itself generates can fail this check.
 pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
     let harness = param(params, "harness").map(|h| {
         h.split(',')
@@ -969,7 +975,7 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
     });
-    SelectorArgs {
+    let args = SelectorArgs {
         session: param(params, "session").map(str::to_string),
         machine: param(params, "machine").map(str::to_string),
         harness,
@@ -981,8 +987,8 @@ pub fn selector_from_query(params: &Query) -> Result<Resolved, UsageError> {
         surface: param(params, "surface")
             .or_else(|| param(params, "sub_surface"))
             .map(str::to_string),
-    }
-    .resolve()
+    };
+    crate::scanner::resolve_selector_flags(&args)
 }
 
 // ------------------------------------------------------------------- paging
@@ -4425,7 +4431,10 @@ mod tests {
     }
 
     /// A filter that cannot be resolved is a usage error — a 400, never a list
-    /// of zero rows, which a reader would take for a measurement.
+    /// of zero rows, which a reader would take for a measurement. The surface
+    /// parameter answers to the same rule (DSK-5): a value the registry does
+    /// not declare can never match a session, so it is refused here exactly
+    /// like a date that is not a date.
     #[test]
     fn an_unresolvable_filter_is_a_usage_error_never_zero_rows() {
         let d = fixture::data();
@@ -4433,6 +4442,7 @@ mod tests {
             "day=yesterday",
             "day=2026-02-30",
             "since=2026-03-01&until=2026-01-01",
+            "surface=not-a-surface",
         ] {
             let r = req(&format!("/sessions?{bad}"), &d, &NoContent);
             assert_eq!(r.status, 400, "`{bad}` must be a usage error");
@@ -4442,6 +4452,11 @@ mod tests {
             );
         }
         assert_eq!(req("/sessions?day=2026-01-15", &d, &NoContent).status, 200);
+        assert_eq!(
+            req("/sessions?surface=cli", &d, &NoContent).status,
+            200,
+            "a surface the registry declares is a resolvable filter"
+        );
     }
 
     /// The query string accepts exactly the flags `search` accepts, and no more.
