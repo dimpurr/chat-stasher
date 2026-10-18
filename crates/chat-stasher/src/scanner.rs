@@ -1597,6 +1597,81 @@ pub fn load_registry_from_repo() -> io::Result<HarnessRegistry> {
     load_registry(&path)
 }
 
+impl HarnessRegistry {
+    /// The surface dimension's declared value vocabulary: the union of every
+    /// harness's `dimensions.surfaces` (ADR-059 D1, DSK-5).
+    ///
+    /// This is what a user's `--surface` value is checked against, and it is
+    /// read from the same registry the capture side records provenance from,
+    /// so the word a query may ask for cannot drift from the word a source
+    /// root may record. A value a harness's own capture does not re-record
+    /// per session (claude-code's primary CLI library records no surface at
+    /// all) is still a legal **value**: the vocabulary declares what the
+    /// dimension can mean, not what every session carries — a session with no
+    /// observation answers "unevaluated" under the filter, never "no" (see
+    /// `crate::selector`).
+    pub fn surface_vocabulary(&self) -> BTreeSet<String> {
+        self.harnesses
+            .iter()
+            .flat_map(|harness| harness.dimensions.surfaces.iter().cloned())
+            .collect()
+    }
+}
+
+/// The current registry's surface vocabulary, memoised for this process
+/// (DSK-5).
+///
+/// `search`, `export` and the dashboard all validate a requested surface
+/// against the same declared set; the dashboard re-resolves the selector for
+/// **every request**, so the registry is read once per process rather than
+/// once per page. The registry is read through the same precedence
+/// [`load_registry_from_repo`] documents — explicit override, repository
+/// file, embedded copy — and a failed read stays a failed read on every
+/// later call: memoising an error would be a way to report a broken
+/// override only once and guess afterwards.
+pub fn surface_vocabulary() -> io::Result<&'static BTreeSet<String>> {
+    static VOCABULARY: std::sync::OnceLock<io::Result<BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let loaded = VOCABULARY
+        .get_or_init(|| load_registry_from_repo().map(|registry| registry.surface_vocabulary()));
+    loaded.as_ref().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("the harness registry's surface vocabulary could not be read: {error}"),
+        )
+    })
+}
+
+/// Resolve `search`'s shared filter flags, validating a requested surface
+/// value against the registry's declared surface vocabulary (DSK-5).
+///
+/// The registry is consulted **only when a surface was actually requested**:
+/// a query that names no surface must behave exactly as before — all
+/// surfaces are in scope by default — and must not fail because a registry
+/// copy could not be read. With a surface named, an unreadable registry is
+/// still a usage error rather than a search that quietly skipped the check:
+/// the query asks about a dimension nobody could verify, and guessing there
+/// is the "unknown recorded as empty" failure this repo forbids.
+///
+/// Callers print the message and exit `2`, the same way they treat
+/// [`crate::selector::UsageError`] from the plain resolve — the arguments
+/// cannot be turned into a verifiable filter at all.
+pub fn resolve_selector_flags(
+    filters: &crate::selector::SelectorArgs,
+) -> Result<crate::selector::Resolved, crate::selector::UsageError> {
+    let Some(surface) = filters.surface.as_deref() else {
+        // No surface named: nothing to validate, the registry is not read.
+        return filters.resolve();
+    };
+    let vocabulary = surface_vocabulary().map_err(|error| {
+        crate::selector::UsageError(format!(
+            "the requested `--surface {surface}` could not be checked against the harness \
+             registry, so the query is refused rather than answered unverified: {error}"
+        ))
+    })?;
+    filters.resolve_validated(vocabulary)
+}
+
 /// Registry-driven scan against an already-loaded [`HarnessRegistry`];
 /// separate entry so tests can feed it a scratch registry without touching
 /// the user's HOME or the repo's `data/` file.
@@ -6650,6 +6725,99 @@ mod tests {
             Some(value) => env::set_var(REGISTRY_ENV, value),
             None => env::remove_var(REGISTRY_ENV),
         }
+    }
+
+    /// DSK-5 (ADR-059): the shipped registry declares the surface dimension's
+    /// value vocabulary, and the two values the ADR landed for claude-code
+    /// — `cli` and `desktop-cowork` — are in the union a `--surface` value
+    /// is validated against. The union is the whole registry's, not one
+    /// harness's: `ide`/`app` (antigravity) and `web` (deepseek-harness)
+    /// are declared by their own entries, and `resolve`'s refusal lists
+    /// exactly this set.
+    #[test]
+    fn the_shipped_registry_declares_the_surface_vocabulary() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = env::var_os(REGISTRY_ENV);
+        env::remove_var(REGISTRY_ENV);
+
+        let registry = load_registry_from_repo().expect("the shipped registry must load");
+        let vocabulary = registry.surface_vocabulary();
+        for value in ["cli", "desktop-cowork", "ide", "app", "web"] {
+            assert!(
+                vocabulary.contains(value),
+                "the shipped registry must declare `{value}` as a surface value: {vocabulary:?}"
+            );
+        }
+
+        match previous {
+            Some(value) => env::set_var(REGISTRY_ENV, value),
+            None => env::remove_var(REGISTRY_ENV),
+        }
+    }
+
+    /// The vocabulary is a **union** with duplicates removed, taken from every
+    /// harness's `dimensions.surfaces` alike: claude-code declares
+    /// `desktop-cowork` where another harness declares the same `cli`, and
+    /// neither harness's list shadows the other's. A scratch registry proves
+    /// the fold without depending on the shipped data's exact contents.
+    #[test]
+    fn the_surface_vocabulary_is_the_sorted_deduplicated_union() {
+        // The DSK-1 scratch registry declares no dimensions, so its union is
+        // empty — this is also the proof that a harness entry without a
+        // `dimensions` block contributes nothing, rather than an error.
+        assert!(claude_code_cli_plus_desktop_registry()
+            .surface_vocabulary()
+            .is_empty());
+
+        let registry: HarnessRegistry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated": "synthetic fixture",
+            "harnesses": [
+                {
+                    "id": "claude-code",
+                    "display_name": "synthetic",
+                    "dimensions": {
+                        "supported": ["surface"],
+                        "surfaces": ["desktop-cowork", "cli"]
+                    },
+                    "paths": {}
+                },
+                {
+                    "id": "google-antigravity",
+                    "display_name": "synthetic",
+                    "dimensions": {
+                        "supported": ["surface"],
+                        "surfaces": ["cli", "ide", "app"]
+                    },
+                    "paths": {}
+                },
+                {
+                    "id": "codex",
+                    "display_name": "synthetic",
+                    "paths": {}
+                }
+            ]
+        }))
+        .unwrap();
+        let expected: BTreeSet<String> = ["app", "cli", "desktop-cowork", "ide"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(registry.surface_vocabulary(), expected);
+    }
+
+    /// [`resolve_selector_flags`] reads the registry only when a surface was
+    /// asked for (DSK-5: the no-flag run must behave exactly as before), so
+    /// a flag-absent resolve cannot fail because of the registry at all.
+    #[test]
+    fn flags_without_a_surface_resolve_without_touching_the_registry() {
+        let args = crate::selector::SelectorArgs {
+            machine: Some("m".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_selector_flags(&args)
+            .expect("a flag-absent resolve must not depend on the registry at all");
+        assert_eq!(resolved.selector.machine.as_deref(), Some("m"));
     }
 
     #[test]
