@@ -833,10 +833,10 @@ machine:
 - **Harness session stores are opened read-only.** Every SQLite connection uses
   `SQLITE_OPEN_READ_ONLY` with a `mode=ro` URI, falling back to
   `mode=ro&immutable=1` when a WAL store has no `-shm`
-  (`crates/chat-stasher/src/sqlite_probe.rs:2104-2122`). The module states the
+  (`crates/chat-stasher/src/sqlite_probe.rs:2277-2295`). The module states the
   intent that a read-only probe never creates or touches `-wal`/`-shm` sidecars
   (`crates/chat-stasher/src/sqlite_probe.rs:23-29`), and there is a test
-  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:2945-2993`).
+  asserting no sidecars are created (`crates/chat-stasher/src/sqlite_probe.rs:3118-3166`).
   `status` and `doctor` are likewise declared read-only
   (`crates/chat-stasher/src/main.rs:470,560-561`).
 - **`seal` refuses to rename files it cannot justify renaming.** It is gated by
@@ -940,7 +940,7 @@ a real limitation of the current code.
    changed session payloads and stores user/assistant text and titles in a local
    SQLite index in the operating-system cache directory. The index is mode 0600
    on Unix and can be removed with `index clear`
-   (`crates/chat-stasher/src/fts.rs:1-6,1472-1692,1694-1709,2143-2152`). One qualification, because the
+   (`crates/chat-stasher/src/fts.rs:1-6,1473-1693,1695-1710,2144-2153`). One qualification, because the
    looser version of that sentence is no longer true: `search` also reads each
    machine's activity sidecar `meta/<machine>/activity-v1.jsonl`, and in a
    rustic repository every file's bytes are a data blob, so that read does go
