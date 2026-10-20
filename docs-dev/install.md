@@ -301,7 +301,7 @@ and prints the file, the position and the reason
 and continue on the built-in defaults: those defaults declare no destination, so a
 scheduled `push` would then run exactly as if you had never declared one, and the
 archive would quietly stop being copied anywhere
-(`crates/chat-stasher/src/main.rs:13747-13755,13765-13788`).
+(`crates/chat-stasher/src/main.rs:13750-13758,13768-13791`).
 
 Two exceptions, and only two. `doctor` is the one command that keeps going — it
 reports the error and lists the checks it therefore could not perform, so "no
@@ -604,7 +604,7 @@ can express them (`crates/chat-stasher/src/store.rs:2430-2437`).
 archive uses `rustic_key_file` (default `~/.local/share/chat-stasher/masterkey.json`);
 each declared destination has its own, defaulting to
 `~/.local/share/chat-stasher/masterkey-<destination>.json` and settable with that
-destination's `key_file` (`crates/chat-stasher/src/main.rs:8894-8899`). A second
+destination's `key_file` (`crates/chat-stasher/src/main.rs:8897-8902`). A second
 machine reads a destination with **that destination's** key and does not use the
 local one at all — so a backup that copies only the local key cannot read the
 off-site copies. Measured on a real second machine: restoring only the local key
@@ -622,8 +622,8 @@ does not exist yet — so a headless run that owes nothing but
 (`steps.local_save` is `not_attempted`) creates every key it will ask about,
 reports them in `masterkey.keys` (`masterkey.path` is the local one), and stops
 before the local archive pass and the timer
-(`crates/chat-stasher/src/main.rs:15363-15370`; the refusal's own wording is
-`crates/chat-stasher/src/main.rs:14926-14940`). Nothing is archived on that run,
+(`crates/chat-stasher/src/main.rs:15366-15373`; the refusal's own wording is
+`crates/chat-stasher/src/main.rs:14929-14943`). Nothing is archived on that run,
 and every other missing parameter still refuses before the first write.
 
 The `steps.local_save` half is what tells that bootstrap apart from a run that
@@ -958,7 +958,7 @@ Windows every `schedule` action refuses with exit 2 before writing anything,
 and the refusal points at the manual Task Scheduler steps in
 `docs/schedule.md`, which carry a copy-pasteable `schtasks /Create` command and
 the logon caveat that keeps a per-user task from looking scheduled while it
-sleeps (`crates/chat-stasher/src/main.rs:7949-8004`).
+sleeps (`crates/chat-stasher/src/main.rs:7952-8007`).
 
 `run-once` is one complete collect-and-push pass; it exits when done, and
 repeated invocation is safe (`crates/chat-stasher/src/main.rs:293-330`).
@@ -986,13 +986,13 @@ chat-stasher status
 
 `status` is read-only. The source states its output boundary as: only ids,
 paths, sizes, mtimes, and flags go to standard output; conversation content
-does not (`crates/chat-stasher/src/main.rs:18386-18387`). This is the
+does not (`crates/chat-stasher/src/main.rs:18389-18390`). This is the
 source's self-description; we have not exhaustively verified every output path.
 
 Its timer and scan output has two parts. **The first line** is the timer health conclusion,
 from the record left by the last `run-once`
-(`crates/chat-stasher/src/main.rs:18380-18381`). These are the conclusions defined
-verbatim in the source (`crates/chat-stasher/src/runstate.rs:296-344`):
+(`crates/chat-stasher/src/main.rs:18383-18384`). These are the conclusions defined
+verbatim in the source (`crates/chat-stasher/src/runstate.rs:315-363`):
 
 - No timer installed / never run successfully:
   `[run-once] No run has ever been recorded: run-once has never completed successfully on this machine (or the state directory was cleared). It is impossible to tell whether the timer is working.`
@@ -1007,7 +1007,7 @@ verbatim in the source (`crates/chat-stasher/src/runstate.rs:296-344`):
 
 **The second part** is the scan result. By default it is a fixed summary of a
 few lines and does not flood the screen
-(`crates/chat-stasher/src/main.rs:18375-18443`):
+(`crates/chat-stasher/src/main.rs:18378-18446`):
 
 - When there are sessions: `[scan] N session(s) (N compressed): <source> N · <source> N`
 - When none are found: `[scan] No sessions were found on this machine.`
@@ -1020,7 +1020,7 @@ To see the per-session detail, add `--sessions`; that will be hundreds of lines
 
 **🔴 A common pitfall:** `status` exits with a **non-zero code** when it judges
 the timer "unhealthy", **it exits with a non-zero code**
-(`crates/chat-stasher/src/main.rs:18362-18367`). So "the command errored"
+(`crates/chat-stasher/src/main.rs:18365-18370`). So "the command errored"
 does not necessarily mean the command is broken; it may well be telling you the
 timer has stopped. Please read that first line.
 
@@ -1030,7 +1030,7 @@ finished, but the timer is judged unhealthy (including **never having run**) ·
 or a requested destination; unavailable counts remain unknown) · `2` = usage
 error. A config file it could not read is the same case, not a fifth one: nothing
 was scanned, so nothing is claimed
-(`crates/chat-stasher/src/main.rs:17901-17935`). **Note:** the human-readable report goes to
+(`crates/chat-stasher/src/main.rs:17904-17938`). **Note:** the human-readable report goes to
 **stderr**, so a pipeline like
 `chat-stasher status 2>&1 | head` gives you `head`'s exit code of 0, not its.
 To see the exit code, do not pipe, or use `${PIPESTATUS[0]}`. With `--json`,
@@ -1287,7 +1287,7 @@ not need you to confirm anything.
   for you (`crates/chat-stasher/src/runstate.rs:1-11`). This is also why "never
   ran" is judged **unhealthy** rather than "fine": an absent record is the
   **absence of evidence**, not **evidence of health**
-  (`crates/chat-stasher/src/runstate.rs:298-304`).
+  (`crates/chat-stasher/src/runstate.rs:317-325`).
 - Run `doctor` occasionally, to check whether any tool has started deleting
   your history.
 
