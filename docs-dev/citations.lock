@@ -611,9 +611,9 @@ crates/chat-stasher/Cargo.toml:38  f6c7a40dd8b1  lines=1
   <- docs-dev/threat-model.md:1033  :: rusqlite = { version = "=0.32.1", features = ["bundled"] }
 crates/chat-stasher/src/activity.rs:132-213  251d5fb340ee  lines=82
   <- docs-dev/privacy.md:503  :: /// Privacy-safe provenance captured from a source path dur…
-crates/chat-stasher/src/activity.rs:2351-2585  06b47d726229  lines=235
+crates/chat-stasher/src/activity.rs:2351-2593  8f8fbc5de9fe  lines=243
   <- docs-dev/privacy.md:515  :: ///
-crates/chat-stasher/src/activity.rs:2916-2965  a0ac92c15fee  lines=50
+crates/chat-stasher/src/activity.rs:3036-3085  a0ac92c15fee  lines=50
   <- docs-dev/privacy.md:461  :: /// or is a label the closed enum does not name, is a bundl…
 crates/chat-stasher/src/codebuff.rs:37-39  b460a03e1b0f  lines=3
   <- docs-dev/privacy.md:1146  :: /// The only `CapturedStart::source` value this build write…
@@ -971,7 +971,7 @@ crates/chat-stasher/src/overview.rs:722-779  cada79442043  lines=58
   <- docs-dev/privacy.md:421, docs-dev/threat-model.md:813  :: }
 crates/chat-stasher/src/packcheck.rs:95  bda148c6d69d  lines=1
   <- docs-dev/orphan-packs.md:64  :: pub fn verify_pack(
-crates/chat-stasher/src/provenance.rs:21-54  a5096e190884  lines=34
+crates/chat-stasher/src/provenance.rs:22-55  a5096e190884  lines=34
   <- docs-dev/privacy.md:516  :: /// The optional dimensions used to describe a session's ob…
 crates/chat-stasher/src/reap.rs:1-12  f3c5250f1f63  lines=12
   <- docs-dev/threat-model.md:80, docs-dev/threat-model.md:821  :: //! Connection reaping for remote SSH backends.
