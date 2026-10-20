@@ -519,6 +519,11 @@
       "id": "hermes-agent",
       "display_name": "Hermes Agent",
       "product_group": "agent-platforms",
+      "verified": {
+        "date": "2026-10-06",
+        "platform": "macos",
+        "scope": "macOS: all 420 real sessions in the sqlite state store were collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests (export manifest, exported file, staged shards, archive read-back, expected source) agreed for every session. Linux and Windows remain unverified."
+      },
       "dev_priority": "normal",
       "paths": {
         "macos": {
@@ -621,6 +626,11 @@
     {
       "id": "grok-bot",
       "display_name": "Grok Bot (desktop)",
+      "verified": {
+        "date": "2026-10-13",
+        "platform": "macos",
+        "scope": "macOS: all 8 real replica sessions in the desktop app's local persistence were collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests agreed for every session, and two earlier runs a day apart repeated the same cycle identically. Linux and Windows remain unverified."
+      },
       "dev_priority": "low",
       "product_group": "agent-platforms",
       "known_issue": "local transcript replicas are partial and can contain sequence gaps; the archive does not claim completeness",
@@ -700,6 +710,11 @@
     {
       "id": "github-copilot-cli",
       "display_name": "GitHub Copilot CLI",
+      "verified": {
+        "date": "2026-10-06",
+        "platform": "macos",
+        "scope": "macOS: the one real local session was collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests (export manifest, exported file, staged shards, archive read-back, expected source) agreed. Linux and Windows remain unverified."
+      },
       "dev_priority": "low",
       "known_issue": "no reader extractor yet: archived sessions render as raw view only (git 41db2bf)",
       "paths": {
@@ -973,8 +988,13 @@
     {
       "id": "deepseek-harness",
       "display_name": "DeepSeek Harness",
+      "verified": {
+        "date": "2026-10-06",
+        "platform": "macos",
+        "scope": "macOS: all 26 real session.v4.jsonl.zstd sessions were collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests (export manifest, exported file, staged shards, archive read-back, expected source) agreed for every session. Linux and Windows remain unverified."
+      },
       "dev_priority": "normal",
-      "known_issue": "measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); no session has been archived end to end yet",
+      "known_issue": "measured on one machine against a developer preview (app 0.2.0-rc.2, session format 4); attachments are not archived yet",
       "dimensions": {
         "supported": [],
         "surfaces": [

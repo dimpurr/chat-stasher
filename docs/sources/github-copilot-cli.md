@@ -5,12 +5,12 @@
 |---|---|
 | Id | `github-copilot-cli` |
 | Surface | cli |
-| Status | supported |
-| Last verified end to end | not yet verified end to end |
+| Status | verified end-to-end (2026-10-06) |
+| Last verified end to end | 2026-10-06 (macOS): macOS: the one real local session was collected into an isolated stage, pushed to a throwaway local destination, and read back; five independent SHA-256 digests (export manifest, exported file, staged shards, archive read-back, expected source) agreed. Linux and Windows remain unverified. |
 
 | OS | Session path template | Format | Confidence | Status |
 |---|---|---|---|---|
-| macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported |
+| macOS | `~/.copilot/` | sqlite + jsonl | source-confirmed | verified end-to-end (2026-10-06) |
 | Linux | `~/.copilot/` | sqlite + jsonl | source-confirmed | supported |
 | Windows | `%USERPROFILE%\.copilot\` | sqlite + jsonl | source-confirmed | supported |
 <!-- END GENERATED -->
