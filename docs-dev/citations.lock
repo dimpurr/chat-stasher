@@ -819,37 +819,37 @@ crates/chat-stasher/src/main.rs:6649-6661  a684cd148e76  lines=13
   <- docs-dev/install.md:694  :: about what it holds is proven and nothing was imported: {er…
 crates/chat-stasher/src/main.rs:6763-6771  91c920ea60b9  lines=9
   <- docs-dev/threat-model.md:877  :: Ok(config) => config,
-crates/chat-stasher/src/main.rs:7949-8004  b580b6b1c776  lines=56
+crates/chat-stasher/src/main.rs:7952-8007  b580b6b1c776  lines=56
   <- docs-dev/install.md:961  :: // W880: one summary line per pass, on every outcome — the
-crates/chat-stasher/src/main.rs:8706-8711  277527308823  lines=6
+crates/chat-stasher/src/main.rs:8709-8714  277527308823  lines=6
   <- docs-dev/privacy.md:1191  :: return ExitCode::FAILURE;
-crates/chat-stasher/src/main.rs:8824-8829  52d4b7130c7c  lines=6
+crates/chat-stasher/src/main.rs:8827-8832  52d4b7130c7c  lines=6
   <- docs-dev/privacy.md:826  :: eprintln!("schedule: {error:#}");
-crates/chat-stasher/src/main.rs:8894-8899  581bf6c44307  lines=6
+crates/chat-stasher/src/main.rs:8897-8902  581bf6c44307  lines=6
   <- docs-dev/install.md:607  :: /// (and a wrapper) inject through. One place names each va…
-crates/chat-stasher/src/main.rs:9109-9116  b54ca1b3e4d5  lines=8
+crates/chat-stasher/src/main.rs:9112-9119  b54ca1b3e4d5  lines=8
   <- SECURITY.md:70, docs-dev/threat-model.md:866  :: let mut levels: BTreeMap<&str, usize> = BTreeMap::new();
-crates/chat-stasher/src/main.rs:9136-9140  0d25cb363ccc  lines=5
+crates/chat-stasher/src/main.rs:9139-9143  0d25cb363ccc  lines=5
   <- SECURITY.md:70, docs-dev/threat-model.md:864  :: config::default_data_root()
-crates/chat-stasher/src/main.rs:9649-9809  1f1a0d8e77c3  lines=161
+crates/chat-stasher/src/main.rs:9652-9812  1f1a0d8e77c3  lines=161
   <- docs-dev/threat-model.md:928  :: }
-crates/chat-stasher/src/main.rs:13747-13755  55fd954d72cf  lines=9
+crates/chat-stasher/src/main.rs:13750-13758  55fd954d72cf  lines=9
   <- docs-dev/install.md:304  :: .join("000");
-crates/chat-stasher/src/main.rs:13765-13788  b78b3335ba4d  lines=24
+crates/chat-stasher/src/main.rs:13768-13791  b78b3335ba4d  lines=24
   <- docs-dev/install.md:304  :: ],
-crates/chat-stasher/src/main.rs:14926-14940  9e66de89cc0e  lines=15
+crates/chat-stasher/src/main.rs:14929-14943  9e66de89cc0e  lines=15
   <- docs-dev/install.md:626  :: // about either, for the same reason as the local key above…
-crates/chat-stasher/src/main.rs:15363-15370  393343fb317f  lines=8
+crates/chat-stasher/src/main.rs:15366-15373  393343fb317f  lines=8
   <- docs-dev/install.md:625  :: repository and masterkey for you to copy failed ({error}), …
-crates/chat-stasher/src/main.rs:17901-17935  128ff4615579  lines=35
+crates/chat-stasher/src/main.rs:17904-17938  128ff4615579  lines=35
   <- docs-dev/install.md:1033  :: });
-crates/chat-stasher/src/main.rs:18362-18367  84dbce637d8a  lines=6
+crates/chat-stasher/src/main.rs:18365-18370  84dbce637d8a  lines=6
   <- docs-dev/install.md:1023  :: /// verdict line and the `--json` object are derived from t…
-crates/chat-stasher/src/main.rs:18375-18443  f1161f7029d2  lines=69
+crates/chat-stasher/src/main.rs:18378-18446  f1161f7029d2  lines=69
   <- docs-dev/install.md:1010  :: /// explicit value is an unknown timer verdict, not permiss…
-crates/chat-stasher/src/main.rs:18380-18381  1c2a7e49dfee  lines=2
+crates/chat-stasher/src/main.rs:18383-18384  1c2a7e49dfee  lines=2
   <- docs-dev/install.md:994  :: let state_dir = chat_stasher::collect::default_state_dir();
-crates/chat-stasher/src/main.rs:18386-18387  90cec3cab80c  lines=2
+crates/chat-stasher/src/main.rs:18389-18390  90cec3cab80c  lines=2
   <- docs-dev/install.md:989  :: // after the gate's second blind spot was fixed (B93). It n…
 crates/chat-stasher/src/metahash.rs:1-12  8855f2242e16  lines=12
   <- docs-dev/privacy.md:436, docs-dev/threat-model.md:717  :: //! ADR-022: content-addressed hash tracking for stage meta…
@@ -981,9 +981,9 @@ crates/chat-stasher/src/remote_err.rs:514-547  c531f63130e8  lines=34
   <- docs-dev/install.md:695  :: pub fn trust_host(cfg: &StoreConfig, known_hosts: &Path) ->…
 crates/chat-stasher/src/runstate.rs:1-11  04391d8ccc80  lines=11
   <- docs-dev/install.md:1287  :: //! Timer-visibility state: what happened on the last `run-…
-crates/chat-stasher/src/runstate.rs:296-344  036d69fcbd03  lines=49
+crates/chat-stasher/src/runstate.rs:315-363  036d69fcbd03  lines=49
   <- docs-dev/install.md:995  :: /// false → `status` must exit non-zero.
-crates/chat-stasher/src/runstate.rs:298-304  525f5b894e82  lines=7
+crates/chat-stasher/src/runstate.rs:317-325  109067636f30  lines=9
   <- docs-dev/install.md:1290  :: }
 crates/chat-stasher/src/scanner.rs:3210-3270  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1130  :: /// through the ordinary whole-file collector.
