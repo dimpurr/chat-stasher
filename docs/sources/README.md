@@ -49,7 +49,7 @@ These are the platforms the browser extension captures; the row for each is read
 |---|---|---|---|
 | [Claude (official export)](import-claude.md) | export | shipped in this build (`chat-stasher import claude <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
 | [DeepSeek (official export)](import-deepseek.md) | export | parser written, not yet offered by the command | not yet verified end to end |
-| [ChatGPT (official export)](import-chatgpt.md) | export | no parser in this build | not yet verified end to end |
+| [ChatGPT (official export)](import-chatgpt.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 | [Grok (official export)](import-grok.md) | export | shipped in this build (`chat-stasher import grok <export> --inbox <dir> --stage <dir>` parses it) | not yet verified end to end |
 | [Gemini (official export)](import-gemini.md) | export | parser written, not yet offered by the command | not yet verified end to end |
 

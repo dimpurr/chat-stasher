@@ -5,7 +5,7 @@
 |---|---|
 | Id | `chatgpt` |
 | Surface | export |
-| Parser | no parser in this build |
+| Parser | parser written, not yet offered by the command |
 | Last verified end to end | not yet verified end to end |
 <!-- END GENERATED -->
 

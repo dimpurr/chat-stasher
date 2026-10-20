@@ -66,6 +66,10 @@
 /// split (see the module docs for the properties every parser holds).
 pub mod deepseek;
 
+/// The ChatGPT arm of the same third piece — the DSAR conversation parser,
+/// behind the producer above and wired to no command.
+pub mod chatgpt;
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -176,9 +180,12 @@ impl TakeoutPlatform {
         }
     }
 
-    /// Does this build parse this platform's export? `claude` and `grok`
-    /// do; the order the rest land in is ADR-055 D10 (DeepSeek and ChatGPT
-    /// are gated by their platform's own extension validation first).
+    /// Whether [`run`] parses this platform's export in this build: `claude`
+    /// and `grok` are wired in; `chatgpt`, `deepseek` and `gemini` have
+    /// parsers under this module that no command calls yet, so each is still
+    /// refused here — the order the rest land in is ADR-055 D10 (DeepSeek
+    /// and ChatGPT are gated by their platform's own extension validation
+    /// first).
     pub fn has_parser(self) -> bool {
         parser_for(self).is_some()
     }
