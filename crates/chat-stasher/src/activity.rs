@@ -2336,15 +2336,16 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 ///
 /// This is the harness's side of [`crate::provenance::SessionProvenance`]: what
 /// the archived records themselves say about where the session came from, as
-/// opposed to what the collection path or the registry already recorded. Seven
+/// opposed to what the collection path or the registry already recorded. Eight
 /// harnesses have a reader today — `claude-code` (its working directory and
 /// owning tenancy), `gemini-cli` (its `projectHash`), `opencode` (its
 /// directory, project, and archive fact), `openclaw` (its `agent_id`, plus
 /// the archived status of a cold snapshot), `grok` (its CLI `session_docs`
 /// row's `cwd`), `codex` (its `session_meta` record's working directory
-/// and repository) and `hermes-agent` (its `sessions` row's directory,
+/// and repository), `hermes-agent` (its `sessions` row's directory,
 /// gateway peer binding, repository identity, and its archived / pinned
-/// flags); every other harness answers with the empty set, which is
+/// flags) and `zed` (the workspace folders its `threads` table
+/// records); every other harness answers with the empty set, which is
 /// the honest answer for a dimension nothing was read from — and never a
 /// value inferred from the harness name.
 ///
@@ -2452,9 +2453,64 @@ fn session_dimensions(harness: &str, lines: &[&str]) -> crate::provenance::Sessi
                 fold_hermes_agent_dimensions(&mut dimensions, &record);
             }
         }
+        "zed" => {
+            for line in lines {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                fold_zed_dimensions(&mut dimensions, &record);
+            }
+        }
         _ => {}
     }
     dimensions
+}
+
+/// Zed states the workspace folders a thread belongs to in the `threads`
+/// table's `folder_paths` column, which `read_zed_session` exports onto the
+/// session envelope (`session.folder_paths`).
+///
+/// The folders are the thread's project/workspace identities, so every one is
+/// recorded as a `container`; the first entry — the primary workspace root the
+/// ticket designates, lexicographically first as Zed stores the list — is also
+/// the session's `cwd`. That is the class of value `cwd` exists for: the
+/// `cwd ≠ repo identity` rule separates repository identities (URLs, UUIDs,
+/// digests like `projectHash`) from filesystem paths, and a workspace folder
+/// **is** a filesystem path, the same recorded-path-to-cwd reading Cursor's
+/// workspace URI and Continue's `workspaceDirectory` already take. Neither
+/// dimension is inferred from the other, and a NULL or empty `folder_paths`
+/// leaves both unobserved.
+///
+/// Two column shapes are read, both honestly the same fact: the array
+/// [`crate::sqlite_probe::read_zed_session`] exports today, and the raw
+/// newline-separated text an envelope sealed before that export carried. Old
+/// sessions stay observable instead of silently losing their projection.
+fn fold_zed_dimensions(
+    dimensions: &mut crate::provenance::SessionProvenance,
+    record: &serde_json::Value,
+) {
+    let Some(folder_paths) = record.pointer("/session/folder_paths") else {
+        return;
+    };
+    let paths: Vec<String> = match folder_paths {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        serde_json::Value::String(text) => text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => return,
+    };
+    let Some(primary) = paths.first() else {
+        return;
+    };
+    dimensions.insert_cwd(primary.clone());
+    for path in paths {
+        dimensions.insert_container(path);
+    }
 }
 
 /// Claude Code writes two provenance facts on the **top level** of a transcript
@@ -3191,6 +3247,21 @@ mod tests {
             r#"{{"schema":"chat-stasher.opencode.session.v1","session":{{{fields}}},"messages":[],"orphan_parts":[]}}"#
         )
     }
+
+    // --------------------------------------------------- TICKET-4D-09 · zed
+    //
+    // The workspace folders Zed's `threads.folder_paths` column records for a
+    // thread: every folder is a project/workspace identity (`container`), and
+    // the first entry is the session's working directory (`cwd`).
+
+    /// One archived Zed session envelope, spelled the way
+    /// `read_sqlite_session`'s Zed route writes it.
+    fn zed_envelope(folder_paths: &str) -> String {
+        format!(
+            r#"{{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{{"id":"synthetic-zed","summary":"synthetic-summary","updated_at":"{RFC_T1}","folder_paths":{folder_paths}}}}}"#
+        )
+    }
+
     #[test]
     fn gemini_cli_records_its_project_hash_as_the_container() {
         let line = gemini_doc(r#","projectHash":"hash-fixture""#);
@@ -3253,6 +3324,19 @@ mod tests {
     }
 
     #[test]
+    fn zed_records_its_workspace_folders_as_containers_and_the_first_as_cwd() {
+        let line = zed_envelope(r#"["/w/one","/w/two"]"#);
+        let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
+        assert_eq!(
+            row.dimensions.cwd,
+            ["/w/one"],
+            "the first entry is the primary workspace root, a filesystem path, \
+             so it is the session's cwd"
+        );
+    }
+
+    #[test]
     fn an_absent_empty_or_mistyped_project_hash_records_no_container() {
         let row = build_row(
             "s",
@@ -3290,6 +3374,16 @@ mod tests {
             "the gemini-cli reader is the only one that reads projectHash: {:?}",
             row.dimensions.container
         );
+    }
+
+    #[test]
+    fn zed_keeps_the_raw_text_shape_of_an_envelope_sealed_before_the_array_export() {
+        // Pre-change exports carry the column as the newline-separated text Zed
+        // stores; the projection reads the same fact rather than leaving old
+        // sessions unobserved.
+        let line = zed_envelope("\"/w/one\\n/w/two\"");
+        let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+        assert_eq!(row.dimensions.container, ["/w/one", "/w/two"]);
         assert_eq!(row.dimensions.cwd, ["/w/one"]);
     }
 
@@ -4151,6 +4245,31 @@ mod tests {
         let bare = hermes_with(r#""id":"s1","cwd":"/w/one""#);
         let json = to_jsonl(&build_row("s", "mbp", "hermes-agent", &[bare.as_str()]));
         assert!(!json.contains("\"status\""), "line: {json}");
+    }
+
+    #[test]
+    fn a_zed_thread_without_folders_leaves_container_and_cwd_unobserved() {
+        for line in [
+            zed_envelope("null"),
+            zed_envelope("[]"),
+            zed_envelope("\"\""),
+            r#"{"schema":"chat-stasher.sqlite.session.v1","table":"threads","session":{"id":"synthetic-zed","updated_at":"2025-01-15T12:34:56.789Z"}}"#.to_string(),
+            "not json at all".to_string(),
+        ] {
+            let row = build_row("s", "mbp", "zed", &[line.as_str()]);
+            assert!(
+                row.dimensions.container.is_empty() && row.dimensions.cwd.is_empty(),
+                "NULL, empty, absent or unparseable folder_paths records no folder: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zed_projection_travels_in_the_index_line() {
+        let line = zed_envelope(r#"["/w/one"]"#);
+        let json = to_jsonl(&build_row("s", "mbp", "zed", &[line.as_str()]));
+        assert!(json.contains(r#""container":["/w/one"]"#), "line: {json}");
+        assert!(json.contains(r#""cwd":["/w/one"]"#), "line: {json}");
     }
 
     // ------------------------------------------------- W219 · account keys
