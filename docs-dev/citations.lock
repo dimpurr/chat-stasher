@@ -621,19 +621,19 @@ crates/chat-stasher/src/codebuff.rs:59-115  317668d09130  lines=57
   <- docs-dev/privacy.md:1146  :: #[derive(Debug, Clone, Serialize, Deserialize)]
 crates/chat-stasher/src/collect.rs:25-34  583ebca50758  lines=10
   <- docs-dev/openclaw-scanner.md:46  :: //! The same rule binds a `.jsonl.zst` source, whose decode…
-crates/chat-stasher/src/collect.rs:1686-1697  3369985c763c  lines=12
+crates/chat-stasher/src/collect.rs:1687-1698  3369985c763c  lines=12
   <- docs-dev/privacy.md:504  :: crate::activity::record_session_provenance(
-crates/chat-stasher/src/collect.rs:2129-2136  c70a2797398c  lines=8
+crates/chat-stasher/src/collect.rs:2130-2137  c70a2797398c  lines=8
   <- docs-dev/privacy.md:574  :: let mut dimensions = crate::provenance::SessionProvenance::…
-crates/chat-stasher/src/collect.rs:3419-3553  8ac2e193cf78  lines=135
+crates/chat-stasher/src/collect.rs:3437-3571  8ac2e193cf78  lines=135
   <- docs-dev/privacy.md:1146  :: /// The codebuff whole-file arm (ADR-054 D2/D5/D6/D9). Dist…
-crates/chat-stasher/src/collect.rs:3561-3616  e659775e292e  lines=56
+crates/chat-stasher/src/collect.rs:3579-3634  e659775e292e  lines=56
   <- docs-dev/privacy.md:1146  :: fn seal_codebuff_sidecars(
-crates/chat-stasher/src/collect.rs:3628-3695  23481377a3b6  lines=68
+crates/chat-stasher/src/collect.rs:3646-3713  23481377a3b6  lines=68
   <- docs-dev/privacy.md:1146  :: fn process_whole_file(
-crates/chat-stasher/src/collect.rs:3673-3686  d01a447f96d8  lines=14
+crates/chat-stasher/src/collect.rs:3691-3704  d01a447f96d8  lines=14
   <- docs-dev/openclaw-scanner.md:46  :: state: OffsetEntry {
-crates/chat-stasher/src/collect.rs:3846-3860  4979f697033d  lines=15
+crates/chat-stasher/src/collect.rs:3864-3878  4979f697033d  lines=15
   <- docs-dev/openclaw-scanner.md:46  :: continue;
 crates/chat-stasher/src/config.rs:22-24  c438bae30d5f  lines=3
   <- docs-dev/install.md:294  :: /// Directory + filename of the config relative to the user…
@@ -685,11 +685,11 @@ crates/chat-stasher/src/export.rs:962-979  bd664b7c0646  lines=18
   <- docs-dev/openclaw-scanner.md:99  :: // `.jsonl` is appended here, so this file name is one path…
 crates/chat-stasher/src/fts.rs:1-6  b20dd3f20d50  lines=6
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:943  :: //! Local, disposable full-text index for one archive desti…
-crates/chat-stasher/src/fts.rs:1472-1692  b6dd6f684adc  lines=221
+crates/chat-stasher/src/fts.rs:1473-1693  b6dd6f684adc  lines=221
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:943  :: pub fn build<F>(&self, sources: &[SourceDoc], mut load: F) …
-crates/chat-stasher/src/fts.rs:1694-1709  c572ae968c6b  lines=16
+crates/chat-stasher/src/fts.rs:1695-1710  c572ae968c6b  lines=16
   <- docs-dev/privacy.md:61, docs-dev/threat-model.md:943  :: pub fn clear(&self) -> Result<bool> {
-crates/chat-stasher/src/fts.rs:2143-2152  64fcac75f933  lines=10
+crates/chat-stasher/src/fts.rs:2144-2153  64fcac75f933  lines=10
   <- docs-dev/threat-model.md:943  :: #[cfg(unix)]
 crates/chat-stasher/src/grok_bot.rs:232-240  35d4c6988919  lines=9
   <- docs-dev/privacy.md:573  :: /// Extract the account reference from a replica state key.
@@ -989,11 +989,11 @@ crates/chat-stasher/src/runstate.rs:315-363  036d69fcbd03  lines=49
   <- docs-dev/install.md:995  :: /// false → `status` must exit non-zero.
 crates/chat-stasher/src/runstate.rs:317-325  109067636f30  lines=9
   <- docs-dev/install.md:1290  :: }
-crates/chat-stasher/src/scanner.rs:3210-3270  9db74cb60f65  lines=61
+crates/chat-stasher/src/scanner.rs:3456-3516  9db74cb60f65  lines=61
   <- docs-dev/privacy.md:1146  :: /// through the ordinary whole-file collector.
-crates/chat-stasher/src/scanner.rs:3272-3333  d8480d0822d0  lines=62
+crates/chat-stasher/src/scanner.rs:3518-3579  d8480d0822d0  lines=62
   <- docs-dev/privacy.md:1146  :: /// The native Grok CLI transcripts — `chat_history.jsonl`,…
-crates/chat-stasher/src/scanner.rs:3490-3500  3f94015d6ac2  lines=11
+crates/chat-stasher/src/scanner.rs:3736-3746  3f94015d6ac2  lines=11
   <- docs-dev/openclaw-scanner.md:32  :: /// Probe Cursor's current global store and, when it cannot…
 crates/chat-stasher/src/schedule.rs:208-243  31cde3d34520  lines=36
   <- docs-dev/install.md:939  :: /// Resolve the executable that a persistent scheduler may …
@@ -1013,13 +1013,13 @@ crates/chat-stasher/src/snapshot_cache.rs:587-621  3d14c6ed2e13  lines=35
   <- docs-dev/privacy.md:70  :: // ---- owner-only permissions ----------------------------…
 crates/chat-stasher/src/sqlite_probe.rs:23-29  fa32ad6c5dbc  lines=7
   <- SECURITY.md:67, docs-dev/threat-model.md:838  :: //! Read-only guarantee: every connection opens with `mode=…
-crates/chat-stasher/src/sqlite_probe.rs:382-437  27ac04014952  lines=56
+crates/chat-stasher/src/sqlite_probe.rs:417-472  27ac04014952  lines=56
   <- docs-dev/openclaw-scanner.md:96  :: /// Filesystem-safe, collision-resistant native ID for an O…
-crates/chat-stasher/src/sqlite_probe.rs:2104-2122  714c3c1685ee  lines=19
+crates/chat-stasher/src/sqlite_probe.rs:2277-2295  714c3c1685ee  lines=19
   <- docs-dev/threat-model.md:836  :: /// SQLite's read-only WAL access needs the store's `-shm` …
-crates/chat-stasher/src/sqlite_probe.rs:2108-2115  ae091c19ff12  lines=8
+crates/chat-stasher/src/sqlite_probe.rs:2281-2288  ae091c19ff12  lines=8
   <- SECURITY.md:68  :: /// so:
-crates/chat-stasher/src/sqlite_probe.rs:2945-2993  0dfae1a37b9a  lines=49
+crates/chat-stasher/src/sqlite_probe.rs:3118-3166  0dfae1a37b9a  lines=49
   <- docs-dev/threat-model.md:839  :: fn wal_store_without_shm_probes_immutable_and_creates_no_si…
 crates/chat-stasher/src/store.rs:167-170  f2781c197162  lines=4
   <- docs-dev/install.md:646, docs-dev/install.md:736  :: /// Extra backend options (e.g. `endpoint`/`user`/`key`/`ro…
