@@ -1837,10 +1837,12 @@ struct ReadData {
 struct Processed {
     outcome: CollectOutcome,
     state: OffsetEntry,
-    /// The 4D dimensions this read observed firsthand (TICKET-4D-10). Only the
-    /// OpenClaw layout reads any today; every other source answers with the
-    /// empty set, which is the honest answer for a dimension nothing was read
-    /// from — and never a value inferred from the harness name.
+    /// The 4D dimensions this read observed firsthand (TICKET-4D-10; Grok
+    /// Bot's tenant and container join under TICKET-4D-08). Only the OpenClaw
+    /// layout and the Grok Bot replica pass read any today; every other
+    /// source answers with the empty set, which is the honest answer for a
+    /// dimension nothing was read from — and never a value inferred from
+    /// the harness name.
     dimensions: crate::provenance::SessionProvenance,
 }
 
@@ -2120,6 +2122,19 @@ fn process_grok_bot(
         .find(|agent| agent.agent_id == agent_id)
         .ok_or_else(|| anyhow!("Grok Bot replica disappeared during collection"))?;
 
+    // TICKET-4D-08: the persistence read answered the tenant this agent's
+    // state key is scoped to and the identities of the agent itself, so this
+    // pass observed them firsthand — on every pass, including one that has
+    // no new rows to deliver, because the keys and roster are read each time.
+    let mut dimensions = crate::provenance::SessionProvenance::default();
+    if let Some(tenant) = &observed.tenant {
+        dimensions.insert_tenant(tenant.clone());
+    }
+    dimensions.insert_container(agent_id.to_string());
+    if let Some(name) = &observed.name {
+        dimensions.insert_container(name.clone());
+    }
+
     fs::create_dir_all(state_dir.join("grok-bot-unions"))
         .context("create Grok Bot union state directory")?;
     let union_path = grok_bot_union_path(state_dir, agent_id);
@@ -2160,7 +2175,7 @@ fn process_grok_bot(
                 reset: false,
                 compressed: false,
             },
-            dimensions: Default::default(),
+            dimensions,
         });
     }
     let mut payload = Vec::new();
@@ -2208,7 +2223,7 @@ fn process_grok_bot(
             reset: old.is_some_and(|entry| entry.grok_bot_row_digests.is_none()),
             compressed: false,
         },
-        dimensions: Default::default(),
+        dimensions,
     })
 }
 
