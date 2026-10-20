@@ -458,7 +458,7 @@ different facts and stay different. A later observation may add a **supplement**
 beside that record: the project a source reported, the source's name, and the
 time it was observed; it never replaces what the capture recorded, so the archive
 shows both what was known then and what was learned afterwards
-(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:2916-2965`). A project name is a label from
+(`contracts/inbox.schema.json:194-206`; `crates/chat-stasher/src/activity.rs:3036-3085`). A project name is a label from
 the platform rather than conversation text, but it is still **yours** and still
 plaintext: it sits in the bundle, in the staged shards and in the activity index
 beside everything else this section describes. A page cannot author either field
@@ -512,8 +512,8 @@ which is a different fact from where the archive found them. A Claude Code
 transcript names the working directory it ran in and the organization that
 authored it — the account, where there is no organization — and both land on the
 session's row beside the collection-time provenance
-(`crates/chat-stasher/src/activity.rs:2351-2585`,
-`crates/chat-stasher/src/provenance.rs:21-54`). Two things about that are worth
+(`crates/chat-stasher/src/activity.rs:2351-2593`,
+`crates/chat-stasher/src/provenance.rs:22-55`). Two things about that are worth
 stating plainly. A working directory is a **path, not a repository**: it says
 where the harness ran, never which project or repository the work belonged to,
 and a session that `cd`s into a subdirectory records each place it ran rather
