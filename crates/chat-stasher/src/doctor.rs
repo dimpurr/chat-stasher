@@ -1721,6 +1721,18 @@ pub struct DoctorReport {
     /// there is no answer rather than an empty one (the same distinction
     /// `fts_indexes` and `native_host` carry).
     pub keys: Option<Vec<KeyInventoryRow>>,
+    /// W1012 / SG-1 C1: the four-fact destination reconciliation — timer
+    /// push coverage, timer-resolvable credentials, last recorded push,
+    /// reclaim share — from [`crate::destdiag::reconcile`], which owns the
+    /// wording all three surfaces share. `None` for the same reason as
+    /// `keys`: every fact is derived from the config and the paths under
+    /// its defaults.
+    ///
+    /// Unlike `destinations` (D7) this is filled by the library's own
+    /// [`run()`]: it reads only files (timer unit files, state records),
+    /// never the network, so the test-suite-visible entry point can keep
+    /// producing it.
+    pub dest_reconcile: Option<crate::destdiag::Reconciliation>,
 }
 
 /// D10 state for one destination's disposable full-text index.
@@ -2223,7 +2235,7 @@ fn activity_index_json(freshness: &ActivityIndexFreshness) -> serde_json::Value 
 /// The checks a run cannot perform without a usable config, in the order
 /// [`print_report`] presents them. [`DoctorReport::not_checked`] returns this
 /// list only for a report whose `config_error` is set.
-const CHECKS_NEEDING_CONFIG: [&str; 10] = [
+const CHECKS_NEEDING_CONFIG: [&str; 11] = [
     "D3 harness scan, footprints and archive gaps",
     "D4 risk summary",
     "D5 repository reclaim",
@@ -2233,6 +2245,7 @@ const CHECKS_NEEDING_CONFIG: [&str; 10] = [
     "D7 destination probes",
     "D8 native host stage",
     "D11 stage duplicate scan",
+    "D12 destination reconciliation (timers, credentials, last push, reclaim)",
     "machine identity",
 ];
 
@@ -2297,6 +2310,9 @@ pub fn config_unreadable(error: String) -> DoctorReport {
         // override and each destination's), so an unreadable config means the
         // inventory was not computed — `None`, not an empty list.
         keys: None,
+        // W1012 / SG-1 C1: same source (the config every destination name
+        // and credential reference comes from), same "not computed".
+        dest_reconcile: None,
     }
 }
 
@@ -2732,6 +2748,33 @@ pub fn run() -> DoctorReport {
     // ADR-053 D4 — measured read-only, and reported in its own rows.
     let machine_logs = machine_log_rows(&config, &scan);
     let probes = scan.probes;
+
+    // W1012 / SG-1 C1 — the four-fact destination reconciliation, filled here
+    // rather than in the CLI because every input is a file read (the
+    // installed timer unit files, the state records the product itself
+    // writes): no destination is dialed, so the test-suite-visible entry
+    // point can keep producing it. The platform's format follows the same
+    // split `setup_schedule_format` makes in the CLI.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        // reason: NOT an honest default — the same (a)-fragile
+        // pre-1970-clock branch `runstate::now_unix` documents. Reached
+        // only by a clock before the epoch; the wrong stamp lands in a
+        // staleness age so the reconciliation would report the records as
+        // ancient rather than as fresh.
+        .unwrap_or(0);
+    let dest_reconcile = crate::destdiag::reconcile(&crate::destdiag::Inputs {
+        config: &config,
+        format: match cfg!(target_os = "macos") {
+            true => crate::schedule::Format::Launchd,
+            false => crate::schedule::Format::Systemd,
+        },
+        home: &home,
+        state_dir: &crate::collect::default_state_dir(),
+        now_unix,
+    });
+
     DoctorReport {
         config_source: config.source,
         config_error: None,
@@ -2755,6 +2798,7 @@ pub fn run() -> DoctorReport {
         stage_duplicate_shards: Some(stage_duplicate_shards),
         native_host: Some(native_host),
         keys: Some(key_inventory(&config)),
+        dest_reconcile: Some(dest_reconcile),
     }
 }
 
@@ -3955,6 +3999,22 @@ pub fn report_to_json(r: &DoctorReport) -> serde_json::Value {
             // inventory is derived from, so it never looked.
             None => serde_json::json!({"checked": false}),
         },
+        // W1012 / SG-1 C1: the four facts and the shared alert wording, in
+        // the same tag-first shape the rest of this document uses. `checked:
+        // false` is the did-not-look case, distinct from every "checked and
+        // the answer is" kind inside.
+        "destination_reconciliation": match &r.dest_reconcile {
+            Some(reconciliation) => {
+                let value = crate::destdiag::destinations_json(reconciliation);
+                serde_json::json!({
+                    "checked": true,
+                    "destinations": value["destinations"],
+                    "alerts": value["alerts"],
+                    "reclaim": value["reclaim"],
+                })
+            }
+            None => serde_json::json!({"checked": false}),
+        },
         "native_host": match &r.native_host {
             Some(check) => native_host_json(check),
             // Not the same as "there is no registration": this run did not look.
@@ -4778,6 +4838,11 @@ pub fn print_report(r: &DoctorReport) {
 
     // D7 — can each declared destination actually be reached? (ADR-023)
     print_destinations(&r.destinations);
+
+    // D12 — does the declared set agree with what the timers and the
+    // reclaim actually do on this machine? (W1012 / SG-1 C1)
+    print_dest_reconcile(&r.dest_reconcile);
+
     print_stage_duplicates(&r.stage_duplicate_shards);
 
     // Every archive copy has its own key, so a backup that names only the
@@ -5162,6 +5227,29 @@ fn print_activity_index(freshness: &ActivityIndexFreshness) {
             eprintln!("               activity index: UNKNOWN — {detail}");
         }
     }
+}
+
+/// D12 printing — the four-fact destination reconciliation (W1012 / SG-1
+/// C1). The facts come from [`crate::destdiag::reconcile`] and the alerts
+/// are its wording, printed unchanged: `status`'s `[dest]` / `[reclaim]`
+/// lines, this page and the menu bar app all display one vocabulary, which
+/// is the requirement the "one function" in `destdiag` exists to satisfy.
+///
+/// Silent when the reconciliation was not computed (config unreadable —
+/// `not_checked` names it there) and prints nothing for a machine with
+/// nothing declared beyond its default-repository row: a start.md machine
+/// with one timer has facts, and its printed lines are the facts, not
+/// findings — the alert lines stay empty and stay unprinted.
+fn print_dest_reconcile(reconciliation: &Option<crate::destdiag::Reconciliation>) {
+    let Some(reconciliation) = reconciliation else {
+        return;
+    };
+    eprintln!("D12 · Declared destinations vs installed timers — push coverage, credentials, last push, reclaim");
+    eprintln!("     read-only: reads the timer files and the reclaim/push state records, and never opens a destination.");
+    for line in crate::destdiag::doctor_lines(reconciliation) {
+        eprintln!("{line}");
+    }
+    eprintln!();
 }
 
 /// D6 printing — shared by the normal path and the scan-failed early return.
@@ -5823,6 +5911,7 @@ mod json_tests {
             native_host: None,
             stage_duplicate_shards: None,
             keys: Some(Vec::new()),
+            dest_reconcile: None,
         }
     }
 
@@ -6317,6 +6406,7 @@ mod report_to_json_shape_tests {
             stage_duplicate_shards: None,
             native_host: None,
             keys: None,
+            dest_reconcile: None,
         }
     }
 

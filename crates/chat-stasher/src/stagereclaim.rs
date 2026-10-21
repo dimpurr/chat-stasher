@@ -65,7 +65,16 @@ pub struct Blocked {
 pub enum BlockedKind {
     /// The destination could not be opened, or its masterkey could not be
     /// read. Unreachable is "unproven", never "does not have it".
-    Unreachable { error: String },
+    ///
+    /// `kind` is the ADR-023 classifier's verdict for the failure when it
+    /// produced one (W1012 / SG-1 C3): an R2 destination whose credentials a
+    /// timer cannot resolve used to reach the user as a third-party
+    /// "We believe this is a bug" chain with no verdict at all, and the
+    /// same error text is what decides the advice the report now leads with.
+    Unreachable {
+        kind: Option<crate::remote_err::RemoteErrorKind>,
+        error: String,
+    },
     /// The destination was read but not to completion; its absences are
     /// unproven and therefore block, exactly like unreachable.
     PartialRead { detail: String },
@@ -106,6 +115,39 @@ impl ReclaimReport {
     pub fn blocked(&self) -> bool {
         !self.blocked.is_empty()
     }
+}
+
+/// The machine-readable word for one block kind, as `cmd_reclaim_stage`
+/// prints it and [`crate::reclaimstate`] persists it (W1012 / SG-1): the
+/// printed line and the stored record name the same failure the same way,
+/// so a weekly streak computed from the file never disagrees with the log
+/// the user can read.
+pub fn block_kind_word(kind: &BlockedKind) -> &'static str {
+    match kind {
+        BlockedKind::Unreachable { .. } => "unreachable",
+        BlockedKind::PartialRead { .. } => "partial-read",
+        BlockedKind::SessionNotHeld => "not-held",
+        BlockedKind::TripleMismatch => "triple-mismatch",
+    }
+}
+
+/// The blocked list in the durable record's shape (SG-1 C1④): per
+/// destination, the block's word plus the classifier's slug when the
+/// failure produced one — counts only, never error text bodies.
+pub fn blocks_as_state(blocks: &[Blocked]) -> Vec<crate::reclaimstate::ReclaimBlock> {
+    blocks
+        .iter()
+        .map(|block| crate::reclaimstate::ReclaimBlock {
+            destination: block.destination.clone(),
+            kind: block_kind_word(&block.kind).to_string(),
+            error_kind: match &block.kind {
+                BlockedKind::Unreachable { kind, .. } => kind.map(|k| k.slug().to_string()),
+                _ => None,
+            },
+            sessions: block.sessions,
+            bytes: block.bytes,
+        })
+        .collect()
 }
 
 /// Reclaim the stage body, proving every session against every destination first.
@@ -165,6 +207,7 @@ pub fn reclaim_stage(
         report.blocked.push(Blocked {
             destination: "<none>".to_string(),
             kind: BlockedKind::Unreachable {
+                kind: None,
                 error: "no destination declared; nothing can be proven against an empty set"
                     .to_string(),
             },
@@ -181,10 +224,12 @@ pub fn reclaim_stage(
         let mk = match store::load_key_file(&dest.cfg) {
             Ok(mk) => mk,
             Err(e) => {
+                let error = format!("cannot read masterkey: {e:#}");
                 report.blocked.push(Blocked {
                     destination: dest.name.clone(),
                     kind: BlockedKind::Unreachable {
-                        error: format!("cannot read masterkey: {e:#}"),
+                        kind: crate::remote_err::classify_error_str(&error),
+                        error,
                     },
                     sessions: report.candidates.len(),
                     bytes: report.candidate_bytes,
@@ -194,9 +239,9 @@ pub fn reclaim_stage(
         };
         match consult_destination(dest, &mk) {
             DestinationRead::Ready(map) => ready.push((dest, map)),
-            DestinationRead::Unreachable(error) => report.blocked.push(Blocked {
+            DestinationRead::Unreachable { kind, error } => report.blocked.push(Blocked {
                 destination: dest.name.clone(),
-                kind: BlockedKind::Unreachable { error },
+                kind: BlockedKind::Unreachable { kind, error },
                 sessions: report.candidates.len(),
                 bytes: report.candidate_bytes,
             }),
@@ -294,10 +339,16 @@ pub fn reclaim_stage(
     Ok(report)
 }
 
-/// How a destination answered the consult.
+/// How a destination answered the consult. The unreachable arm carries the
+/// classifier's verdict ([`crate::remote_err::RemoteErrorKind`]) beside the
+/// raw chain, so the report can say which failure it was while the original
+/// text stays whole (SG-1 C3).
 enum DestinationRead {
     Ready(BTreeMap<(String, String), Candidate>),
-    Unreachable(String),
+    Unreachable {
+        kind: Option<crate::remote_err::RemoteErrorKind>,
+        error: String,
+    },
     PartialRead(String),
 }
 
@@ -316,7 +367,13 @@ fn consult_destination(dest: &NamedStore, mk: &MasterKey) -> DestinationRead {
     let store = BackupStore::for_metadata_query(dest.cfg.clone());
     let report = match store.read_latest_per_machine(mk) {
         Ok(r) => r,
-        Err(e) => return DestinationRead::Unreachable(format!("{e:#}")),
+        Err(e) => {
+            let error = format!("{e:#}");
+            return DestinationRead::Unreachable {
+                kind: crate::remote_err::classify_error_str(&error),
+                error,
+            };
+        }
     };
     if !report.complete() {
         return DestinationRead::PartialRead(report.warnings.join("; "));

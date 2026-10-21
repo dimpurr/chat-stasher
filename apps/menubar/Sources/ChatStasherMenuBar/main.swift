@@ -3,11 +3,19 @@ import Charts
 import Sparkle
 import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 @main
 struct ChatStasherMenuBarApp: App {
     @NSApplicationDelegateAdaptor(DemoWindowDelegate.self) private var demoWindowDelegate
     @StateObject private var model = ArchiveModel()
+
+    /// The menu bar's own delegate hook: it only registers the
+    /// UserNotifications presentation delegate, and only for a real app —
+    /// the delivery decision and the guard that keeps bare executables
+    /// (`swift run`, tests, `--resolve-cli`) away from the system's
+    /// notification surface live in `ReclaimNotifier` (W1012 / C2).
+    @NSApplicationDelegateAdaptor(ReclaimPresentationDelegate.self) private var reclaimPresentationDelegate
 
     init() {
         // `--resolve-cli` is the headless acceptance mode: print the version
@@ -64,6 +72,87 @@ private final class DemoWindowDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
+    }
+}
+
+/// The delivery half of W1012 / SG-1 C2: a reclaim blocked two weeks in a
+/// row is a fact away from nobody's eyes — before this change the only
+/// address of the failure was the weekly job's own log — so the app posts
+/// one local notification when the streak first reaches two.
+///
+/// The *decision* is pure (`reclaimNotificationPayload`) and unit-tested;
+/// this object is only the plumbing: authorization is asked once (a denial
+/// degrades to the panel's dot, which already reflects the same facts,
+/// rather than to nagging), and delivery never runs unless this process is
+/// an app bundle. That last guard is what keeps `swift run`, the test
+/// runner and `--resolve-cli` off the system's notification surface — those
+/// environments carry no bundle identity for the notification center to
+/// speak through.
+@MainActor
+enum ReclaimNotifier {
+    private static var authorizationResolved = false
+    private static var authorized = false
+
+    /// Whether this process is an app bundle UserNotifications can speak
+    /// through. A bare executable is not one, and SwiftPM's debug layout
+    /// (`--demo-window`) is deliberately excluded too: the screenshot bundle
+    /// must not ask the system for anything.
+    static var canPostNotifications: Bool {
+        guard !ProcessInfo.processInfo.arguments.contains("--resolve-cli"),
+              Bundle.main.bundleIdentifier != nil else { return false }
+        let path = Bundle.main.bundleURL.path
+        return !path.contains(".build/debug/") && !path.contains(".build/release/")
+    }
+
+    static func deliver(_ payload: ReclaimNotification) {
+        guard canPostNotifications else { return }
+        requestAuthorizationIfNeeded { granted in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = payload.title
+            content.body = payload.body
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: payload.identifier,
+                content: content,
+                trigger: nil
+            )
+            UNUserNotificationCenter.current().add(request)
+        }
+    }
+
+    private static func requestAuthorizationIfNeeded(_ completion: @escaping (Bool) -> Void) {
+        if authorizationResolved {
+            completion(authorized)
+            return
+        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            Task { @MainActor in
+                authorizationResolved = true
+                authorized = granted
+                completion(granted)
+            }
+        }
+    }
+}
+
+/// Presents the reclaim notification even while the app is frontmost: the
+/// panel showing the same sentence is not a substitute — the user has to
+/// open it to see it, and the notification's whole point (SG-1 C2) is that
+/// the failure makes itself known.
+@MainActor
+final class ReclaimPresentationDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ReclaimNotifier.canPostNotifications else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 }
 
@@ -182,8 +271,67 @@ private struct SummarySource: Decodable {
 
 private struct SummaryDay: Decodable { let date: String; let count: Int }
 
-private struct CountState: Decodable { let kind: String; let value: Int?; let why: String? }
-private struct StatusDocument: Decodable {
+struct CountState: Decodable { let kind: String; let value: Int?; let why: String? }
+
+/// W1012 / SG-1 C1: one reconciliation alert `status --json` already worded
+/// — the app displays this sentence verbatim, because the same wording is
+/// what `status` prints and `doctor` shows; one vocabulary for the same
+/// fact is the whole reason the CLI emits sentences rather than
+/// machine-readable kinds alone. `fix` surfaces the command when there is
+/// one (the panel shows both; a notification shows only the sentence).
+struct DestAlertRow: Decodable, Identifiable {
+    let severity: String
+    let sentence: String
+    let fix: String?
+    var id: String { sentence }
+    var isError: Bool { severity == "red" }
+}
+
+/// W1012 / SG-1 C2's counter: what the durable reclaim record says about the
+/// weekly stage clean-up. The tri-state discipline travels through: a
+/// missing record (`kind: "missing"`) on a machine whose timer never
+/// installed is not an unknown, and an unreadable one says so rather than
+/// counting as anything.
+struct ReclaimState: Decodable {
+    let kind: String
+    /// "ok" | "blocked" | "refused" — present for `kind: "known"`.
+    let state: String?
+    /// Consecutive non-ok attempts ending at this record; the number C2's
+    /// two-in-a-row notification counts from.
+    let consecutiveBlocked: Int?
+    let heldBackSessions: Int?
+    let heldBackBytes: Int?
+    let blocked: [ReclaimBlockedDestination]?
+    /// Whether a reclaim timer file is installed at all — a machine without
+    /// one has no reclaim job to alarm about.
+    let unitInstalled: Bool?
+    let why: String?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, state, why, blocked
+        case consecutiveBlocked = "consecutive_blocked"
+        case heldBackSessions = "held_back_sessions"
+        case heldBackBytes = "held_back_bytes"
+        case unitInstalled = "unit_installed"
+    }
+}
+
+/// One destination the recorded reclaim attempt named as blocking it.
+struct ReclaimBlockedDestination: Decodable, Identifiable {
+    let destination: String
+    let kind: String
+    let sessions: Int?
+    let bytes: Int?
+    let errorKind: String?
+    var id: String { destination }
+
+    enum CodingKeys: String, CodingKey {
+        case destination, kind, sessions, bytes
+        case errorKind = "error_kind"
+    }
+}
+
+struct StatusDocument: Decodable {
     let schemaVersion: Int; let command: String; let exitCode: Int; let cliVersion: String?
     let configSource: String; let configError: String?
     /// The machine-readable half of `config_error` ("credentials" for the
@@ -191,25 +339,31 @@ private struct StatusDocument: Decodable {
     /// absent from a CLI that predates the field.
     let configErrorKind: String?
     let local: LocalStatus?; let scanner: ScannerStatus?
+    /// W1012 / SG-1: the destination reconciliation's already-worded alerts
+    /// and the reclaim record — optional because a CLI older than this field
+    /// keeps working, with the panel simply not showing these facts.
+    let destAlerts: [DestAlertRow]?
+    let reclaim: ReclaimState?
     enum CodingKeys: String, CodingKey {
-        case command, local, scanner
+        case command, local, scanner, reclaim
         case schemaVersion = "schema_version"
         case exitCode = "exit_code"
         case cliVersion = "cli_version"
         case configSource = "config_source"
         case configError = "config_error"
         case configErrorKind = "config_error_kind"
+        case destAlerts = "dest_alerts"
     }
 }
-private struct LocalStatus: Decodable {
+struct LocalStatus: Decodable {
     let schedule: ScheduleStatus?; let lastRun: LastRunStatus?; let stage: StageStatus?
     let destinationNames: [String]
     enum CodingKeys: String, CodingKey { case schedule, stage; case lastRun = "last_run"; case destinationNames = "destination_names" }
 }
-private struct ScheduleStatus: Decodable { let kind: String; let installed: Bool?; let units: [String]? }
-private struct LastRunStatus: Decodable { let kind: String; let outcome: String? }
-private struct StageStatus: Decodable { let waitingToUpload: CountState?; enum CodingKeys: String, CodingKey { case waitingToUpload = "waiting_to_upload" } }
-private struct ScannerStatus: Decodable { let kind: String; let why: String? }
+struct ScheduleStatus: Decodable { let kind: String; let installed: Bool?; let units: [String]? }
+struct LastRunStatus: Decodable { let kind: String; let outcome: String? }
+struct StageStatus: Decodable { let waitingToUpload: CountState?; enum CodingKeys: String, CodingKey { case waitingToUpload = "waiting_to_upload" } }
+struct ScannerStatus: Decodable { let kind: String; let why: String? }
 
 struct TimeValue: Decodable {
     let kind: String
@@ -333,6 +487,12 @@ struct LocalSnapshot {
     var cliNeedsUpdate: Bool = false
     var destinationCount: Int? = nil
     var destinationNames: [String] = []
+    /// W1012 / SG-1 C1: the destination reconciliation's worded alerts, and
+    /// the reclaim record the notification threshold counts from. Empty /
+    /// nil on a CLI that predates the fields — absence is "this CLI cannot
+    /// report them", never "the machine has none".
+    var destAlerts: [DestAlertRow] = []
+    var reclaim: ReclaimState? = nil
 }
 
 enum ArchiveStatus {
@@ -344,6 +504,12 @@ enum ArchiveStatus {
     case waiting(Int)
     case localFailure(String)
     case sourceStopped(String)
+    /// W1012 / SG-1 C1: the destination reconciliation's own worded alert —
+    /// a destination no timer pushes, credentials a timer cannot resolve, a
+    /// reclaim blocked for weeks. The machinery facts outrank the archive
+    /// facts below them in the ladder: nothing in the last two cases says
+    /// anything about whether backups are being made at all.
+    case destAlert(String, ArchiveStatus.Severity)
     /// The setup card: a fixed sentence plus the CLI's own explanation, so a
     /// config problem names itself instead of hiding behind generic wording.
     case setup(String, String?)
@@ -357,6 +523,7 @@ enum ArchiveStatus {
     var severity: Severity {
         switch self {
         case .healthy: .healthy
+        case .destAlert(_, let severity): severity
         case .needsAttention, .silent, .extensionStale, .waiting, .sourceStopped, .setup, .offline: .warning
         case .destination(_, _, let severity): severity
         case .unreadable, .localFailure, .cliMissing, .cliTooOld, .credentialsUnavailable: .error
@@ -378,6 +545,7 @@ enum ArchiveStatus {
         case .healthy: "All saved"
         case .waiting(let count): "\(count) conversations waiting to upload"
         case .localFailure(let reason): reason
+        case .destAlert(let sentence, _): sentence
         case .setup(let sentence, _): sentence
         case .sourceStopped(let source): "\(source) stopped saving"
         case .cliMissing: "Install the command-line tool"
@@ -392,6 +560,7 @@ enum ArchiveStatus {
         case .unreadable(let reason), .localFailure(let reason): return reason
         case .setup(_, let explanation): return explanation
         case .destination(_, let sentence, _): return sentence
+        case .destAlert(_, _): return nil
         // W913 review · Same honesty as the sentence: the one-line status
         // words both causes behind the dashboard's stale flag, because the
         // reader who opens the panel should not have to infer that "48 hours"
@@ -466,6 +635,18 @@ func archiveStatus(snapshot: ArchiveSnapshot?, local: LocalSnapshot? = nil, fail
         return (machine.machine, Int((age + 86_399) / 86_400), age)
     }.max { $0.2 < $1.2 }
     if let silent { return .silent(silent.0, silent.1) }
+    // W1012 / SG-1 C1: the machinery facts — a destination no timer pushes,
+    // credentials a timer cannot resolve, a reclaim blocked twice or more —
+    // rank above the per-source and extension facts, because unlike them
+    // these are costs already being paid. Every red alert outranks every
+    // yellow one in the same pass; ties keep the CLI's own order, which is
+    // destination order.
+    if let alert = local.destAlerts.first(where: \.isError) {
+        return .destAlert(alert.sentence, .error)
+    }
+    if let alert = local.destAlerts.first {
+        return .destAlert(alert.sentence, .warning)
+    }
     if let stopped = snapshot.sourceDetails.first(where: {
         $0.regularlyUsed && sourceHealth(activeDays: 3, lastSavedUnix: $0.lastSavedUnix,
                                         silenceAfterDays: silenceThresholdOverrideDays ?? $0.silenceAfterDays,
@@ -603,6 +784,62 @@ func dashboardDestination(environment: String?, displayed: String?) -> String? {
     return displayed.flatMap { $0.isEmpty ? nil : $0 }
 }
 
+/// The C2 notification (W1012 / SG-1): one payload, delivered when the
+/// recorded reclaim has been blocked at least twice in a row and the app
+/// has not already notified for that streak.
+struct ReclaimNotification {
+    let title: String
+    let body: String
+    /// One identity per streak episode: notifying again while the same
+    /// streak continues would be the nagging this threshold exists to
+    /// avoid, and the streak resets to zero on the first ok attempt, so
+    /// the *next* blocked streak notifies again.
+    let identifier: String
+}
+
+/// Decide whether the reclaim state asks for a system notification (pure,
+/// so every threshold branch is testable without the system).
+///
+/// `notifiedStreak` is the streak the app last notified for (persisted in
+/// UserDefaults; 0 / nil = never). The rule is deliberately minimal: the
+/// threshold is two because one blocked week can be a bad weekend, and the
+/// payload carries the machine's own numbers rather than a paraphrase —
+/// the same discipline the panel's sentences come from.
+func reclaimNotificationPayload(reclaim: ReclaimState?, notifiedStreak: Int?) -> ReclaimNotification? {
+    guard let reclaim, reclaim.kind == "known", reclaim.state != "ok",
+          let consecutive = reclaim.consecutiveBlocked,
+          consecutive >= 2 else { return nil }
+    // Re-notifying while the same streak grows keeps the user's attention
+    // on a fact they have seen; the streak crossing is the moment to speak.
+    guard (notifiedStreak ?? 0) < 2 else { return nil }
+    let names = (reclaim.blocked ?? []).map(\.destination)
+    var body = "The weekly stage clean-up has been blocked \(consecutive) times in a row"
+    if let sessions = reclaim.heldBackSessions, sessions > 0 {
+        body += "; \(sessions.formatted()) conversation file\(sessions == 1 ? "" : "s") still held on this machine"
+    }
+    if let bytes = reclaim.heldBackBytes, bytes > 0 {
+        body += " (\(reclaimHeldBackBytes(bytes)))"
+    }
+    body += ". Nothing has been reclaimed and the stage keeps growing."
+    if !names.isEmpty {
+        body += " Blocked for: \(names.joined(separator: ", "))."
+    }
+    body += " Open the panel for the reason and the fix."
+    return ReclaimNotification(
+        title: "Chat Stasher: stage reclaim is still blocked",
+        body: body,
+        identifier: "chat-stasher-reclaim-blocked"
+    )
+}
+
+/// The held-back size in the few words a notification body has room for —
+/// the same binary-unit abbreviation the CLI prints.
+func reclaimHeldBackBytes(_ bytes: Int) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .binary
+    return formatter.string(fromByteCount: Int64(bytes))
+}
+
 func machineNeedsAttention(_ machine: MachineFreshness, now: Date, silenceThresholdOverrideDays: Int? = nil) -> Bool {
     if machine.health != "healthy" { return true }
     guard let unix = machine.newestSnapshotUnix else { return false }
@@ -687,11 +924,34 @@ private final class ArchiveModel: ObservableObject {
                 self.failure = nil
                 self.offline = false
                 self.lastSuccessfulRefresh = Date()
+                // W1012 / SG-1 C2: the reclaim streak is counted from the
+                // durable record the CLI writes, delivered once per blocked
+                // episode. Decided pure (`reclaimNotificationPayload`),
+                // delivered only when this process is an installed app.
+                self.deliverReclaimNotificationIfDue(local.reclaim)
             case .failure(let failure):
                 self.offline = self.snapshot != nil
                 self.failure = failure
             }
         }
+    }
+
+    /// The C2 delivery step: one notification per blocked streak episode.
+    /// `lastNotifiedStreak` persists across launches, so a restart does not
+    /// re-notify about a streak that was already announced.
+    func deliverReclaimNotificationIfDue(_ reclaim: ReclaimState?) {
+        let notified = UserDefaults.standard.integer(forKey: "reclaimNotifiedStreak")
+        guard let payload = reclaimNotificationPayload(reclaim: reclaim, notifiedStreak: notified) else {
+            // The record's streak dropping back below the threshold (the
+            // reclaim resolved) clears the marker so a future episode
+            // notifies again.
+            if reclaim?.kind == "known", reclaim?.state == "ok" {
+                UserDefaults.standard.set(0, forKey: "reclaimNotifiedStreak")
+            }
+            return
+        }
+        UserDefaults.standard.set(reclaim?.consecutiveBlocked ?? 0, forKey: "reclaimNotifiedStreak")
+        ReclaimNotifier.deliver(payload)
     }
 
     func checkForUpdates() {
@@ -788,6 +1048,31 @@ private final class ArchiveModel: ObservableObject {
             failure = OverviewFailure(kind: .setup, message: "Set up chat-stasher in Terminal first.")
             return
         }
+        if mode == "reclaim-blocked" {
+            // W1012 / SG-1: the screenshot shape of the machine the change
+            // was written for — an overview that reads fine, a destination no
+            // timer pushes, shell-only credentials, and a reclaim blocked
+            // twice in a row. The sentences are the CLI's own wordings.
+            localSnapshot = LocalSnapshot(
+                waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
+                cliVersion: "0.5.0", cliNeedsUpdate: false,
+                destAlerts: [
+                    DestAlertRow(severity: "red", sentence: "[reclaim] the weekly stage clean-up is blocked 4 times in a row — 9,869 session(s) / 12.0 GiB held back for r2; nothing was deleted and the stage keeps every byte it archives", fix: "'chat-stasher reclaim-stage --stage <stage>'   # dry run: names the destination and the reason in its output"),
+                    DestAlertRow(severity: "yellow", sentence: "[dest] r2: declared, but no installed timer pushes it — a push reaches it only when a command names it by hand; the weekly stage clean-up consults every declared destination, so the stage keeps growing until `r2` holds a copy or the declaration is removed", fix: "chat-stasher schedule install --destination r2 --stage <stage>"),
+                    DestAlertRow(severity: "yellow", sentence: "[dest] r2: credentials are shell-only (CHAT_STASHER_R2_ACCESS_KEY_ID) — the timer file(s) com.chat-stasher.reclaim-stage.plist declare none of them, and a launchd / systemd job does not inherit your shell, so a scheduled run cannot authenticate to `r2`; write the same credentials in a form that resolves without a shell (`file:PATH`, `env-file:PATH:NAME`, on macOS `keychain:ACCOUNT`)", fix: nil),
+                ],
+                reclaim: ReclaimState(
+                    kind: "known", state: "blocked", consecutiveBlocked: 4,
+                    heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
+                    blocked: [ReclaimBlockedDestination(
+                        destination: "r2", kind: "unreachable", sessions: 9_869,
+                        bytes: 12_900_000_000, errorKind: "credentials_missing_or_invalid")],
+                    unitInstalled: true, why: nil
+                )
+            )
+            loadDemoArchive(mode: mode, now: Date())
+            return
+        }
         if mode == "offline" { offline = true }
         guard mode != "unreadable" else {
             snapshot = nil
@@ -795,7 +1080,14 @@ private final class ArchiveModel: ObservableObject {
                                        message: "The archive overview could not be read (exit code 3).")
             return
         }
-        let now = Date()
+        loadDemoArchive(mode: mode, now: Date())
+    }
+
+    /// The synthetic archive every demo mode above the failure line shares:
+    /// `--demo=reclaim-blocked` uses it unchanged, because the shape SG-1's
+    /// screenshot needs is a healthy archive with failing machinery around
+    /// it — that contrast is the finding the panel has to be able to show.
+    private func loadDemoArchive(mode: String, now: Date) {
         let silentDays = mode == "silent" ? 9 : 1
         let machines = [
             MachineFreshness(machine: "Studio Mac", newestSnapshotUnix: Int64(now.timeIntervalSince1970) - 14 * 60, health: "healthy"),
@@ -840,8 +1132,10 @@ private final class ArchiveModel: ObservableObject {
             refreshedAt: now, machines: machines, days: days, usedConversationFallback: false,
             sources: sources, sourceDetails: sources, destinations: 1, extensionInstalls: extensionInstalls
         )
-        localSnapshot = LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
-                                      cliVersion: "0.5.0-rc.2", cliNeedsUpdate: mode == "cli-old")
+        if localSnapshot == nil {
+            localSnapshot = LocalSnapshot(waitingToUpload: 0, scheduleInstalled: true, lastRunFailed: false, reason: nil,
+                                          cliVersion: "0.5.0-rc.2", cliNeedsUpdate: mode == "cli-old")
+        }
     }
 
     nonisolated private static func readOverview() -> OverviewResult {
@@ -875,7 +1169,8 @@ private final class ArchiveModel: ObservableObject {
             let localWithDestinations = LocalSnapshot(waitingToUpload: local.waitingToUpload,
                 scheduleInstalled: local.scheduleInstalled, lastRunFailed: local.lastRunFailed, reason: local.reason,
                 cliVersion: local.cliVersion, cliPath: local.cliPath, cliNeedsUpdate: local.cliNeedsUpdate,
-                destinationCount: local.destinationCount, destinationNames: local.destinationNames)
+                destinationCount: local.destinationCount, destinationNames: local.destinationNames,
+                destAlerts: local.destAlerts, reclaim: local.reclaim)
             return .success(snapshot, localWithDestinations)
         } catch let failure as OverviewFailure {
             return .failure(failure)
@@ -991,7 +1286,9 @@ private final class ArchiveModel: ObservableObject {
                              cliNeedsUpdate: version.map { !versionAtLeast($0, "0.5.0-rc.2") } ?? true,
                              destinationCount: local.destinationNames.isEmpty
                                 ? local.schedule?.units?.count : local.destinationNames.count,
-                             destinationNames: local.destinationNames)
+                             destinationNames: local.destinationNames,
+                             destAlerts: document.destAlerts ?? [],
+                             reclaim: document.reclaim)
     }
 
     /// Run the same `status --json` handshake the panel runs and return the
@@ -1022,6 +1319,15 @@ func destinationStatusRank(_ status: ArchiveStatus) -> Int {
     case .offline, .setup, .silent, .extensionStale, .sourceStopped: 1
     case .needsAttention, .waiting: 2
     case .localFailure, .unreadable, .cliMissing, .cliTooOld, .credentialsUnavailable: 3
+    case .destAlert(_, let severity):
+        // W1012 / SG-1: machinery findings outrank the same-severity archive
+        // findings because they mean the backups themselves have a gap —
+        // the whole ladder exists to surface the worst risk first.
+        switch severity {
+        case .healthy: 0
+        case .warning: 2
+        case .error: 3
+        }
     case .destination(_, _, let severity):
         switch severity {
         case .healthy: 0
@@ -1289,6 +1595,7 @@ private struct ArchivePopover: View {
                 sourceList(snapshot)
                 machineList(snapshot)
                 attention(snapshot)
+                machineryAlerts
             } else if model.status.explanation == nil {
                 Text("Reading archive overview…").font(.system(size: 13)).foregroundStyle(.secondary)
             } else {
@@ -1502,6 +1809,36 @@ private struct ArchivePopover: View {
             if sorted.count > 5 {
                 Button("and \(sorted.count - 5) more ▸", action: model.openDashboard).font(.system(size: 10)).buttonStyle(.plain)
             }
+        }
+    }
+
+    /// W1012 / SG-1 C1: the destination machinery alerts the CLI worded —
+    /// rendered as the CLI's own sentences plus the fix, because one
+    /// vocabulary across `status`, `doctor`, and this panel is what the
+    /// reconciliation's "three surfaces" requirement is. Hidden when the
+    /// machine has no findings, like every other healthy-state section.
+    @ViewBuilder private var machineryAlerts: some View {
+        let alerts = model.localSnapshot?.destAlerts ?? []
+        if !alerts.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(alerts) { alert in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(alert.sentence, systemImage: alert.isError
+                              ? "exclamationmark.triangle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(alert.isError ? Color.red : Color.yellow)
+                            .font(.system(size: 11))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let fix = alert.fix {
+                            Text(fix)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 

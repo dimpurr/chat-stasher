@@ -683,4 +683,116 @@ final class StatusTests: XCTestCase {
         XCTAssertNil(rows[1].newestSnapshotUnix)
         XCTAssertEqual(rows[2].health, "missing_index")
     }
+
+    // ---- W1012 / SG-1: destination reconciliation alerts + C2's notification ----
+
+    /// The panel ladder: a red machinery alert turns the whole panel red,
+    /// outranks every yellow finding, and shows the CLI's own sentence —
+    /// the wording `status` prints and `doctor` shows, because one
+    /// vocabulary for the same fact is the reason `dest_alerts` carries
+    /// ready-made sentences rather than id codes.
+    func testDestAlertsDriveTheStatusAndKeepTheCLIWording() {
+        var local = cleanLocal
+        local.destAlerts = [
+            DestAlertRow(severity: "yellow",
+                         sentence: "[dest] r2: declared, but no installed timer pushes it", fix: nil),
+            DestAlertRow(severity: "red",
+                         sentence: "[reclaim] the weekly stage clean-up is blocked 2 times in a row", fix: nil),
+        ]
+        let status = archiveStatus(snapshot: snapshot(), local: local, failure: nil, now: now)
+        XCTAssertEqual(status.severity, .error)
+        XCTAssertEqual(status.sentence,
+                       "[reclaim] the weekly stage clean-up is blocked 2 times in a row")
+        XCTAssertEqual(destinationStatusRank(status), 3)
+    }
+
+    func testDestAlertWarningsBeatQuietExtensions() {
+        var local = cleanLocal
+        local.destAlerts = [
+            DestAlertRow(severity: "yellow",
+                         sentence: "[dest] r2: credentials are shell-only", fix: "use file:/env-file:/keychain:"),
+        ]
+        let status = archiveStatus(snapshot: snapshot(), local: local, failure: nil, now: now)
+        XCTAssertEqual(status.severity, .warning)
+        XCTAssertEqual(status.sentence, "[dest] r2: credentials are shell-only")
+        XCTAssertEqual(destinationStatusRank(status), 2)
+    }
+
+    func testNoDestAlertsLeavesTheLadderUntouched() {
+        // A CLI without the fields (absent dest_alerts) and a machine without
+        // findings are the same silence — the panel must not distinguish them.
+        let status = archiveStatus(snapshot: snapshot(), local: cleanLocal, failure: nil, now: now)
+        guard case .healthy = status else {
+            XCTFail("no findings on a clean machine must stay .healthy, got \(status)")
+            return
+        }
+    }
+
+    /// C2's threshold: two blocked attempts in a row notify once, and only
+    /// once per blocked episode. A single blocked week is a bad weekend, not
+    /// a system notification; the third week says nothing new; the streak
+    /// resetting back to two later must notify again.
+    func testReclaimNotificationFiresOncePerBlockedEpisode() {
+        func reclaim(streak: Int, state: String = "blocked") -> ReclaimState {
+            ReclaimState(kind: "known", state: state, consecutiveBlocked: streak,
+                         heldBackSessions: 9_869, heldBackBytes: 12_900_000_000,
+                         blocked: [ReclaimBlockedDestination(destination: "r2", kind: "unreachable",
+                                                             sessions: 9_869, bytes: 12_900_000_000,
+                                                             errorKind: "credentials_missing_or_invalid")],
+                         unitInstalled: true, why: nil)
+        }
+        XCTAssertNil(reclaimNotificationPayload(reclaim: nil, notifiedStreak: 0))
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 1), notifiedStreak: 0))
+        let first = reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0)
+        XCTAssertNotNil(first)
+        // The payload carries the machine's own numbers, not a paraphrase.
+        XCTAssertTrue(first?.body.contains("2 times in a row") ?? false)
+        XCTAssertTrue(first?.body.contains("r2") ?? false)
+        // The streak keeps growing: already notified, stays quiet.
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 5), notifiedStreak: 2))
+        // An ok streak is not a notification event, and clears nothing here.
+        XCTAssertNil(reclaimNotificationPayload(reclaim: reclaim(streak: 0, state: "ok"), notifiedStreak: 2))
+        // After the ok reset clears the marker, the next episode notifies.
+        XCTAssertNotNil(reclaimNotificationPayload(reclaim: reclaim(streak: 2), notifiedStreak: 0))
+        // A record the CLI could not read is not a notification event either.
+        XCTAssertNil(reclaimNotificationPayload(reclaim: ReclaimState(kind: "missing", state: nil, consecutiveBlocked: nil, heldBackSessions: nil, heldBackBytes: nil, blocked: nil, unitInstalled: true, why: nil), notifiedStreak: 0))
+    }
+
+    /// The decode contract: a `status --json` document carrying `dest_alerts`
+    /// and `reclaim` decodes, and one from a CLI that predates the fields
+    /// still decodes — the older CLI keeps working, with the panel simply
+    /// not showing these facts (absence is "cannot report", never "none").
+    func testStatusDocumentDecodesDestAlertsAndOlderShape() throws {
+        let withAlerts = """
+        {"schema_version":1,"command":"status","exit_code":1,"cli_version":"1.0.0","config_source":"file",
+         "local":{"schedule":{"kind":"installed","installed":true},
+                  "destination_names":["r2","storagebox"],
+                  "last_run":{"kind":"known"},"stage":{"path":null}},
+         "dest_alerts":[{"severity":"red","sentence":"[reclaim] blocked 2 times in a row","fix":"reclaim-stage"},
+                        {"severity":"yellow","sentence":"[dest] r2: declared, but no installed timer pushes it","fix":null}],
+         "reclaim":{"kind":"known","state":"blocked","consecutive_blocked":2,"held_back_sessions":10,
+                    "held_back_bytes":1024,"blocked":[{"destination":"r2","kind":"unreachable","error_kind":"credentials_missing_or_invalid","sessions":10,"bytes":1024}],
+                    "unit_installed":true}}
+        """.data(using: .utf8)!
+        let document = try JSONDecoder().decode(StatusDocument.self, from: withAlerts)
+        XCTAssertEqual(document.destAlerts?.count, 2)
+        XCTAssertEqual(document.destAlerts?[0].severity, "red")
+        XCTAssertEqual(document.reclaim?.consecutiveBlocked, 2)
+        XCTAssertEqual(document.reclaim?.blocked?.first?.destination, "r2")
+
+        let older = """
+        {"schema_version":1,"command":"status","exit_code":1,"cli_version":"0.5.0-rc.2","config_source":"file",
+         "local":{"schedule":{"kind":"installed","installed":true},
+                  "destination_names":[],"last_run":{"kind":"known"},
+                  "stage":{"path":null,"sessions":{"kind":"known","value":1}}},
+         "unused_should_be_ignored":7}
+        """.data(using: .utf8)!
+        let olderDocument = try JSONDecoder().decode(StatusDocument.self, from: older)
+        // The older document simply has no dest_alerts — decode treats that
+        // as "cannot report", and `readStatus` maps nil to an empty list, so
+        // the panel shows nothing rather than a finding.
+        XCTAssertTrue((olderDocument.destAlerts?.count ?? 0) == 0)
+        XCTAssertNil(olderDocument.reclaim)
+        XCTAssertNil(reclaimNotificationPayload(reclaim: olderDocument.reclaim, notifiedStreak: 0))
+    }
 }
